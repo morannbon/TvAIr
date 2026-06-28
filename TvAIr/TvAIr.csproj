@@ -1,0 +1,133 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <Platforms>AnyCPU;x86;x64</Platforms>
+    <InformationalVersion>1.0.0</InformationalVersion>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>TvAIr</RootNamespace>
+    <AssemblyName>TvAIr</AssemblyName>
+    <Version>1.0.0</Version>
+    <FileVersion>1.0.0.0</FileVersion>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <ApplicationIcon>TvAIr_Idle.ico</ApplicationIcon>
+    <OutputType>WinExe</OutputType>
+    <UseAppHost>true</UseAppHost>
+    <UseWindowsForms>true</UseWindowsForms>
+    <!-- Ctrl+F5（デバッグなしで開始）でVSから直接起動できるようにする -->
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Platform)'=='x86'">
+    <PlatformTarget>x86</PlatformTarget>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Platform)'=='x64'">
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.7" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
+    <!-- v32.83: WMIによるLIVE視聴中TVTestプロセス検出用 -->
+    <PackageReference Include="System.Management" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TvAIrPlugin\TvAIrPlugin.csproj" />
+    <!-- v0.8.18: TvAIrEpgRec is kept in the solution for explicit/manual builds, but TvAIr.csproj must not reference it.
+         When the solution configuration skips TvAIrEpgRec, a ProjectReference still asks MSBuild to resolve/copy worker outputs and fails.
+         TvAIr runtime discovery/copy is therefore handled only by the conditional CopyTvAIrEpgRecWorker target below. -->
+  </ItemGroup>
+
+  <!-- wwwroot を bin にコピー（ビルド・デバッグ両方で有効） -->
+  <ItemGroup>
+    <ContentWithTargetPath Include="wwwroot\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <TargetPath>wwwroot\%(RecursiveDir)%(Filename)%(Extension)</TargetPath>
+    </ContentWithTargetPath>
+  </ItemGroup>
+  <ItemGroup>
+    <ContentWithTargetPath Include="Config\allowed-plugins.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <TargetPath>Config\allowed-plugins.json</TargetPath>
+    </ContentWithTargetPath>
+  </ItemGroup>
+
+  <!-- タスクトレイ/アプリ用アイコンを出力ディレクトリにコピー -->
+  <ItemGroup>
+    <None Include="TvAIr_Idle.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="TvAIr_Recording.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <!-- AribDecodeBridge C++ DLL is built for x86/x64 and copied after Build.
+       The flat AribDecodeBridge.dll preserves the existing runtime path; native\x86 and native\x64 keep both architectures available. -->
+
+  <!-- v0.7.78: LegacyDirectRecorderBridge.exe is no longer copied and the LegacyDirectRecorderBridge project is not part of TvAIr.sln.
+       Any remaining DirectRecorder wording is legacy lineage / internal contract naming, not an executable dependency. -->
+
+  <Target Name="CopyTvAIrEpgRecWorker" AfterTargets="Build">
+    <PropertyGroup>
+      <TvAIrEpgRecPlatformDir Condition="'$(Platform)' == 'x86'">x86\</TvAIrEpgRecPlatformDir>
+      <TvAIrEpgRecPlatformDir Condition="'$(Platform)' == 'x64'">x64\</TvAIrEpgRecPlatformDir>
+      <TvAIrEpgRecPlatformDir Condition="'$(Platform)' != 'x86' and '$(Platform)' != 'x64'"></TvAIrEpgRecPlatformDir>
+      <TvAIrEpgRecOutputDir>..\TvAIrEpgRec\bin\$(TvAIrEpgRecPlatformDir)$(Configuration)\net8.0-windows\</TvAIrEpgRecOutputDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <TvAIrEpgRecOutput Include="$(TvAIrEpgRecOutputDir)TvAIrEpgRec.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(TvAIrEpgRecOutput)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="'@(TvAIrEpgRecOutput)' != ''" />
+    <Error Text="TvAIrEpgRec.exe was not copied to TvAIr output. Build TvAIrEpgRec first or build the solution." Condition="!Exists('$(OutDir)TvAIrEpgRec.exe')" />
+  </Target>
+
+
+  <Target Name="BuildAribDecodeBridgeArchitectures" BeforeTargets="Build" Condition="'$(OS)' == 'Windows_NT'">
+    <MSBuild Projects="..\AribDecodeBridge\AribDecodeBridge.vcxproj" Targets="Build" Properties="Configuration=$(Configuration);Platform=Win32" />
+    <MSBuild Projects="..\AribDecodeBridge\AribDecodeBridge.vcxproj" Targets="Build" Properties="Configuration=$(Configuration);Platform=x64" />
+  </Target>
+
+  <Target Name="CopyAribDecodeBridgeArchitectures" AfterTargets="Build" Condition="'$(OS)' == 'Windows_NT'">
+    <PropertyGroup>
+      <AribBridgeX86>..\AribDecodeBridge\bin\$(Configuration)\x86\AribDecodeBridge.dll</AribBridgeX86>
+      <AribBridgeX64>..\AribDecodeBridge\bin\$(Configuration)\x64\AribDecodeBridge.dll</AribBridgeX64>
+    </PropertyGroup>
+    <Error Text="AribDecodeBridge x86 DLL was not built: $(AribBridgeX86)" Condition="!Exists('$(AribBridgeX86)')" />
+    <Error Text="AribDecodeBridge x64 DLL was not built: $(AribBridgeX64)" Condition="!Exists('$(AribBridgeX64)')" />
+    <MakeDir Directories="$(OutDir)native\x86;$(OutDir)native\x64" />
+    <Copy SourceFiles="$(AribBridgeX86)" DestinationFiles="$(OutDir)native\x86\AribDecodeBridge.dll" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(AribBridgeX64)" DestinationFiles="$(OutDir)native\x64\AribDecodeBridge.dll" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(AribBridgeX86)" DestinationFiles="$(OutDir)AribDecodeBridge.dll" SkipUnchangedFiles="true" Condition="'$(Platform)' == 'x86'" />
+    <Copy SourceFiles="$(AribBridgeX64)" DestinationFiles="$(OutDir)AribDecodeBridge.dll" SkipUnchangedFiles="true" Condition="'$(Platform)' != 'x86'" />
+  </Target>
+
+  <!-- v0.11.590 AppIcon/Favicon asset contract guard:
+       Browser icon assets are fixed filenames; cache busting must use query strings only.
+       The same guard runs before and after Build so source omissions and output copy omissions fail fast. -->
+  <Target Name="ValidateTvAIrIconAssetContract" BeforeTargets="Build">
+    <ItemGroup>
+      <TvAIrVersionedIconResidue Include="wwwroot\favicon-v*.ico;wwwroot\nav-home-v*.ico" />
+    </ItemGroup>
+    <Error Text="TvAIr icon asset contract violation: wwwroot\favicon.ico is missing. Use fixed filename favicon.ico and cache-bust with ?v=$(Version)." Condition="!Exists('wwwroot\favicon.ico')" />
+    <Error Text="TvAIr icon asset contract violation: wwwroot\nav-home.ico is missing. Use fixed filename nav-home.ico and cache-bust with ?v=$(Version)." Condition="!Exists('wwwroot\nav-home.ico')" />
+    <Error Text="TvAIr icon asset contract violation: TvAIr_Idle.ico is missing." Condition="!Exists('TvAIr_Idle.ico')" />
+    <Error Text="TvAIr icon asset contract violation: TvAIr_Recording.ico is missing." Condition="!Exists('TvAIr_Recording.ico')" />
+    <Error Text="TvAIr icon asset contract violation: versioned icon residue exists: @(TvAIrVersionedIconResidue). Do not package favicon-v*.ico or nav-home-v*.ico." Condition="'@(TvAIrVersionedIconResidue)' != ''" />
+    <Exec Condition="'$(OS)' == 'Windows_NT'" Command="cmd /c findstr /S /N /I /C:&quot;favicon-v&quot; /C:&quot;nav-home-v&quot; &quot;$(MSBuildProjectDirectory)\Program.cs&quot; &quot;$(MSBuildProjectDirectory)\wwwroot\*.html&quot; &gt;nul 2&gt;nul &amp;&amp; exit /b 1 || exit /b 0" />
+  </Target>
+
+  <Target Name="ValidateTvAIrIconOutputContract" AfterTargets="Build">
+    <Error Text="TvAIr icon output contract violation: output wwwroot\favicon.ico was not copied." Condition="!Exists('$(OutDir)wwwroot\favicon.ico')" />
+    <Error Text="TvAIr icon output contract violation: output wwwroot\nav-home.ico was not copied." Condition="!Exists('$(OutDir)wwwroot\nav-home.ico')" />
+    <Error Text="TvAIr icon output contract violation: output TvAIr_Idle.ico was not copied." Condition="!Exists('$(OutDir)TvAIr_Idle.ico')" />
+    <Error Text="TvAIr icon output contract violation: output TvAIr_Recording.ico was not copied." Condition="!Exists('$(OutDir)TvAIr_Recording.ico')" />
+  </Target>
+
+</Project>

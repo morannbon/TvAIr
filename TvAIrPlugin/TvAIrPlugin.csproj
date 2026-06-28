@@ -1,0 +1,27 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Platforms>AnyCPU;x86;x64</Platforms>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>TvAIrPlugin</RootNamespace>
+    <AssemblyName>TvAIrPlugin</AssemblyName>
+    <Version>1.0.4</Version>
+    <FileVersion>0.11.315.0</FileVersion>
+    <AssemblyVersion>1.0.4.0</AssemblyVersion>
+    <InformationalVersion>0.11.315-plugin-host-contract-foundation</InformationalVersion>
+    <!-- 実装を持たない契約定義専用 DLL。AssemblyVersionは既存プラグイン互換のため固定する。 -->
+    <OutputType>Library</OutputType>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Platform)'=='x86'">
+    <PlatformTarget>x86</PlatformTarget>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Platform)'=='x64'">
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+
+</Project>

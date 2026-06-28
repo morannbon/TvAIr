@@ -1,0 +1,332 @@
+﻿<!DOCTYPE html>
+
+<html lang="ja">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width,initial-scale=1" name="viewport"/>
+<title>キーワード検索 — TvAIr</title>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.0"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.0"/>
+<link href="/tvair-notification.css?v=1.0.0" rel="stylesheet"/>
+<script src="/tvair-theme.js?v=1.0.0"></script>
+<link href="/tvair-epg-panel.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-keyword.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.0.0" rel="stylesheet"/>
+</head>
+<body class="tvair-non-program-page tvair-keyword-page tvair-split-page">
+<div class="tvair-topnav" id="nav">
+<a class="nav-btn" href="/" title="番組表">番組表</a>
+<a class="nav-btn" href="/reservations.html">予約リスト</a>
+<a class="nav-btn active" href="/keyword.html">キーワード検索</a>
+<a class="nav-btn" href="/program-rules.html">自動検索予約</a>
+<a class="nav-btn" href="/new-reservation.html">プログラム予約</a>
+<div class="spacer"></div>
+<span class="nav-brand-text">TvAIr</span>
+<div id="page-menu-wrap">
+<button aria-label="メニュー" id="page-menu-btn" data-tvair-menu-entry="page" aria-controls="page-menu-dropdown" title="メニュー" type="button">☰</button>
+<div data-tvair-menu-host="1" id="page-menu-dropdown"></div>
+</div>
+</div>
+<div id="body">
+<!-- 検索フォーム -->
+<div id="form-panel">
+<div class="form-section">
+<div class="form-section-title">キーワード</div>
+<div class="form-row">
+<label>タイトルキーワード</label>
+<input id="kw-title" type="text"/>
+</div>
+<div class="form-row">
+<label>詳細キーワード</label>
+<input id="kw-desc" type="text"/>
+</div>
+<div class="opt-row tvair-choice-row">
+<label class="opt-label"><input id="opt-desc-search" type="checkbox"/> 説明文も検索</label>
+<label class="opt-label"><input checked="" id="opt-fuzzy" type="checkbox"/> あいまい検索</label>
+</div>
+</div>
+<div class="form-section">
+<div class="form-section-title">時間指定</div>
+<div class="time-row tvair-time-row">
+<select id="time-from"><option value="">指定なし</option></select>
+<span>時 〜</span>
+<select id="time-to"><option value="">指定なし</option></select>
+<span>時</span>
+</div>
+</div>
+<div class="form-section">
+<div class="form-section-title">曜日指定</div>
+<div class="dow-row tvair-choice-row tvair-weekday-row" id="dow-row"></div>
+</div>
+<div class="form-section">
+<div class="form-section-title">チャンネル（複数選択可）</div>
+<div class="ch-list" id="ch-list"></div>
+<div class="mt4 ui-row-gap4">
+<button class="kw-channel-bulk-btn" onclick="selAllCh()">全選択</button>
+<button class="kw-channel-bulk-btn" onclick="selNoneCh()">全解除</button>
+</div>
+</div>
+<div class="form-section">
+<div class="form-section-title">期間</div>
+<div class="date-row">
+<input id="date-from" type="date"/>
+<span>〜</span>
+<input id="date-to" type="date"/>
+</div>
+</div>
+<button id="search-btn" onclick="doSearch()">🔍 検索</button>
+</div>
+<!-- 検索結果 -->
+<div id="result-panel">
+<div class="initial-hidden" id="result-summary">
+<span id="result-count">0</span> 件見つかりました
+    </div>
+<div class="initial-hidden" id="result-wrap">
+<table id="result-table">
+<thead>
+<tr>
+<th>日時</th>
+<th>チャンネル</th>
+<th>タイトル / 説明</th>
+<th>時間</th>
+<th>予約</th>
+</tr>
+</thead>
+<tbody id="result-body"></tbody>
+</table>
+<div id="result-empty">検索結果がありません</div>
+</div>
+<div id="result-init">キーワードを入力して検索してください</div>
+</div>
+</div>
+<div id="toast"></div>
+<script>
+const DOW_LABELS=['日','月','火','水','木','金','土'];
+let channels=[];
+let selectedCh=new Set();
+let reservedKeys=new Set();
+let keywordDeepLinkApplied=false;
+
+function p2(n){return String(n).padStart(2,'0')}
+function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function fmtDate(s){
+  const d=new Date(s);
+  return `${d.getFullYear()}/${p2(d.getMonth()+1)}/${p2(d.getDate())}（${DOW_LABELS[d.getDay()]}）`;
+}
+function fmtTime(s,e){
+  const ds=new Date(s),de=new Date(e);
+  return `${p2(ds.getHours())}:${p2(ds.getMinutes())}～${p2(de.getHours())}:${p2(de.getMinutes())}`;
+}
+function fmtDur(sec){
+  const m=Math.round(sec/60);
+  return m>=60?`${Math.floor(m/60)}時間${m%60?m%60+'分':''}`:`${m}分`;
+}
+function evKey(e){return `${e.networkId}:${e.transportStreamId}:${e.serviceId}:${e.eventId}`;}
+
+function initTimeSelects(){
+  ['time-from','time-to'].forEach(id=>{
+    const sel=document.getElementById(id);
+    for(let h=0;h<24;h++){
+      const opt=document.createElement('option');
+      opt.value=String(h);opt.textContent=`${p2(h)}:00`;
+      sel.appendChild(opt);
+    }
+  });
+}
+
+function syncChoiceChipLabel(label){
+  if(!label) return;
+  const input=label.querySelector('input[type=checkbox]');
+  label.classList.toggle('checked', !!(input && input.checked));
+  label.setAttribute('aria-pressed', input && input.checked ? 'true' : 'false');
+}
+function initDow(){
+  const row=document.getElementById('dow-row');
+  DOW_LABELS.forEach((d,i)=>{
+    const lbl=document.createElement('label');
+    lbl.className='dow-label tvair-check-chip tvair-weekday-chip';
+    lbl.innerHTML=`<input type="checkbox" value="${i}" checked> <span>${d}</span>`;
+    const input=lbl.querySelector('input');
+    input.addEventListener('change',()=>syncChoiceChipLabel(lbl));
+    syncChoiceChipLabel(lbl);
+    row.appendChild(lbl);
+  });
+}
+
+async function loadChannels(){
+  try{
+    const res=await fetch('/api/channels');
+    const d=await res.json();
+    channels=d.channels||[];
+    const list=document.getElementById('ch-list');
+    list.innerHTML='';
+    channels.forEach(ch=>{
+      const key=String(ch.serviceId);
+      selectedCh.add(key);
+      const div=document.createElement('div');
+      div.className='ch-item selected';
+      div.dataset.sid=key;
+      div.textContent=ch.name;
+      div.onclick=()=>toggleCh(div,key);
+      list.appendChild(div);
+    });
+    applyProgramGuideTitleKeywordDeepLink();
+  }catch(e){console.error(e);}
+}
+
+function toggleCh(el,key){
+  if(selectedCh.has(key)){selectedCh.delete(key);el.classList.remove('selected');}
+  else{selectedCh.add(key);el.classList.add('selected');}
+}
+function selAllCh(){
+  document.querySelectorAll('.ch-item').forEach(el=>{selectedCh.add(el.dataset.sid);el.classList.add('selected');});
+}
+function selNoneCh(){
+  selectedCh.clear();
+  document.querySelectorAll('.ch-item').forEach(el=>el.classList.remove('selected'));
+}
+
+function applyProgramGuideTitleKeywordDeepLink(){
+  // v0.11.590 ProgramGuideTitleKeywordRouteContract:
+  // title clicks from the program guide land here with q + event identity.
+  // Scope the channel only when the source is explicitly the program guide title;
+  // ordinary keyword searches keep the user's current channel selection behavior.
+  if(keywordDeepLinkApplied) return;
+  const params=new URLSearchParams(location.search||'');
+  const q=params.get('q') || params.get('title') || '';
+  if(q) document.getElementById('kw-title').value=q;
+  const source=(params.get('source')||'').toLowerCase();
+  const sid=params.get('sid') || params.get('serviceId') || '';
+  if(source==='programguidetitle' && sid){
+    selectedCh.clear();
+    document.querySelectorAll('.ch-item').forEach(el=>{
+      const hit=String(el.dataset.sid||'')===String(sid);
+      el.classList.toggle('selected', hit);
+      if(hit) selectedCh.add(String(sid));
+    });
+  }
+  keywordDeepLinkApplied=true;
+  if(q) setTimeout(doSearch,0);
+}
+
+async function loadReserved(){
+  try{
+    const res=await fetch('/api/reservations');
+    const rsvs=await res.json();
+    reservedKeys=new Set((rsvs||[])
+      .filter(r=>r.status==='scheduled'||r.status==='recording')
+      .map(r=>`${r.networkId}:${r.transportStreamId}:${r.serviceId}:${r.eventId}`));
+  }catch(e){}
+}
+
+async function doSearch(){
+  await loadReserved();
+  const params=new URLSearchParams();
+  const title=document.getElementById('kw-title').value.trim();
+  const desc=document.getElementById('kw-desc').value.trim();
+  const kw=[title,desc].filter(Boolean).join(' ');
+  if(kw) params.set('q',kw);
+  if(document.getElementById('opt-desc-search').checked) params.set('desc','true');
+  if(selectedCh.size>0 && selectedCh.size<channels.length)
+    params.set('sids',[...selectedCh].join(','));
+  const checkedDow=[...document.querySelectorAll('#dow-row input:checked')].map(i=>i.value);
+  if(checkedDow.length<7 && checkedDow.length>0)
+    params.set('dow',checkedDow.join(','));
+  const tf=document.getElementById('time-from').value;
+  const tt=document.getElementById('time-to').value;
+  if(tf) params.set('timeFrom',tf);
+  if(tt) params.set('timeTo',tt);
+  const df=document.getElementById('date-from').value;
+  const dt=document.getElementById('date-to').value;
+  if(df) params.set('dateFrom',df);
+  if(dt) params.set('dateTo',dt);
+
+  const btn=document.getElementById('search-btn');
+  btn.textContent='検索中...';btn.disabled=true;
+  try{
+    const res=await fetch('/api/epg/search?'+params.toString());
+    const d=await res.json();
+    renderResults(d.events||[],d.count||0);
+  }catch(e){showToast('検索エラー: '+e.message);}
+  finally{btn.textContent='🔍 検索';btn.disabled=false;}
+}
+
+function renderResults(events,total){
+  document.getElementById('result-init').style.display='none';
+  document.getElementById('result-summary').style.display='block';
+  document.getElementById('result-wrap').style.display='block';
+  document.getElementById('result-count').textContent=total;
+  const tbody=document.getElementById('result-body');
+  const empty=document.getElementById('result-empty');
+  if(events.length===0){tbody.innerHTML='';empty.style.display='block';return;}
+  empty.style.display='none';
+  tbody.innerHTML=events.map(e=>{
+    const key=evKey(e);
+    const isRsv=reservedKeys.has(key);
+    const btnHtml=isRsv
+      ?`<span class="rsv-state-label program-cell-action-btn program-cell-action-btn--list-context" data-state-role="program-reserved-state" data-state-label="予約済" data-state-context="keyword-search-result-row">予約済</span>`
+      :`<button class="rsv-btn tvair-action-button program-cell-action-btn program-cell-action-btn--list-context" data-program-action="reserve" data-action-role="program-reserve" data-action-label="予約" data-action-context="keyword-search-result-row" onclick='reserve(${JSON.stringify(e).replace(/'/g,"&#39;")},this)'>予約</button>`;
+    const sub=e.description?`<div class="sub">${esc(e.description)}</div>`:'';
+    return `<tr class="${isRsv?'reserved':''}">
+      <td data-cell-role="date-time-metadata"><div class="td-date">${fmtDate(e.start)}</div><div class="td-time">${fmtTime(e.start,e.end)}</div></td>
+      <td class="td-ch" data-cell-role="service-metadata">${esc(e.serviceName||'—')}</td>
+      <td class="td-title" data-cell-role="title-data">${esc(e.title)}${sub}</td>
+      <td class="td-dur" data-cell-role="duration-metadata">${fmtDur(e.durationSeconds)}</td>
+      <td data-cell-role="reservation-action">${btnHtml}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function reserve(ev,btn){
+  const cancelEpg = await (window.TvAIrNotification?.confirmEpgCancelBeforeReservation?.() || Promise.resolve(false));
+  btn.disabled=true;btn.textContent='送信中...';
+  try{
+    const reservationUrl = '/api/reservations' + (cancelEpg ? '?cancelEpgIfRunning=true' : '');
+    const res=await fetch(reservationUrl,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        networkId:ev.networkId,transportStreamId:ev.transportStreamId,
+        serviceId:ev.serviceId,eventId:ev.eventId,
+        title:ev.title,startTime:ev.start,endTime:ev.end,
+        status:'scheduled',source:'keywordsearch'
+      })
+    });
+    let d={};try{d=await res.json();}catch(_){}
+    if(res.ok){
+      btn.className='rsv-btn rsv-btn-done';btn.textContent='予約済';
+      reservedKeys.add(evKey(ev));
+      btn.closest('tr').classList.add('reserved');
+      showToast('「'+ev.title+'」を予約しました。');
+    }else{btn.disabled=false;btn.textContent='予約';showToast(d.message||'予約に失敗しました。');}
+  }catch(e){btn.disabled=false;btn.textContent='予約';showToast('通信エラー');}
+}
+
+function showToast(msg,ms=2800){
+  const t=document.getElementById('toast');
+  t.textContent=msg;t.classList.add('show');
+  clearTimeout(t._timer);
+  t._timer=setTimeout(()=>t.classList.remove('show'),ms);
+}
+
+document.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey) doSearch();});
+
+// 初期化
+initTimeSelects();
+initDow();
+loadChannels();
+
+// URLパラメータ ?q= / ?source=programGuideTitle は loadChannels 完了後に
+// applyProgramGuideTitleKeywordDeepLink() で処理する。
+
+/* v0.11.531 MenuLegacyEntryCleanupContract: page menu ownership is centralized in tvair-menu-spine.js. */
+
+</script>
+<script src="/tvair-notification.js?v=1.0.0"></script>
+<script src="/tvair-epg-run-contract.js?v=1.0.0"></script>
+<script src="/tvair-epg-widget.js?v=1.0.0"></script>
+<script src="/tvair-menu-spine.js?v=1.0.0"></script>
+</body>
+</html>

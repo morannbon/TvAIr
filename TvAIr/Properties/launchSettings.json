@@ -1,0 +1,13 @@
+﻿{
+  "profiles": {
+    "TvAIr": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "applicationUrl": "http://localhost:55884",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Production"
+      },
+      "launchBrowser": false
+    }
+  }
+}

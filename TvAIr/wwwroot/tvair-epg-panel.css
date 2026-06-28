@@ -1,0 +1,136 @@
+﻿/* TvAIr v0.11.358 EPGProgressPanelThemeRoleRebuild
+   Owner: EPG progress panel only.
+   Purpose: keep EPG progress panel structure, role-based colors, progress bar and actions out of index.html,
+   tvair-ui-modules.css and tvair-theme-contract.css. EPG panel colors must be dialog/progress/action roles, not fixed navy tokens. */
+#epg-panel{
+  display:none;
+  position:fixed;
+  bottom:16px;
+  right:16px;
+  z-index:2147483000;
+  width:360px;
+  max-width:calc(100vw - 32px);
+}
+#epg-panel.show{display:block;}
+#epg-box{
+  background:var(--tvair-epg-panel-bg,var(--tvair-role-dialog-bg));
+  color:var(--tvair-epg-panel-fg,var(--tvair-role-dialog-fg));
+  border:1px solid var(--tvair-epg-panel-border,var(--tvair-role-border-soft));
+  border-radius:6px;
+  box-shadow:var(--tvair-theme-shadow,0 12px 28px rgba(0,0,0,.28));
+  overflow:hidden;
+}
+#epg-box-head{
+  cursor:move;
+  padding:7px 12px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  background:var(--tvair-epg-panel-head-bg,var(--tvair-role-header-bg));
+  color:var(--tvair-epg-panel-head-fg,var(--tvair-role-header-fg));
+}
+#epg-box-head h2,
+#epg-title{
+  font-size:13px;
+  font-weight:bold;
+  margin:0;
+  line-height:1.4;
+  color:var(--tvair-epg-panel-head-fg,var(--tvair-role-header-fg));
+}
+#epg-progress{padding:11px 12px 12px;}
+#epg-panel .bwrap,
+#epg-box .bwrap{
+  flex:1;
+  height:14px;
+  background:var(--tvair-epg-progress-track,var(--tvair-role-control-bg));
+  border-radius:7px;
+  overflow:hidden;
+}
+#epg-panel .binner,
+#epg-box .binner{
+  height:100%;
+  border-radius:7px;
+  transition:width .3s;
+  width:0%;
+  background:var(--tvair-epg-progress-fill,var(--tvair-role-focus));
+}
+#epg-pct{
+  font-size:13px;
+  font-weight:bold;
+  min-width:42px;
+  text-align:right;
+  color:var(--tvair-epg-panel-fg,var(--tvair-role-dialog-fg));
+}
+#epg-groups,
+#epg-current{
+  font-size:12px;
+  padding:3px 0;
+  color:var(--tvair-epg-panel-sub-fg,var(--tvair-role-dialog-muted-fg));
+}
+#epg-groups{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+#epg-current{
+  white-space:normal;
+  overflow:visible;
+  text-overflow:clip;
+  line-height:1.45;
+  word-break:break-all;
+  overflow-wrap:anywhere;
+  max-height:4.4em;
+  overflow-y:auto;
+}
+#epg-panel .muted,
+#epg-box .muted,
+#epg-panel small,
+#epg-box small{color:var(--tvair-epg-panel-sub-fg,var(--tvair-role-dialog-muted-fg));}
+.epg-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:7px;}
+.epg-btn{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  padding:4px 13px;
+  min-height:26px;
+  border:1px solid var(--tvair-role-control-border);
+  border-radius:3px;
+  cursor:pointer;
+  font-size:12px;
+  line-height:1.5;
+  white-space:nowrap;
+  box-shadow:none;
+}
+/* v0.11.358 EPG action buttons consume action/control roles directly.
+   Do not inherit nav-bg/danger-btn aliases from unrelated toolbar or ProgramGuide owners. */
+.epg-btn-start{
+  display:none;
+  background:var(--tvair-action-reserve-bg,var(--tvair-role-action-bg,var(--tvair-role-control-active-bg)));
+  color:var(--tvair-action-reserve-fg,var(--tvair-role-action-fg,var(--tvair-role-control-active-fg)));
+  border-color:var(--tvair-action-reserve-border,var(--tvair-role-control-border));
+}
+.epg-btn-start:hover,
+.epg-btn-execute-ts:hover{
+  background:var(--tvair-action-reserve-hover-bg,var(--tvair-role-control-hover-bg));
+}
+.epg-btn-stop{
+  display:none;
+  background:var(--tvair-action-stop-bg,var(--tvair-program-action-stop-bg,var(--tvair-role-control-bg)));
+  color:var(--tvair-action-stop-fg,var(--tvair-role-control-active-fg));
+  border-color:var(--tvair-action-stop-border,var(--tvair-role-control-border));
+}
+.epg-btn-stop:hover{
+  background:var(--tvair-action-stop-hover-bg,var(--tvair-program-action-stop-hover-bg,var(--tvair-role-control-hover-bg)));
+}
+.epg-btn-close{
+  background:var(--tvair-role-action-secondary-bg,var(--tvair-role-control-bg));
+  color:var(--tvair-role-action-secondary-fg,var(--tvair-role-control-fg));
+  border-color:var(--tvair-role-control-border);
+}
+.epg-btn-close:hover{
+  background:var(--tvair-role-control-hover-bg);
+}
+.epg-btn-execute-ts{
+  background:var(--tvair-action-reserve-bg,var(--tvair-role-action-bg,var(--tvair-role-control-active-bg)));
+  color:var(--tvair-action-reserve-fg,var(--tvair-role-action-fg,var(--tvair-role-control-active-fg)));
+  border-color:var(--tvair-action-reserve-border,var(--tvair-role-control-border));
+  white-space:nowrap;
+}
+.epg-btn:disabled{opacity:.55;cursor:default;filter:none;}

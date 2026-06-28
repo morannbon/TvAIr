@@ -1,0 +1,135 @@
+﻿<!DOCTYPE html>
+
+<html lang="ja">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width,initial-scale=1" name="viewport"/>
+<title>NicoJkライブコメント — TvAIr</title>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.0"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.0"/>
+<link href="/tvair-notification.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-epg-panel.css?v=1.0.0" rel="stylesheet"/>
+<script src="/tvair-theme.js?v=1.0.0"></script>
+<style>
+  body{margin:0;background:var(--tvair-bg,#f4f6f8);color:var(--tvair-text,#222);font-family:"Yu Gothic UI","Meiryo",sans-serif;}
+  #main{padding:64px 22px 22px;max-width:1180px;margin:0 auto;}
+  .header-row{display:flex;align-items:center;gap:12px;margin-bottom:14px;}
+  .header-row h1{font-size:20px;margin:0;font-weight:700;}
+  .status{font-size:13px;color:var(--tvair-muted-text,#666);}
+  .toolbar{display:flex;align-items:center;gap:10px;margin:10px 0 16px;}
+  .toolbar input{width:180px;padding:7px 9px;border:1px solid var(--tvair-border,#bbb);border-radius:4px;background:var(--tvair-control-bg,#fff);color:inherit;}
+  .toolbar button{padding:7px 12px;border:1px solid var(--tvair-border,#aaa);border-radius:4px;background:var(--tvair-button-bg,#fff);color:inherit;cursor:pointer;}
+  .comment-grid{display:grid;grid-template-columns:1fr;gap:14px;}
+  .comment-card{border:1px solid var(--tvair-border,#c9ced6);border-radius:8px;background:var(--tvair-panel-bg,#fff);box-shadow:0 1px 2px rgba(0,0,0,.08);overflow:hidden;}
+  .comment-card-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border-bottom:1px solid var(--tvair-border,#d8dde5);background:var(--tvair-panel-header-bg,#eef2f6);}
+  .program-title{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .program-meta{font-size:12px;color:var(--tvair-muted-text,#666);white-space:nowrap;}
+  .comment-list{height:260px;overflow:auto;padding:8px 12px;background:var(--tvair-panel-bg,#fff);}
+  .comment-row{display:grid;grid-template-columns:86px 1fr;gap:10px;padding:4px 0;border-bottom:1px dashed rgba(128,128,128,.25);font-size:14px;line-height:1.45;}
+  .comment-time{color:var(--tvair-muted-text,#666);font-variant-numeric:tabular-nums;font-size:12px;padding-top:2px;}
+  .comment-body{white-space:pre-wrap;word-break:break-word;}
+  .empty{padding:28px 12px;text-align:center;color:var(--tvair-muted-text,#666);border:1px dashed var(--tvair-border,#bbb);border-radius:8px;background:var(--tvair-panel-bg,#fff);}
+  .auto-scroll{margin-left:auto;font-size:13px;display:flex;align-items:center;gap:6px;}
+</style>
+<link href="/tvair-ui-foundation.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.0.0" rel="stylesheet"/>
+</head>
+<body class="tvair-non-program-page tvair-page-width-wide">
+<div class="tvair-topnav" id="nav">
+<a class="nav-btn" href="/" title="番組表">番組表</a>
+<a class="nav-btn" href="/reservations.html">予約リスト</a>
+<a class="nav-btn" href="/keyword.html">キーワード検索</a>
+<a class="nav-btn" href="/program-rules.html">自動検索予約</a>
+<a class="nav-btn" href="/new-reservation.html">プログラム予約</a>
+<div class="spacer"></div>
+<span id="nav-title">TvAIr</span>
+<div id="page-menu-wrap">
+<button aria-label="メニュー" id="page-menu-btn" data-tvair-menu-entry="page" aria-controls="page-menu-dropdown" title="メニュー" type="button">☰</button>
+<div data-tvair-menu-host="1" id="page-menu-dropdown"></div>
+</div>
+</div>
+<div id="main">
+<div class="header-row">
+<h1>NicoJkライブコメント</h1>
+<span class="status" id="status">コメント受信待機中</span>
+</div>
+<div class="toolbar">
+<label>予約ID <input autocomplete="off" id="reservation-id" type="text"/></label>
+<button id="apply-filter" type="button">表示更新</button>
+<label class="auto-scroll"><input checked="" id="auto-scroll" type="checkbox"/> 自動スクロール</label>
+</div>
+<div class="comment-grid" id="comments"></div>
+</div>
+<script>
+/* v0.11.531 MenuLegacyEntryCleanupContract: page menu ownership is centralized in tvair-menu-spine.js. */
+function closePageMenu(){ const el = document.getElementById('page-menu-dropdown'); if(el) el.classList.remove('open'); }
+document.addEventListener('click', e => { const wrap = document.getElementById('page-menu-wrap'); if(wrap && !wrap.contains(e.target)) closePageMenu(); });
+const commentsRoot = document.getElementById('comments');
+const statusEl = document.getElementById('status');
+const reservationInput = document.getElementById('reservation-id');
+const autoScroll = document.getElementById('auto-scroll');
+document.getElementById('apply-filter').addEventListener('click', () => loadComments(true));
+let lastSignature = '';
+function esc(value){
+  return String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+}
+function formatTime(value){
+  const d = value ? new Date(value) : null;
+  if(!d || Number.isNaN(d.getTime())) return '';
+  return d.toLocaleTimeString('ja-JP', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+}
+async function loadComments(force){
+  const rid = reservationInput.value.trim();
+  const url = rid ? `/api/plugins/nicojk/live-comments?reservationId=${encodeURIComponent(rid)}&count=100` : '/api/plugins/nicojk/live-comments/groups?count=100';
+  try{
+    const res = await fetch(url, { cache:'no-store' });
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const signature = JSON.stringify(data);
+    if(!force && signature === lastSignature) return;
+    lastSignature = signature;
+    if(rid){
+      renderGroups([{ reservationId: rid, comments: data.comments || [], count: data.count || 0 }]);
+    }else{
+      renderGroups(data.groups || []);
+    }
+  }catch(ex){
+    statusEl.textContent = `コメント取得エラー: ${ex.message}`;
+  }
+}
+function renderGroups(groups){
+  if(!groups.length){
+    commentsRoot.innerHTML = '<div class="empty">コメント受信待機中</div>';
+    statusEl.textContent = 'コメント受信待機中';
+    return;
+  }
+  commentsRoot.innerHTML = groups.map(group => {
+    const comments = group.comments || [];
+    const latest = comments[comments.length - 1] || {};
+    const title = group.programTitle || latest.programTitle || '録画中コメント';
+    const service = group.serviceName || latest.serviceName || '';
+    const jk = group.jkChannel || latest.jkChannel || '';
+    return `<section class="comment-card">
+      <div class="comment-card-head">
+        <div class="program-title">${esc(title)}</div>
+        <div class="program-meta">${esc(group.reservationId || latest.reservationId || '')} / ${esc(service)} / jk${esc(jk)} / ${comments.length}件</div>
+      </div>
+      <div class="comment-list">
+        ${comments.length ? comments.map(c => `<div class="comment-row"><div class="comment-time">${esc(formatTime(c.receivedAt))}</div><div class="comment-body">${esc(c.content)}</div></div>`).join('') : '<div class="empty">コメント受信待機中</div>'}
+      </div>
+    </section>`;
+  }).join('');
+  statusEl.textContent = 'コメント表示中';
+  if(autoScroll.checked){
+    document.querySelectorAll('.comment-list').forEach(el => { el.scrollTop = el.scrollHeight; });
+  }
+}
+loadComments(true);
+setInterval(() => loadComments(false), 1500);
+</script>
+<script src="/tvair-notification.js?v=1.0.0"></script>
+<script src="/tvair-epg-run-contract.js?v=1.0.0"></script>
+<script src="/tvair-epg-widget.js?v=1.0.0"></script>
+<script src="/tvair-menu-spine.js?v=1.0.0"></script>
+</body>
+</html>

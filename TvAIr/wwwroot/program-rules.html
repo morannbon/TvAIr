@@ -1,0 +1,299 @@
+﻿<!DOCTYPE html>
+
+<html lang="ja">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width,initial-scale=1" name="viewport"/>
+<title>自動検索予約リスト — TvAIr</title>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.0"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.0"/>
+<link href="/tvair-notification.css?v=1.0.0" rel="stylesheet"/>
+<script src="/tvair-theme.js?v=1.0.0"></script>
+<link href="/tvair-epg-panel.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-program-rules.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.0.0" rel="stylesheet"/>
+</head>
+<body class="tvair-non-program-page tvair-rule-list-page">
+<div class="tvair-topnav" id="nav">
+<a class="nav-btn" href="/" title="番組表">番組表</a>
+<a class="nav-btn" href="/reservations.html">予約リスト</a>
+<a class="nav-btn" href="/keyword.html">キーワード検索</a>
+<a class="nav-btn active" href="/program-rules.html">自動検索予約</a>
+<a class="nav-btn" href="/new-reservation.html">プログラム予約</a>
+<div class="spacer"></div>
+<span class="nav-brand-text">TvAIr</span>
+<div id="page-menu-wrap">
+<button aria-label="メニュー" id="page-menu-btn" data-tvair-menu-entry="page" aria-controls="page-menu-dropdown" title="メニュー" type="button">☰</button>
+<div data-tvair-menu-host="1" id="page-menu-dropdown"></div>
+</div>
+</div>
+<input accept="application/json,.json" aria-hidden="true" class="ui-import-file tvair-hidden-control" id="import-file" onchange="importRules(this)" tabindex="-1" type="file"/>
+<div id="page-scroll">
+<div id="main">
+<div id="toolbar">
+<div id="toolbar-left">
+<span id="summary">読み込み中...</span>
+<button class="toolbar-btn" id="new-rule-btn" onclick="openCreate()" type="button">＋ 新規ルール追加</button>
+</div>
+<div id="toolbar-right">
+<button class="toolbar-btn btn-primary" id="import-btn" onclick="triggerImport()" type="button"><span aria-hidden="true">⭱</span> インポート</button>
+<button class="toolbar-btn btn-primary" id="export-btn" onclick="exportRules()" type="button"><span aria-hidden="true">⭳</span> エクスポート</button>
+</div>
+</div>
+<div id="table-wrap">
+<table id="rules-table">
+<thead>
+<tr>
+<th class="col-enabled">有効</th>
+<th>キーワード</th>
+<th class="col-state">条件</th>
+<th class="col-order">順序</th>
+<th class="col-actions">操作</th>
+</tr>
+</thead>
+<tbody id="rules-body"></tbody>
+</table>
+<div id="empty">まだ自動検索予約ルールがありません。<br/>「新規ルール追加」から登録してください。</div>
+</div>
+</div>
+<div id="modal-overlay" class="tvair-rule-modal-overlay" role="presentation">
+<div id="modal-box" class="tvair-rule-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+<div id="modal-head" class="tvair-rule-modal-head"><span id="modal-title">自動検索予約ルール</span><button id="modal-close" onclick="closeModal()" type="button" aria-label="閉じる">×</button></div>
+<div id="modal-body">
+<input id="rule-id" type="hidden"/>
+<div class="editor-pane">
+<div class="grid">
+<div class="panel full">
+<div class="panel-title">検索条件</div>
+<div class="field">
+<label>キーワード <span class="required">*</span></label>
+<input class="input" id="pattern" type="text"/>
+<div class="note" id="pattern-hint">正規表現ONの例: (?=.*オリンピック)((?=.*卓球)|(?=.*バレー))(?=.*女子);.*(NiziU|西野七瀬)</div>
+</div>
+<div class="field mt8">
+<label>除外キーワード</label>
+<input class="input" id="exclude-pattern" type="text"/>
+<div class="note" id="exclude-hint">正規表現ONの例: 録画;ハイライト;男子</div>
+</div>
+<div class="field-actions">
+<label class="check"><input id="use-regex" onchange="syncRegexMode()" type="checkbox"/> 正規表現を使用</label>
+<span class="note">初期状態では軽さ優先でタイトルのみ検索します。必要なときだけ正規表現・概要・詳細・出演者を有効にしてください。</span>
+</div>
+</div>
+<div class="panel">
+<div class="panel-title">検索対象</div>
+<div class="row">
+<label class="check"><input checked="" id="search-title" type="checkbox"/> タイトル</label>
+<label class="check"><input id="search-outline" type="checkbox"/> 概要</label>
+<label class="check"><input id="search-detail" type="checkbox"/> 詳細</label>
+<label class="check"><input id="search-cast" type="checkbox"/> 出演者</label>
+</div>
+</div>
+<div class="panel">
+<div class="panel-title">状態</div>
+<div class="row">
+<label class="check"><input checked="" id="enabled" type="checkbox"/> 有効</label>
+</div>
+</div>
+<div class="panel full">
+<div class="panel-title">ジャンル</div>
+<div class="genres" id="genre-wrap"></div>
+<div class="note mt6">未選択なら全ジャンル対象です。</div>
+</div>
+<div class="panel full">
+<div class="panel-title">対象局</div>
+<select class="multi" id="target-services" multiple=""></select>
+<div class="row mt6 ui-justify-end">
+<button class="btn-lite" onclick="selectAllChannels()" type="button">全局指定</button>
+<button class="btn-lite" onclick="clearAllChannels()" type="button">全局解除</button>
+</div>
+<div class="note mt6">Ctrl押下で複数選択できます。全未選択はヒット0件になるため、全局対象にしたい場合は「全局指定」を使ってください。</div>
+</div>
+<div class="panel full">
+<div class="panel-title">時間帯・曜日</div>
+<div class="row tvair-time-row">
+<label class="check tvair-check-chip"><input id="use-time-range" onchange="syncTimeEnabled()" type="checkbox"/> <span>時間帯指定</span></label>
+<select id="start-time"></select>
+<span>～</span>
+<select id="end-time"></select>
+</div>
+<div class="days mt8 tvair-choice-row tvair-weekday-row" id="days-wrap"></div>
+<div class="note mt6">未チェック時は 24時間365日対象です。チェック時のみ曜日と時間帯を使用します。</div>
+</div>
+</div>
+</div>
+<div class="preview-pane">
+<div class="panel ui-panel-fill">
+<div class="preview-head">
+<div>
+<div class="preview-summary" id="preview-summary">右側に保存前検索の結果を表示します。</div>
+<div class="preview-sub" id="preview-sub">条件を入力して左下の「検索」を押してください。</div>
+</div>
+</div>
+<div class="result-wrap" id="preview-wrap">
+<div class="empty-preview" id="preview-empty">まだ検索していません。<br/>条件を調整しながら、左下の「検索」で同じ画面のまま候補を確認できます。</div>
+<table class="initial-hidden result-table" id="preview-table">
+<thead>
+<tr>
+<th class="preview-col-date">放送日時</th>
+<th class="preview-col-channel">局</th>
+<th>タイトル</th>
+<th class="preview-col-status">状態</th>
+</tr>
+</thead>
+<tbody id="preview-body"></tbody>
+</table>
+</div>
+</div>
+</div>
+</div>
+<div class="footer-bar" id="modal-footer">
+<div class="footer-left">
+<button class="btn-primary" id="preview-search-btn" onclick="previewRule()" type="button">検索</button>
+</div>
+<div class="footer-right">
+<button class="btn-secondary" onclick="closeModal()">キャンセル</button>
+<button class="btn-success" id="save-button" onclick="saveRule()">ルール作成</button>
+</div>
+</div>
+</div>
+</div>
+</div>
+<div id="toast"></div>
+<script>
+const DOW=['日','月','火','水','木','金','土'];
+const GENRES=[
+  {code:'0',label:'ニュース/報道'},{code:'1',label:'スポーツ'},{code:'2',label:'情報/ワイドショー'},{code:'3',label:'ドラマ'},
+  {code:'4',label:'音楽'},{code:'5',label:'バラエティー'},{code:'6',label:'映画'},{code:'7',label:'アニメ/特撮'},
+  {code:'8',label:'ドキュメンタリー'},{code:'9',label:'劇場/公演'},{code:'A',label:'趣味/教育'},{code:'B',label:'福祉'}
+];
+let rules=[]; let channels=[]; let lastPreviewCount=0;
+function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function setToolbarButtonsDisabled(disabled){['import-btn','export-btn'].forEach(id=>{const btn=document.getElementById(id); if(btn) btn.disabled=disabled;});}
+function showToast(msg, ms=2600){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');clearTimeout(t._tm);t._tm=setTimeout(()=>t.classList.remove('show'),ms)}
+function keywordLabel(rule){return rule.pattern||'(空)'}
+function badge(t){return `<span class="badge">${esc(t)}</span>`}
+function summarize(rule){
+  const parts=[];
+  parts.push(rule.useAllChannels ? badge('全局') : badge(`局指定 ${rule.targetServices.split(',').filter(Boolean).length}`));
+  parts.push(rule.useRegex ? badge('正規表現') : badge('通常検索'));
+  parts.push(rule.targetGenres ? badge(`ジャンル ${rule.targetGenres.split(',').filter(Boolean).length}`) : badge('全ジャンル'));
+  parts.push(rule.useTimeRange ? badge(`${rule.startTime}～${rule.endTime}`) : badge('24h365d'));
+  const days=(rule.targetDays||'').split(',').filter(x=>x!=='').map(x=>DOW[Number(x)]).join(' ');
+  if(days) parts.push(badge(days));
+  return parts.join('');
+}
+function searchFieldsLabel(rule){
+  const xs=[]; if(rule.searchTitle) xs.push('タイトル'); if(rule.searchOutline) xs.push('概要'); if(rule.searchDetail) xs.push('詳細'); if(rule.searchCast) xs.push('出演者'); return xs.join(' / ');
+}
+function render(){
+  document.getElementById('summary').textContent=`自動検索予約ルール ${rules.length}件`;
+  const body=document.getElementById('rules-body'); const empty=document.getElementById('empty'); const table=document.getElementById('rules-table');
+  if(!rules.length){body.innerHTML=''; table.style.display='none'; empty.style.display='block'; return;}
+  table.style.display='table'; empty.style.display='none';
+  body.innerHTML=rules.map((r,i)=>`
+    <tr class="row-${i % 2 === 0 ? 'odd' : 'even'} ${r.enabled?'':'disabled-row'}">
+      <td class="col-enabled" data-cell-role="rule-enabled-state"><label class="tvair-enabled-toggle rule-enabled-toggle ${r.enabled?'enabled':'disabled'}" title="${r.enabled?'有効。押すと無効にします。':'無効。押すと有効にします。'}"><input type="checkbox" ${r.enabled?'checked':''} onchange="toggleEnabled(${r.id},this.checked)"><span class="tvair-enabled-toggle-track"><span class="tvair-enabled-toggle-thumb"></span></span></label></td>
+      <td data-cell-role="rule-title-data">
+        <div class="keyword-main" title="${esc(keywordLabel(r))}">${esc(keywordLabel(r))}</div>
+        <div class="hit-meta">${r.enabled ? `ヒット ${Number.isFinite(r.hitCount) ? r.hitCount : 0}件` : 'ヒット -'}</div>
+        ${r.excludePattern?`<div class="keyword-sub" title="${esc(r.excludePattern)}">除外: ${esc(r.excludePattern)}</div>`:''}
+        <div class="meta">検索対象: ${esc(searchFieldsLabel(r))}</div>
+      </td>
+      <td data-cell-role="rule-condition-metadata">${summarize(r)}</td>
+      <td data-cell-role="rule-order-action">
+        <div class="actions-inline">
+          <button class="order-btn" onclick="moveRule(${i},-1)" ${i===0?'disabled':''}>▲</button>
+          <button class="order-btn" onclick="moveRule(${i},1)" ${i===rules.length-1?'disabled':''}>▼</button>
+        </div>
+      </td>
+      <td data-cell-role="rule-edit-action">
+        <div class="actions-inline">
+          <button class="action-btn edit" onclick="openEdit(${r.id})">編集</button>
+          <button class="action-btn del" onclick="deleteRule(${r.id})">削除</button>
+        </div>
+      </td>
+    </tr>`).join('');
+}
+function triggerImport(){const input=document.getElementById('import-file'); input.value=''; input.click();}
+async function exportRules(){setToolbarButtonsDisabled(true); try{const res=await fetch('/api/keyword-rules/export'); if(!res.ok){showToast('エクスポートに失敗しました。'); return;} const blob=await res.blob(); const url=URL.createObjectURL(blob); const a=document.createElement('a'); const cd=res.headers.get('Content-Disposition')||''; const m=cd.match(/filename\*=UTF-8''([^;]+)|filename=\"?([^\";]+)\"?/i); const fileName=decodeURIComponent((m&&(m[1]||m[2]))||'tvair-keyword-rules.json'); a.href=url; a.download=fileName; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url); showToast('エクスポートしました。');} catch(err){showToast('エクスポートに失敗しました。');} finally {setToolbarButtonsDisabled(false);}}
+async function importRules(input){const file=input.files&&input.files[0]; if(!file) return; const formData=new FormData(); formData.append('file', file); setToolbarButtonsDisabled(true); showToast('インポートを開始します。',1800); try{const res=await fetch('/api/keyword-rules/import',{method:'POST',body:formData}); const data=await res.json().catch(()=>({})); if(!res.ok){showToast(data.message||'インポートに失敗しました。',4200); return;} await loadRules(); showToast(data.message||'インポートしました。',3200);} catch(err){showToast('インポートに失敗しました。',4200);} finally {input.value=''; setToolbarButtonsDisabled(false);}}
+async function loadRules(){const res=await fetch('/api/keyword-rules',{cache:'no-store'}); rules=await res.json(); render(); requestAnimationFrame(()=>{const wrap=document.getElementById('table-wrap'); wrap.style.overflowY='auto';});}
+async function loadChannels(){const res=await fetch('/api/channels'); const data=await res.json(); channels=data.channels||[]; const sel=document.getElementById('target-services'); sel.innerHTML=channels.map(ch=>`<option value="${ch.serviceId}">${esc(ch.name)}</option>`).join('');}
+function syncChoiceChipLabel(label){if(!label)return; const input=label.querySelector('input[type=checkbox]'); label.classList.toggle('checked',!!(input&&input.checked)); label.setAttribute('aria-pressed',input&&input.checked?'true':'false');}
+function bindChoiceChipLabels(container){if(!container)return; container.querySelectorAll('.tvair-check-chip').forEach(label=>{const input=label.querySelector('input[type=checkbox]'); if(input&&!input.dataset.tvairChoiceBound){input.dataset.tvairChoiceBound='1'; input.addEventListener('change',()=>syncChoiceChipLabel(label));} syncChoiceChipLabel(label);});}
+function buildGenreChecks(){const wrap=document.getElementById('genre-wrap'); wrap.innerHTML=GENRES.map(g=>`<label class="genre tvair-check-chip"><input type="checkbox" value="${g.code}"> <span>${g.label}</span></label>`).join(''); bindChoiceChipLabels(wrap);}
+function buildDayChecks(){const wrap=document.getElementById('days-wrap'); wrap.innerHTML=DOW.map((d,i)=>`<label class="day tvair-check-chip tvair-weekday-chip"><input type="checkbox" value="${i}"> <span>${d}</span></label>`).join(''); bindChoiceChipLabels(wrap);}
+function buildTimeOptions(){const s=[]; for(let h=0;h<24;h++){for(let m=0;m<60;m+=30){const t=`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`; s.push(`<option value="${t}">${t}</option>`);}} document.getElementById('start-time').innerHTML=s.join(''); document.getElementById('end-time').innerHTML=s.join(''); document.getElementById('start-time').value='00:00'; document.getElementById('end-time').value='23:30';}
+function getSelectedValues(sel){return [...sel.options].filter(x=>x.selected).map(x=>x.value)}
+function setSelectedValues(sel, values){const set=new Set(values); [...sel.options].forEach(o=>o.selected=set.has(o.value))}
+function getCheckedValues(container){return [...container.querySelectorAll('input:checked')].map(x=>x.value)}
+function setCheckedValues(container, values){const set=new Set(values); [...container.querySelectorAll('input')].forEach(x=>x.checked=set.has(x.value)); bindChoiceChipLabels(container)}
+function clearForm(){document.getElementById('rule-id').value=''; document.getElementById('pattern').value=''; document.getElementById('exclude-pattern').value=''; document.getElementById('enabled').checked=true; document.getElementById('use-regex').checked=false; document.getElementById('search-title').checked=true; document.getElementById('search-outline').checked=false; document.getElementById('search-detail').checked=false; document.getElementById('search-cast').checked=false; setSelectedValues(document.getElementById('target-services'), channels.map(ch=>String(ch.serviceId))); setCheckedValues(document.getElementById('genre-wrap'), []); setCheckedValues(document.getElementById('days-wrap'), []); document.getElementById('use-time-range').checked=false; document.getElementById('start-time').value='00:00'; document.getElementById('end-time').value='23:30'; syncTimeEnabled(); syncRegexMode();}
+function resetPreview(){lastPreviewCount=0; document.getElementById('preview-summary').textContent='右側に保存前検索の結果を表示します。'; document.getElementById('preview-sub').textContent='条件を入力して左下の「検索」を押してください。'; document.getElementById('preview-empty').style.display='block'; document.getElementById('preview-table').style.display='none'; document.getElementById('preview-body').innerHTML=''; document.getElementById('save-button').textContent=document.getElementById('rule-id').value?'更新':'ルール作成';}
+function openCreate(){clearForm(); document.getElementById('modal-title').textContent='自動検索予約ルール追加'; document.getElementById('save-button').textContent='ルール作成'; resetPreview(); document.getElementById('modal-overlay').classList.add('open'); document.getElementById('pattern').focus();}
+function openEdit(id){const r=rules.find(x=>x.id===id); if(!r) return; clearForm(); document.getElementById('modal-title').textContent='自動検索予約ルール編集'; document.getElementById('rule-id').value=r.id; document.getElementById('pattern').value=r.pattern||''; document.getElementById('exclude-pattern').value=r.excludePattern||''; document.getElementById('enabled').checked=!!r.enabled; document.getElementById('use-regex').checked=(r.useRegex!==false); document.getElementById('search-title').checked=!!r.searchTitle; document.getElementById('search-outline').checked=!!r.searchOutline; document.getElementById('search-detail').checked=!!r.searchDetail; document.getElementById('search-cast').checked=!!r.searchCast; setSelectedValues(document.getElementById('target-services'), r.useAllChannels ? channels.map(ch=>String(ch.serviceId)) : (r.targetServices||'').split(',').filter(Boolean)); setCheckedValues(document.getElementById('genre-wrap'), (r.targetGenres||'').split(',').filter(Boolean)); setCheckedValues(document.getElementById('days-wrap'), (r.targetDays||'').split(',').filter(Boolean)); document.getElementById('use-time-range').checked=!!r.useTimeRange; document.getElementById('start-time').value=r.startTime||'00:00'; document.getElementById('end-time').value=r.endTime||'23:30'; syncTimeEnabled(); syncRegexMode(); resetPreview(); document.getElementById('modal-overlay').classList.add('open');}
+function closeModal(){document.getElementById('modal-overlay').classList.remove('open');}
+function selectAllChannels(){setSelectedValues(document.getElementById('target-services'), channels.map(ch=>String(ch.serviceId)))}
+function clearAllChannels(){setSelectedValues(document.getElementById('target-services'), [])}
+function syncTimeEnabled(){const on=document.getElementById('use-time-range').checked; document.getElementById('start-time').disabled=!on; document.getElementById('end-time').disabled=!on; document.querySelectorAll('#days-wrap input').forEach(x=>x.disabled=!on); bindChoiceChipLabels(document.getElementById('days-wrap')); syncChoiceChipLabel(document.querySelector('label[for=use-time-range]')||document.getElementById('use-time-range')?.closest('.tvair-check-chip'))}
+function syncRegexMode(){
+  const on=document.getElementById('use-regex').checked;
+  document.getElementById('pattern-hint').textContent=on
+    ? '正規表現ONの例: (?=.*オリンピック)((?=.*卓球)|(?=.*バレー))(?=.*女子);.*(NiziU|西野七瀬)'
+    : '通常検索の例: ドラマ;(恋愛|青春)  /  ; = すべて含む  | = いずれか  () = グループ';
+  document.getElementById('exclude-hint').textContent=on
+    ? '正規表現ONの例: 録画;ハイライト;男子'
+    : '通常検索の例: 再放送|ダイジェスト  /  ; = すべて含む  | = いずれか  () = グループ';
+}
+function bindRulePageActions(){
+  const newBtn=document.getElementById('new-rule-btn');
+  const importBtn=document.getElementById('import-btn');
+  const exportBtn=document.getElementById('export-btn');
+  const importFile=document.getElementById('import-file');
+  if(newBtn) newBtn.onclick=openCreate;
+  if(importBtn) importBtn.onclick=triggerImport;
+  if(exportBtn) exportBtn.onclick=exportRules;
+  if(importFile) importFile.onchange=()=>importRules(importFile);
+}
+
+function collectRule(){return {
+  pattern:document.getElementById('pattern').value.trim(),
+  excludePattern:document.getElementById('exclude-pattern').value.trim(),
+  enabled:document.getElementById('enabled').checked,
+  useRegex:document.getElementById('use-regex').checked,
+  searchTitle:document.getElementById('search-title').checked,
+  searchOutline:document.getElementById('search-outline').checked,
+  searchDetail:document.getElementById('search-detail').checked,
+  searchCast:document.getElementById('search-cast').checked,
+  useAllChannels:getSelectedValues(document.getElementById('target-services')).length===channels.length && channels.length>0,
+  targetServices:getSelectedValues(document.getElementById('target-services')).join(','),
+  targetGenres:getCheckedValues(document.getElementById('genre-wrap')).join(','),
+  targetDays:getCheckedValues(document.getElementById('days-wrap')).join(','),
+  useTimeRange:document.getElementById('use-time-range').checked,
+  startTime:document.getElementById('start-time').value,
+  endTime:document.getElementById('end-time').value,
+  name:'', searchFields:'title', expiresOn:''
+}}
+function formatDateTime(v){const d=new Date(v); const mm=String(d.getMonth()+1).padStart(2,'0'); const dd=String(d.getDate()).padStart(2,'0'); const hh=String(d.getHours()).padStart(2,'0'); const mi=String(d.getMinutes()).padStart(2,'0'); return `${mm}/${dd} ${hh}:${mi}`;}
+async function previewRule(){const payload=collectRule(); if(!payload.pattern){showToast('キーワードは必須です。'); return;} const btn=document.getElementById('preview-search-btn'); const originalText=btn?btn.textContent:'検索'; if(btn){btn.disabled=true; btn.textContent='検索中...';} try{const res=await fetch('/api/keyword-rules/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); const data=await res.json().catch(()=>({})); if(!res.ok){showToast(data.message||'検索に失敗しました。'); return;} lastPreviewCount=data.candidateCount||0; document.getElementById('preview-summary').textContent=`候補 ${data.candidateCount||0}件 / 既予約 ${data.alreadyReservedCount||0}件`; document.getElementById('preview-sub').textContent=`右側は保存前プレビューです。最大 ${data.previewCount||0}件まで表示しています。`; const items=data.items||[]; const body=document.getElementById('preview-body'); if(!items.length){body.innerHTML=''; document.getElementById('preview-empty').style.display='block'; document.getElementById('preview-table').style.display='none'; document.getElementById('preview-empty').innerHTML='ヒット候補がありません。<br>このまま条件を修正して再検索できます。'; return;} body.innerHTML=items.map(x=>`<tr><td>${formatDateTime(x.start)}～${formatDateTime(x.end).slice(6)}</td><td>${esc(x.serviceName||'')}</td><td><div class="result-title">${esc(x.title||'')}</div>${x.description?`<div class="note">${esc(x.description)}</div>`:''}</td><td>${x.alreadyReserved?'<span class="pill reserved">既予約</span>':'<span class="pill">新規候補</span>'}</td></tr>`).join(''); document.getElementById('preview-empty').style.display='none'; document.getElementById('preview-table').style.display='table';} finally {if(btn){btn.disabled=false; btn.textContent=originalText||'検索';}}}
+async function saveRule(){const id=document.getElementById('rule-id').value; const payload=collectRule(); if(!payload.pattern){showToast('キーワードは必須です。'); return;} const saveBtn=document.getElementById('save-button'); saveBtn.disabled=true; saveBtn.textContent=id?'更新中...':'登録中...'; try{const url=id?`/api/keyword-rules/${id}`:'/api/keyword-rules'; const method=id?'PUT':'POST'; const res=await fetch(url,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); const data=await res.json().catch(()=>({})); if(!res.ok){showToast(data.message||'保存に失敗しました。'); return;} closeModal(); await loadRules(); showToast(id?'更新しました。':`登録しました。${lastPreviewCount?` 候補 ${lastPreviewCount}件で確認済み。`:''}`);} finally {saveBtn.disabled=false; saveBtn.textContent=id?'更新':'ルール作成';}}
+async function toggleEnabled(id, enabled){const r=rules.find(x=>x.id===id); if(!r) return; const payload={...r, enabled}; const res=await fetch(`/api/keyword-rules/${id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); const data=await res.json().catch(()=>({})); if(!res.ok){showToast(data.message||'更新に失敗しました。'); await loadRules(); return;} await loadRules();}
+async function deleteRule(id){const res=await fetch(`/api/keyword-rules/${id}`,{method:'DELETE',cache:'no-store'}); const data=await res.json().catch(()=>({})); if(res.ok){await loadRules(); showToast(data.message||'削除しました。');} else showToast(data.message||'削除に失敗しました。');}
+async function moveRule(index, delta){const next=index+delta; if(next<0||next>=rules.length) return; const arr=[...rules]; [arr[index], arr[next]]=[arr[next], arr[index]]; const orderedIds=arr.map(x=>x.id); const res=await fetch('/api/keyword-rules/reorder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({orderedIds})}); const data=await res.json().catch(()=>({})); if(!res.ok){showToast(data.message||'並び替えに失敗しました。'); return;} rules=arr; render(); showToast('並び順を更新しました。'); await loadRules();}
+document.addEventListener('keydown',e=>{if(e.key==='Escape') closeModal();}); document.getElementById('modal-overlay').addEventListener('click',e=>{if(e.target===document.getElementById('modal-overlay')) closeModal();});
+buildGenreChecks(); buildDayChecks(); buildTimeOptions(); syncTimeEnabled(); syncRegexMode(); bindRulePageActions(); Promise.all([loadChannels(), loadRules()]).catch(err=>showToast('読み込みに失敗しました。'));
+
+/* v0.11.531 MenuLegacyEntryCleanupContract: page menu ownership is centralized in tvair-menu-spine.js. */
+
+</script>
+
+<script src="/tvair-notification.js?v=1.0.0"></script>
+<script src="/tvair-epg-run-contract.js?v=1.0.0"></script>
+<script src="/tvair-epg-widget.js?v=1.0.0"></script>
+<script src="/tvair-menu-spine.js?v=1.0.0"></script>
+</body>
+</html>

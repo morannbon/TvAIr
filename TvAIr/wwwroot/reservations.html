@@ -1,0 +1,1525 @@
+﻿<!DOCTYPE html>
+
+<html lang="ja">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width,initial-scale=1" name="viewport"/>
+<title>予約リスト — TvAIr</title>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.0"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.0"/>
+<link href="/tvair-notification.css?v=1.0.0" rel="stylesheet"/>
+<script src="/tvair-theme.js?v=1.0.0"></script>
+<script src="/genre-shared.js?v=1.0.0"></script>
+<script src="/tvair-user-log.js?v=1.0.0"></script>
+<link href="/tvair-reservations.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-epg-panel.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-user-log.css?v=1.0.0" rel="stylesheet"/>
+</head>
+<body class="tvair-non-program-page tvair-reservation-page">
+<div class="tvair-topnav" id="nav">
+<a class="nav-btn" href="/" title="番組表">番組表</a>
+<a class="nav-btn active" href="/reservations.html">予約リスト</a>
+<a class="nav-btn" href="/keyword.html">キーワード検索</a>
+<a class="nav-btn" href="/program-rules.html">自動検索予約</a>
+<a class="nav-btn" href="/new-reservation.html">プログラム予約</a>
+<div class="spacer"></div>
+<span class="nav-brand-text" id="nav-title">TvAIr</span>
+<div id="page-menu-wrap">
+<button aria-label="メニュー" id="page-menu-btn" data-tvair-menu-entry="page" aria-controls="page-menu-dropdown" title="メニュー" type="button">☰</button>
+<div data-tvair-menu-host="1" id="page-menu-dropdown"></div>
+</div>
+</div>
+<div id="main">
+<div id="filter-tabs">
+<button class="ftab active" onclick="setFilter('active',this)">予約一覧</button>
+<button class="ftab" onclick="setFilter('keyword',this)">自動検索予約リスト</button>
+<button class="ftab" onclick="setFilter('stations',this)">局名リスト</button>
+<button class="ftab" onclick="setFilter('newprogram',this)">新番組</button>
+<button class="ftab" onclick="setFilter('finalepisode',this)">最終回</button>
+<button class="ftab" onclick="setFilter('done',this)">ログ</button>
+<div id="tab-spacer"></div>
+<span id="genre-color-action-host" data-toolbar-capability="genre-color"></span>
+<span class="tvair-log-action-host" data-list-role="log" hidden="" id="log-action-host"></span>
+<button id="refresh-btn" class="reservation-toolbar-action" data-toolbar-capability="refresh" onclick="refreshReservations(this)">↻ 更新</button>
+</div>
+<div id="content-region">
+<div id="content-inner">
+<div id="table-wrap">
+<table class="tvair-reservation-family-table" id="rsv-table">
+<thead>
+<tr>
+<th class="col-no" data-cell-role="list-index">#</th>
+<th class="col-toggle" data-cell-role="reservation-state" title="録画する(○)/しない(×)">録画</th>
+<th class="col-tuner" data-cell-role="priority-metadata">優先度</th>
+<th class="col-date" data-cell-role="date-metadata">予約日時</th>
+<th class="col-time" data-cell-role="time-metadata">時間</th>
+<th class="col-ch" data-cell-role="service-metadata">局名</th>
+<th class="col-title" data-cell-role="title-data">タイトル</th>
+<th class="col-status" data-cell-role="source-metadata">予約もと</th>
+<th class="col-action" data-cell-role="reservation-action">操作</th>
+</tr>
+</thead>
+<tbody id="rsv-body"></tbody>
+</table>
+<div id="empty">該当する予約はありません</div>
+</div>
+<div id="keyword-wrap"></div>
+</div>
+</div>
+</div>
+<div id="toast"></div>
+<script>
+const STATUS_CLASS = {
+  scheduled: 'st-scheduled',
+  recording: 'st-recording',
+  completed: 'st-completed',
+  cancelled: 'st-cancelled',
+  failed:    'st-failed'
+};
+
+let allData = [];
+let userEvents = [];
+let userEventsSignature = '';
+let keywordGroups = [];
+let taggedPrograms = { newprogram: [], finalepisode: [] };
+let taggedLoading = { newprogram: false, finalepisode: false };
+let taggedLoadedOnce = { newprogram: false, finalepisode: false };
+let currentFilter = 'active';
+let keywordLoading = false;
+let keywordLoadedOnce = false;
+// v1.0.0: reservation sub-tabs share toolbar styling, but functional actions are materialized by tab capability.
+// The operation log tab is a reservation-family list surface, not a genre-capable surface.
+const reservationTabContracts = Object.freeze({
+  active:       Object.freeze({ listRole:'reservation', supportsGenreColor:true,  supportsLogActions:false, supportsRefresh:true }),
+  keyword:      Object.freeze({ listRole:'auto-search', supportsGenreColor:true,  supportsLogActions:false, supportsRefresh:true }),
+  stations:     Object.freeze({ listRole:'service-list', supportsGenreColor:true,  supportsLogActions:false, supportsRefresh:true }),
+  newprogram:   Object.freeze({ listRole:'new-program',  supportsGenreColor:true,  supportsLogActions:false, supportsRefresh:true }),
+  finalepisode: Object.freeze({ listRole:'final-program',supportsGenreColor:true,  supportsLogActions:false, supportsRefresh:true }),
+  done:         Object.freeze({ listRole:'log',          supportsGenreColor:false, supportsLogActions:true,  supportsRefresh:true })
+});
+const genreColorFilters = new Set(Object.keys(reservationTabContracts).filter(k => reservationTabContracts[k].supportsGenreColor));
+let genreColorPrefs = loadGenreColorPrefs();
+let missingDuplicateConflictIds = new Set();
+
+let reservationStationWidthSignature = '';
+let reservationStationWidthCanvas = null;
+
+function collectReservationStationNames(){
+  const names = new Set();
+  const add = (v) => {
+    const text = String(v || '').trim();
+    if(text && text !== '—' && text !== '（局名不明）') names.add(text);
+  };
+
+  stationChannelMetaList.forEach(ch => add(ch.name || ch.channelArgument));
+  stationGroupMetaMap.forEach(meta => add(meta.label));
+  allData.forEach(r => add(r.serviceName || r.channelArgument));
+
+  keywordGroups.forEach(group => {
+    (group && Array.isArray(group.items) ? group.items : []).forEach(r => add(r.serviceName || r.channelArgument));
+    (group && Array.isArray(group.reservations) ? group.reservations : []).forEach(r => add(r.serviceName || r.channelArgument));
+  });
+
+  Object.values(taggedPrograms).forEach(list => {
+    (Array.isArray(list) ? list : []).forEach(ev => add(ev.serviceName || ev.channelName || ev.channelArgument));
+  });
+  return Array.from(names).sort((a,b)=>a.localeCompare(b, 'ja'));
+}
+
+function measureReservationStationTextWidth(names){
+  if(!names.length) return 0;
+  if(!reservationStationWidthCanvas) reservationStationWidthCanvas = document.createElement('canvas');
+  const ctx = reservationStationWidthCanvas.getContext('2d');
+  if(!ctx) return Math.max(...names.map(x => x.length * 12));
+  const sampleCell = document.querySelector('#rsv-table td.col-ch, #rsv-table th.col-ch');
+  const style = sampleCell ? getComputedStyle(sampleCell) : null;
+  ctx.font = style ? `${style.fontWeight || '400'} ${style.fontSize || '12px'} ${style.fontFamily || 'Meiryo, sans-serif'}` : '12px Meiryo, sans-serif';
+  return Math.max(...names.map(x => ctx.measureText(x).width));
+}
+
+function readReservationCssPx(computed, name, fallback){
+  const value = Number.parseFloat(computed.getPropertyValue(name));
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function estimateReservationTableAvailableWidth(){
+  const tableWrap = document.getElementById('table-wrap');
+  const keywordWrap = document.getElementById('keyword-wrap');
+  const main = document.getElementById('main');
+  const candidates = [
+    tableWrap && tableWrap.clientWidth,
+    keywordWrap && keywordWrap.clientWidth,
+    main && main.clientWidth,
+    document.documentElement.clientWidth
+  ].filter(v => Number.isFinite(v) && v > 0);
+  return candidates.length ? Math.max(...candidates) : 0;
+}
+
+function updateReservationColumnWidthVars(){
+  const names = collectReservationStationNames();
+  const tableWidth = Math.round(estimateReservationTableAvailableWidth());
+  const signature = names.join('\u001f') + `|w=${tableWidth}`;
+  if(signature === reservationStationWidthSignature) return false;
+  reservationStationWidthSignature = signature;
+
+  const root = document.documentElement;
+  const bodyComputed = getComputedStyle(document.body);
+  const rootComputed = getComputedStyle(root);
+  const minWidth = Number.parseFloat(rootComputed.getPropertyValue('--rsv-col-channel-min')) || 150;
+  const measuredText = measureReservationStationTextWidth(names);
+  // Service/station column is semi-fixed: derive it from the current known service set,
+  // not from the active tab/filter. The title column remains the only elastic absorber.
+  const required = Math.ceil(measuredText + 26); // cell padding + safety room for half-width/antialiasing
+  let width = Math.max(minWidth, required);
+
+  const fixedReservationColumns =
+    readReservationCssPx(bodyComputed, '--rsv-index-w', 36) +
+    readReservationCssPx(bodyComputed, '--rsv-toggle-w', 56) +
+    readReservationCssPx(bodyComputed, '--rsv-priority-w', 72) +
+    readReservationCssPx(bodyComputed, '--rsv-date-w', 122) +
+    readReservationCssPx(bodyComputed, '--rsv-time-w', 116) +
+    readReservationCssPx(bodyComputed, '--rsv-source-w', 94) +
+    readReservationCssPx(bodyComputed, '--rsv-action-w', 112);
+  const minimumTitleColumn = 180;
+  const safeRoom = 12;
+  const maxByLayout = tableWidth > 0 ? Math.floor(tableWidth - fixedReservationColumns - minimumTitleColumn - safeRoom) : 0;
+  if(maxByLayout > minWidth) width = Math.min(width, maxByLayout);
+
+  root.style.setProperty('--rsv-col-channel', `${width}px`);
+  root.style.setProperty('--tvair-col-service', `${width}px`);
+  // v0.11.112: the log tab owns its own column balance. Do not let long
+  // station names consume the log message column; keep the target readable
+  // and give the remaining width to 内容.
+  const logTargetWidth = Math.max(120, Math.min(width, 180));
+  root.style.setProperty('--reservation-log-col-target', `${logTargetWidth}px`);
+  return true;
+}
+
+
+const SPECIAL_GROUP_TITLES = {
+  stations: '局名リスト',
+  newprogram: '新番組',
+  finalepisode: '最終回'
+};
+
+const GENRE_COLORS = (window.TvAirGenre && window.TvAirGenre.COLORS) || {};
+
+function loadGenreColorPrefs(){
+  try{
+    const raw = localStorage.getItem('tvair-reservation-genre-colors');
+    const parsed = raw ? JSON.parse(raw) : {};
+    return { active: !!parsed.active, keyword: !!parsed.keyword, stations: !!parsed.stations, newprogram: !!parsed.newprogram, finalepisode: !!parsed.finalepisode };
+  }catch(_){
+    return { active:false, keyword:false, stations:false, newprogram:false, finalepisode:false };
+  }
+}
+
+function saveGenreColorPrefs(){
+  try{ localStorage.setItem('tvair-reservation-genre-colors', JSON.stringify(genreColorPrefs)); }catch(_){ }
+}
+
+function isGenreColorEnabled(filter){
+  return !!genreColorPrefs[filter];
+}
+
+function reservationTabContractForFilter(filter){
+  return reservationTabContracts[filter] || reservationTabContracts.active;
+}
+
+function reservationListRoleForFilter(filter){
+  return reservationTabContractForFilter(filter).listRole;
+}
+
+function reservationTabSupports(filter, capability){
+  return !!reservationTabContractForFilter(filter)[capability];
+}
+
+function applyReservationListRole(){
+  const role = reservationListRoleForFilter(currentFilter);
+  document.body.setAttribute('data-filter', currentFilter || 'active');
+  document.body.setAttribute('data-list-role', role);
+  const table = document.getElementById('rsv-table');
+  if(table) table.setAttribute('data-list-role', role);
+  const tabs = document.getElementById('filter-tabs');
+  if(tabs) tabs.setAttribute('data-list-role', role);
+  const tableWrap = document.getElementById('table-wrap');
+  if(tableWrap) tableWrap.setAttribute('data-list-role', role);
+  const keywordWrap = document.getElementById('keyword-wrap');
+  if(keywordWrap) keywordWrap.setAttribute('data-list-role', role);
+}
+
+function updateLogActionHost(){
+  const host = document.getElementById('log-action-host');
+  if(!host) return;
+  const canShow = reservationTabSupports(currentFilter, 'supportsLogActions');
+  host.hidden = !canShow;
+  host.setAttribute('aria-hidden', canShow ? 'false' : 'true');
+  if(!canShow){
+    host.innerHTML = '';
+    return;
+  }
+  if(!document.getElementById('report-log-btn')){
+    host.innerHTML = '<button id="report-log-btn" class="tvair-log-action-button" data-action-role="log-copy" onclick="copyUserEventReport(this)">報告用コピー</button>'+
+                     '<button id="clear-log-btn" class="tvair-log-action-button" data-action-role="log-clear" onclick="clearLogReservations(this)">一括削除</button>';
+  }
+}
+
+function canShowGenreColorButtonForFilter(filter){
+  return reservationTabSupports(filter, 'supportsGenreColor');
+}
+
+function updateGenreColorButton(){
+  updateLogActionHost();
+  const host = document.getElementById('genre-color-action-host');
+  if(!host) return;
+  const canShow = canShowGenreColorButtonForFilter(currentFilter);
+  if(!canShow){
+    host.innerHTML = '';
+    host.setAttribute('aria-hidden', 'true');
+    return;
+  }
+  host.setAttribute('aria-hidden', 'false');
+  if(!document.getElementById('genre-color-btn')){
+    host.innerHTML = '<button id="genre-color-btn" class="reservation-toolbar-action" data-toolbar-action="genre-color" onclick="toggleGenreColorForCurrentFilter()"></button>';
+  }
+  const btn = document.getElementById('genre-color-btn');
+  if(!btn) return;
+  const enabled = isGenreColorEnabled(currentFilter);
+  btn.textContent = enabled ? 'ジャンル色：ON' : 'ジャンル色：OFF';
+  btn.title = enabled ? '現在はジャンル色表示あり。押すとOFFになります。' : '現在はジャンル色表示なし。押すとONになります。';
+}
+
+function toggleGenreColorForCurrentFilter(){
+  if(!canShowGenreColorButtonForFilter(currentFilter)) return;
+  genreColorPrefs[currentFilter] = !isGenreColorEnabled(currentFilter);
+  saveGenreColorPrefs();
+  updateGenreColorButton();
+  render();
+  updateReservationScrollLayout();
+}
+
+function genreClsFromCodes(codes){
+  return (window.TvAirGenre && window.TvAirGenre.codesToClass) ? window.TvAirGenre.codesToClass(codes) : 'g-other';
+}
+
+function reservationTextGenreFallback(item){
+  const title = String((item && (item.titleDisplay || item.TitleDisplay || item.title || item.Title)) || '');
+  const service = String((item && (item.serviceName || item.channelArgument || item.ServiceName || item.ChannelArgument)) || '');
+  const rule = String((item && (item.sourceRuleName || item.SourceRuleName || item.sourceLabel || item.SourceLabel)) || '');
+  const text = (title + ' ' + service + ' ' + rule).normalize('NFKC').toLowerCase();
+  if(/ニュース|報道|news/.test(text)) return 'g-news';
+  if(/スポーツ|野球|サッカー|ゴルフ|競馬|競輪|競艇|f1|formula|プロレス|大相撲|オリンピック|パラリンピック/.test(text)) return 'g-sports';
+  if(/情報|ワイドショー|旅|散歩|グルメ|通販|ショッピング|天気|ドキュメント72時間/.test(text)) return 'g-info';
+  if(/ドラマ|劇場|時代劇|サスペンス|ミステリー|刑事|連続テレビ小説/.test(text)) return 'g-drama';
+  if(/音楽|ミュージック|ライブ|コンサート|歌謡|カラオケ|music/.test(text)) return 'g-music';
+  if(/バラエティ|お笑い|クイズ|トーク|所さん|水曜日のダウンタウン|アメトーーク/.test(text)) return 'g-variety';
+  if(/映画|シネマ|ムービー|\[映\]|【映】|午後のロードショー|wowowシネマ|chneco|日本映画専門ch|衛星劇場|東映チャンネル/.test(text)) return 'g-movie';
+  if(/アニメ|特撮|仮面ライダー|ウルトラマン|ガンダム|鬼滅|コナン|anime/.test(text)) return 'g-anime';
+  if(/ドキュメンタリー|教養|documentary|映像の世紀|nhkスペシャル/.test(text)) return 'g-docu';
+  return '';
+}
+
+function genreClsFromItem(item){
+  if(!item) return '';
+  const direct = String(item.genreClass || item.genreCssClass || '').trim();
+  if(/^g-(news|sports|info|drama|music|variety|movie|anime|docu|other)$/.test(direct)) return direct;
+  if(/^genre-(news|sports|info|drama|music|variety|movie|anime|docu|documentary|other)$/.test(direct)) return direct === 'genre-documentary' ? 'g-docu' : direct.replace(/^genre-/, 'g-');
+
+  const codes = item.genreCodes || item.GenreCodes || item.genreCode || item.GenreCode || '';
+  if(String(codes || '').trim()) return genreClsFromCodes(codes);
+
+  const label = String(item.genre || item.Genre || '').toLowerCase();
+  if(label.includes('ニュース')) return 'g-news';
+  if(label.includes('スポーツ')) return 'g-sports';
+  if(label.includes('情報') || label.includes('ワイドショー')) return 'g-info';
+  if(label.includes('ドラマ')) return 'g-drama';
+  if(label.includes('音楽')) return 'g-music';
+  if(label.includes('バラエティ')) return 'g-variety';
+  if(label.includes('映画')) return 'g-movie';
+  if(label.includes('アニメ')) return 'g-anime';
+  if(label.includes('ドキュメンタリー') || label.includes('教養') || label.includes('document')) return 'g-docu';
+  return reservationTextGenreFallback(item);
+}
+
+function buildGenreRowAttr(item){
+  const cls = genreClsFromItem(item);
+  const codes = String((item && (item.genreCodes || item.GenreCodes || item.genreCode || item.GenreCode)) || '');
+  const source = codes.trim() ? 'epg-genre-codes' : (cls ? 'text-fallback' : 'none');
+  return ` data-genre-class="${esc(cls)}" data-genre-source="${esc(source)}"`;
+}
+
+function buildGenreRowClass(item, state = {}){
+  if(!canShowGenreColorButtonForFilter(currentFilter) || !isGenreColorEnabled(currentFilter)) return '';
+
+  // v0.11.378 reservation row-state owner rebuild:
+  // genre color is a data/background attribute, never a higher-priority row state.
+  // Disabled/cancelled/conflicted/log rows must not receive genre row owner classes;
+  // otherwise the genre background can fight the disabled/cancelled/conflict tokens.
+  const statusKey = String((item && item.status) || '').toLowerCase();
+  const isTerminal = statusKey === 'completed' || statusKey === 'cancelled' || statusKey === 'failed';
+  const disabled = state.disabled === true || (!isTerminal && item && item.isEnabled === false);
+  const cancelled = state.cancelled === true || statusKey === 'cancelled';
+  const conflicted = state.conflicted === true;
+  const logPlain = state.logPlain === true;
+  if(disabled || cancelled || conflicted || logPlain) return '';
+
+  const cls = genreClsFromItem(item);
+  return cls ? ' genre-colored-row tvair-reservation-genre-row ' + cls : '';
+}
+
+let genreColorSettingsSynced = false;
+async function ensureReservationGenreColorsSynced(){
+  if(genreColorSettingsSynced) return;
+  genreColorSettingsSynced = true;
+  if(window.TvAirGenre && typeof window.TvAirGenre.syncGenreColorsFromSettings === 'function'){
+    await window.TvAirGenre.syncGenreColorsFromSettings();
+  }
+}
+
+
+/* Reservation-row semantic DOM contract. */
+function reservationStatusKey(r){
+  return String((r && r.status) || '').toLowerCase();
+}
+
+function reservationIsTerminal(r){
+  const statusKey = reservationStatusKey(r);
+  return statusKey === 'completed' || statusKey === 'cancelled' || statusKey === 'failed';
+}
+
+function reservationIsActiveStatus(r){
+  const statusKey = reservationStatusKey(r);
+  return statusKey === 'scheduled' || statusKey === 'recording';
+}
+
+function reservationHasDisplayAllocation(r){
+  if(!r || r.source === 'epg') return false;
+  if(!reservationIsActiveStatus(r)) return false;
+  if(r.isEnabled === false || r.isConflicted === true) return false;
+  return true;
+}
+
+function reservationDisplayTunerName(r, options){
+  const opts = options || {};
+  if(!r) return '';
+  if(opts.logPlain || reservationIsTerminal(r)){
+    return r.actualTunerName || '';
+  }
+  if(!reservationHasDisplayAllocation(r)) return '';
+  if(reservationStatusKey(r) === 'recording') return r.actualTunerName || r.tunerName || '';
+  return r.tunerName || '';
+}
+
+function reservationSemanticState(r, options){
+  const opts = options || {};
+  const statusKey = reservationStatusKey(r);
+  if(!opts.logPlain && r && r.isConflicted) return 'conflicted';
+  if(statusKey === 'cancelled') return 'cancelled';
+  if(statusKey === 'failed') return 'failed';
+  if(statusKey === 'completed') return 'completed';
+  if(!reservationIsTerminal(r) && r && r.isEnabled === false) return 'disabled';
+  if(statusKey === 'recording') return 'recording';
+  if(statusKey === 'scheduled' || statusKey === '') return 'scheduled';
+  return 'scheduled';
+}
+
+function reservationSystemEpgKind(r){
+  if(!r || r.source !== 'epg') return '';
+  const title = String(r.titleDisplay || r.title || '');
+  const sourceRuleName = String(r.sourceRuleName || '');
+  if(sourceRuleName.toLowerCase() === 'prerecepg' || title.startsWith('EPG確認') || title.startsWith('録画前EPG確認')) return 'pre-record-epg';
+  if(title.startsWith('EPG取得')) return 'daily-epg';
+  return 'system-epg';
+}
+
+function reservationSemanticClass(r, options){
+  const state = reservationSemanticState(r, options);
+  const view = String(currentFilter || 'active').replace(/[^a-z0-9_-]/gi, '');
+  const systemKind = reservationSystemEpgKind(r);
+  const systemClass = systemKind ? ` tvair-reservation-system-${systemKind}` : '';
+  return ` tvair-reservation-row tvair-reservation-view-${view} tvair-reservation-state-${state}${systemClass}`;
+}
+
+function reservationSemanticAttrs(r, options){
+  const state = reservationSemanticState(r, options);
+  const view = String(currentFilter || 'active').replace(/[^a-z0-9_-]/gi, '');
+  const systemKind = reservationSystemEpgKind(r);
+  const systemAttrs = systemKind ? ` data-row-role="system-epg-event" data-system-epg-kind="${systemKind}"` : '';
+  return ` data-view-mode="${view}" data-reservation-state="${state}"${systemAttrs}`;
+}
+
+function reservationEventKey(x){
+  return `${x.networkId}:${x.transportStreamId}:${x.serviceId}:${x.eventId}`;
+}
+
+function reservationFrameKey(x){
+  const st = new Date((x && (x.startTime || x.start)) || '').getTime();
+  const en = new Date((x && (x.endTime || x.end)) || '').getTime();
+  const base = reservationEventKey(x || {});
+  if(Number.isFinite(st) && Number.isFinite(en)) return `${base}:${st}:${en}`;
+  return base;
+}
+
+function isAlreadyReservedEvent(ev){
+  const key = reservationFrameKey(ev);
+  return allData.some(r => reservationIsActiveStatus(r) && r.source !== 'epg' && reservationFrameKey(r) === key);
+}
+
+function p2(n){ return String(n).padStart(2,'0'); }
+function esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function fmtDate(s){
+  const d = new Date(s);
+  const dow = ['日','月','火','水','木','金','土'][d.getDay()];
+  return `${d.getFullYear()}/${p2(d.getMonth()+1)}/${p2(d.getDate())}(${dow})`;
+}
+function fmtTime(s, e){
+  const ds = new Date(s), de = new Date(e);
+  return `${p2(ds.getHours())}:${p2(ds.getMinutes())}〜${p2(de.getHours())}:${p2(de.getMinutes())}`;
+}
+function fmtDateTime(s){
+  const d = new Date(s);
+  if(Number.isNaN(d.getTime())) return '—';
+  return `${d.getFullYear()}/${p2(d.getMonth()+1)}/${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+}
+function userLogSeverityClass(e){
+  const sev = String((e && e.severity) || '').toLowerCase();
+  if(sev === 'error') return ' user-log-error';
+  if(sev === 'warn' || sev === 'warning') return ' user-log-warn';
+  return ' user-log-info';
+}
+function fmtDur(s, e){
+  const m = Math.round((new Date(e) - new Date(s)) / 60000);
+  return m >= 60 ? `${Math.floor(m/60)}h${m%60 ? m%60+'m' : ''}` : `${m}m`;
+}
+
+async function readJsonSafely(response, fallback){
+  if(!response || !response.ok) return fallback;
+  const text = await response.text();
+  if(!text || !text.trim()) return fallback;
+  try{
+    return JSON.parse(text);
+  }catch(_){
+    return fallback;
+  }
+}
+
+async function loadKeywordReservations(showError=false){
+  keywordLoading = true;
+  if(currentFilter === 'keyword') render();
+  try{
+    const response = await fetch('/api/keyword-rule-reservations');
+    keywordGroups = await readJsonSafely(response, []);
+    keywordLoadedOnce = true;
+    if(showError && (!response || !response.ok)){
+      showToast('取得エラー: 自動検索予約一覧の取得に失敗しました。');
+    }
+  }catch(_){
+    keywordGroups = [];
+    keywordLoadedOnce = true;
+    if(showError) showToast('取得エラー: 自動検索予約一覧の取得に失敗しました。');
+  }finally{
+    keywordLoading = false;
+    if(currentFilter === 'keyword') render();
+  }
+}
+
+
+function isSafeTaggedProgramClientSide(ev){
+  const title = String((ev && ev.title) || '').trim();
+  if(!title) return false;
+  if(/^(EPG確認|録画前EPG確認|録画前EPG確認対象|SystemEpg|PreRecEpg)(\s|（|\(|:|：|$)/.test(title)) return false;
+  const compact = title.replace(/\s+/g,'');
+  const removedTags = compact
+    .replace(/\[新\]|［新］|【新】|\[終\]|［終］|【終】|\[初\]|［初］|【初】/g,'')
+    .replace(/\[字\]|［字］|\[二\]|［二］|\[無\]|［無］|\[生\]|［生］/g,'');
+  if(/^(\[新\]|［新］|【新】|\[終\]|［終］|【終】|\[初\]|［初］|【初】).{0,4}$/.test(compact)) return false;
+  if(removedTags.length <= 2) return false;
+  return true;
+}
+
+async function loadTaggedPrograms(kind, showError=false){
+  if(kind !== 'newprogram' && kind !== 'finalepisode') return;
+  taggedLoading[kind] = true;
+  if(currentFilter === kind) render();
+  try{
+    const response = await fetch(`/api/epg/tagged?kind=${encodeURIComponent(kind)}`);
+    const data = await readJsonSafely(response, { events: [] });
+    taggedPrograms[kind] = (Array.isArray(data.events) ? data.events : []).filter(isSafeTaggedProgramClientSide);
+    taggedLoadedOnce[kind] = true;
+    if(showError && (!response || !response.ok)) showToast(`取得エラー: ${SPECIAL_GROUP_TITLES[kind]}の取得に失敗しました。`);
+  }catch(_){
+    taggedPrograms[kind] = [];
+    taggedLoadedOnce[kind] = true;
+    if(showError) showToast(`取得エラー: ${SPECIAL_GROUP_TITLES[kind]}の取得に失敗しました。`);
+  }finally{
+    taggedLoading[kind] = false;
+    if(currentFilter === kind) render();
+  }
+}
+
+async function loadUserEvents(showError=false){
+  try{
+    const response = await fetch('/api/user-events?count=100', { cache:'no-store' }).catch(()=>null);
+    const nextEvents = await readJsonSafely(response, []);
+    const sig = stableSignature(nextEvents);
+    const changed = sig !== userEventsSignature;
+    userEvents = Array.isArray(nextEvents) ? nextEvents : [];
+    if(changed) userEventsSignature = sig;
+    if(showError && (!response || !response.ok)) showToast('取得エラー: ログの取得に失敗しました。');
+    if(currentFilter === 'done' && changed) render();
+    return changed;
+  }catch(_){
+    if(showError) showToast('取得エラー: ログの取得に失敗しました。');
+    return false;
+  }
+}
+
+async function load(forceRender=false){
+  await ensureReservationGenreColorsSynced();
+  const reservationResponse = await fetch('/api/reservations', { cache:'no-store' }).catch(()=>null);
+  const nextData = await readJsonSafely(reservationResponse, []);
+  await loadStationChannelMeta();
+
+  if((!reservationResponse || !reservationResponse.ok) && currentFilter !== 'keyword' && currentFilter !== 'done'){
+    showToast('取得エラー: 予約一覧の取得に失敗しました。');
+  }
+
+  const nextSignature = stableSignature(nextData);
+  const changed = nextSignature !== lastReservationSignature;
+  allData = nextData;
+  rebuildMissingDuplicateConflictIds(allData);
+  updateReservationColumnWidthVars();
+  if(changed){
+    lastReservationSignature = nextSignature;
+    idleTick = 0;
+  }
+  if(hasRealtimeReservation(allData)) idleTick = 0;
+  const userEventsChanged = await loadUserEvents(currentFilter === 'done');
+  if(forceRender || changed || (currentFilter === 'done' && userEventsChanged)) render();
+
+  await loadKeywordReservations(currentFilter === 'keyword');
+  if(taggedLoadedOnce.newprogram) await loadTaggedPrograms('newprogram', false);
+  if(taggedLoadedOnce.finalepisode) await loadTaggedPrograms('finalepisode', false);
+  updateReservationColumnWidthVars();
+}
+
+async function refreshReservations(btn){
+  if(btn) btn.disabled = true;
+  const originalText = btn ? btn.textContent : '';
+  if(btn) btn.textContent = '更新中...';
+  try{
+    const res = await fetch('/api/reservations/refresh', { method: 'POST' });
+    const data = await readJsonSafely(res, {});
+    if(!res || !res.ok){
+      showToast((data && data.message) || '予約一覧の更新に失敗しました。');
+      return;
+    }
+    await load();
+    scheduleNextPoll(true);
+    showToast((data && data.message) || '予約一覧を更新しました。');
+  }catch(_){
+    showToast('通信エラー');
+  }finally{
+    if(btn){
+      btn.disabled = false;
+      btn.textContent = originalText || '↻ 更新';
+    }
+  }
+}
+
+function updateReservationScrollLayout(){
+  // v0.11.314: ListGrid owns the column contract. JS only supplies the semi-fixed
+  // service/station width derived from the current known service set.
+  updateReservationColumnWidthVars();
+}
+
+
+function setFilter(f, el){
+  currentFilter = f;
+  applyReservationListRole();
+  document.querySelectorAll('.ftab').forEach(t => t.classList.remove('active'));
+  if(el) el.classList.add('active');
+  updateGenreColorButton();
+  if(f === 'keyword'){
+    if(!keywordLoadedOnce) keywordLoading = true;
+    render();
+    loadKeywordReservations(true);
+    return;
+  }
+  if(f === 'newprogram' || f === 'finalepisode'){
+    if(!taggedLoadedOnce[f]) taggedLoading[f] = true;
+    render();
+    loadTaggedPrograms(f, true);
+    return;
+  }
+  if(f === 'done'){
+    render();
+    loadUserEvents(true);
+    return;
+  }
+  render();
+}
+
+function getFiltered(){
+  // 予約一覧タブ: scheduled + recording 両方表示
+  if(currentFilter === 'active')   return allData.filter(r => (r.status === 'scheduled' || r.status === 'recording'));
+  if(currentFilter === 'done')     return allData.filter(r => {
+    if(!r || r.source === 'epg') return false;
+    const status = String(r.status || '').toLowerCase();
+    const started = !!(r.hasRecordingStarted || r.recordingStartedAt || r.actualTunerName);
+    if(status === 'completed') return started;
+    if(status === 'cancelled') return started;
+    if(status === 'failed') return true;
+    return false;
+  });
+  return allData;
+}
+
+function normalizeConflictTitle(title){
+  let value = String(title || '').replace(/^\s+/, '');
+  while(true){
+    const updated = value.replace(/^(?:【競合(?::\s*[^】]+)?】|\[競合(?::\s*[^\]]+)?\]|［競合(?::\s*[^］]+)?］)\s*/, '');
+    if(updated === value) break;
+    value = updated.replace(/^\s+/, '');
+  }
+  return value;
+}
+
+function buildConflictPrefix(r){
+  if(!r || !r.isConflicted) return '';
+  const id = Number(r.id || 0);
+  return '';
+}
+
+function buildDisplayTitle(r){
+  const baseTitle = normalizeConflictTitle(r && (r.titleDisplay || r.title || ''));
+  const prefix = buildConflictPrefix(r);
+  if(prefix){
+    const stripped = normalizeConflictTitle(baseTitle);
+    return `${prefix}${stripped}`;
+  }
+  return baseTitle;
+}
+
+function reservationOriginKind(r){
+  return String(r && (r.reservationOrigin || r.originKind || '') || '').trim();
+}
+function reservationIdentityKind(r){
+  return String(r && (r.reservationIdentity || r.identityKind || '') || '').trim();
+}
+function isProgramGuideMissingReservation(r){
+  if(!r) return false;
+  if(r.isProgramGuideMissing === true) return true;
+  if(reservationOriginKind(r) === 'ProgramGuideMissingProgramRule') return true;
+  // v0.11.378 fallback only for older API payloads; canonical owner is ReservationOriginClassifier.
+  if(String(r.source||'').toLowerCase() !== 'program') return false;
+  if(!Number(r.sourceRuleId||0)) return false;
+  const title=String(r.titleDisplay||r.title||'').trim();
+  const rule=String(r.sourceRuleName||'').trim();
+  return title === 'ProgramGuideBlank' || rule === 'ProgramGuideBlank' || rule === 'ProgramGuideMissing';
+}
+function isRegularResolvedReservationForDuplicate(r){
+  if(!r) return false;
+  if(r.isResolvedEventReservation === true) return true;
+  if(String(r.source||'').toLowerCase()==='epg') return false;
+  if(isProgramGuideMissingReservation(r)) return false;
+  if(!Number(r.networkId||0) || !Number(r.transportStreamId||0) || !Number(r.serviceId||0) || !Number(r.eventId||0)) return false;
+  const identity=reservationIdentityKind(r);
+  if(identity && identity !== 'EventIdentity') return false;
+  const title=String(r.titleDisplay||r.title||'').trim();
+  if(!title || title==='空欄' || title==='ProgramGuideBlank' || title==='RAW_BLANK_EVENT_TITLE' || title==='RAW_INCOMPLETE_EVENT_TITLE') return false;
+  if(title.startsWith('放送休止') || title.startsWith('休止')) return false;
+  return true;
+}
+function reservationTimeOverlaps(a,b){
+  const as=new Date(a&&a.startTime).getTime();
+  const ae=new Date(a&&a.endTime).getTime();
+  const bs=new Date(b&&b.startTime).getTime();
+  const be=new Date(b&&b.endTime).getTime();
+  return Number.isFinite(as)&&Number.isFinite(ae)&&Number.isFinite(bs)&&Number.isFinite(be)&&as<be&&bs<ae;
+}
+function isSameReservationService(a,b){
+  return Number(a&&a.networkId||0)===Number(b&&b.networkId||0)
+    && Number(a&&a.transportStreamId||0)===Number(b&&b.transportStreamId||0)
+    && Number(a&&a.serviceId||0)===Number(b&&b.serviceId||0);
+}
+function rebuildMissingDuplicateConflictIds(list){
+  const ids=new Set();
+  const active=(Array.isArray(list)?list:[]).filter(r=>r&&r.isEnabled!==false&&['scheduled','recording'].includes(String(r.status||'').toLowerCase()));
+  const missing=active.filter(isProgramGuideMissingReservation);
+  const regular=active.filter(isRegularResolvedReservationForDuplicate);
+  missing.forEach(m=>{
+    regular.forEach(r=>{
+      if(isSameReservationService(m,r) && reservationTimeOverlaps(m,r)){
+        if(m.id!==undefined&&m.id!==null) ids.add(Number(m.id));
+        if(r.id!==undefined&&r.id!==null) ids.add(Number(r.id));
+      }
+    });
+  });
+  missingDuplicateConflictIds=ids;
+}
+function hasMissingDuplicateConflict(r){
+  return !!(r && r.id!==undefined && r.id!==null && missingDuplicateConflictIds.has(Number(r.id)));
+}
+function hasDisplayConflict(r){
+  return !!(r && (r.isConflicted || hasMissingDuplicateConflict(r)));
+}
+function conflictLabelClass(r){
+  return hasMissingDuplicateConflict(r) ? ' conflict-missing-duplicate' : '';
+}
+
+function isReservationListGroupingRow(r){
+  return r && r.source !== 'epg';
+}
+
+function isListVisibleReservation(r){
+  const status = String((r && r.status) || '').toLowerCase();
+  return status === 'scheduled' || status === 'recording';
+}
+
+function titleMatchesNewProgram(r){
+  const title = String((r && (r.titleDisplay || r.title)) || '');
+  return /\[新\]|［新］|【新】|新番組/.test(title);
+}
+
+function titleMatchesFinalEpisode(r){
+  const title = String((r && (r.titleDisplay || r.title)) || '');
+  return /\[終\]|［終］|【終】|最終回/.test(title);
+}
+
+/* TS GROUPING START */
+let stationChannelMetaList = [];
+let stationGroupMetaMap = new Map();
+
+function normalizeStationChannel(raw){
+  return {
+    group: String(raw.group || raw.Group || '').trim().toUpperCase(),
+    originalNetworkId: Number(raw.originalNetworkId ?? raw.OriginalNetworkId ?? raw.networkId ?? raw.NetworkId ?? 0),
+    transportStreamId: Number(raw.transportStreamId ?? raw.TransportStreamId ?? 0),
+    serviceId: Number(raw.serviceId ?? raw.ServiceId ?? 0),
+    name: String(raw.name || raw.Name || raw.serviceName || raw.ServiceName || '').trim(),
+    channelArgument: String(raw.channelArgument || raw.ChannelArgument || '').trim()
+  };
+}
+
+function getStationGroupKeyFromMeta(ch){
+  if(!ch) return '';
+  if(ch.group === 'GR'){
+    return `GR:${ch.originalNetworkId}:${ch.transportStreamId}`;
+  }
+  return `SV:${ch.originalNetworkId}:${ch.transportStreamId}:${ch.serviceId}`;
+}
+
+function getStationKey(r){
+  const onid = Number(r.networkId || r.NetworkId || 0);
+  const tsid = Number(r.transportStreamId || r.TransportStreamId || 0);
+  const sid = Number(r.serviceId || r.ServiceId || 0);
+
+  const exact = stationChannelMetaList.find(ch =>
+    ch.originalNetworkId === onid &&
+    ch.transportStreamId === tsid &&
+    ch.serviceId === sid
+  );
+  if(exact){
+    return getStationGroupKeyFromMeta(exact);
+  }
+
+  const gr = stationChannelMetaList.find(ch =>
+    ch.group === 'GR' &&
+    ch.originalNetworkId === onid &&
+    ch.transportStreamId === tsid
+  );
+  if(gr){
+    return getStationGroupKeyFromMeta(gr);
+  }
+
+  if(onid && tsid){
+    if(r.group === 'GR' || r.Group === 'GR'){
+      return `GR:${onid}:${tsid}`;
+    }
+    return `SV:${onid}:${tsid}:${sid}`;
+  }
+
+  return `NAME:${String(r.serviceName || r.channelArgument || '（局名不明）').trim() || '（局名不明）'}`;
+}
+
+function getStationGroupMeta(item){
+  const key = getStationKey(item);
+  const stored = stationGroupMetaMap.get(key);
+  if(stored) return stored;
+  return {
+    key,
+    label: String(item.serviceName || item.channelArgument || '（局名不明）').trim() || '（局名不明）',
+    order: Number.MAX_SAFE_INTEGER
+  };
+}
+
+async function loadStationChannelMeta(){
+  try{
+    const response = await fetch('/api/channels').catch(()=>null);
+    const json = await readJsonSafely(response, { channels: [] });
+    const list = Array.isArray(json && json.channels) ? json.channels.map(normalizeStationChannel) : [];
+    stationChannelMetaList = list;
+    stationGroupMetaMap = new Map();
+
+    list.forEach((ch, index) => {
+      const key = getStationGroupKeyFromMeta(ch);
+      if(!key || stationGroupMetaMap.has(key)) return;
+      stationGroupMetaMap.set(key, {
+        key,
+        label: ch.name || ch.channelArgument || '（局名不明）',
+        order: index
+      });
+    });
+  }catch(_){
+    stationChannelMetaList = [];
+    stationGroupMetaMap = new Map();
+  }
+}
+/* TS GROUPING END */
+
+function getSpecialGroups(){
+  const items = allData
+    .filter(isReservationListGroupingRow)
+    .filter(isListVisibleReservation)
+    .slice()
+    .sort((a,b)=>new Date(a.startTime)-new Date(b.startTime) || String(a.serviceName||'').localeCompare(String(b.serviceName||''), 'ja') || String(a.title||'').localeCompare(String(b.title||''), 'ja'));
+
+  if(currentFilter === 'stations'){
+    const groups = new Map();
+    items.forEach(item => {
+      const meta = getStationGroupMeta(item);
+      if(!groups.has(meta.key)){
+        groups.set(meta.key, {
+          groupName: meta.label,
+          order: meta.order,
+          items: []
+        });
+      }
+      groups.get(meta.key).items.push(item);
+    });
+    return Array.from(groups.values())
+      .sort((a,b)=>{
+        if(a.order !== b.order) return a.order - b.order;
+        return String(a.groupName || '').localeCompare(String(b.groupName || ''), 'ja');
+      })
+      .map(group => ({ groupName: group.groupName, items: group.items, mode: 'reservation' }));
+  }
+
+  if(currentFilter === 'newprogram' || currentFilter === 'finalepisode'){
+    return [{ groupName: SPECIAL_GROUP_TITLES[currentFilter], items: taggedPrograms[currentFilter] || [], mode: 'candidate' }];
+  }
+
+  return [];
+}
+
+
+/* Post-render guard only; state should normally be emitted at row generation time. */
+function normalizeReservationFamilySemanticRows(root){
+  const scope = root || document;
+  const rows = scope.querySelectorAll('table.tvair-reservation-family-table tbody tr, #rsv-body > tr');
+  rows.forEach(tr => {
+    const state = tr.getAttribute('data-reservation-state') || '';
+    if(state){
+      tr.classList.add('tvair-reservation-row', `tvair-reservation-state-${state}`);
+    }
+    if(state === 'disabled') tr.classList.add('disabled-row');
+    if(state === 'cancelled') tr.classList.add('cancelled-row');
+    if(state === 'conflicted') tr.classList.add('conflicted');
+  });
+}
+
+function renderSpecialGroups(){
+  const tableWrap = document.getElementById('table-wrap');
+  const keywordWrap = document.getElementById('keyword-wrap');
+  tableWrap.style.display = 'none';
+  keywordWrap.style.display = 'block';
+
+  if((currentFilter === 'newprogram' || currentFilter === 'finalepisode') && taggedLoading[currentFilter] && (!taggedLoadedOnce[currentFilter] || !(taggedPrograms[currentFilter] || []).length)){
+    keywordWrap.innerHTML = '<div id="keyword-empty" class="table-empty">読み込み中...</div>';
+    return;
+  }
+
+  const groups = getSpecialGroups().filter(g => Array.isArray(g.items) && g.items.length > 0);
+  const emptyLabel = SPECIAL_GROUP_TITLES[currentFilter] || '一覧';
+
+  if(groups.length === 0){
+    keywordWrap.innerHTML = `<div id="keyword-empty" class="table-empty">該当する${esc(emptyLabel)}はありません</div>`;
+    return;
+  }
+
+  keywordWrap.innerHTML = groups.map(group => {
+    const items = [...group.items];
+    const isCandidateMode = group.mode === 'candidate';
+    const rows = items.map((r, idx) => {
+      if(isCandidateMode){
+        const isReserved = isAlreadyReservedEvent(r);
+        const actionBtn = isReserved
+          ? '<span class="reservation-state-label reservation-state-label--reserved" data-state-role="program-reserved-state" data-state-label="予約済" data-state-context="'+String(currentFilter||'candidate').replace(/[^a-z0-9_-]/gi,'')+'-list-row">予約済</span>'
+          : `<button class="act-btn reservation-action-button reservation-action-button--reserve" data-program-action="reserve" data-action-role="program-reserve" data-action-label="予約" data-action-context="${String(currentFilter||'candidate').replace(/[^a-z0-9_-]/gi,'')}-list-row" onclick='reserveTaggedProgram(${JSON.stringify(r).replace(/'/g,"&#39;")},this)'>予約</button>`;
+        const rowAttr = buildGenreRowAttr(r);
+        const rowClass = buildGenreRowClass(r, { disabled:false, cancelled:false, conflicted:false });
+        return `<tr class="${rowClass.trim()} tvair-reservation-candidate-row tvair-reservation-view-${String(currentFilter||'candidate').replace(/[^a-z0-9_-]/gi,'')}" data-view-mode="${String(currentFilter||'candidate').replace(/[^a-z0-9_-]/gi,'')}" data-reservation-state="candidate"${rowAttr}>
+          <td class="col-no tvair-genre-list-index-cell tvair-reservation-list-index-cell" data-cell-role="list-index">${idx + 1}</td>
+          <td class="col-date tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="date-metadata">${fmtDate(r.start)}</td>
+          <td class="col-time tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="time-metadata">${fmtTime(r.start, r.end)}</td>
+          <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata">${esc(r.serviceName || '—')}</td>
+          <td class="col-title tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="title-data" title="${esc(r.titleDisplay || r.title || '')}">${esc(r.titleDisplay || r.title || '')}</td>
+          <td class="col-action tvair-reservation-action-cell" data-cell-role="reservation-action"><div class="reservation-action-slot">${actionBtn}</div></td>
+        </tr>`;
+      }
+
+      const statusKey   = String(r.status || '').toLowerCase();
+      const isRecording = statusKey === 'recording';
+      const isDone      = statusKey === 'completed' || statusKey === 'cancelled' || statusKey === 'failed';
+      const isEnabled   = r.isEnabled !== false;
+      const disabledClass = (!isDone && !isEnabled) ? 'disabled-row' : '';
+      const cancelledClass = statusKey === 'cancelled' ? 'cancelled-row' : '';
+      const displayConflict = hasDisplayConflict(r);
+      const conflictClass = displayConflict ? ' conflicted' : '';
+      const missingDupClass = hasMissingDuplicateConflict(r) ? ' missing-duplicate-conflict' : '';
+
+      let toggleBtn;
+      if(isDone){
+        toggleBtn = `<span class="col-no" data-state-role="reservation-toggle-none" data-state-context="reservation-list-row">—</span>`;
+      } else if(isEnabled){
+        toggleBtn = `<button class="toggle-btn toggle-on" data-state-role="reservation-enabled-state" data-state-label="録画する" data-state-context="reservation-list-row" onclick="toggleEnabled(${r.id},false,this)"${isRecording ? ' disabled title="録画中は変更不可"' : ''}>○</button>`;
+      } else {
+        toggleBtn = `<button class="toggle-btn toggle-off" data-state-role="reservation-disabled-state" data-state-label="録画しない" data-state-context="reservation-list-row" onclick="toggleEnabled(${r.id},true,this)">×</button>`;
+      }
+      const rowAttr = buildGenreRowAttr(r);
+      const genreClass = buildGenreRowClass(r, {
+        disabled: !!disabledClass,
+        cancelled: !!cancelledClass,
+        conflicted: displayConflict
+      });
+      return `<tr class="row-${idx % 2 === 0 ? 'odd' : 'even'}${conflictClass}${missingDupClass} ${disabledClass} ${cancelledClass}${reservationSemanticClass(r)}${genreClass}"${reservationSemanticAttrs(r)}${rowAttr}>
+        <td class="col-no tvair-genre-list-index-cell tvair-reservation-list-index-cell" data-cell-role="list-index">${idx + 1}</td>
+        <td class="col-toggle tvair-reservation-state-cell" data-cell-role="reservation-state">${toggleBtn}</td>
+        <td class="col-date tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="date-metadata">${fmtDate(r.startTime)}</td>
+        <td class="col-time tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="time-metadata">${fmtTime(r.startTime, r.endTime)}</td>
+        <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata" title="${esc(r.serviceName || r.channelArgument || '')}">${esc(r.serviceName || r.channelArgument || '—')}</td>
+        <td class="col-title tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="title-data" title="${esc(buildDisplayTitle(r))}">${esc(buildDisplayTitle(r))}</td>
+        <td class="col-status tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="source-metadata"><span class="source-label" data-state-role="source-label" title="${esc(r.sourceLabel || "")}">${esc(r.sourceLabel || "—")}</span></td>
+      </tr>`;
+    }).join('');
+
+    return `<section class="keyword-group">
+      <div class="keyword-group-head">
+        <span class="keyword-group-title">${esc(group.groupName || '（分類不明）')}</span>
+        <span class="keyword-group-count">${items.length}件</span>
+      </div>
+      <table class="keyword-group-table tvair-reservation-family-table" data-table-schema="${isCandidateMode ? 'candidate' : 'tagged'}">
+        ${isCandidateMode ? `<thead>
+          <tr>
+            <th class="col-no" data-cell-role="list-index">#</th>
+            <th class="col-date">日時</th>
+            <th class="col-time" data-cell-role="time-metadata">時間</th>
+            <th class="col-ch" data-cell-role="service-metadata">局名</th>
+            <th class="col-title" data-cell-role="title-data">タイトル</th>
+            <th class="col-action" data-cell-role="reservation-action">操作</th>
+          </tr>
+        </thead>` : `<thead>
+          <tr>
+            <th class="col-no" data-cell-role="list-index">#</th>
+            <th class="col-toggle" data-cell-role="reservation-state" title="録画する(○)/しない(×)">録画</th>
+            <th class="col-date" data-cell-role="date-metadata">予約日時</th>
+            <th class="col-time" data-cell-role="time-metadata">時間</th>
+            <th class="col-ch" data-cell-role="service-metadata">局名</th>
+            <th class="col-title" data-cell-role="title-data">タイトル</th>
+            <th class="col-status" data-cell-role="source-metadata">予約もと</th>
+          </tr>
+        </thead>`}
+        <tbody>${rows}</tbody>
+      </table>
+    </section>`;
+  }).join('');
+  normalizeReservationFamilySemanticRows(keywordWrap);
+}
+
+function renderKeywordGroups(){
+  const tableWrap = document.getElementById('table-wrap');
+  const keywordWrap = document.getElementById('keyword-wrap');
+  tableWrap.style.display = 'none';
+  keywordWrap.style.display = 'block';
+
+  if(keywordLoading && (!keywordLoadedOnce || !keywordGroups || keywordGroups.length === 0)){
+    keywordWrap.innerHTML = '<div id="keyword-empty" class="table-empty">読み込み中...</div>';
+    return;
+  }
+
+  if(!keywordGroups || keywordGroups.length === 0){
+    keywordWrap.innerHTML = '<div id="keyword-empty" class="table-empty">該当する自動検索予約はありません</div>';
+    return;
+  }
+
+  keywordWrap.innerHTML = keywordGroups.map(group => {
+    // システムEPG行は予約一覧だけのチューナー占有行。自動検索グループには混ぜない
+    const items = [...(group.items || [])]
+      .filter(r => r.source !== 'epg')
+      .sort((a,b)=>new Date(a.startTime)-new Date(b.startTime));
+    const rows = items.map((r, idx) => {
+      const statusKey   = String(r.status || '').toLowerCase();
+      const isRecording = statusKey === 'recording';
+      const isDone      = statusKey === 'completed' || statusKey === 'cancelled' || statusKey === 'failed';
+      const isEnabled   = r.isEnabled !== false;
+      const disabledClass = (!isDone && !isEnabled) ? 'disabled-row' : '';
+      const cancelledClass = statusKey === 'cancelled' ? 'cancelled-row' : '';
+      const displayConflict = hasDisplayConflict(r);
+      const conflictClass = displayConflict ? ' conflicted' : '';
+      const missingDupClass = hasMissingDuplicateConflict(r) ? ' missing-duplicate-conflict' : '';
+
+      // 録画ON/OFFトグル(完了済みは非表示)
+      let toggleBtn;
+      if(isDone){
+        toggleBtn = `<span class="col-no" data-state-role="reservation-toggle-none" data-state-context="reservation-list-row">—</span>`;
+      } else if(isEnabled){
+        toggleBtn = `<button class="toggle-btn toggle-on" data-state-role="reservation-enabled-state" data-state-label="録画する" data-state-context="reservation-list-row" onclick="toggleEnabled(${r.id},false,this)"${isRecording ? ' disabled title="録画中は変更不可"' : ''}>○</button>`;
+      } else {
+        toggleBtn = `<button class="toggle-btn toggle-off" data-state-role="reservation-disabled-state" data-state-label="録画しない" data-state-context="reservation-list-row" onclick="toggleEnabled(${r.id},true,this)">×</button>`;
+      }
+
+      const rowAttr = buildGenreRowAttr(r);
+      const genreClass = buildGenreRowClass(r, {
+        disabled: !!disabledClass,
+        cancelled: !!cancelledClass,
+        conflicted: displayConflict
+      });
+      return `<tr class="row-${idx % 2 === 0 ? 'odd' : 'even'}${conflictClass}${missingDupClass} ${disabledClass} ${cancelledClass}${reservationSemanticClass(r)}${genreClass}"${reservationSemanticAttrs(r)}${rowAttr}>
+        <td class="col-no tvair-genre-list-index-cell tvair-reservation-list-index-cell" data-cell-role="list-index">${idx + 1}</td>
+        <td class="col-toggle tvair-reservation-state-cell" data-cell-role="reservation-state">${toggleBtn}</td>
+        <td class="col-date tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="date-metadata">${fmtDate(r.startTime)}</td>
+        <td class="col-time tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="time-metadata">${fmtTime(r.startTime, r.endTime)}</td>
+        <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata" title="${esc(r.serviceName || r.channelArgument || '')}">${esc(r.serviceName || r.channelArgument || '—')}</td>
+        <td class="col-title tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="title-data" title="${esc(buildDisplayTitle(r))}">${esc(buildDisplayTitle(r))}</td>
+        <td class="col-status tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="source-metadata"><span class="source-label" data-state-role="source-label" title="${esc(r.sourceLabel || "")}">${esc(r.sourceLabel || "—")}</span></td>
+      </tr>`;
+    }).join('');
+
+    return `<section class="keyword-group">
+      <div class="keyword-group-head">
+        <span class="keyword-group-title">${esc(group.ruleName || '（ルール不明）')}</span>
+        <span class="keyword-group-count">${items.length}件</span>
+      </div>
+      <table class="keyword-group-table tvair-reservation-family-table" data-table-schema="tagged">
+        <thead>
+          <tr>
+            <th class="col-no" data-cell-role="list-index">#</th>
+            <th class="col-toggle" data-cell-role="reservation-state" title="録画する(○)/しない(×)">録画</th>
+            <th class="col-date" data-cell-role="date-metadata">予約日時</th>
+            <th class="col-time" data-cell-role="time-metadata">時間</th>
+            <th class="col-ch" data-cell-role="service-metadata">局名</th>
+            <th class="col-title" data-cell-role="title-data">タイトル</th>
+            <th class="col-status" data-cell-role="source-metadata">予約もと</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </section>`;
+  }).join('');
+  normalizeReservationFamilySemanticRows(keywordWrap);
+}
+
+function updateReservationTableStructure(){
+  const table = document.getElementById('rsv-table');
+  if(!table) return;
+  const isLog = currentFilter === 'done';
+  table.setAttribute('data-list-role', reservationListRoleForFilter(currentFilter));
+  table.setAttribute('data-table-schema', isLog ? 'log' : 'reservation');
+
+  const thead = table.querySelector('thead');
+  if(thead){
+    thead.innerHTML = isLog ? `
+        <tr>
+          <th class="col-no" data-cell-role="log-index">#</th>
+          <th class="col-datetime" data-cell-role="log-datetime">日時</th>
+          <th class="col-kind" data-cell-role="log-kind">種別</th>
+          <th class="col-result" data-cell-role="log-result">結果</th>
+          <th class="col-target" data-cell-role="log-target">対象</th>
+          <th class="col-main" data-cell-role="log-content">内容</th>
+        </tr>` : `
+        <tr>
+          <th class="col-no" data-cell-role="list-index">#</th>
+          <th class="col-toggle" data-cell-role="reservation-state" title="録画する(○)/しない(×)">録画</th>
+          <th class="col-tuner" data-cell-role="priority-metadata">優先度</th>
+          <th class="col-date" data-cell-role="date-metadata">予約日時</th>
+          <th class="col-time" data-cell-role="time-metadata">時間</th>
+          <th class="col-ch" data-cell-role="service-metadata">局名</th>
+          <th class="col-title" data-cell-role="title-data">タイトル</th>
+          <th class="col-status" data-cell-role="source-metadata">予約もと</th>
+          <th class="col-action" data-cell-role="reservation-action">操作</th>
+        </tr>`;
+  }
+}
+
+function render(){
+  applyReservationListRole();
+  updateLogActionHost();
+  updateReservationTableStructure();
+  const tableWrap = document.getElementById('table-wrap');
+  const keywordWrap = document.getElementById('keyword-wrap');
+  const empty = document.getElementById('empty');
+
+  if(currentFilter === 'keyword'){
+    renderKeywordGroups();
+    return;
+  }
+
+  if(currentFilter === 'stations' || currentFilter === 'newprogram' || currentFilter === 'finalepisode'){
+    renderSpecialGroups();
+    return;
+  }
+
+  tableWrap.style.display = 'block';
+  keywordWrap.style.display = 'none';
+  empty.textContent = '該当する予約はありません';
+
+  const tbody = document.getElementById('rsv-body');
+
+  if(currentFilter === 'done'){
+    const rows = [...userEvents].sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt));
+    if(rows.length === 0){ tbody.innerHTML = ''; empty.style.display = 'block'; empty.textContent = '表示するユーザー向けログはありません'; return; }
+    empty.style.display = 'none';
+    tbody.innerHTML = rows.map((e, i) => {
+      const rowClass = `row-${i % 2 === 0 ? 'odd' : 'even'} tvair-user-log-row${userLogSeverityClass(e)}`;
+      return `<tr class="${rowClass}" data-list-role="log">
+        <td class="col-no tvair-user-log-index-cell" data-cell-role="log-index">${i + 1}</td>
+        <td class="col-datetime tvair-user-log-datetime-cell" data-cell-role="log-datetime">${fmtDateTime(e.createdAt)}</td>
+        <td class="col-kind tvair-user-log-kind-cell" data-cell-role="log-kind">${esc(e.category || '—')}</td>
+        ${TvAIrUserLog.renderResultCell(e, esc)}
+        ${TvAIrUserLog.renderTargetCell(e, esc)}
+        ${TvAIrUserLog.renderMessageCell(e, esc)}
+      </tr>`;
+    }).join('');
+    updateReservationScrollLayout();
+    return;
+  }
+
+  const rows = [...getFiltered()].sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
+
+  if(rows.length === 0){ tbody.innerHTML = ''; empty.style.display = 'block'; return; }
+  empty.style.display = 'none';
+
+  tbody.innerHTML = rows.map((r, i) => {
+    const isRecording = r.status === 'recording';
+    const isDone      = r.status === 'completed' || r.status === 'cancelled' || r.status === 'failed';
+    const isEnabled   = r.isEnabled !== false;
+    const isEpg       = r.source === 'epg';
+    const isProgram   = r.source === 'program';
+
+    // 録画ON/OFFトグル（EPGエントリと完了済み、ログタブは非表示）
+    let toggleBtn;
+    if(currentFilter === 'done' || isDone || isEpg || isProgram){
+      toggleBtn = `<span class="col-no" data-state-role="reservation-toggle-none" data-state-context="reservation-list-row">—</span>`;
+    } else if(isEnabled){
+      toggleBtn = `<button class="toggle-btn toggle-on" data-state-role="reservation-enabled-state" data-state-label="録画する" data-state-context="reservation-list-row" onclick="toggleEnabled(${r.id},false,this)"${isRecording ? ' disabled title="録画中は変更不可"' : ''}>○</button>`;
+    } else {
+      toggleBtn = `<button class="toggle-btn toggle-off" data-state-role="reservation-disabled-state" data-state-label="録画しない" data-state-context="reservation-list-row" onclick="toggleEnabled(${r.id},true,this)">×</button>`;
+    }
+
+    const displayTunerName = reservationDisplayTunerName(r, { logPlain: currentFilter === 'done' });
+    const explicitChainMark = !!(r.chainRole && r.chainRole !== 'tail' && r.source !== 'keyword' && r.source !== 'epg' && r.source !== 'system');
+    const tunerText = (displayTunerName || '—') + (explicitChainMark ? '（C）' : '');
+    const tunerCell = currentFilter === 'done'
+      ? `<span class="tuner-normal">${esc(tunerText)}</span>`
+      : (hasDisplayConflict(r)
+        ? `<span class="tuner-conflict${conflictLabelClass(r)}">競合</span>`
+        : `<span class="tuner-normal">${esc(tunerText)}</span>`);
+
+    // 局名
+    const chCell = esc(r.serviceName || r.channelArgument || '—');
+
+    // タイトル（EPGエントリは青文字イタリック）
+    const titleClass = isEpg ? 'title-epg' : 'title-normal';
+
+    // 操作ボタン（EPGエントリは操作なし）
+    // v32.68: scheduled の「解除」ボタンを撤去。予約の能動的意思表示は◯✗トグルに集約。
+    // 横断的な予約リスト表示(予約一覧 / 自動検索予約一覧 / 局別 / 曜日別)で
+    // 同じ◯✗状態を維持することに設計上の意味がある。
+    const isManual = r.source === 'manual';
+    let actionBtn;
+    if(currentFilter === 'done'){
+      actionBtn = `<span class="reservation-action-empty" data-state-role="empty-action-cell" data-state-context="reservation-list-row">—</span>`;
+    } else if(isRecording){
+      // v0.11.178: プログラム予約も実行後は共通停止ルートで止められるようにする。
+      actionBtn = `<button class="act-btn reservation-action-button reservation-action-button--stop" data-program-action="stop" data-action-role="recording-stop" data-action-label="録画停止" data-action-context="reservation-list-row" onclick="stopRec(${r.id},this)">録画停止</button>`;
+    } else if(isEpg || isProgram){
+      actionBtn = `<span class="reservation-action-empty" data-state-role="empty-action-cell" data-state-context="reservation-list-row">—</span>`;
+    } else if(r.status === 'scheduled' && isManual){
+      actionBtn = `<button class="act-btn reservation-action-button reservation-action-button--cancel" data-program-action="cancel" data-action-role="reservation-cancel" data-action-label="予約取消" data-action-context="reservation-list-row" onclick="cancelManualReservation(${r.id},this)">予約取消</button>`;
+    } else if(r.status === 'scheduled'){
+      // scheduled は操作なし(◯✗トグルで意思表示する)
+      actionBtn = `<span class="reservation-action-empty" data-state-role="empty-action-cell" data-state-context="reservation-list-row">—</span>`;
+    } else {
+      actionBtn = `<span class="reservation-action-empty" data-state-role="empty-action-cell" data-state-context="reservation-list-row">—</span>`;
+    }
+
+    const logPlain = currentFilter === 'done';
+    const displayConflict = !logPlain && hasDisplayConflict(r);
+    const conflictClass = displayConflict ? ' conflicted' : '';
+    const missingDupClass = (!logPlain && hasMissingDuplicateConflict(r)) ? ' missing-duplicate-conflict' : '';
+    const disabledClass = (!logPlain && !isDone && !isEnabled) ? ' disabled-row' : '';
+    const cancelledClass = (!logPlain && r.status === 'cancelled') ? ' cancelled-row' : '';
+    const chainClass    = (!logPlain && explicitChainMark) ? ` chain-${r.chainRole}` : '';
+    const rowClass = `row-${i % 2 === 0 ? 'odd' : 'even'}${conflictClass}${missingDupClass}${disabledClass}${cancelledClass}${chainClass}`;
+
+    const rowAttr = buildGenreRowAttr(r);
+    const genreClass = buildGenreRowClass(r, {
+      disabled: !!disabledClass,
+      cancelled: !!cancelledClass,
+      conflicted: displayConflict,
+      logPlain
+    });
+    if(currentFilter === 'done'){
+      return `<tr class="${rowClass}${reservationSemanticClass(r,{ logPlain })}${genreClass}" data-reservation-id="${r.id}" data-reservation-source="${esc(r.source || '')}"${reservationSemanticAttrs(r,{ logPlain })}${rowAttr}>
+        <td class="col-no tvair-genre-list-index-cell tvair-reservation-list-index-cell" data-cell-role="list-index">${i + 1}</td>
+        <td class="col-tuner tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="priority-metadata">${tunerCell}</td>
+        <td class="col-date tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="date-metadata">${fmtDate(r.startTime)}</td>
+        <td class="col-time tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="time-metadata">${fmtTime(r.startTime, r.endTime)}</td>
+        <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata" title="${esc(r.serviceName || r.channelArgument || '')}">${chCell}</td>
+        <td class="col-title tvair-genre-list-text-cell tvair-reservation-list-text-cell ${titleClass}" data-cell-role="title-data" title="${esc(buildDisplayTitle(r))}">${esc(buildDisplayTitle(r))}</td>
+        <td class="col-status tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="source-metadata"><span class="source-label" data-state-role="source-label" title="${esc(r.sourceLabel || "")}">${esc(r.sourceLabel || "—")}</span></td>
+      </tr>`;
+    }
+
+    return `<tr class="${rowClass}${reservationSemanticClass(r,{ logPlain })}${genreClass}" data-reservation-id="${r.id}" data-reservation-source="${esc(r.source || '')}"${reservationSemanticAttrs(r,{ logPlain })}${rowAttr}>
+      <td class="col-no tvair-genre-list-index-cell tvair-reservation-list-index-cell" data-cell-role="list-index">${i + 1}</td>
+      <td class="col-toggle tvair-reservation-state-cell" data-cell-role="reservation-state">${toggleBtn}</td>
+      <td class="col-tuner tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="priority-metadata">${tunerCell}</td>
+      <td class="col-date tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="date-metadata">${fmtDate(r.startTime)}</td>
+      <td class="col-time tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="time-metadata">${fmtTime(r.startTime, r.endTime)}</td>
+      <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata" title="${esc(r.serviceName || r.channelArgument || '')}">${chCell}</td>
+      <td class="col-title tvair-genre-list-text-cell tvair-reservation-list-text-cell ${titleClass}" data-cell-role="title-data" title="${esc(buildDisplayTitle(r))}">${esc(buildDisplayTitle(r))}</td>
+      <td class="col-status tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="source-metadata"><span class="source-label" data-state-role="source-label" title="${esc(r.sourceLabel || "")}">${esc(r.sourceLabel || "—")}</span></td>
+      <td class="col-action tvair-reservation-action-cell" data-cell-role="reservation-action"><div class="reservation-action-slot">${actionBtn}</div></td>
+    </tr>`;
+  }).join('');
+  normalizeReservationFamilySemanticRows(tbody);
+  updateReservationScrollLayout();
+}
+
+async function reserveTaggedProgram(ev, btn){
+  const cancelEpg = await (window.TvAIrNotification?.confirmEpgCancelBeforeReservation?.() || Promise.resolve(false));
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = '送信中...';
+  try{
+    const reservationUrl = '/api/reservations' + (cancelEpg ? '?cancelEpgIfRunning=true' : '');
+    const res = await fetch(reservationUrl,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        networkId:ev.networkId,
+        transportStreamId:ev.transportStreamId,
+        serviceId:ev.serviceId,
+        eventId:ev.eventId,
+        title:ev.title,
+        startTime:ev.start,
+        endTime:ev.end,
+        status:'scheduled',
+        source:'manual'
+      })
+    });
+    let data = {};
+    try{ data = await res.json(); }catch(_){ }
+    if(res.ok){
+      await load();
+      scheduleNextPoll(true);
+      showToast(`「${ev.title || '番組'}」を予約しました。`);
+    }else{
+      btn.disabled = false;
+      btn.textContent = original || '予約';
+      showToast(data.message || '予約に失敗しました。');
+    }
+  }catch(_){
+    btn.disabled = false;
+    btn.textContent = original || '予約';
+    showToast('通信エラー');
+  }
+}
+
+async function toggleEnabled(id, newVal, btn){
+  btn.disabled = true;
+  try{
+    const res = await fetch(`/api/reservations/${id}/enabled`, {
+      method: 'PATCH',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ isEnabled: newVal })
+    });
+    if(res.ok){
+      await load();
+      scheduleNextPoll(true);
+    } else {
+      const d = await res.json();
+      showToast(d.message || '更新に失敗しました。');
+      btn.disabled = false;
+    }
+  } catch(e){ showToast('通信エラー'); btn.disabled = false; }
+}
+
+async function stopRec(id, btn){
+  btn.disabled = true; btn.textContent = '停止中...';
+  try{
+    const res = await fetch(`/api/reservations/${id}/stop`, { method: 'POST' });
+    const d = await res.json();
+    if(res.ok){ await load(); scheduleNextPoll(true); }
+    else{ showToast(d.message || '停止に失敗しました。'); btn.disabled = false; btn.textContent = '録画停止'; }
+  } catch(e){ showToast('通信エラー'); btn.disabled = false; btn.textContent = '録画停止'; }
+}
+
+async function deleteRsv(id, btn){
+  btn.disabled = true; btn.textContent = '...';
+  try{
+    const res = await fetch(`/api/reservations/${id}`, { method: 'DELETE' });
+    const d = await res.json();
+    if(res.ok){ await load(); scheduleNextPoll(true); }
+    else{ showToast(d.message || '削除に失敗しました。'); btn.disabled = false; btn.textContent = '削除'; }
+  } catch(e){ showToast('通信エラー'); btn.disabled = false; btn.textContent = '削除'; }
+}
+
+
+async function copyUserEventReport(btn){
+  const original = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.textContent = 'コピー中...'; }
+  try{
+    const res = await fetch('/api/user-events/report?hours=24&count=200', { cache:'no-store' });
+    const text = await res.text();
+    if(!res.ok || !text){ showToast('報告用ログの作成に失敗しました。'); return; }
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      await navigator.clipboard.writeText(text);
+      showToast('直近24時間の報告用ログをコピーしました。');
+    }else{
+      window.prompt('報告用ログをコピーしてください', text);
+    }
+  }catch(_){
+    showToast('通信エラー');
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = original || '報告用コピー'; }
+  }
+}
+
+async function clearLogReservations(btn){
+  if(btn) { btn.disabled = true; btn.textContent = "削除中..."; }
+  try{
+    const res = await fetch("/api/user-events", { method: "DELETE" });
+    const d = await res.json().catch(()=>({}));
+    if(res.ok){ await load(); scheduleNextPoll(true); showToast(d.message || "ユーザー向けログを削除しました。"); }
+    else{ showToast(d.message || "ログ削除に失敗しました。"); }
+  }catch(e){ showToast("通信エラー"); }
+  finally{ if(btn){ btn.disabled = false; btn.textContent = "一括削除"; } }
+}
+
+async function cancelManualReservation(id, btn){
+  btn.disabled = true; btn.textContent = '取消中...';
+  try{
+    const res = await fetch(`/api/reservations/${id}`, { method: 'DELETE' });
+    const d = await res.json();
+    if(res.ok){ await load(); scheduleNextPoll(true); }
+    else{ showToast(d.message || '予約取消に失敗しました。'); btn.disabled = false; btn.textContent = '予約取消'; }
+  } catch(e){ showToast('通信エラー'); btn.disabled = false; btn.textContent = '予約取消'; }
+}
+
+function applyConflictJumpHint(){
+  try{
+    const raw = sessionStorage.getItem("tvair_conflict_target");
+    if(!raw) return;
+    sessionStorage.removeItem("tvair_conflict_target");
+    const target = JSON.parse(raw);
+    // Conflict notice text stays removed; keep only explicit row focus/highlight.
+    setTimeout(()=>{
+      const row = document.querySelector(`[data-reservation-id="${target.id}"]`) || document.querySelector('tr.conflicted');
+      if(row){
+        row.scrollIntoView({behavior:'smooth', block:'center'});
+        row.classList.add('flash-conflict');
+        setTimeout(()=>row.classList.remove('flash-conflict'), 2500);
+      }
+    }, 120);
+  }catch(_){ }
+}
+
+function showToast(msg, ms=2800){
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove('show'), ms);
+}
+
+let pollTimer = null;
+let idleTick = 0;
+let lastReservationSignature = "";
+function stableSignature(value){ try{ return JSON.stringify(value); }catch(_){ return String(Date.now()); } }
+function hasRealtimeReservation(rows){
+  const now = Date.now();
+  return (rows || []).some(r => {
+    const st = String((r && r.status) || '').toLowerCase();
+    if(st === 'recording' || st === 'stopping') return true;
+    if(st === 'scheduled'){
+      const start = new Date(r.startTime || r.start || 0).getTime();
+      const end = new Date(r.endTime || r.end || 0).getTime();
+      return Number.isFinite(start) && Number.isFinite(end) && start - 120000 <= now && now <= end + 300000;
+    }
+    return false;
+  });
+}
+
+function scheduleNextPoll(reset=false){
+  if(reset) idleTick = 0;
+  clearTimeout(pollTimer);
+  if(document.hidden) return;
+  const realtime = hasRealtimeReservation(allData);
+  const ms = realtime ? 5000 : (idleTick >= 30 ? 300000 : idleTick >= 10 ? 120000 : 60000);
+  pollTimer = setTimeout(async () => {
+    if(document.hidden){ scheduleNextPoll(false); return; }
+    idleTick++;
+    await load(false);
+    scheduleNextPoll(false);
+  }, ms);
+}
+
+window.addEventListener('focus', async () => { if(!document.hidden){ await load(false); scheduleNextPoll(true); } });
+document.addEventListener('visibilitychange', async () => {
+  if(document.visibilityState === 'visible'){
+    await load(false);
+    scheduleNextPoll(true);
+  } else {
+    clearTimeout(pollTimer);
+  }
+});
+
+let reservationRailObserver = null;
+function ensureReservationRailObserver(){
+  if(reservationRailObserver || typeof ResizeObserver === 'undefined') return;
+  const main = document.getElementById('main');
+  if(!main) return;
+  reservationRailObserver = new ResizeObserver(() => updateReservationScrollLayout());
+  reservationRailObserver.observe(main);
+}
+
+window.addEventListener('resize', updateReservationScrollLayout);
+window.addEventListener('load', () => { ensureReservationRailObserver(); updateReservationScrollLayout(); });
+
+applyReservationListRole();
+updateGenreColorButton();
+load(true).then(() => { applyConflictJumpHint(); applyReservationListRole(); updateGenreColorButton(); updateReservationScrollLayout(); scheduleNextPoll(true); });
+
+/* v0.11.531 MenuLegacyEntryCleanupContract: page menu ownership is centralized in tvair-menu-spine.js. */
+
+document.addEventListener('DOMContentLoaded', ()=>{
+  applyReservationListRole();
+  updateLogActionHost();
+  ensureReservationRailObserver();
+  updateReservationScrollLayout();
+});
+
+</script>
+<script src="/tvair-notification.js?v=1.0.0"></script>
+<script src="/tvair-epg-run-contract.js?v=1.0.0"></script>
+<script src="/tvair-epg-widget.js?v=1.0.0"></script>
+<script src="/tvair-menu-spine.js?v=1.0.0"></script>
+</body>
+</html>

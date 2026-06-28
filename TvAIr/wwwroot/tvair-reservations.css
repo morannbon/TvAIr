@@ -1,0 +1,224 @@
+﻿/*
+ * TvAIr reservations/log page module - v0.11.314
+ *
+ * Scope:
+ * - reservations.html tabs, toolbar, action controls, log controls, semantic text roles.
+ * - reservation-family table structure, row rhythm, borders, and row paint are owned by tvair-list-module.css.
+ * - Reservation tabs, reservation list area, station list, new/final/log panes.
+ *
+ * Safety:
+ * - This file is an exact externalization of the previous reservations.html
+ *   inline CSS block. It does not target the program-guide grid/cells.
+ */
+*{box-sizing:border-box;margin:0;padding:0}
+html{height:100%;overflow:hidden} body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:var(--tvair-reservation-page-bg);color:var(--text-main);height:100%;margin:0;overflow:hidden}
+
+/* TopNav is owned by tvair-style-system.css (v0.11.198). */
+#page-menu-wrap{position:relative;margin-left:4px;flex:0 0 auto}
+
+
+/* ── メイン */
+#main{width:100%;max-width:none;min-width:0;margin:0;background:var(--tvair-reservation-page-bg);border:0;border-radius:0;overflow:hidden;display:flex;flex-direction:column;min-height:0}
+
+/* ── フィルタータブ（ListPageShell基準） */
+#filter-tabs{display:flex;align-items:flex-end;gap:2px;flex-shrink:0;border-bottom:2px solid var(--tvair-reservation-subtab-active-border,var(--tvair-reservation-tab-border));width:100%;margin:0;position:sticky;top:0;z-index:35;background:var(--tvair-reservation-subtab-strip-bg,var(--tvair-reservation-tab-strip-bg))}
+.ftab{padding:3px 14px;font-size:12px;cursor:pointer;border:1px solid var(--tvair-reservation-subtab-border,var(--tvair-reservation-tab-border));border-bottom:0;background:var(--tvair-reservation-subtab-bg,var(--tvair-reservation-tab-bg));color:var(--tvair-reservation-subtab-fg,var(--tvair-reservation-tab-text));border-radius:2px 2px 0 0;font-family:'Meiryo','メイリオ',sans-serif}
+.ftab:hover{background:var(--tvair-reservation-subtab-hover-bg,var(--tvair-reservation-tab-hover-bg));color:var(--tvair-reservation-subtab-hover-fg,var(--tvair-reservation-tab-hover-text))}
+.ftab.active{background:var(--tvair-reservation-subtab-active-bg,var(--tvair-reservation-tab-active-bg));color:var(--tvair-reservation-subtab-active-fg,var(--tvair-reservation-tab-active-text));border-color:var(--tvair-reservation-subtab-active-border,var(--tvair-reservation-tab-active-bg));box-shadow:inset 0 -3px 0 var(--tvair-reservation-subtab-active-underline,var(--tvair-reservation-subtab-active-fg,var(--tvair-reservation-tab-active-text)));font-weight:bold}
+#tab-spacer{flex:1}
+.reservation-toolbar-action{background:var(--tvair-reservation-toolbar-bg);border:1px solid var(--tvair-reservation-toolbar-border);color:var(--tvair-reservation-toolbar-text);padding:2px 10px;border-radius:2px 2px 0 0;cursor:pointer;font-size:11px;font-family:'Meiryo','メイリオ',sans-serif;margin-bottom:0;line-height:1.4}
+.reservation-toolbar-action:hover{background:var(--tvair-reservation-toolbar-hover-bg)}
+#content-region{background:var(--tvair-reservation-page-bg)}
+#content-inner{}
+
+/* ── テーブルエリア（幅・スクロール・列Schemaは tvair-list-module.css が所有） */
+#table-wrap{background:var(--panel-bg);border:1px solid var(--panel-border);border-radius:0 3px 3px 3px}
+
+/* Reservation-family row state paint is owned by tvair-list-module.css.
+   v0.11.502 ReservationRowStateGenreGuard: disabled/cancelled/conflict rows are
+   operational states; genre-color paint must not override disabled rows. */
+
+/* v0.11.314 Reservation page owns tabs, toolbar, actions, log controls, and semantic text roles only. Reservation-family table structure/vertical rhythm stays in tvair-list-module.css. */
+
+
+/* 各列(予約リスト配下一覧系共通の固定幅。タイトル/内容だけ可変) */
+:root{
+  --rsv-col-priority: var(--rsv-list-col-tuner); /* 優先度欄は S1/T1/—/競合 程度に収め、残りをタイトル列へ渡す */
+  --rsv-col-tuner: var(--rsv-col-priority);
+}
+.col-no,.col-index{font-size:12px;color:var(--tvair-reservation-list-text-muted);text-align:center}
+.col-toggle{text-align:center}
+.col-tuner{font-size:12px;color:var(--tvair-reservation-list-text-soft);text-align:center}
+.col-date,.col-datetime{font-size:12px;color:var(--tvair-reservation-list-text-strong);text-align:center}
+.col-time{font-size:12px;font-weight:bold;color:var(--tvair-reservation-list-text-strong);text-align:center}
+.col-dur{font-size:11px;color:var(--tvair-reservation-list-text-muted);margin-left:4px;font-weight:normal}
+.col-ch,.col-target{font-size:12px;color:var(--tvair-reservation-list-text-strong)}
+.col-title,.col-main{font-size:12px;color:var(--tvair-reservation-list-text-strong);text-align:left}
+.col-kind,.col-result,.col-status{font-size:12px;color:var(--tvair-reservation-list-text-strong);text-align:center}
+.col-code{font-size:12px;color:var(--tvair-reservation-list-text-strong);text-align:left}
+.col-action{font-size:12px;text-align:center}
+/* Log table cell layout, column schema and severity text are owned by tvair-user-log.css. */
+
+/* 録画ON/OFFトグル — 行高22pxに収まるサイズ */
+.toggle-btn{
+  width:30px;height:18px;border-radius:3px;border:1px solid transparent;
+  cursor:pointer;font-size:12px;font-weight:bold;line-height:1;
+  display:inline-flex;align-items:center;justify-content:center;
+  font-family:'Meiryo','メイリオ',sans-serif;padding:0;vertical-align:middle;
+}
+.toggle-on{background:var(--tvair-reservation-toggle-on-bg);color:var(--tvair-reservation-toggle-on-fg);border-color:var(--tvair-reservation-toggle-on-border)}
+.toggle-on:hover{background:var(--tvair-reservation-toggle-on-hover-bg);border-color:var(--tvair-reservation-toggle-on-hover-border)}
+.toggle-off{background:var(--tvair-reservation-toggle-off-bg);color:var(--tvair-reservation-toggle-off-fg);border-color:var(--tvair-reservation-toggle-off-border)}
+.toggle-off:hover{background:var(--tvair-reservation-toggle-off-hover-bg);border-color:var(--tvair-reservation-toggle-off-hover-border)}
+.toggle-btn:disabled{cursor:default;opacity:.35}
+
+/* ステータス文字色 */
+.st-scheduled{color:var(--tvair-status-scheduled-text);font-weight:bold}
+.st-recording{color:var(--tvair-status-recording-text);font-weight:bold;animation:blink-text .8s infinite}
+@keyframes blink-text{0%,100%{opacity:1}50%{opacity:.4}}
+.st-completed{color:var(--tvair-status-completed-text)}
+.st-cancelled{color:var(--tvair-status-cancelled-text);font-weight:bold}
+.st-failed   {color:var(--tvair-status-failed-text)}
+
+/* v0.11.554 ListMetadataColumnParityContract: this page keeps operation button color semantics only. ○/× state-cell geometry remains unchanged and is owned by tvair-list-module.css, not by action button rules. */
+/* 操作ボタン */
+.act-btn{padding:1px 10px;border:none;border-radius:2px;cursor:pointer;font-size:11px;white-space:nowrap;font-family:'Meiryo','メイリオ',sans-serif;color:var(--tvair-content-inverse);display:inline-flex;align-items:center;justify-content:center;min-width:80px;height:20px}
+.btn-stop  {background:var(--rec-btn)}
+.btn-stop:hover{background:var(--rec-btn-hover)}
+.btn-delete{background:var(--danger-btn)}
+.btn-delete:hover{background:var(--danger-btn-hover)}
+
+/* チェーン予約グループ表示 */
+.chain-label{display:inline-block;font-size:11px;color:var(--chain-accent);font-weight:bold;white-space:nowrap;line-height:1.2;margin-right:4px}
+.tuner-conflict{color:var(--tvair-reservation-conflict-label-tuner-fg,var(--tvair-state-conflict-text));font-weight:bold;font-size:11px}
+.tuner-conflict.conflict-missing-duplicate{color:var(--tvair-reservation-conflict-label-missing-duplicate-fg,var(--tvair-reservation-conflict-label-tuner-fg));}
+.tuner-normal{color:var(--tvair-reservation-list-text-soft)}
+.title-epg{color:var(--tvair-action-primary-bg);font-style:italic}
+.source-label{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center}
+.title-normal{color:var(--tvair-reservation-list-text-strong)}
+
+/* 自動検索予約グループ */
+#keyword-wrap{display:none;background:var(--panel-bg);border:1px solid var(--panel-border);border-radius:0 3px 3px 3px;padding:0}
+#keyword-wrap::-webkit-scrollbar{width:6px;height:6px}
+#keyword-wrap::-webkit-scrollbar-track{background:var(--tvair-scrollbar-track)}
+#keyword-wrap::-webkit-scrollbar-thumb{background:var(--tvair-scrollbar-thumb);border-radius:3px}
+.keyword-group{margin-bottom:8px}
+.keyword-group-head{display:flex;align-items:center;gap:8px;background:var(--tvair-reservation-group-head-bg);padding:4px 8px;box-sizing:border-box}
+.keyword-group-title{font-weight:bold;color:var(--tvair-reservation-list-text-strong);font-size:12px}
+.keyword-group-count{font-size:11px;color:var(--tvair-reservation-list-text-soft)}
+/* 空状態 */
+#empty{display:none;padding:40px;text-align:center;color:var(--tvair-reservation-list-text-muted);font-size:13px}
+.table-empty{padding:40px;text-align:center;color:var(--tvair-reservation-list-text-muted);font-size:13px}
+
+/* トースト */
+/* 予約リストはページ本体で一貫した縦スクロールを使う */
+/* v0.11.502: #toast geometry/paint/animation is owned by tvair-notification.css. */
+.flash-conflict{outline:3px solid var(--tvair-state-warning-text); outline-offset:-2px}
+
+
+
+
+/* v0.11.502 ReservationSubtabThemeTokenContract
+   Reservation page owns reservation-family tabs, reservation action cell geometry,
+   reservation state/toggle semantics, and reservation action button states.
+   User-operation log report/clear controls, log column schema, message clipping,
+   datetime/code formatting and severity text are owned by tvair-user-log.css.
+   Shared list row-state, genre paint and disabled/cancelled/conflict guards are
+   owned by tvair-list-module.css. */
+
+/* v0.11.502 ListPageImportantReductionPhase2: page-side display/alignment overrides now rely on selector ownership where safe; semantic action colors still keep required guards. */
+
+/* v0.11.465 ReservationActionStateContract
+   Operation buttons and state/boolean indicators are separate contracts.
+   This block intentionally targets only .reservation-action-button.
+   The ○/× recording-intent toggle remains .toggle-btn and is not an action button. */
+
+.tvair-reservation-action-cell{
+  padding:0 4px;
+  text-align:center;
+  vertical-align:middle;
+}
+.reservation-action-slot{
+  min-height:22px;
+  height:22px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  width:100%;
+  line-height:1;
+}
+.reservation-action-empty{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-width:var(--tvair-reservation-action-button-min-width);
+  height:20px;
+  color:var(--tvair-reservation-action-empty-fg);
+  font-size:12px;
+  line-height:1;
+}
+.act-btn.reservation-action-button{
+  box-sizing:border-box;
+  min-width:var(--tvair-reservation-action-button-min-width);
+  max-width:100%;
+  height:20px;
+  padding:0 8px;
+  line-height:18px;
+  text-align:center;
+  justify-content:center;
+  align-items:center;
+  border:1px solid transparent;
+  border-radius:2px;
+  font-size:11px;
+  font-weight:700;
+}
+.act-btn.reservation-action-button[data-program-action="stop"],
+.reservation-action-button--stop{
+  background:var(--tvair-program-action-stop-bg,var(--tvair-reservation-action-stop-bg))!important;
+  color:var(--tvair-program-action-stop-fg,var(--tvair-reservation-action-stop-fg))!important;
+  border-color:var(--tvair-program-action-stop-border,var(--tvair-reservation-action-stop-border))!important;
+}
+.act-btn.reservation-action-button[data-program-action="stop"]:hover,
+.reservation-action-button--stop:hover{background:var(--tvair-program-action-stop-hover-bg,var(--tvair-reservation-action-stop-hover-bg))!important}
+.act-btn.reservation-action-button[data-program-action="cancel"],
+.reservation-action-button--cancel{
+  background:var(--tvair-program-action-cancel-bg,var(--tvair-reservation-action-cancel-bg))!important;
+  color:var(--tvair-program-action-cancel-fg,var(--tvair-reservation-action-cancel-fg))!important;
+  border-color:var(--tvair-program-action-cancel-border,var(--tvair-reservation-action-cancel-border))!important;
+}
+.act-btn.reservation-action-button[data-program-action="cancel"]:hover,
+.reservation-action-button--cancel:hover{background:var(--tvair-program-action-cancel-hover-bg,var(--tvair-reservation-action-cancel-hover-bg))!important}
+.act-btn.reservation-action-button[data-program-action="reserve"],
+.reservation-action-button--reserve{
+  background:var(--tvair-program-action-reserve-bg,var(--tvair-reservation-action-reserve-bg))!important;
+  color:var(--tvair-program-action-reserve-fg,var(--tvair-reservation-action-reserve-fg))!important;
+  border-color:var(--tvair-program-action-reserve-border,var(--tvair-reservation-action-reserve-border))!important;
+}
+.act-btn.reservation-action-button[data-program-action="reserve"]:hover,
+.reservation-action-button--reserve:hover{background:var(--tvair-program-action-reserve-hover-bg,var(--tvair-reservation-action-reserve-hover-bg))!important}
+.reservation-action-button--reserved{
+  background:var(--tvair-program-action-state-bg,var(--tvair-reservation-action-disabled-bg))!important;
+  color:var(--tvair-program-action-state-fg,var(--tvair-reservation-action-disabled-fg))!important;
+  border-color:var(--tvair-program-action-state-border,var(--tvair-reservation-action-disabled-border))!important;
+  cursor:default!important;
+  opacity:1!important;
+}
+/* v0.11.465 Candidate/list state labels are not action buttons. */
+.reservation-state-label{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-width:var(--tvair-reservation-action-button-min-width);
+  height:20px;
+  padding:0 8px;
+  box-sizing:border-box;
+  font-size:11px;
+  font-weight:700;
+  line-height:1.15;
+  white-space:nowrap;
+}
+.reservation-state-label--reserved{
+  color:var(--tvair-reservation-action-empty-fg);
+  border:1px solid var(--tvair-reservation-action-empty-border, transparent);
+  background:var(--tvair-reservation-action-empty-bg, transparent);
+}

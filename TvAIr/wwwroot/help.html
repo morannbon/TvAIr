@@ -1,0 +1,142 @@
+﻿<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>TvAIr 設定ヘルプ</title>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.0"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.0"/>
+<link href="/tvair-ui-foundation.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-help.css?v=1.0.0" rel="stylesheet"/>
+<script src="/tvair-theme.js?v=1.0.0"></script>
+</head>
+<body class="tvair-non-program-page tvair-page-width-wide tvair-help-page">
+<header class="help-window-bar" aria-label="ヘルプ見出し">
+  <div class="help-window-title">TvAIr 設定ヘルプ</div>
+  <div class="help-window-note">設定画面と同じ順番で確認できます</div>
+</header>
+<div class="help-shell">
+  <aside class="help-sidebar" aria-label="設定ヘルプ項目">
+    <div class="help-sidebar-title">設定</div>
+    <button class="help-nav active" data-help-tab="general" type="button">全般</button>
+    <button class="help-nav" data-help-tab="tvtest" type="button">TVTest</button>
+    <button class="help-nav" data-help-tab="tuner" type="button">チューナー</button>
+    <button class="help-nav" data-help-tab="recording" type="button">録画</button>
+    <button class="help-nav" data-help-tab="display" type="button">表示</button>
+  </aside>
+  <main class="help-content" id="help-content">
+    <section class="help-section active" id="help-general">
+      <header class="help-section-head">
+        <p class="help-kicker">全般</p>
+        <h1>全般</h1>
+        <p>EPG取得、データ保存先、ポート、自動起動、スリープ復帰を設定します。</p>
+      </header>
+      <div class="help-group">
+        <h2>EPG取得</h2>
+        <article class="setting-card"><h3>定期取得を有効にする</h3><dl><dt>入力</dt><dd>チェックを入れる / 外す</dd><dt>デフォルト</dt><dd>有効</dd><dt>おすすめ</dt><dd>有効</dd><dt>おすすめ理由</dt><dd>番組表と自動検索予約を定期更新するための標準設定です。</dd><dt>効果</dt><dd>指定した時刻にEPGを取得します。</dd></dl></article>
+        <article class="setting-card"><h3>定期取得時刻</h3><dl><dt>入力</dt><dd>時、分を数字で入力</dd><dt>デフォルト</dt><dd>初回は3時0分</dd><dt>おすすめ</dt><dd>チューナーが空いている時間帯</dd><dt>おすすめ理由</dt><dd>EPG取得中はチューナーを使います。録画や視聴と重なりにくい時間帯を指定します。</dd><dt>効果</dt><dd>定期EPG取得を開始する時刻になります。</dd></dl></article>
+        <article class="setting-card"><h3>取得深度</h3><dl><dt>入力</dt><dd>スライダーで選択</dd><dt>デフォルト</dt><dd>中（180秒）</dd><dt>おすすめ</dt><dd>中（180秒）</dd><dt>おすすめ理由</dt><dd>取得量と所要時間のバランスを取った標準値です。取得漏れが気になる場合は深く、取得時間を短くしたい場合は浅くします。</dd><dt>効果</dt><dd>EPG取得に使う時間の目安になります。</dd></dl></article>
+        <article class="setting-card"><h3>放送前EPG確認を有効にする</h3><dl><dt>入力</dt><dd>チェックを入れる / 外す</dd><dt>デフォルト</dt><dd>有効</dd><dt>おすすめ</dt><dd>有効</dd><dt>おすすめ理由</dt><dd>録画前に番組情報を確認し、放送時間変更に追従しやすくするための設定です。</dd><dt>効果</dt><dd>録画前に予約対象局のEPGを確認します。</dd></dl></article>
+        <article class="setting-card"><h3>放送前EPG確認（時間追従）</h3><dl><dt>入力</dt><dd>スライダーで何分前かを選択</dd><dt>デフォルト</dt><dd>15分前</dd><dt>おすすめ</dt><dd>同時刻に始まる録画数が多い場合は長めにします。目安は、1〜2本は5分前、3〜6本は10分前、7〜12本は15分前、13本以上は20分前です。</dd><dt>おすすめ理由</dt><dd>録画前EPG確認は録画対象局の番組情報を確認します。同時刻に始まる録画が多いほど確認対象が増えるため、余裕を持った時間指定が必要です。</dd><dt>効果</dt><dd>録画開始の何分前にEPG確認を行うかを決めます。録画開始に近い場合は、番組表確認より録画開始を優先します。</dd></dl></article>
+      </div>
+      <div class="help-group">
+        <h2>その他</h2>
+        <article class="setting-card"><h3>データ保存先フォルダ</h3><dl><dt>入力</dt><dd>TvAIrのデータ保存先フォルダを指定</dd><dt>デフォルト</dt><dd>空欄時はdata扱い</dd><dt>おすすめ</dt><dd>空欄（data）。変更が必要な場合のみ指定</dd><dt>おすすめ理由</dt><dd>空欄の場合はTvAIrの標準保存先としてdataを使います。保存先を分けたい場合だけ変更します。</dd><dt>効果</dt><dd>予約、番組情報、ログなどの保存先になります。</dd></dl></article>
+        <article class="setting-card"><h3>ポート番号</h3><dl><dt>入力</dt><dd>ポート番号を数字で入力</dd><dt>デフォルト</dt><dd>55884</dd><dt>おすすめ</dt><dd>55884</dd><dt>おすすめ理由</dt><dd>TvAIrの標準ポートです。重複した場合だけ変更します。</dd><dt>効果</dt><dd>TvAIrを開くURLのポート番号になります。</dd></dl></article>
+        <article class="setting-card"><h3>Windows起動時にTvAIrを自動起動する</h3><dl><dt>入力</dt><dd>チェックを入れる / 外す</dd><dt>デフォルト</dt><dd>無効</dd><dt>おすすめ</dt><dd>常用する場合は有効</dd><dt>おすすめ理由</dt><dd>Windows起動時からTvAIrを使えるようにする設定です。</dd><dt>効果</dt><dd>Windows起動時にTvAIrを起動します。</dd></dl></article>
+        <article class="setting-card"><h3>タスクスケジューラー ユーザー名</h3><dl><dt>入力</dt><dd>Windowsのユーザー名を入力</dd><dt>デフォルト</dt><dd>未設定</dd><dt>おすすめ</dt><dd>スリープ復帰を使う場合に設定</dd><dt>おすすめ理由</dt><dd>Windowsのタスク登録に必要な場合があります。</dd><dt>効果</dt><dd>自動起動やスリープ復帰用のタスク登録に使います。</dd></dl></article>
+        <article class="setting-card"><h3>タスクスケジューラー パスワード</h3><dl><dt>入力</dt><dd>上のユーザーのパスワードを入力</dd><dt>デフォルト</dt><dd>未設定</dd><dt>おすすめ</dt><dd>ユーザー名を設定する場合に入力</dd><dt>おすすめ理由</dt><dd>Windowsのタスク登録に必要な場合があります。空のままなら既存値を保持します。</dd><dt>効果</dt><dd>タスク登録に使います。</dd></dl></article>
+        <article class="setting-card"><h3>スリープ復帰</h3><dl><dt>入力</dt><dd>なし</dd><dt>デフォルト</dt><dd>表示のみ</dd><dt>おすすめ</dt><dd>確認用</dd><dt>おすすめ理由</dt><dd>次回の復帰予定を確認するための表示欄です。</dd><dt>効果</dt><dd>次回のスリープ復帰予定を表示します。</dd></dl></article>
+      </div>
+    </section>
+
+    <section class="help-section" id="help-tvtest">
+      <header class="help-section-head"><p class="help-kicker">TVTest</p><h1>TVTest</h1><p>TVTest側の設定、BonDriver、ch2/ChSetファイルの明示的な参照先を指定します。</p></header>
+      <div class="help-group">
+        <h2>TVTest</h2>
+        <article class="setting-card"><h3>TVTest.exe のフルパス</h3><dl><dt>入力</dt><dd>TVTest.exeを指定</dd><dt>デフォルト</dt><dd>未設定</dd><dt>おすすめ</dt><dd>TvAIrで使うチャンネル・BonDriver設定を持つTVTest.exe</dd><dt>おすすめ理由</dt><dd>TVTest.iniなど、TVTest側の設定を参照するために使います。</dd><dt>効果</dt><dd>TvAIrがTVTest側の設定を読み取る基準になります。</dd></dl></article>
+        <article class="setting-card"><h3>視聴用TVTest.exe のフルパス</h3><dl><dt>入力</dt><dd>視聴で使うTVTest.exeを指定</dd><dt>デフォルト</dt><dd>未設定</dd><dt>おすすめ</dt><dd>視聴用に使うTVTest.exe。分けない場合は上と同じTVTest.exe</dd><dt>おすすめ理由</dt><dd>視聴起動時に使うTVTestと、その設定を分けたい場合に指定します。</dd><dt>効果</dt><dd>視聴用TVTestの起動先と参照設定になります。</dd></dl></article>
+        <article class="setting-card"><h3>BonDriver フォルダ</h3><dl><dt>入力</dt><dd>BonDriverが入っているフォルダを指定</dd><dt>デフォルト</dt><dd>未設定</dd><dt>おすすめ</dt><dd>指定したTVTestが使っているBonDriverフォルダ</dd><dt>おすすめ理由</dt><dd>チューナー設定でBonDriver候補を出すための参照先です。</dd><dt>効果</dt><dd>チューナー設定で選べるBonDriverの候補になります。</dd></dl></article>
+        <article class="setting-card"><h3>地上波 ch2 ファイルパス</h3><dl><dt>入力</dt><dd>地上波用のch2ファイルを指定</dd><dt>デフォルト</dt><dd>未設定</dd><dt>おすすめ</dt><dd>TVTestで使用中の地上波ch2ファイル</dd><dt>おすすめ理由</dt><dd>TvAIrで地上波チャンネルを扱うための参照先です。</dd><dt>効果</dt><dd>地上波のチャンネル情報に使います。</dd></dl></article>
+        <article class="setting-card"><h3>地上波 ChSet.txt ファイルパス</h3><dl><dt>入力</dt><dd>地上波用のChSet.txtを明示的に指定</dd><dt>デフォルト</dt><dd>未設定</dd><dt>おすすめ</dt><dd>地上波ch2と同じTVTest構成で使っているChSet.txt</dd><dt>おすすめ理由</dt><dd>地上波EPG取得でTVTest/BonDriverへ選局するときに使うファイルです。</dd><dt>効果</dt><dd>地上波EPG取得時の選局引数に使います。</dd></dl></article>
+        <article class="setting-card"><h3>BS/CS ch2 ファイルパス</h3><dl><dt>入力</dt><dd>BS/CS用のch2ファイルを指定</dd><dt>デフォルト</dt><dd>未設定</dd><dt>おすすめ</dt><dd>TVTestで使用中のBS/CS ch2ファイル</dd><dt>おすすめ理由</dt><dd>TvAIrでBS/CSチャンネルを扱うための参照先です。</dd><dt>効果</dt><dd>BS/CSのチャンネル情報に使います。</dd></dl></article>
+        <article class="setting-card"><h3>BS/CS ChSet.txt ファイルパス</h3><dl><dt>入力</dt><dd>BS/CS用のChSet.txtを明示的に指定</dd><dt>デフォルト</dt><dd>未設定</dd><dt>おすすめ</dt><dd>BS/CS ch2と同じTVTest構成で使っているChSet.txt</dd><dt>おすすめ理由</dt><dd>BS/CS EPG取得でTVTest/BonDriverへ選局するときに使うファイルです。</dd><dt>効果</dt><dd>BS/CS EPG取得時の選局引数に使います。</dd></dl></article>
+      </div>
+    </section>
+
+    <section class="help-section" id="help-tuner">
+      <header class="help-section-head"><p class="help-kicker">チューナー</p><h1>チューナー</h1><p>仮想枠ごとにBonDriver、放送波、用途を設定します。</p></header>
+      <div class="help-group">
+        <h2>チューナー</h2>
+        <article class="setting-card"><h3>仮想枠</h3><dl><dt>入力</dt><dd>なし</dd><dt>デフォルト</dt><dd>設定済みの枠を表示</dd><dt>おすすめ</dt><dd>変更不要</dd><dt>おすすめ理由</dt><dd>TvAIr上で録画・視聴の割り当て順を扱うための枠名です。</dd><dt>効果</dt><dd>録画や視聴の割り当て順に使います。</dd></dl></article>
+        <article class="setting-card"><h3>BonDriver</h3><dl><dt>入力</dt><dd>この枠で使うBonDriverを選択</dd><dt>デフォルト</dt><dd>未設定または保存済みの値</dd><dt>おすすめ</dt><dd>その枠で使用するBonDriver</dd><dt>おすすめ理由</dt><dd>録画・視聴で開くチューナーを決める設定です。</dd><dt>効果</dt><dd>その仮想枠で使用するBonDriverになります。</dd></dl></article>
+        <article class="setting-card"><h3>放送波</h3><dl><dt>入力</dt><dd>この枠で扱う放送波を選択</dd><dt>デフォルト</dt><dd>未設定または保存済みの値</dd><dt>おすすめ</dt><dd>選択したBonDriverに合う放送波</dd><dt>おすすめ理由</dt><dd>地上波用、BS/CS用を区別するための設定です。</dd><dt>効果</dt><dd>その枠で扱う放送波を決めます。</dd></dl></article>
+        <article class="setting-card"><h3>用途</h3><dl><dt>入力</dt><dd>録画用 / 視聴用を選択</dd><dt>デフォルト</dt><dd>未設定または保存済みの値</dd><dt>おすすめ</dt><dd>録画に使う枠は録画用、視聴に使う枠は視聴用を選択</dd><dt>おすすめ理由</dt><dd>録画用にした枠は録画と録画前EPG確認の候補になります。視聴用にした枠は視聴の候補になります。</dd><dt>効果</dt><dd>その枠を録画用、視聴用のどちらに使うかを決めます。</dd></dl></article>
+      </div>
+    </section>
+
+    <section class="help-section" id="help-recording">
+      <header class="help-section-head"><p class="help-kicker">録画</p><h1>録画</h1><p>録画データ、マージン、録画後動作、前後番組優先を設定します。</p></header>
+      <div class="help-group">
+        <h2>録画</h2>
+        <article class="setting-card"><h3>現在のサービスのみ保存する</h3><dl><dt>入力</dt><dd>チェックを入れる / 外す</dd><dt>デフォルト</dt><dd>有効</dd><dt>おすすめ</dt><dd>有効</dd><dt>おすすめ理由</dt><dd>対象サービスだけを保存する標準設定です。</dd><dt>効果</dt><dd>現在のサービスのみ保存します。</dd></dl></article>
+        <article class="setting-card"><h3>字幕データを保存する</h3><dl><dt>入力</dt><dd>チェックを入れる / 外す</dd><dt>デフォルト</dt><dd>有効</dd><dt>おすすめ</dt><dd>有効</dd><dt>おすすめ理由</dt><dd>字幕を後から利用できる録画データにするための設定です。</dd><dt>効果</dt><dd>字幕データを保存します。</dd></dl></article>
+        <article class="setting-card"><h3>データ放送を保存する</h3><dl><dt>入力</dt><dd>チェックを入れる / 外す</dd><dt>デフォルト</dt><dd>無効</dd><dt>おすすめ</dt><dd>無効</dd><dt>おすすめ理由</dt><dd>通常の録画視聴では使わない場合が多いデータです。</dd><dt>効果</dt><dd>データ放送を保存します。</dd></dl></article>
+        <article class="setting-card"><h3>TvAIrEpgRecのタスクバーアイコンを表示する</h3><dl><dt>入力</dt><dd>チェックを入れる / 外す</dd><dt>デフォルト</dt><dd>有効</dd><dt>おすすめ</dt><dd>有効</dd><dt>おすすめ理由</dt><dd>録画処理中の状態を確認しやすくするための設定です。</dd><dt>効果</dt><dd>録画処理中のタスクバーアイコンを表示します。</dd></dl></article>
+        <article class="setting-card"><h3>録画開始マージン（秒前）</h3><dl><dt>入力</dt><dd>秒数を数字で入力</dd><dt>デフォルト</dt><dd>30秒</dd><dt>おすすめ</dt><dd>30秒</dd><dt>おすすめ理由</dt><dd>TvAIrの標準値です。番組開始前の余裕を取るために使います。</dd><dt>効果</dt><dd>番組開始より前に指定秒数だけ録画を開始します。</dd></dl></article>
+        <article class="setting-card"><h3>録画終了マージン（秒後）</h3><dl><dt>入力</dt><dd>秒数を数字で入力</dd><dt>デフォルト</dt><dd>30秒</dd><dt>おすすめ</dt><dd>30秒</dd><dt>おすすめ理由</dt><dd>TvAIrの標準値です。番組終了後の余裕を取るために使います。</dd><dt>効果</dt><dd>番組終了後も指定秒数だけ録画を続けます。</dd></dl></article>
+        <article class="setting-card"><h3>録画終了後アクション</h3><dl><dt>入力</dt><dd>録画終了後の動作を選択</dd><dt>デフォルト</dt><dd>何もしない</dd><dt>おすすめ</dt><dd>何もしない</dd><dt>おすすめ理由</dt><dd>録画終了後の自動操作を行わない標準動作です。</dd><dt>効果</dt><dd>最後の録画が正常終了した後に実行する動作を決めます。</dd></dl></article>
+        <article class="setting-card"><h3>録画終了後アクション待機</h3><dl><dt>入力</dt><dd>分数を数字で入力</dd><dt>デフォルト</dt><dd>1分</dd><dt>おすすめ</dt><dd>1分</dd><dt>おすすめ理由</dt><dd>録画終了後アクションを実行する前の標準待機時間です。</dd><dt>効果</dt><dd>録画終了後アクションを実行するまでの待機時間になります。</dd></dl></article>
+        <article class="setting-card"><h3>前後番組の優先</h3><dl><dt>入力</dt><dd>前番組優先 / 後番組を優先する を選択</dd><dt>デフォルト</dt><dd>前番組優先</dd><dt>おすすめ</dt><dd>通常は前番組優先。後番組の開始を優先したい場合は後番組を優先する</dd><dt>おすすめ理由</dt><dd>前後番組が重なる場合に、どちらを優先するかを選びます。後番組を優先すると、チェーン予約を使えるようになります。</dd><dt>効果</dt><dd>同一チューナーで前後番組が重なる場合の基本方針になります。</dd></dl></article>
+        <article class="setting-card"><h3>チェーン予約を実行する</h3><dl><dt>入力</dt><dd>チェックを入れる / 外す</dd><dt>デフォルト</dt><dd>無効</dd><dt>おすすめ</dt><dd>後番組優先で、チェーン予約を使う場合のみ有効</dd><dt>おすすめ理由</dt><dd>チェーン予約は後番組優先のオプションです。連続番組で後番組の開始を優先したい場合に使います。</dd><dt>効果</dt><dd>後番組優先時にチェーン予約を使用可能にします。</dd></dl></article>
+      </div>
+    </section>
+
+    <section class="help-section" id="help-display">
+      <header class="help-section-head"><p class="help-kicker">表示</p><h1>表示</h1><p>テーマと番組表ジャンル色を設定します。</p></header>
+      <div class="help-group">
+        <h2>システム色設定</h2>
+        <article class="setting-card"><h3>現在の設定</h3><dl><dt>入力</dt><dd>選択する</dd><dt>デフォルト</dt><dd>現在の設定</dd><dt>おすすめ</dt><dd>現在の設定</dd><dt>おすすめ理由</dt><dd>Windowsのアプリテーマに合わせる標準設定です。</dd><dt>効果</dt><dd>Windowsのアプリテーマに追従します。</dd></dl></article>
+        <article class="setting-card"><h3>ライト</h3><dl><dt>入力</dt><dd>選択する</dd><dt>デフォルト</dt><dd>未選択</dd><dt>おすすめ</dt><dd>ライト表示に固定したい場合だけ選択</dd><dt>おすすめ理由</dt><dd>TvAIrを明るい表示で固定するための設定です。</dd><dt>効果</dt><dd>TvAIrをライト表示に固定します。</dd></dl></article>
+        <article class="setting-card"><h3>ダーク</h3><dl><dt>入力</dt><dd>選択する</dd><dt>デフォルト</dt><dd>未選択</dd><dt>おすすめ</dt><dd>ダーク表示に固定したい場合だけ選択</dd><dt>おすすめ理由</dt><dd>TvAIrを暗い表示で固定するための設定です。</dd><dt>効果</dt><dd>TvAIrをダーク表示に固定します。</dd></dl></article>
+      </div>
+      <div class="help-group">
+        <h2>番組表ジャンル色</h2>
+        <article class="setting-card compact"><h3>ニュース</h3><dl><dt>入力</dt><dd>色を選択</dd><dt>デフォルト</dt><dd>標準色</dd><dt>おすすめ</dt><dd>標準色</dd><dt>おすすめ理由</dt><dd>番組表でジャンルを見分けるための初期色です。</dd><dt>効果</dt><dd>ニュース番組のジャンル色になります。</dd></dl></article>
+        <article class="setting-card compact"><h3>情報</h3><dl><dt>入力</dt><dd>色を選択</dd><dt>デフォルト</dt><dd>標準色</dd><dt>おすすめ</dt><dd>標準色</dd><dt>おすすめ理由</dt><dd>番組表でジャンルを見分けるための初期色です。</dd><dt>効果</dt><dd>情報番組のジャンル色になります。</dd></dl></article>
+        <article class="setting-card compact"><h3>音楽</h3><dl><dt>入力</dt><dd>色を選択</dd><dt>デフォルト</dt><dd>標準色</dd><dt>おすすめ</dt><dd>標準色</dd><dt>おすすめ理由</dt><dd>番組表でジャンルを見分けるための初期色です。</dd><dt>効果</dt><dd>音楽番組のジャンル色になります。</dd></dl></article>
+        <article class="setting-card compact"><h3>映画</h3><dl><dt>入力</dt><dd>色を選択</dd><dt>デフォルト</dt><dd>標準色</dd><dt>おすすめ</dt><dd>標準色</dd><dt>おすすめ理由</dt><dd>番組表でジャンルを見分けるための初期色です。</dd><dt>効果</dt><dd>映画番組のジャンル色になります。</dd></dl></article>
+        <article class="setting-card compact"><h3>ドキュメンタリー</h3><dl><dt>入力</dt><dd>色を選択</dd><dt>デフォルト</dt><dd>標準色</dd><dt>おすすめ</dt><dd>標準色</dd><dt>おすすめ理由</dt><dd>番組表でジャンルを見分けるための初期色です。</dd><dt>効果</dt><dd>ドキュメンタリー番組のジャンル色になります。</dd></dl></article>
+        <article class="setting-card compact"><h3>スポーツ</h3><dl><dt>入力</dt><dd>色を選択</dd><dt>デフォルト</dt><dd>標準色</dd><dt>おすすめ</dt><dd>標準色</dd><dt>おすすめ理由</dt><dd>番組表でジャンルを見分けるための初期色です。</dd><dt>効果</dt><dd>スポーツ番組のジャンル色になります。</dd></dl></article>
+        <article class="setting-card compact"><h3>ドラマ</h3><dl><dt>入力</dt><dd>色を選択</dd><dt>デフォルト</dt><dd>標準色</dd><dt>おすすめ</dt><dd>標準色</dd><dt>おすすめ理由</dt><dd>番組表でジャンルを見分けるための初期色です。</dd><dt>効果</dt><dd>ドラマ番組のジャンル色になります。</dd></dl></article>
+        <article class="setting-card compact"><h3>バラエティ</h3><dl><dt>入力</dt><dd>色を選択</dd><dt>デフォルト</dt><dd>標準色</dd><dt>おすすめ</dt><dd>標準色</dd><dt>おすすめ理由</dt><dd>番組表でジャンルを見分けるための初期色です。</dd><dt>効果</dt><dd>バラエティ番組のジャンル色になります。</dd></dl></article>
+        <article class="setting-card compact"><h3>アニメ</h3><dl><dt>入力</dt><dd>色を選択</dd><dt>デフォルト</dt><dd>標準色</dd><dt>おすすめ</dt><dd>標準色</dd><dt>おすすめ理由</dt><dd>番組表でジャンルを見分けるための初期色です。</dd><dt>効果</dt><dd>アニメ番組のジャンル色になります。</dd></dl></article>
+        <article class="setting-card compact"><h3>その他</h3><dl><dt>入力</dt><dd>色を選択</dd><dt>デフォルト</dt><dd>標準色</dd><dt>おすすめ</dt><dd>標準色</dd><dt>おすすめ理由</dt><dd>番組表でジャンルを見分けるための初期色です。</dd><dt>効果</dt><dd>その他ジャンルの番組色になります。</dd></dl></article>
+        <article class="setting-card compact"><h3>現在テーマを標準に戻す</h3><dl><dt>入力</dt><dd>ボタンを押す</dd><dt>デフォルト</dt><dd>なし</dd><dt>おすすめ</dt><dd>色を戻したい場合だけ実行</dd><dt>おすすめ理由</dt><dd>表示中テーマのジャンル色を初期状態へ戻す操作です。</dd><dt>効果</dt><dd>現在テーマのジャンル色を標準に戻します。</dd></dl></article>
+      </div>
+    </section>
+  </main>
+</div>
+<script>
+(function(){
+  const tabs = Array.from(document.querySelectorAll('.help-nav'));
+  const panels = Array.from(document.querySelectorAll('.help-section'));
+  function showHelpTab(name, pushHash){
+    const target = document.getElementById('help-' + name);
+    if(!target) return;
+    panels.forEach(p => p.classList.toggle('active', p === target));
+    tabs.forEach(b => b.classList.toggle('active', b.dataset.helpTab === name));
+    if(pushHash) history.replaceState(null, '', '#' + name);
+  }
+  tabs.forEach(btn => btn.addEventListener('click', () => showHelpTab(btn.dataset.helpTab, true)));
+  const initial = (location.hash || '#general').replace('#','');
+  showHelpTab(initial, false);
+  if(window.self !== window.top){ document.body.classList.add('in-modal'); }
+})();
+</script>
+<script src="/tvair-notification.js?v=1.0.0"></script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+.vs/
+bin/
+obj/
+*.user
+*.suo
+*.rsuser
+*.pdb
+*.log
+*.tmp
+
+TvAIr/data/
+TvAIr/appsettings.json

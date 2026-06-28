@@ -1,0 +1,581 @@
+﻿<!DOCTYPE html>
+
+<html lang="ja">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width,initial-scale=1" name="viewport"/>
+<title>プログラム予約 — TvAIr</title>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.0"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.0"/>
+<link href="/tvair-notification.css?v=1.0.0" rel="stylesheet"/>
+<script src="/tvair-theme.js?v=1.0.0"></script>
+<link href="/tvair-epg-panel.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-program-reservation.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.0.0" rel="stylesheet"/>
+</head>
+<body class="tvair-non-program-page tvair-program-reservation-page tvair-form-split-page">
+<div class="tvair-topnav" id="nav">
+<a class="nav-btn" href="/" title="番組表">番組表</a>
+<a class="nav-btn" href="/reservations.html">予約リスト</a>
+<a class="nav-btn" href="/keyword.html">キーワード検索</a>
+<a class="nav-btn" href="/program-rules.html">自動検索予約</a>
+<a class="nav-btn active" href="/new-reservation.html">プログラム予約</a>
+<div class="spacer"></div>
+<span class="nav-brand-text">TvAIr</span>
+<div id="page-menu-wrap">
+<button aria-label="メニュー" id="page-menu-btn" data-tvair-menu-entry="page" aria-controls="page-menu-dropdown" title="メニュー" type="button">☰</button>
+<div data-tvair-menu-host="1" id="page-menu-dropdown"></div>
+</div>
+</div>
+<div id="page-scroll">
+<div id="main">
+<!-- 左: 登録フォーム -->
+<div id="form-panel">
+<div id="form-head">プログラム予約 — 新規登録</div>
+<div id="form-body">
+<div class="f-section">
+<div class="f-section-title">基本設定</div>
+<div class="f-row">
+<label>ルール名（任意）</label>
+<input id="f-name" type="text"/>
+</div>
+<div class="f-row">
+<label>チャンネル</label>
+<select id="f-ch"><option value="">— 選択してください —</option></select>
+</div>
+</div>
+<div class="f-section">
+<div class="f-section-title">録画時刻</div>
+<div class="f-row">
+<label>曜日</label>
+<div class="ui-inline-row wrap mb4 tvair-control-strip">
+<button class="dow-check-all tvair-mini-action" onclick="setAllDow(true)" type="button">全選択</button>
+<button class="dow-check-all tvair-mini-action" onclick="setAllDow(false)" type="button">全解除</button>
+</div>
+<div class="dow-wrap tvair-choice-row tvair-weekday-row" id="dow-wrap"></div>
+<div class="ui-note-xs mt4">※ 曜日未選択 = 毎日録画</div>
+</div>
+<div class="f-row">
+<label>開始時刻</label>
+<div class="time-wrap">
+<select id="f-sh"></select><span class="time-sep">時</span>
+<select id="f-sm"></select><span class="time-sep">分</span>
+</div>
+</div>
+<div class="f-row">
+<label>終了時刻</label>
+<div class="time-wrap">
+<select id="f-eh"></select><span class="time-sep">時</span>
+<select id="f-em"></select><span class="time-sep">分</span>
+</div>
+</div>
+</div>
+<div class="f-section">
+<div class="f-section-title">オプション</div>
+<div class="f-row">
+<label>有効期限（空=無期限）</label>
+<input id="f-expires" type="date"/>
+</div>
+<div class="f-row">
+<label class="ui-inline-row ui-row-gap8-click">
+<input checked="" id="f-enabled" type="checkbox"/>
+            有効にする
+          </label>
+</div>
+</div>
+</div>
+<div id="form-actions">
+<button class="btn-reset" onclick="resetForm()">リセット</button>
+<button class="btn-submit" onclick="addRule()">登録</button>
+</div>
+</div>
+<!-- 右: ルール一覧 -->
+<div id="list-panel">
+<div id="list-head">
+<span>登録済みプログラム予約</span>
+<span id="list-count"></span>
+</div>
+<div id="table-wrap">
+<table class="tvair-data-table tvair-striped-table" id="program-rules-table">
+<thead>
+<tr>
+<th class="td-no">#</th>
+<th class="program-rule-col-enabled">有効</th>
+<th>ルール名 / チャンネル</th>
+<th>曜日</th>
+<th class="td-time">時刻</th>
+<th>有効期限</th>
+<th>操作</th>
+</tr>
+</thead>
+<tbody id="rules-body"></tbody>
+</table>
+<div id="empty">プログラム予約ルールがありません。左のフォームから登録してください。</div>
+</div>
+</div>
+</div>
+<!-- 編集モーダル -->
+<div id="modal-overlay">
+<div id="modal-box">
+<div id="modal-head">
+<span>プログラム予約 — 編集</span>
+<button id="modal-close" onclick="closeModal()">✕</button>
+</div>
+<div id="modal-body">
+<input id="e-id" type="hidden"/>
+<div class="f-section">
+<div class="f-section-title">基本設定</div>
+<div class="f-row">
+<label>ルール名（任意）</label>
+<input id="e-name" type="text"/>
+</div>
+<div class="f-row">
+<label>チャンネル</label>
+<select id="e-ch"><option value="">— 選択してください —</option></select>
+</div>
+</div>
+<div class="f-section">
+<div class="f-section-title">録画時刻</div>
+<div class="f-row">
+<label>曜日</label>
+<div class="ui-inline-row wrap mb4 tvair-control-strip">
+<button class="dow-check-all tvair-mini-action" onclick="setAllDowE(true)" type="button">全選択</button>
+<button class="dow-check-all tvair-mini-action" onclick="setAllDowE(false)" type="button">全解除</button>
+</div>
+<div class="dow-wrap tvair-choice-row tvair-weekday-row" id="e-dow-wrap"></div>
+</div>
+<div class="f-row">
+<label>開始時刻</label>
+<div class="time-wrap">
+<select id="e-sh"></select><span class="time-sep">時</span>
+<select id="e-sm"></select><span class="time-sep">分</span>
+</div>
+</div>
+<div class="f-row">
+<label>終了時刻</label>
+<div class="time-wrap">
+<select id="e-eh"></select><span class="time-sep">時</span>
+<select id="e-em"></select><span class="time-sep">分</span>
+</div>
+</div>
+</div>
+<div class="f-section">
+<div class="f-section-title">オプション</div>
+<div class="f-row">
+<label>有効期限（空=無期限）</label>
+<input id="e-expires" type="date"/>
+</div>
+<div class="f-row">
+<label class="ui-inline-row ui-row-gap8-click">
+<input id="e-enabled" type="checkbox"/>
+            有効にする
+          </label>
+</div>
+</div>
+</div>
+<div id="modal-footer">
+<button class="btn-reset" onclick="closeModal()">キャンセル</button>
+<button class="btn-submit" onclick="saveEdit()">保存</button>
+</div>
+</div>
+</div>
+</div>
+<div id="toast"></div>
+<script>
+// 曜日定数（0=毎日、1=月...7=日）
+const DOW_LABELS=['月','火','水','木','金','土','日'];
+// dayOfWeek: 0=毎日, 1=月, 2=火, 3=水, 4=木, 5=金, 6=土, 7=日
+// 複数曜日対応: カンマ区切りで複数保存（例: "1,3,5"）
+// ※APIのdayOfWeekは単一整数なので、UIで複数選択→個別ルール複数登録 or 代表値1件の2択
+// 今回は選択曜日を1ルール=1曜日として複数登録する方式を採用
+
+let rules=[];
+let channels=[];
+let programGuideMissingPrefillApplied=false;
+
+function readProgramGuidePrefill(){
+  const q=new URLSearchParams(location.search||'');
+  if(q.get('source')!=='ProgramGuideMissing') return null;
+  const start=q.get('start')||'';
+  const end=q.get('end')||'';
+  return {
+    title:q.get('title')||'ProgramGuideBlank',
+    networkId:Number(q.get('networkId')||0),
+    transportStreamId:Number(q.get('transportStreamId')||0),
+    serviceId:Number(q.get('serviceId')||0),
+    serviceName:q.get('serviceName')||'',
+    start:start?new Date(start):null,
+    end:end?new Date(end):null,
+    broadcastDate:q.get('broadcastDate')||'',
+    dayOfWeek:Number(q.get('dayOfWeek')||0),
+    expiresOn:q.get('expiresOn')||''
+  };
+}
+function nearest5Minute(m){
+  const n=Math.round(Number(m||0)/5)*5;
+  return Math.max(0, Math.min(55, n));
+}
+function localDateValue(d){
+  if(!(d instanceof Date) || Number.isNaN(d.getTime())) return '';
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+function channelIdentity(ch){
+  return {
+    nid:Number(ch && (ch.networkId ?? ch.originalNetworkId ?? ch.OriginalNetworkId ?? ch.NetworkId) || 0),
+    tsid:Number(ch && (ch.transportStreamId ?? ch.TransportStreamId) || 0),
+    sid:Number(ch && (ch.serviceId ?? ch.ServiceId) || 0),
+    name:(ch && (ch.name || ch.Name)) || '',
+    chArg:(ch && (ch.channelArgument || ch.ChannelArgument)) || ''
+  };
+}
+function channelOptionValue(ch){
+  const id=channelIdentity(ch);
+  return JSON.stringify(id);
+}
+function applyProgramGuidePrefill(){
+  if(programGuideMissingPrefillApplied) return;
+  const pf=readProgramGuidePrefill();
+  if(!pf) return;
+  document.getElementById('f-name').value=pf.title||'ProgramGuideBlank';
+  const ch=channels.find(c=>{const id=channelIdentity(c);return id.nid===pf.networkId&&id.tsid===pf.transportStreamId&&id.sid===pf.serviceId;})
+    || channels.find(c=>{const id=channelIdentity(c);return id.sid===pf.serviceId&&id.nid===pf.networkId;})
+    || channels.find(c=>{const id=channelIdentity(c);return id.sid===pf.serviceId;});
+  if(ch){
+    document.getElementById('f-ch').value=channelOptionValue(ch);
+  }
+  if(pf.start && !Number.isNaN(pf.start.getTime())){
+    buildTimeSelects('f-sh','f-sm',pf.start.getHours(),nearest5Minute(pf.start.getMinutes()));
+    const dow = pf.dayOfWeek || (pf.start.getDay()===0 ? 7 : pf.start.getDay());
+    setDow('dow-wrap', dow);
+    document.getElementById('f-expires').value=pf.expiresOn || pf.broadcastDate || localDateValue(pf.start);
+  }
+  if(pf.end && !Number.isNaN(pf.end.getTime())){
+    buildTimeSelects('f-eh','f-em',pf.end.getHours(),nearest5Minute(pf.end.getMinutes()));
+  }
+  programGuideMissingPrefillApplied=true;
+}
+
+function p2(n){return String(n).padStart(2,'0')}
+function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+
+// 時刻セレクト生成
+function buildTimeSelects(hId,mId,defaultH=0,defaultM=0){
+  const hSel=document.getElementById(hId);
+  const mSel=document.getElementById(mId);
+  hSel.innerHTML='';
+  mSel.innerHTML='';
+  for(let i=0;i<24;i++){
+    const o=document.createElement('option');
+    o.value=p2(i);o.textContent=p2(i);
+    if(i===defaultH)o.selected=true;
+    hSel.appendChild(o);
+  }
+  for(let i=0;i<60;i+=5){
+    const o=document.createElement('option');
+    o.value=p2(i);o.textContent=p2(i);
+    if(i===defaultM)o.selected=true;
+    mSel.appendChild(o);
+  }
+}
+
+// 曜日選択生成
+// v0.11.442: 予約系ページ横串の共通 choice-chip UI に接続する。
+// 通常/編集/全選択/全解除はすべて setDowChipState() を通す。
+function getDowChips(wrapId){
+  const wrap=document.getElementById(wrapId);
+  return wrap ? Array.from(wrap.querySelectorAll('.dow-chip[data-dow]')) : [];
+}
+function getDowChipInput(chip){
+  return chip ? chip.querySelector('input[type=checkbox]') : null;
+}
+function setDowChipState(chip, checked){
+  if(!chip) return;
+  const on=!!checked;
+  const input=getDowChipInput(chip);
+  if(input) input.checked=on;
+  chip.dataset.checked = on ? '1' : '0';
+  chip.classList.toggle('checked', on);
+  chip.setAttribute('aria-pressed', on ? 'true' : 'false');
+}
+function syncDowChipFromInput(chip){
+  const input=getDowChipInput(chip);
+  setDowChipState(chip, !!(input && input.checked));
+}
+function toggleDowChip(chip){
+  const input=getDowChipInput(chip);
+  const next=!(input && input.checked);
+  setDowChipState(chip, next);
+}
+function buildDowWrap(wrapId){
+  const wrap=document.getElementById(wrapId);
+  if(!wrap) return;
+  wrap.innerHTML='';
+  DOW_LABELS.forEach((label,idx)=>{
+    const chip=document.createElement('label');
+    chip.className='dow-chip tvair-check-chip tvair-weekday-chip';
+    chip.dataset.dow=String(idx+1); // 1=月...7=日
+    chip.setAttribute('aria-pressed','false');
+    chip.innerHTML=`<input type="checkbox" value="${idx+1}"> <span>${label}</span>`;
+    const input=getDowChipInput(chip);
+    input.addEventListener('change',()=>syncDowChipFromInput(chip));
+    setDowChipState(chip,false);
+    wrap.appendChild(chip);
+  });
+}
+function setDowChecked(wrapId, checked){
+  getDowChips(wrapId).forEach(chip=>setDowChipState(chip, checked));
+}
+function setAllDow(checked){ setDowChecked('dow-wrap', checked); }
+function setAllDowE(checked){ setDowChecked('e-dow-wrap', checked); }
+window.setAllDow=setAllDow;
+window.setAllDowE=setAllDowE;
+
+function getSelectedDow(wrapId){
+  const vals=[];
+  getDowChips(wrapId).forEach(chip=>{
+    const input=getDowChipInput(chip);
+    if(input && input.checked) vals.push(parseInt(chip.dataset.dow||input.value||'0',10));
+  });
+  return vals.filter(v=>v>=1&&v<=7); // 空 = 毎日(0)
+}
+function setDow(wrapId, dayOfWeek){
+  // dayOfWeek: 0=毎日, 1-7=個別曜日
+  getDowChips(wrapId).forEach(chip=>{
+    const val=parseInt(chip.dataset.dow||'0',10);
+    setDowChipState(chip, dayOfWeek!==0 && val===dayOfWeek);
+  });
+}
+
+async function loadChannels(){
+  try{
+    const res=await fetch('/api/channels');
+    const d=await res.json();
+    channels=d.channels||[];
+    buildChOptions('f-ch');
+    buildChOptions('e-ch');
+    applyProgramGuidePrefill();
+  }catch(e){console.error(e);}
+}
+
+function buildChOptions(selId){
+  const sel=document.getElementById(selId);
+  const cur=sel.value;
+  // 最初のoption以外を削除
+  while(sel.options.length>1) sel.remove(1);
+  channels.forEach(ch=>{
+    const o=document.createElement('option');
+    const id=channelIdentity(ch);
+    o.value=channelOptionValue(ch);
+    o.textContent=id.name;
+    sel.appendChild(o);
+  });
+  if(cur) sel.value=cur;
+}
+
+async function load(){
+  try{
+    const res=await fetch('/api/program-rules');
+    rules=await res.json();
+    render();
+  }catch(e){showToast('取得エラー: '+e.message);}
+}
+
+const DOW_STR={0:'毎日',1:'月',2:'火',3:'水',4:'木',5:'金',6:'土',7:'日'};
+
+function render(){
+  document.getElementById('list-count').textContent=`${rules.length}件`;
+  const tbody=document.getElementById('rules-body');
+  const empty=document.getElementById('empty');
+  if(rules.length===0){tbody.innerHTML='';empty.style.display='block';return;}
+  empty.style.display='none';
+
+  // チャンネル名解決
+  function chName(r){
+    const ch=channels.find(c=>c.serviceId===r.serviceId&&c.networkId===r.networkId);
+    return ch?ch.name:`SID${r.serviceId}`;
+  }
+
+  tbody.innerHTML=rules.map((r,i)=>`
+    <tr class="${r.enabled?'':'disabled-row'}">
+      <td class="td-no" data-cell-role="list-index">${i+1}</td>
+      <td class="text-center col-enabled" data-cell-role="rule-enabled-state">
+        <label class="tvair-enabled-toggle program-rule-enabled-toggle ${r.enabled?'enabled':'disabled'}" title="${r.enabled?'有効。押すと無効にします。':'無効。押すと有効にします。'}"><input type="checkbox" ${r.enabled?'checked':''} onchange="toggleEnabled(${r.id},this.checked)"><span class="tvair-enabled-toggle-track"><span class="tvair-enabled-toggle-thumb"></span></span></label>
+      </td>
+      <td data-cell-role="rule-title-data">
+        <div class="td-name">${esc(r.name||'(無名)')}</div>
+        <div class="td-ch detail-channel-sub">${esc(chName(r))}</div>
+      </td>
+      <td class="td-dow" data-cell-role="day-metadata">${DOW_STR[r.dayOfWeek]||'毎日'}</td>
+      <td class="td-time" data-cell-role="time-metadata">${r.startTime}～${r.endTime}</td>
+      <td class="td-exp" data-cell-role="expire-metadata">${r.expiresOn||'無期限'}</td>
+      <td data-cell-role="rule-edit-action">
+        <div class="act-wrap">
+          <button class="btn-edit" onclick="openEdit(${r.id})">編集</button>
+          <button class="btn-del" onclick="delRule(${r.id})">削除</button>
+        </div>
+      </td>
+    </tr>`).join('');
+}
+
+function resetForm(){
+  programGuideMissingPrefillApplied=true;
+  document.getElementById('f-name').value='';
+  document.getElementById('f-ch').value='';
+  document.getElementById('f-expires').value='';
+  document.getElementById('f-enabled').checked=true;
+  setAllDow(false);
+  buildTimeSelects('f-sh','f-sm',0,0);
+  buildTimeSelects('f-eh','f-em',0,30);
+}
+
+async function addRule(){
+  const chVal=document.getElementById('f-ch').value;
+  if(!chVal){showToast('チャンネルを選択してください。');return;}
+  const chInfo=JSON.parse(chVal);
+  const sh=document.getElementById('f-sh').value;
+  const sm=document.getElementById('f-sm').value;
+  const eh=document.getElementById('f-eh').value;
+  const em=document.getElementById('f-em').value;
+  const dows=getSelectedDow('dow-wrap'); // 空=毎日
+
+  // 曜日ごとに1ルール登録（空=毎日で1件のみ）
+  const targets=dows.length>0?dows:[0];
+  const name=document.getElementById('f-name').value.trim();
+  const expires=document.getElementById('f-expires').value||'';
+  const enabled=document.getElementById('f-enabled').checked;
+
+  let ok=0;
+  for(const dow of targets){
+    const r={
+      name: dows.length>1&&name ? `${name}（${DOW_STR[dow]}）` : name,
+      dayOfWeek:dow,
+      startTime:`${sh}:${sm}`,
+      endTime:`${eh}:${em}`,
+      networkId:chInfo.nid||0,
+      transportStreamId:chInfo.tsid||0,
+      serviceId:chInfo.sid||0,
+      expiresOn:expires,
+      enabled:enabled
+    };
+    try{
+      const res=await fetch('/api/program-rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(r)});
+      if(res.ok) ok++;
+      else{const d=await res.json();showToast(d.message||'登録に失敗しました。');return;}
+    }catch(e){showToast('通信エラー');return;}
+  }
+  showToast(`${ok}件のルールを登録しました。`);
+  resetForm();
+  await load();
+}
+
+async function toggleEnabled(id,enabled){
+  const r=rules.find(x=>x.id===id);
+  if(!r)return;
+  try{
+    const res=await fetch(`/api/program-rules/${id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({...r,enabled})});
+    if(res.ok)await load();
+    else showToast('更新に失敗しました。');
+  }catch(e){showToast('通信エラー');}
+}
+
+function openEdit(id){
+  const r=rules.find(x=>x.id===id);
+  if(!r)return;
+  document.getElementById('e-id').value=r.id;
+  document.getElementById('e-name').value=r.name||'';
+  document.getElementById('e-expires').value=r.expiresOn||'';
+  document.getElementById('e-enabled').checked=r.enabled;
+  // チャンネル
+  buildChOptions('e-ch');
+  const ch=channels.find(c=>c.serviceId===r.serviceId&&c.networkId===r.networkId);
+  if(ch){
+    const val=JSON.stringify({nid:ch.networkId,tsid:ch.transportStreamId,sid:ch.serviceId,name:ch.name,chArg:ch.channelArgument||''});
+    document.getElementById('e-ch').value=val;
+  }
+  // 時刻
+  const [sh,sm]=(r.startTime||'00:00').split(':');
+  const [eh,em]=(r.endTime||'00:00').split(':');
+  buildTimeSelects('e-sh','e-sm',parseInt(sh),Math.round(parseInt(sm)/5)*5);
+  buildTimeSelects('e-eh','e-em',parseInt(eh),Math.round(parseInt(em)/5)*5);
+  // 曜日
+  setDow('e-dow-wrap',r.dayOfWeek);
+  document.getElementById('modal-overlay').classList.add('open');
+}
+function closeModal(){document.getElementById('modal-overlay').classList.remove('open');}
+
+async function saveEdit(){
+  const id=parseInt(document.getElementById('e-id').value);
+  const r=rules.find(x=>x.id===id);
+  if(!r)return;
+  const chVal=document.getElementById('e-ch').value;
+  if(!chVal){showToast('チャンネルを選択してください。');return;}
+  const chInfo=JSON.parse(chVal);
+  const sh=document.getElementById('e-sh').value;
+  const sm=document.getElementById('e-sm').value;
+  const eh=document.getElementById('e-eh').value;
+  const em=document.getElementById('e-em').value;
+  const dows=getSelectedDow('e-dow-wrap');
+  const dow=dows.length>0?dows[0]:0; // 編集は代表1曜日
+  const updated={
+    ...r,
+    name:document.getElementById('e-name').value.trim(),
+    dayOfWeek:dow,
+    startTime:`${sh}:${sm}`,
+    endTime:`${eh}:${em}`,
+    networkId:chInfo.nid||0,
+    transportStreamId:chInfo.tsid||0,
+    serviceId:chInfo.sid||0,
+    expiresOn:document.getElementById('e-expires').value||'',
+    enabled:document.getElementById('e-enabled').checked
+  };
+  try{
+    const res=await fetch(`/api/program-rules/${id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(updated)});
+    if(res.ok){showToast('保存しました。');closeModal();await load();}
+    else showToast('保存に失敗しました。');
+  }catch(e){showToast('通信エラー');}
+}
+
+async function delRule(id){
+  const r=rules.find(x=>x.id===id);
+  try{
+    const res=await fetch(`/api/program-rules/${id}`,{method:'DELETE'});
+    if(res.ok){showToast('削除しました。');await load();}
+    else showToast('削除に失敗しました。');
+  }catch(e){showToast('通信エラー');}
+}
+
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
+document.getElementById('modal-overlay').addEventListener('click',e=>{
+  if(e.target===document.getElementById('modal-overlay'))closeModal();
+});
+
+function showToast(msg,ms=2800){
+  const t=document.getElementById('toast');
+  t.textContent=msg;t.classList.add('show');
+  clearTimeout(t._timer);
+  t._timer=setTimeout(()=>t.classList.remove('show'),ms);
+}
+
+// 初期化
+buildDowWrap('dow-wrap');
+buildDowWrap('e-dow-wrap');
+buildTimeSelects('f-sh','f-sm',0,0);
+buildTimeSelects('f-eh','f-em',0,30);
+buildTimeSelects('e-sh','e-sm',0,0);
+buildTimeSelects('e-eh','e-em',0,30);
+loadChannels();
+load();
+
+/* v0.11.531 MenuLegacyEntryCleanupContract: page menu ownership is centralized in tvair-menu-spine.js. */
+
+</script>
+
+<script src="/tvair-notification.js?v=1.0.0"></script>
+<script src="/tvair-epg-run-contract.js?v=1.0.0"></script>
+<script src="/tvair-epg-widget.js?v=1.0.0"></script>
+<script src="/tvair-menu-spine.js?v=1.0.0"></script>
+</body>
+</html>

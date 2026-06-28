@@ -1,0 +1,177 @@
+﻿/*
+ * TvAIr user operational log module - v0.11.112
+ *
+ * Scope:
+ * - Reservation page log tab only (#rsv-table.log-mode).
+ * - Does not target program-guide cells, reservation titles, keyword lists, station lists,
+ *   or generic reservation-list truncate helpers.
+ */
+
+/* v0.11.502 ReservationSubtabThemeTokenContract: this file is the only owner for user-operation log action host, log column schema, message clipping, datetime/code formatting and severity text. */
+:root{
+  --reservation-log-col-result: 108px;
+  --rsv-log-datetime-w:150px;
+  --rsv-log-kind-w:94px;
+  --rsv-log-result-w:94px;
+  --rsv-log-target-w:180px;
+}
+
+/* v0.11.502 UserLogActionAndTableBoundary
+   Log-tab operation controls and log-table text/severity layout are user-log operations.
+   This file owns the log report/clear host, legacy log action ids, message clipping,
+   datetime/code formatting and severity colors. Reservation row-state/genre guards
+   remain in tvair-list-module.css. */
+#filter-tabs[data-list-role="log"] .tvair-log-action-host{display:inline-flex;align-items:flex-end;gap:2px;margin-bottom:0}
+#filter-tabs:not([data-list-role="log"]) .tvair-log-action-host{display:none}
+.tvair-log-action-host[hidden]{display:none!important}
+.tvair-log-action-button{
+  background:var(--tvair-log-action-bg,var(--tvair-reservation-toolbar-bg));
+  border:1px solid var(--tvair-log-action-border,var(--tvair-reservation-toolbar-border));
+  color:var(--tvair-log-action-fg,var(--tvair-reservation-toolbar-text));
+  padding:2px 10px;
+  border-radius:2px 2px 0 0;
+  cursor:pointer;
+  font-size:11px;
+  font-family:'Meiryo','メイリオ',sans-serif;
+  margin-bottom:0;
+}
+.tvair-log-action-button:hover{background:var(--tvair-log-action-hover-bg,var(--tvair-reservation-toolbar-hover-bg))}
+.tvair-log-action-button[data-action-role="log-clear"]{
+  background:var(--tvair-log-action-danger-bg,var(--tvair-reservation-action-cancel-bg));
+  border-color:var(--tvair-log-action-danger-border,var(--tvair-reservation-action-cancel-border));
+  color:var(--tvair-log-action-danger-fg,var(--tvair-reservation-action-cancel-fg));
+}
+.tvair-log-action-button[data-action-role="log-clear"]:hover{background:var(--tvair-log-action-danger-hover-bg,var(--tvair-reservation-action-cancel-hover-bg))}
+
+#report-log-btn,#clear-log-btn{
+  display:none;
+  background:var(--tvair-reservation-toolbar-bg);
+  border:1px solid var(--tvair-reservation-toolbar-border);
+  color:var(--tvair-reservation-toolbar-text);
+  padding:2px 10px;
+  border-radius:2px 2px 0 0;
+  cursor:pointer;
+  font-size:11px;
+  font-family:'Meiryo','メイリオ',sans-serif;
+  margin-bottom:0;
+}
+#report-log-btn:hover,#clear-log-btn:hover{background:var(--tvair-reservation-toolbar-hover-bg)}
+#filter-tabs[data-list-role="log"] #report-log-btn,
+#filter-tabs[data-list-role="log"] #clear-log-btn{display:inline-block}
+
+
+/* v0.11.502 UserLogSchemaOwner
+   Log-table grid columns are log-tab schema, not generic reservation row state.
+   reservations.html loads this module after tvair-list-module.css so the log
+   schema is resolved by module order. */
+body.tvair-reservation-page #rsv-table[data-table-schema="log"] tr{
+  grid-template-columns:
+    var(--rsv-index-w)
+    var(--rsv-log-datetime-w)
+    var(--rsv-log-kind-w)
+    var(--rsv-log-result-w)
+    var(--rsv-log-target-w)
+    minmax(0,1fr);
+}
+
+#rsv-table.log-mode td.tvair-user-log-result-cell,
+#rsv-table.log-mode th.col-result{
+  width:var(--reservation-log-col-result);
+  min-width:var(--reservation-log-col-result);
+  max-width:var(--reservation-log-col-result);
+  text-align:center;
+}
+
+#rsv-table.log-mode td.tvair-user-log-result-cell{
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:clip;
+  font-weight:normal;
+  letter-spacing:0;
+}
+
+#rsv-table.log-mode td.tvair-user-log-target-cell{
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+
+#rsv-table.log-mode td.tvair-user-log-message-cell{
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:clip;
+  line-height:22px;
+  height:22px;
+  padding:0 4px;
+  max-width:none;
+}
+
+#rsv-table.log-mode .tvair-user-log-message-text{
+  display:block;
+  width:100%;
+  max-width:100%;
+  min-width:0;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+
+
+
+/* v0.11.502 UserLogTableOwner
+   Loaded after the shared list module on reservations.html so these log-tab selectors
+   win by module order instead of borrowing reservation-list !important guards. */
+body.tvair-reservation-page #rsv-table.log-mode .col-main,
+body.tvair-reservation-page #rsv-table.log-mode td.tvair-user-log-message-cell,
+body.tvair-reservation-page #rsv-table.log-mode .tvair-user-log-message,
+body.tvair-reservation-page #rsv-table[data-table-schema="log"] .col-main,
+body.tvair-reservation-page #rsv-table[data-table-schema="log"] td.tvair-user-log-message-cell,
+body.tvair-reservation-page #rsv-table[data-table-schema="log"] .tvair-user-log-message{
+  text-align:left;
+  min-width:0;
+  max-width:none;
+  justify-content:flex-start;
+}
+body.tvair-reservation-page #rsv-table.log-mode th[data-cell-role="log-datetime"],
+body.tvair-reservation-page #rsv-table.log-mode td[data-cell-role="log-datetime"],
+body.tvair-reservation-page #rsv-table[data-table-schema="log"] th[data-cell-role="log-datetime"],
+body.tvair-reservation-page #rsv-table[data-table-schema="log"] td[data-cell-role="log-datetime"]{
+  font-variant-numeric:tabular-nums;
+}
+body.tvair-reservation-page #rsv-table.log-mode th[data-cell-role="log-content"],
+body.tvair-reservation-page #rsv-table.log-mode td[data-cell-role="log-content"],
+body.tvair-reservation-page #rsv-table.log-mode td.tvair-user-log-message-cell,
+body.tvair-reservation-page #rsv-table[data-table-schema="log"] th[data-cell-role="log-content"],
+body.tvair-reservation-page #rsv-table[data-table-schema="log"] td[data-cell-role="log-content"],
+body.tvair-reservation-page #rsv-table[data-table-schema="log"] td.tvair-user-log-message-cell{
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+body.tvair-reservation-page #rsv-table.log-mode .tvair-user-log-message-text,
+body.tvair-reservation-page #rsv-table[data-table-schema="log"] .tvair-user-log-message-text{
+  display:block;
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+body.tvair-reservation-page #rsv-table.log-mode .user-log-error > td,
+body.tvair-reservation-page #rsv-table[data-table-schema="log"] .user-log-error > td{
+  color:var(--tvair-log-error-fg);
+  font-weight:normal;
+}
+body.tvair-reservation-page #rsv-table.log-mode .user-log-warn > td,
+body.tvair-reservation-page #rsv-table[data-table-schema="log"] .user-log-warn > td{
+  color:var(--tvair-log-warn-fg);
+}
+body.tvair-reservation-page #rsv-table.log-mode .user-log-info > td,
+body.tvair-reservation-page #rsv-table[data-table-schema="log"] .user-log-info > td{
+  color:var(--tvair-reservation-list-text-strong);
+}
+body.tvair-reservation-page #rsv-table.log-mode td.col-code,
+body.tvair-reservation-page #rsv-table[data-table-schema="log"] td.col-code{
+  font-weight:normal;
+  font-size:11px;
+}

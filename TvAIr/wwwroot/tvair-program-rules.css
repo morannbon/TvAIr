@@ -1,0 +1,243 @@
+﻿/*
+ * TvAIr page CSS module - v0.6.44
+ * Source: program-rules.html
+ * Scope: page-local form/help/list styles extracted from inline <style>.
+ * Safety: exact CSS relocation only; no layout/property changes intended.
+ */
+
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:var(--app-bg);color:var(--text-main);height:100vh;display:flex;flex-direction:column;overflow:hidden}
+/* v0.11.502: program rule list panel/toolbar/table-wrap/empty-state geometry is owned by tvair-list-module.css. */
+#main{background:var(--tvair-surface-subtle);border:0}
+#toolbar{background:var(--panel-bg);border:1px solid var(--panel-border)}
+#summary{color:var(--list-text-strong);font-weight:bold}
+.toolbar-btn{background:var(--tvair-action-primary-bg);color:var(--tvair-content-inverse);border:none}
+.toolbar-btn:hover{background:var(--nav-btn-hover)}
+#table-wrap{background:var(--panel-bg);border:1px solid var(--panel-border)}
+#table-wrap::-webkit-scrollbar-thumb{background:var(--scrollbar-thumb)}
+/* v0.11.502: #rules-table geometry/header/row-state/cell base ownership is centralized in tvair-list-module.css. */
+.col-enabled{width:50px;text-align:center}.col-order{width:86px}.col-state{width:160px}.col-actions{width:140px}
+.keyword-main{display:block;font-weight:bold;color:var(--list-text-strong);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:980px;font-size:13px;line-height:1.5}
+.keyword-sub{margin-top:2px;font-size:11px;color:var(--required-color);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:980px}
+.meta{margin-top:2px;font-size:11px;color:var(--list-text-soft)}
+.hit-meta{margin-top:2px;font-size:11px;color:var(--list-text-strong);font-weight:bold}
+.badge{display:inline-block;padding:1px 6px;border-radius:999px;border:1px solid var(--ch-list-border);background:var(--list-subhead-bg);color:var(--list-text-soft);font-size:11px;margin-right:4px;margin-bottom:2px}
+/* v0.11.502: .order-btn/.action-btn geometry is owned by tvair-list-module.css. */
+.order-btn,.action-btn{border-radius:2px}
+.order-btn{background:var(--btn-lite-bg);color:var(--nav-bg);border:1px solid var(--scrollbar-thumb)}.order-btn:hover{background:var(--ch-hover-bg)}.order-btn:disabled{opacity:.35;cursor:default}
+.action-btn.edit{background:var(--btn-lite-bg);color:var(--nav-bg);border:1px solid var(--scrollbar-thumb)}.action-btn.edit:hover{background:var(--ch-hover-bg)}
+.action-btn.del{background:var(--del-btn-bg);color:var(--del-btn-text);border:1px solid var(--del-btn-border)}.action-btn.del:hover{background:var(--del-btn-hover)}
+/* v0.11.502: #empty geometry is owned by tvair-list-module.css. */
+#empty{color:var(--tvair-content-muted)}
+/* v0.11.554 ListThemeTokenCleanupContract: auto-search rule modal consumes shared dialog/list theme tokens; page-local direct paints are not owned here. */
+:root{
+  --tvair-rule-modal-backdrop:var(--tvair-list-dialog-backdrop,var(--tvair-dialog-backdrop));
+  --tvair-rule-modal-bg:var(--tvair-role-dialog-bg,var(--tvair-dialog-bg,var(--panel-bg)));
+  --tvair-rule-modal-fg:var(--tvair-role-dialog-fg,var(--tvair-dialog-fg,var(--text-main)));
+  --tvair-rule-modal-muted-fg:var(--tvair-role-dialog-muted-fg,var(--tvair-dialog-muted-fg,var(--tvair-content-muted)));
+  --tvair-rule-modal-border:var(--tvair-dialog-border,var(--panel-border));
+  --tvair-rule-modal-head-bg:var(--tvair-dialog-head-bg,var(--table-head-bg));
+  --tvair-rule-modal-head-fg:var(--tvair-dialog-head-fg,var(--tvair-content-inverse));
+  --tvair-rule-modal-body-bg:var(--tvair-dialog-sub-bg,var(--tvair-surface-subtle));
+  --tvair-rule-modal-panel-bg:var(--tvair-dialog-bg,var(--tvair-surface-raised));
+  --tvair-rule-modal-panel-border:var(--tvair-dialog-border,var(--ch-list-border));
+  --tvair-rule-modal-shadow:var(--tvair-list-dialog-shadow,var(--modal-shadow));
+  /* v0.11.678: collapsed former trailing :root dark-preview tokens into the owning root block. */
+  --tvair-program-rules-dark-main-text: var(--tvair-color-text-main);
+  --tvair-program-rules-dark-strong-text: var(--tvair-color-text-inverse);
+  --tvair-program-rules-dark-muted-text: var(--tvair-color-text-muted);
+  --tvair-program-rules-dark-soft-text: var(--tvair-color-text-sub);
+  --tvair-program-rules-dark-disabled-text: var(--tvair-color-text-disabled);
+  --tvair-program-rules-dark-exclude-text: var(--tvair-color-action-danger-bg);
+  --tvair-program-rules-dark-badge-bg: var(--tvair-color-surface-subpanel);
+  --tvair-program-rules-dark-badge-text: var(--tvair-color-text-main);
+  --tvair-program-rules-dark-badge-border: var(--tvair-color-border-soft);
+}
+#modal-overlay{
+  display:none;
+  position:fixed;
+  inset:0;
+  background:var(--tvair-rule-modal-backdrop);
+  z-index:1000;
+  align-items:center;
+  justify-content:center;
+  padding:18px;
+}
+#modal-overlay.open{display:flex}
+#modal-box{
+  background:var(--tvair-rule-modal-bg);
+  color:var(--tvair-rule-modal-fg);
+  border:1px solid var(--tvair-rule-modal-border);
+  border-radius:6px;
+  width:min(1320px,calc(100vw - 36px));
+  height:min(860px,calc(100vh - 36px));
+  max-width:calc(100vw - 36px);
+  max-height:calc(100vh - 36px);
+  display:grid;
+  grid-template-rows:auto minmax(0,1fr) auto;
+  overflow:hidden;
+  box-shadow:var(--tvair-rule-modal-shadow);
+}
+#modal-head{
+  background:var(--tvair-rule-modal-head-bg);
+  color:var(--tvair-rule-modal-head-fg);
+  padding:8px 14px;
+  font-size:13px;
+  font-weight:bold;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  min-height:34px;
+  border-bottom:1px solid var(--tvair-rule-modal-border);
+}
+#modal-close{
+  background:transparent;
+  border:1px solid transparent;
+  border-radius:3px;
+  color:var(--tvair-rule-modal-head-fg);
+  font-size:16px;
+  line-height:1;
+  cursor:pointer;
+  padding:2px 6px;
+}
+#modal-close:hover{background:var(--tvair-list-dialog-close-hover-bg);border-color:var(--tvair-list-dialog-close-hover-border)}
+#modal-body{
+  min-height:0;
+  overflow:hidden;
+  background:var(--tvair-rule-modal-body-bg);
+  display:grid;
+  grid-template-columns:minmax(420px,42%) minmax(520px,1fr);
+  gap:12px;
+  padding:14px;
+}
+#modal-footer{background:var(--tvair-rule-modal-panel-bg)}
+.editor-pane,
+.preview-pane{
+  min-height:0;
+  min-width:0;
+}
+.editor-pane{
+  overflow:auto;
+  padding-right:4px;
+}
+.preview-pane{
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px}.full{grid-column:1/-1}
+.panel{
+  background:var(--tvair-rule-modal-panel-bg);
+  border:1px solid var(--tvair-rule-modal-panel-border);
+  border-radius:3px;
+  padding:10px;
+}
+.ui-panel-fill{
+  flex:1 1 auto;
+  min-height:0;
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+}
+.panel-title{font-weight:bold;color:var(--table-head-bg);margin-bottom:8px}
+/* v0.11.502: modal field/row/check layout is owned by tvair-list-module.css. */
+.field label{color:var(--label-sub-color);font-weight:bold}
+.check{color:var(--label-color)}
+/* v0.11.502: .input/select control geometry/paint/focus is owned by tvair-list-module.css. */
+/* v0.11.502: .multi control geometry/paint is owned by tvair-list-module.css. */
+/* v0.11.502: modal choice/action button geometry is owned by tvair-list-module.css. */
+.btn-lite{background:var(--btn-lite-bg);border:1px solid var(--btn-lite-border);color:var(--btn-lite-text)}.btn-lite:hover{background:var(--btn-lite-hover)}
+.day{border:1px solid var(--ch-list-border);background:var(--ch-list-bg);color:var(--label-color)}
+.genre{border:1px solid var(--ch-list-border);background:var(--ch-list-bg);color:var(--label-color)}
+/* v0.11.502: .actions-inline layout is owned by tvair-list-module.css. */
+.actions-inline{white-space:nowrap}
+/* v0.11.502: #toast geometry/paint/animation is owned by tvair-notification.css. */
+.note{font-size:11px;color:var(--tvair-rule-modal-muted-fg)}.required{color:var(--required-color)}
+.preview-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:8px;flex:0 0 auto}.preview-summary{font-weight:bold;color:var(--table-head-bg)}.preview-sub{font-size:11px;color:var(--tvair-rule-modal-muted-fg)}
+.result-wrap{
+  flex:1 1 auto;
+  min-height:0;
+  overflow:auto;
+  background:var(--tvair-rule-modal-panel-bg);
+  border:1px solid var(--tvair-rule-modal-panel-border);
+  border-radius:3px;
+}
+.result-table{width:100%;border-collapse:collapse;min-width:700px}.result-table thead tr{background:var(--ch-list-bg);position:sticky;top:0;z-index:3}.result-table th{color:var(--text-body);border-right:1px solid var(--ch-list-border)}.result-table td,.result-table th{padding:6px 8px;font-size:12px;border-bottom:1px solid var(--row-border);vertical-align:top}.result-title{font-weight:bold;color:var(--list-text-strong)}.pill{display:inline-block;padding:1px 6px;border-radius:999px;font-size:11px;border:1px solid var(--ch-list-border);background:var(--pill-bg);color:var(--label-color)}.pill.reserved{border-color:var(--del-btn-border);background:var(--pill-reserved-bg);color:var(--pill-reserved-text)}.empty-preview{padding:32px 20px;text-align:center;color:var(--tvair-rule-modal-muted-fg);line-height:1.8}/* v0.11.678: #btn-secondary owns an explicit border below; keep border reset scoped to buttons that actually consume it. */.btn-primary,.btn-success{border:none}.btn-primary{background:var(--tvair-action-primary-bg);color:var(--tvair-content-inverse)}.btn-primary:hover{background:var(--nav-btn-hover)}.btn-success{background:var(--success-btn-bg);color:var(--tvair-content-inverse)}.btn-success:hover{background:var(--success-btn-hover)}.btn-secondary{background:var(--btn-lite-bg);color:var(--label-color);border:1px solid var(--scrollbar-thumb)}.btn-secondary:hover{background:var(--ch-hover-bg)}.footer-bar{padding:10px 14px;border-top:1px solid var(--tvair-rule-modal-border);display:flex;align-items:center;justify-content:space-between;gap:8px;background:var(--tvair-rule-modal-panel-bg);min-height:44px}
+@media (max-width: 980px){
+  #modal-box{height:calc(100vh - 24px);width:calc(100vw - 24px);max-height:calc(100vh - 24px);max-width:calc(100vw - 24px)}
+  #modal-body{grid-template-columns:1fr;grid-template-rows:minmax(260px,1fr) minmax(240px,1fr)}
+}
+
+
+
+
+
+/*
+ * v0.6.54: Program-rules dark preview text contrast fix.
+ *
+ * Scope:
+ * - program-rules.html only, via #rules-table and this page's local classes.
+ * - non-program dark preview only.
+ *
+ * Reason:
+ * - v0.6.52/v0.6.53 darkened the page background, but the auto-search rule
+ *   list still inherited legacy dark/black text tokens in several rule-body fields.
+ * - This made keyword text, hit counts, and search-target helper text hard to read.
+ *
+ * Safety:
+ * - Color-only.
+ * - No layout, sizing, positioning, spacing, font metrics, table width, row height,
+ *   grid, flex, overflow, or z-index changes.
+ * - Program guide cells and reservation/new/final list genre color handling are not targeted.
+ *
+ * v0.11.678: The dark-preview token declarations are owned by the primary :root block above;
+ * this section keeps only the scoped dark-theme consumers.
+ */
+
+html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #rules-table tbody td {
+  color: var(--tvair-program-rules-dark-main-text);
+}
+
+html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #rules-table .keyword-main,
+html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #rules-table .hit-meta {
+  color: var(--tvair-program-rules-dark-strong-text);
+}
+
+html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #rules-table .meta {
+  color: var(--tvair-program-rules-dark-muted-text);
+}
+
+html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #rules-table .keyword-sub {
+  color: var(--tvair-program-rules-dark-exclude-text);
+}
+
+html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #rules-table tbody tr.disabled-row td,
+html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #rules-table tbody tr.disabled-row .keyword-main,
+html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #rules-table tbody tr.disabled-row .hit-meta,
+html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #rules-table tbody tr.disabled-row .meta {
+  color: var(--tvair-program-rules-dark-disabled-text);
+}
+
+html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #rules-table .badge {
+  background: var(--tvair-program-rules-dark-badge-bg);
+  color: var(--tvair-program-rules-dark-badge-text);
+  border-color: var(--tvair-program-rules-dark-badge-border);
+}
+
+html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #modal-box .panel-title,
+html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #modal-box .preview-summary,
+html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #modal-box .result-title {
+  color: var(--tvair-program-rules-dark-strong-text);
+}
+
+html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #modal-box .note,
+html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #modal-box .preview-sub,
+html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #modal-box .empty-preview {
+  color: var(--tvair-program-rules-dark-muted-text);
+}
+
+html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #modal-box .check,
+html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #modal-box .day,
+html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #modal-box .genre {
+  color: var(--tvair-program-rules-dark-main-text);
+}

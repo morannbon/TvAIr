@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Platforms>AnyCPU;x86;x64</Platforms>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>TvAIrEpgRec</RootNamespace>
+    <AssemblyName>TvAIrEpgRec</AssemblyName>
+    <InformationalVersion>1.0.0</InformationalVersion>
+    <Version>1.0.0</Version>
+    <FileVersion>1.0.0.0</FileVersion>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <UseAppHost>true</UseAppHost>
+    <UseWindowsForms>true</UseWindowsForms>
+    <SelfContained>false</SelfContained>
+    <ApplicationIcon>TvAIrEpgRec.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Platform)'=='x86'">
+    <PlatformTarget>x86</PlatformTarget>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Platform)'=='x64'">
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+
+
+  <Target Name="CopySelfToTvAIrOutput" AfterTargets="Build">
+    <PropertyGroup>
+      <TvAIrOutputPlatformDir Condition="'$(Platform)' == 'x86'">x86\</TvAIrOutputPlatformDir>
+      <TvAIrOutputPlatformDir Condition="'$(Platform)' == 'x64'">x64\</TvAIrOutputPlatformDir>
+      <TvAIrOutputPlatformDir Condition="'$(Platform)' != 'x86' and '$(Platform)' != 'x64'"></TvAIrOutputPlatformDir>
+      <TvAIrOutputDir>..\TvAIr\bin\$(TvAIrOutputPlatformDir)$(Configuration)\$(TargetFramework)\</TvAIrOutputDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <TvAIrEpgRecSelfOutput Include="$(TargetDir)TvAIrEpgRec.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(TvAIrEpgRecSelfOutput)" DestinationFolder="$(TvAIrOutputDir)" SkipUnchangedFiles="true" Condition="'@(TvAIrEpgRecSelfOutput)' != ''" />
+  </Target>
+
+</Project>
