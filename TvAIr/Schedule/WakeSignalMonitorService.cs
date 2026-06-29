@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using TvAIr.Core;
 using TvAIr.Epg;
@@ -6,7 +6,7 @@ using TvAIr.Epg;
 namespace TvAIr.Schedule;
 
 /// <summary>
-/// v0.9.38: Wakeタスクから起動された2つ目の TvAIr.exe は本体として起動せず signal ファイルだけを残す。
+/// release_contract: Wakeタスクから起動された2つ目の TvAIr.exe は本体として起動せず signal ファイルだけを残す。
 /// 常駐中の本体はここで signal を拾い、予約/EPG 評価を既存プロセス側へ合流させる。
 /// </summary>
 public sealed class WakeSignalMonitorService : BackgroundService
@@ -32,7 +32,7 @@ public sealed class WakeSignalMonitorService : BackgroundService
     {
         try { Directory.CreateDirectory(_signalDir); } catch { }
         _log.Add("WAKE_SIGNAL", "MONITOR_START",
-            $"dir={_signalDir} rule=v0.9.38_wake_fixed_slot_recovery_scheduler");
+            $"dir={_signalDir} rule=release_contract");
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -40,7 +40,7 @@ public sealed class WakeSignalMonitorService : BackgroundService
             catch (Exception ex)
             {
                 _log.Add("WAKE_SIGNAL", "MONITOR_ERROR",
-                    $"message={Compact(ex.Message)} rule=v0.9.38_wake_fixed_slot_recovery_scheduler");
+                    $"message={Compact(ex.Message)} rule=release_contract");
             }
 
             try { await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken); }
@@ -63,7 +63,7 @@ public sealed class WakeSignalMonitorService : BackgroundService
             catch (Exception ex)
             {
                 _log.Add("WAKE_SIGNAL", "READ_FAILED",
-                    $"file={Path.GetFileName(file)} message={Compact(ex.Message)} action=delete rule=v0.9.38_wake_fixed_slot_recovery_scheduler");
+                    $"file={Path.GetFileName(file)} message={Compact(ex.Message)} action=delete rule=release_contract");
                 TryDelete(file);
                 continue;
             }
@@ -73,7 +73,7 @@ public sealed class WakeSignalMonitorService : BackgroundService
             if (kind == "STARTUP")
             {
                 _log.Add("APP_SINGLE_INSTANCE_SIGNAL", "RECEIVED",
-                    $"sourcePid={signal.SourcePid} file={Path.GetFileName(file)} action=existing_instance_confirmed requestTrayRecovery=True rule=v0.11.122_process_lifecycle_tray_recovery_complete");
+                    $"sourcePid={signal.SourcePid} file={Path.GetFileName(file)} action=existing_instance_confirmed requestTrayRecovery=True rule=release_contract");
                 TryDelete(file);
                 continue;
             }
@@ -82,13 +82,13 @@ public sealed class WakeSignalMonitorService : BackgroundService
             if (!validation.Accepted)
             {
                 _log.Add("WAKE_SIGNAL", validation.Reason,
-                    $"kind={kind} at={signal.AtText} generation={ValueOrLegacy(signal.Generation)} slotId={signal.SlotId} reservationId={signal.ReservationId} sourcePid={signal.SourcePid} file={Path.GetFileName(file)} activeGeneration={validation.ActiveGeneration} action=delete_signal_only rule=v0.10.11_wake_plan_generation_slot_guard");
+                    $"kind={kind} at={signal.AtText} generation={ValueOrLegacy(signal.Generation)} slotId={signal.SlotId} reservationId={signal.ReservationId} sourcePid={signal.SourcePid} file={Path.GetFileName(file)} activeGeneration={validation.ActiveGeneration} action=delete_signal_only rule=release_contract");
                 TryDelete(file);
                 continue;
             }
 
             _log.Add("WAKE_SIGNAL", "RECEIVED",
-                $"kind={kind} at={signal.AtText} generation={ValueOrLegacy(signal.Generation)} slotId={signal.SlotId} reservationId={signal.ReservationId} sourcePid={signal.SourcePid} file={Path.GetFileName(file)} action=merge_existing_instance rule=v0.10.11_wake_plan_generation_slot_guard");
+                $"kind={kind} at={signal.AtText} generation={ValueOrLegacy(signal.Generation)} slotId={signal.SlotId} reservationId={signal.ReservationId} sourcePid={signal.SourcePid} file={Path.GetFileName(file)} action=merge_existing_instance rule=release_contract");
 
             try
             {
@@ -111,12 +111,12 @@ public sealed class WakeSignalMonitorService : BackgroundService
                 }
 
                 _log.Add("WAKE_SIGNAL", "MERGED",
-                    $"kind={kind} at={signal.AtText} action=existing_instance_evaluated rule=v0.9.38_wake_fixed_slot_recovery_scheduler");
+                    $"kind={kind} at={signal.AtText} action=existing_instance_evaluated rule=release_contract");
             }
             catch (Exception ex)
             {
                 _log.Add("WAKE_SIGNAL", "MERGE_FAILED",
-                    $"kind={kind} at={signal.AtText} message={Compact(ex.Message)} rule=v0.9.38_wake_fixed_slot_recovery_scheduler");
+                    $"kind={kind} at={signal.AtText} message={Compact(ex.Message)} rule=release_contract");
             }
             finally
             {

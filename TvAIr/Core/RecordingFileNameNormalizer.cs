@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace TvAIr.Core;
@@ -9,7 +9,7 @@ namespace TvAIr.Core;
 /// </summary>
 public static class RecordingFileNameNormalizer
 {
-    public const string Rule = "v0.10.44_record_filename_event_name_normalization_unified";
+    public const string Rule = "release_contract";
 
     public static string NormalizeEventNameForFileName(string? value)
     {

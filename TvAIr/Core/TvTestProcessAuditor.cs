@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Management;
 using System.Text.RegularExpressions;
 using System.Collections.Concurrent;
@@ -11,13 +11,13 @@ namespace TvAIr.Core;
 /// </summary>
 public static class TvTestProcessAuditor
 {
-    // v0.5.83: 外部LIVETestのDIDが読めないだけの既知状態は、制御上は
+    // release_contract: 外部LIVETestのDIDが読めないだけの既知状態は、制御上は
     // 録画用スロットを1本空けるガードとして扱う。毎回WARNにすると
     // 本当に危険な視聴用DID衝突/BLOCKと混ざるため、短時間は集約してINFO相当に落とす。
     private static readonly ConcurrentDictionary<string, DateTime> ExternalLiveUnknownLogLastUtc = new(StringComparer.OrdinalIgnoreCase);
     private static readonly TimeSpan ExternalLiveUnknownLogWindow = TimeSpan.FromSeconds(60);
 
-    // v0.5.85: ActivityKeeper用TVTestはDirectRecorder録画のSleepGuard向け目印であり、
+    // release_contract: ActivityKeeper用TVTestはDirectRecorder録画のSleepGuard向け目印であり、
     // 録画本体ではない。同一スキャン内でプロセスごとにNOTICEを出すとログ量が増えるため、
     // スキャン単位で1行に集約し、同一内容は短時間抑止する。
     private static readonly ConcurrentDictionary<string, DateTime> ActivityKeeperSummaryLastUtc = new(StringComparer.OrdinalIgnoreCase);
@@ -40,7 +40,7 @@ public static class TvTestProcessAuditor
 
     /// <summary>
     /// 録画/停止/EPGの直前直後に、後から起動された LIVETest/外部TVTest を監査する。
-    /// 起動時検出だけに依存しないための v0.3.85 追加ログ。
+    /// 起動時検出だけに依存しないための release_contract 追加ログ。
     /// </summary>
     public static ViewingProtectionSnapshot EmitViewingProtectionAudit(
         LogRepository log,
@@ -99,7 +99,7 @@ public static class TvTestProcessAuditor
                     $"targetBonDriver={SafeValue(targetBonDriver)} protectedDidHit=False externalSameDid=False " +
                     $"externalViewingDetected={(live.Count > 0)} reason={reasonText} " +
                     $"action=recording_slot_guard_only liveViewingCount={live.Count} protectedViewingDids={FormatList(protectedList)} " +
-                    $"externalLiveDids={FormatList(liveDids)} rule=v0.5.83_external_live_unknown_log_downgraded");
+                    $"externalLiveDids={FormatList(liveDids)} rule=release_contract");
             }
 
             return new ViewingProtectionSnapshot(snapshot.Processes, protectedList, shouldBlock, sameDid, targetIsViewingRole, unknownLiveDid);
@@ -174,7 +174,7 @@ public static class TvTestProcessAuditor
                     var identityState = ResolveIdentityState(cmd, managedByRegistry, isLiveViewing, didKnown, bonKnown);
                     var identityPolicy = ResolveIdentityPolicy(identityState);
                     log.Add("TVTEST_PROCESS_FOUND", phase,
-                        $"pid={proc.Id} name={proc.ProcessName} externalKind={externalKind} liveViewing={isLiveViewing} recording={isRecording} epgLike={isEpg} tvairManaged={isTvAirManaged}{managedInfo} did={SafeValue(did)} bonDriver={SafeValue(bon)} didKnown={didKnown} bonDriverKnown={bonKnown} identityState={identityState} identityPolicy={identityPolicy} startupCommandSnapshot={CompactCommandLineForAudit(cmd)} snapshotNote=startup_command_snapshot_not_current_retune_state currentStateSource={(managedByRegistry ? "managed_registry" : "startup_command_snapshot")} rule=v0.11.590_external_tvtest_identity_snapshot_contract");
+                        $"pid={proc.Id} name={proc.ProcessName} externalKind={externalKind} liveViewing={isLiveViewing} recording={isRecording} epgLike={isEpg} tvairManaged={isTvAirManaged}{managedInfo} did={SafeValue(did)} bonDriver={SafeValue(bon)} didKnown={didKnown} bonDriverKnown={bonKnown} identityState={identityState} identityPolicy={identityPolicy} startupCommandSnapshot={CompactCommandLineForAudit(cmd)} snapshotNote=startup_command_snapshot_not_current_retune_state currentStateSource={(managedByRegistry ? "managed_registry" : "startup_command_snapshot")} rule=release_contract");
 
                     if (managedByRegistry && managedActivityOnly)
                     {
@@ -184,7 +184,7 @@ public static class TvTestProcessAuditor
                     if (emitLegacyEvents && isLiveViewing)
                     {
                         log.Add("LIVE_VIEWING_DETECTED", phase,
-                            $"pid={proc.Id} name={proc.ProcessName} externalKind={externalKind} didKnown={didKnown} bonDriverKnown={bonKnown} identityState={identityState} note=existing_tvtest_like_process_will_not_be_touched identityUnknownPolicy=do_not_touch_external_process_recording_slot_guard_only rule=v0.11.590_external_tvtest_identity_snapshot_contract");
+                            $"pid={proc.Id} name={proc.ProcessName} externalKind={externalKind} didKnown={didKnown} bonDriverKnown={bonKnown} identityState={identityState} note=existing_tvtest_like_process_will_not_be_touched identityUnknownPolicy=do_not_touch_external_process_recording_slot_guard_only rule=release_contract");
                     }
                 }
                 catch (Exception ex)
@@ -260,7 +260,7 @@ public static class TvTestProcessAuditor
             $"result=INFO count={ordered.Count} role=ActivityKeeper " +
             "note=activity_keeper_tvtest_not_recording_route directRecorderFailure=False " +
             $"action=sleepguard_marker_only summary={summary} " +
-            "rule=v0.5.85_activitykeeper_notice_scan_summary");
+            "rule=release_contract");
     }
 
     private static bool IsTvTestLikeProcessName(string name)

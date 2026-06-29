@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Core;
+namespace TvAIr.Core;
 
 /// <summary>
 /// User-facing reservation title display contract.
@@ -10,7 +10,7 @@
 public static class ReservationTitleDisplayContract
 {
     public const string UnavailableTitle = "未取得";
-    public const string Rule = "v0.11.516_reservation_display_metadata_contract";
+    public const string Rule = "release_contract";
 
     public static string NormalizeRaw(string? value)
         => (value ?? string.Empty).Replace("\r", " ").Replace("\n", " ").Trim();

@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Core;
+namespace TvAIr.Core;
 
 /// <summary>
 /// アプリ全体の設定。appsettings.json の各セクションにバインドされる。
@@ -158,14 +158,14 @@ public sealed class EpgSettings
 
     /// <summary>
     /// 診断モード。通常運用では false 推奨。
-    /// v0.9.58以降、EPG汚染系の診断はタグ別カウント中心に限定し、
+    /// release_contract以降、EPG汚染系の診断はタグ別カウント中心に限定し、
     /// 汚染本文・rawHex・サンプル文字列は通常ログへ出さない。
     /// </summary>
     public bool DiagnosticMode { get; set; } = false;
 
     /// <summary>
     /// 同一TS内サービス数によるEPG取得秒数の自動延長設定。
-    /// v0.8.01では通常EPGの実行時間には使わない。EPGが薄い場合は秒数延長ではなく、ch2由来のNID/TSID/SID束ねを優先して確認する。
+    /// release_contractでは通常EPGの実行時間には使わない。EPGが薄い場合は秒数延長ではなく、ch2由来のNID/TSID/SID束ねを優先して確認する。
     /// </summary>
     public int MultiServiceExtraSeconds { get; set; } = 0;
 
@@ -208,11 +208,11 @@ public sealed class ReservationSettings
     /// <summary>チャンネルロック待ち秒数（/recdelay）。CSのサービス確定待ちを考慮し既定10秒。</summary>
     public int RecDelaySeconds { get; set; } = 10;
 
-    /// <summary>スリープ復帰のためにタスクスケジューラーへ登録する録画開始前の分数。(v32.85以降は内部未使用、互換のため残置)</summary>
+    /// <summary>スリープ復帰のためにタスクスケジューラーへ登録する録画開始前の分数。(現在は内部未使用、互換のため残置)</summary>
     public int WakeMinutesBefore { get; set; } = 10;
 
     /// <summary>
-    /// スリープ復帰の余裕秒数(v32.85新設)。EPG確認起床と録画起床の両方に加算される。
+    /// スリープ復帰の余裕秒数(新設)。EPG確認起床と録画起床の両方に加算される。
     /// Wake①時刻 = StartTime − EpgPreRecordMinutes分 − WakeAdditionalSeconds秒
     /// Wake②時刻 = StartTime − PreStartMarginSeconds秒 − WakeAdditionalSeconds秒
     /// </summary>

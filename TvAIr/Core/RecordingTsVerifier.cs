@@ -1,9 +1,9 @@
-﻿using TvAIr.Epg;
+using TvAIr.Epg;
 
 namespace TvAIr.Core;
 
 /// <summary>
-/// v0.3.86: 録画TSの実体確認ログ。
+/// release_contract: 録画TSの実体確認ログ。
 /// TVTestを起動できた/ファイルが増えた、だけではサービス違い・EPGズレ・映像PIDなし・スクランブル残りを見落とすため、
 /// 録画開始後と録画停止後にTS先頭からPSI/SIの最低限の情報を読み、予約情報と照合する。
 /// </summary>
@@ -50,12 +50,12 @@ public static class RecordingTsVerifier
             var eventMismatch = !string.IsNullOrWhiteSpace(eit.CurrentOrNearestTitle)
                 && !LooksLikeSameEvent(reservation.Title, eit.CurrentOrNearestTitle);
             var videoOk = videoPidCount > 0;
-            // v0.3.99: totalScrambledPackets includes packets from other services in the same TS.
+            // release_contract: totalScrambledPackets includes packets from other services in the same TS.
             // It must not turn a PAT/PMT-confirmed target service into SERVICE_MISMATCH_OR_UNKNOWN.
             // Use only the expected service video PID scramble count for the result verdict; keep totalScrambledPackets as diagnostic detail.
             var expectedServiceScrambled = expectedVideoScrambled > 0;
 
-            // v0.5.76: EITの番組名は停止直後・途中開始・番組境界付近で次番組/近傍番組を拾うことがある。
+            // release_contract: EITの番組名は停止直後・途中開始・番組境界付近で次番組/近傍番組を拾うことがある。
             // サービス一致 + PMT映像あり + 対象サービスのスクランブル0 が確認できている場合、
             // 番組名不一致だけで録画実体の失敗に見せない。警告情報として残し、判定名はWARNへ降格する。
             var titleMismatchDowngraded = serviceOk && videoOk && !expectedServiceScrambled && serviceInEit && eventMismatch;
@@ -88,7 +88,7 @@ public static class RecordingTsVerifier
                 $"actualService={Safe(eit.ServiceName)}/{(eit.ServiceId.HasValue ? eit.ServiceId.Value.ToString() : "-")} actualEvent={eventTitle} eventMismatch={eventMismatch} eventMismatchDowngraded={titleMismatchDowngraded} titleMismatchReason={titleMismatchKind.Reason} " +
                 $"videoPidCount={videoPidCount} videoPids=[{(expectedServicePsi != null ? string.Join(',', expectedServicePsi.VideoPids.OrderBy(x => x)) : "")}] " +
                 $"expectedPackets={expectedPackets} expectedScrambledPackets={expectedVideoScrambled} totalScrambledPackets={psi.TotalScrambledPackets} " +
-                $"packetsScanned={psi.PacketsScanned} syncErrors={psi.SyncErrors} clearEnoughForCompleted={clearEnoughForCompleted} rule=v0.8.01_epg_transport_stream_import_restore eitStats={Safe(eit.StatsLine)}");
+                $"packetsScanned={psi.PacketsScanned} syncErrors={psi.SyncErrors} clearEnoughForCompleted={clearEnoughForCompleted} rule=release_contract eitStats={Safe(eit.StatsLine)}");
             return new VerificationResult(stage, result, verdict, readableJudgement, clearEnoughForCompleted, titleMismatchKind.Reason);
         }
         catch (Exception ex)
@@ -135,7 +135,7 @@ public static class RecordingTsVerifier
         var startedLate = actualStart.HasValue && actualStart.Value > reservation.StartTime.AddSeconds(60);
         var afterStopVerify = stage.Contains("after_stop", StringComparison.OrdinalIgnoreCase);
 
-        // v0.5.82: 「今すぐ録画」「短時間録画」「停止直後」は、TS実体が正常でも
+        // release_contract: 「今すぐ録画」「短時間録画」「停止直後」は、TS実体が正常でも
         // EITの現在/近傍番組が次番組側に寄ることがある。録画失敗に見えない名称へ分離する。
         if (shortImmediate || startedLate || (afterStopVerify && stopNearEnd))
         {

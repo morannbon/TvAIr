@@ -1,5 +1,5 @@
-﻿/*
- * TvAIr user operational log renderer - v0.11.254
+/*
+ * TvAIr user operational log renderer - release_contract
  *
  * This module owns only the log-tab cells. It deliberately avoids the generic
  * reservation-list text-cell classes so future changes to program-guide or

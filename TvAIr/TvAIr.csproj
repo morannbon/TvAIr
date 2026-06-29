@@ -1,8 +1,8 @@
-﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+<Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
     <Platforms>AnyCPU;x86;x64</Platforms>
-    <InformationalVersion>1.0.0</InformationalVersion>
+    <InformationalVersion>$(TvAIrProductVersion)</InformationalVersion>
     <TargetFramework>net8.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
@@ -10,9 +10,9 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RootNamespace>TvAIr</RootNamespace>
     <AssemblyName>TvAIr</AssemblyName>
-    <Version>1.0.0</Version>
-    <FileVersion>1.0.0.0</FileVersion>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <Version>$(TvAIrProductVersion)</Version>
+    <FileVersion>$(TvAIrFileVersion)</FileVersion>
+    <AssemblyVersion>$(TvAIrAssemblyVersion)</AssemblyVersion>
     <ApplicationIcon>TvAIr_Idle.ico</ApplicationIcon>
     <OutputType>WinExe</OutputType>
     <UseAppHost>true</UseAppHost>
@@ -33,13 +33,13 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.7" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
     <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
-    <!-- v32.83: WMIによるLIVE視聴中TVTestプロセス検出用 -->
+    <!-- WMIによるLIVE視聴中TVTestプロセス検出用 -->
     <PackageReference Include="System.Management" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\TvAIrPlugin\TvAIrPlugin.csproj" />
-    <!-- v0.8.18: TvAIrEpgRec is kept in the solution for explicit/manual builds, but TvAIr.csproj must not reference it.
+    <!-- release_contract: TvAIrEpgRec is kept in the solution for explicit/manual builds, but TvAIr.csproj must not reference it.
          When the solution configuration skips TvAIrEpgRec, a ProjectReference still asks MSBuild to resolve/copy worker outputs and fails.
          TvAIr runtime discovery/copy is therefore handled only by the conditional CopyTvAIrEpgRecWorker target below. -->
   </ItemGroup>
@@ -71,7 +71,7 @@
   <!-- AribDecodeBridge C++ DLL is built for x86/x64 and copied after Build.
        The flat AribDecodeBridge.dll preserves the existing runtime path; native\x86 and native\x64 keep both architectures available. -->
 
-  <!-- v0.7.78: LegacyDirectRecorderBridge.exe is no longer copied and the LegacyDirectRecorderBridge project is not part of TvAIr.sln.
+  <!-- release_contract: LegacyDirectRecorderBridge.exe is no longer copied and the LegacyDirectRecorderBridge project is not part of TvAIr.sln.
        Any remaining DirectRecorder wording is legacy lineage / internal contract naming, not an executable dependency. -->
 
   <Target Name="CopyTvAIrEpgRecWorker" AfterTargets="Build">
@@ -108,7 +108,7 @@
     <Copy SourceFiles="$(AribBridgeX64)" DestinationFiles="$(OutDir)AribDecodeBridge.dll" SkipUnchangedFiles="true" Condition="'$(Platform)' != 'x86'" />
   </Target>
 
-  <!-- v0.11.590 AppIcon/Favicon asset contract guard:
+  <!-- release_contract AppIcon/Favicon asset contract guard:
        Browser icon assets are fixed filenames; cache busting must use query strings only.
        The same guard runs before and after Build so source omissions and output copy omissions fail fast. -->
   <Target Name="ValidateTvAIrIconAssetContract" BeforeTargets="Build">

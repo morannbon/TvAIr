@@ -1,4 +1,4 @@
-﻿using System.Reflection;
+using System.Reflection;
 using System.Text.Json;
 using System.Runtime.Loader;
 using Microsoft.Extensions.Options;
@@ -137,12 +137,12 @@ internal sealed class PluginLoader : IHostedService
         {
             if (IsPluginSdkContractDll(dllPath))
             {
-                _log.Add("Plugin", Path.GetFileName(dllPath), "[Plugin] SDK ignored: use host TvAIrPlugin.dll stable contract rule=v0.10.22_plugin_sdk_stable_assembly_binding");
+                _log.Add("Plugin", Path.GetFileName(dllPath), $"[Plugin] SDK ignored: use host TvAIrPlugin.dll stable contract rule={TvAIrVersionContract.PublicContractName}");
                 continue;
             }
             if (hasNewAirrhythm && IsLegacyAirrithmDll(dllPath))
             {
-                _log.Add("Plugin", Path.GetFileName(dllPath), "[Plugin] Legacy ignored: AIrhythm.BasicPlugin.dll exists, skip AIrithm.BasicPlugin.dll rule=v0.8.40_ai_rhythm_core_migration");
+                _log.Add("Plugin", Path.GetFileName(dllPath), $"[Plugin] Compatibility alias ignored: AIrhythm.BasicPlugin.dll exists, skip AIrithm.BasicPlugin.dll rule={TvAIrVersionContract.PublicContractName}");
                 continue;
             }
             LoadFromFile(dllPath);
@@ -167,7 +167,24 @@ internal sealed class PluginLoader : IHostedService
             if (!validation.IsAllowed)
             {
                 _userEvents.AddPluginLoadFailed(fileName, validation.Message);
-                _log.Add("Plugin", fileName, $"[Plugin] Blocked: {validation.Message}");
+                _log.Add("Plugin", fileName, $"[Plugin] Blocked: {SafePluginLog(validation.Message)} rule={TvAIrVersionContract.PublicContractName}");
+                return;
+            }
+
+            var externalManifestContract = LoadExternalManifestContract(dllPath);
+            if (IsLegacyPluginContract(externalManifestContract))
+            {
+                var message = $"旧SDKプラグインのため読み込みませんでした。TvAIrPlugin SDK {TvAIrVersionContract.PluginSdkVersion} 以降で再ビルドしてください。";
+                _userEvents.AddPluginLoadFailed(fileName, message);
+                _log.Add("Plugin", fileName, $"[Plugin] Rejected: legacy_sdk requiredSdk={TvAIrVersionContract.PluginSdkVersion} rule={TvAIrVersionContract.PublicContractName}");
+                return;
+            }
+
+            if (IsUnsupportedPluginContract(externalManifestContract))
+            {
+                var message = $"対応外のPlugin Host契約です。TvAIrPlugin SDK {TvAIrVersionContract.PluginSdkVersion} 系で再ビルドしてください。";
+                _userEvents.AddPluginLoadFailed(fileName, message);
+                _log.Add("Plugin", fileName, $"[Plugin] Rejected: unsupported_plugin_contract supportedMajor={TvAIrVersionContract.PluginCompatibilityMajor} minimum={TvAIrVersionContract.MinimumSupportedPluginHostContractVersion} rule={TvAIrVersionContract.PublicContractName}");
                 return;
             }
 
@@ -178,23 +195,24 @@ internal sealed class PluginLoader : IHostedService
 
             foreach (var type in pluginTypes)
             {
-                LoadType(type, fileName, dllPath);
+                LoadType(type, fileName, dllPath, externalManifestContract);
             }
         }
         catch (ReflectionTypeLoadException ex)
         {
             var loaderMessages = string.Join(" | ", ex.LoaderExceptions.Where(e => e != null).Select(e => e!.Message).Distinct().Take(5));
-            _userEvents.AddPluginLoadFailed(fileName, ex.Message);
-            _log.Add("Plugin", fileName, $"[Plugin] Error: ロード失敗 - {ex.Message} loader={loaderMessages} sdk={typeof(ITvAIrPlugin).Assembly.GetName().Version} rule=v0.10.22_plugin_sdk_stable_assembly_binding");
+            _userEvents.AddPluginLoadFailed(fileName, "プラグインの読み込みに失敗しました。");
+            _log.Add("Plugin", fileName, $"[Plugin] Error: load_failed message={SafePluginLog(ex.Message)} loader={SafePluginLog(loaderMessages)} sdk={typeof(ITvAIrPlugin).Assembly.GetName().Version} rule={TvAIrVersionContract.PublicContractName}");
         }
         catch (Exception ex)
         {
-            _userEvents.AddPluginLoadFailed(fileName, ex.Message);
-            _log.Add("Plugin", fileName, $"[Plugin] Error: ロード失敗 - {ex.Message} sdk={typeof(ITvAIrPlugin).Assembly.GetName().Version} rule=v0.10.22_plugin_sdk_stable_assembly_binding");
+            var inner = UnwrapPluginException(ex);
+            _userEvents.AddPluginLoadFailed(fileName, "プラグインの読み込みに失敗しました。");
+            _log.Add("Plugin", fileName, $"[Plugin] Error: load_failed type={SafePluginLog(inner.GetType().Name)} message={SafePluginLog(inner.Message)} sdk={typeof(ITvAIrPlugin).Assembly.GetName().Version} rule={TvAIrVersionContract.PublicContractName}");
         }
     }
 
-    private void LoadType(Type type, string fileName, string dllPath)
+    private void LoadType(Type type, string fileName, string dllPath, PluginExternalManifestContract? externalManifestContract)
     {
         try
         {
@@ -214,11 +232,10 @@ internal sealed class PluginLoader : IHostedService
             catch (Exception ex)
             {
                 _userEvents.AddPluginLoadFailed(plugin.Name, ex.Message);
-                _log.Add("Plugin", plugin.Name, $"[Plugin] Error: Initialize 失敗 - {ex.Message}");
+                _log.Add("Plugin", plugin.Name, $"[Plugin] Error: initialize_failed type={SafePluginLog(UnwrapPluginException(ex).GetType().Name)} message={SafePluginLog(UnwrapPluginException(ex).Message)} rule={TvAIrVersionContract.PublicContractName}");
                 return; // Initialize 失敗のプラグインは OnStart しない
             }
 
-            var externalManifestContract = LoadExternalManifestContract(dllPath);
             ApplyExternalManifestContract(plugin, externalManifestContract);
 
             _loaded.Add(plugin);
@@ -230,7 +247,7 @@ internal sealed class PluginLoader : IHostedService
         catch (Exception ex)
         {
             _userEvents.AddPluginLoadFailed(fileName, ex.Message);
-            _log.Add("Plugin", fileName, $"[Plugin] Error: {ex.Message}");
+            _log.Add("Plugin", fileName, $"[Plugin] Error: load_type_failed type={SafePluginLog(UnwrapPluginException(ex).GetType().Name)} message={SafePluginLog(UnwrapPluginException(ex).Message)} rule={TvAIrVersionContract.PublicContractName}");
         }
     }
 
@@ -273,6 +290,7 @@ internal sealed class PluginLoader : IHostedService
                 Vendor = ReadStringAny(new[] { "vendor", "Vendor", "author", "Author", "publisher", "Publisher" }, root, manifest, metadata),
                 Icon = ReadStringAny(new[] { "icon", "Icon", "iconPath", "IconPath" }, root, manifest, ui, metadata),
                 HostContractVersion = ReadStringAny(new[] { "hostContractVersion", "HostContractVersion", "contractVersion", "ContractVersion" }, root, manifest, compatibility),
+                SdkVersion = ReadStringAny(new[] { "sdkVersion", "SdkVersion", "pluginSdkVersion", "PluginSdkVersion", "tvairPluginSdkVersion", "TvAIrPluginSdkVersion" }, root, manifest, compatibility, metadata),
                 Kind = ReadStringArrayAny(new[] { "kind", "Kind", "kinds", "Kinds" }, root, manifest),
                 Capabilities = ReadStringArrayAny(new[] { "capabilities", "Capabilities" }, root, manifest, ui),
                 Permissions = ReadStringArrayAny(new[] { "permissions", "Permissions" }, root, manifest),
@@ -281,6 +299,9 @@ internal sealed class PluginLoader : IHostedService
                 ToolWindowHeight = ReadIntAny(new[] { "toolWindowHeight", "ToolWindowHeight", "height", "Height" }, root, manifest, ui, window),
                 ToolWindowMinWidth = ReadIntAny(new[] { "toolWindowMinWidth", "ToolWindowMinWidth", "minWidth", "MinWidth", "toolWindowMinWidthPx", "ToolWindowMinWidthPx" }, root, manifest, ui, window),
                 ToolWindowMinHeight = ReadIntAny(new[] { "toolWindowMinHeight", "ToolWindowMinHeight", "minHeight", "MinHeight", "toolWindowMinHeightPx", "ToolWindowMinHeightPx" }, root, manifest, ui, window),
+                ToolWindowTitle = FirstNonEmpty(
+                    ReadStringAny(new[] { "toolWindowTitle", "ToolWindowTitle" }, ui, manifest, root),
+                    ReadStringAny(new[] { "title", "Title" }, window)),
                 DefaultMenuActionKind = FirstNonEmpty(
                     ReadStringAny(new[] { "defaultMenuActionKind", "DefaultMenuActionKind" }, root, manifest, ui),
                     ReadStringAny(new[] { "kind", "Kind" }, menu)),
@@ -293,9 +314,10 @@ internal sealed class PluginLoader : IHostedService
 
             if (string.IsNullOrWhiteSpace(contract.Id) && string.IsNullOrWhiteSpace(contract.Name) && string.IsNullOrWhiteSpace(contract.Version)
                 && string.IsNullOrWhiteSpace(contract.Route) && string.IsNullOrWhiteSpace(contract.Entry) && string.IsNullOrWhiteSpace(contract.Description)
-                && string.IsNullOrWhiteSpace(contract.Vendor) && string.IsNullOrWhiteSpace(contract.Icon) && string.IsNullOrWhiteSpace(contract.HostContractVersion)
+                && string.IsNullOrWhiteSpace(contract.Vendor) && string.IsNullOrWhiteSpace(contract.Icon) && string.IsNullOrWhiteSpace(contract.HostContractVersion) && string.IsNullOrWhiteSpace(contract.SdkVersion)
                 && contract.Kind.Count == 0 && contract.Capabilities.Count == 0 && contract.Permissions.Count == 0 && contract.Tags.Count == 0
                 && contract.ToolWindowWidth <= 0 && contract.ToolWindowHeight <= 0 && contract.ToolWindowMinWidth <= 0 && contract.ToolWindowMinHeight <= 0
+                && string.IsNullOrWhiteSpace(contract.ToolWindowTitle)
                 && string.IsNullOrWhiteSpace(contract.DefaultMenuActionKind) && string.IsNullOrWhiteSpace(contract.DefaultMenuActionLabel)
                 && contract.DefaultMenuActionPriority <= 0 && contract.ToolWindowShowInTaskbar is null)
             {
@@ -306,7 +328,7 @@ internal sealed class PluginLoader : IHostedService
         }
         catch (Exception ex)
         {
-            _log.Add("PLUGIN_EXTERNAL_MANIFEST", Path.GetFileName(dllPath), $"result=FAILED message={ex.Message} rule=v0.11.65_plugin_toolwindow_contract_merge");
+            _log.Add("PLUGIN_EXTERNAL_MANIFEST", Path.GetFileName(dllPath), $"result=FAILED message={SafePluginLog(ex.Message)} rule={TvAIrVersionContract.PublicContractName}");
             return null;
         }
     }
@@ -329,7 +351,9 @@ internal sealed class PluginLoader : IHostedService
             if (string.IsNullOrWhiteSpace(manifest.Description) && !string.IsNullOrWhiteSpace(external.Description)) { manifest.Description = external.Description; applied.Add("manifest.description"); }
             if (string.IsNullOrWhiteSpace(manifest.Vendor) && !string.IsNullOrWhiteSpace(external.Vendor)) { manifest.Vendor = external.Vendor; applied.Add("manifest.vendor"); }
             if (string.IsNullOrWhiteSpace(manifest.Icon) && !string.IsNullOrWhiteSpace(external.Icon)) { manifest.Icon = external.Icon; applied.Add("manifest.icon"); }
+            if (string.IsNullOrWhiteSpace(manifest.ToolWindowTitle) && !string.IsNullOrWhiteSpace(external.ToolWindowTitle)) { manifest.ToolWindowTitle = external.ToolWindowTitle; applied.Add("manifest.toolWindowTitle"); }
             if (string.IsNullOrWhiteSpace(manifest.HostContractVersion) && !string.IsNullOrWhiteSpace(external.HostContractVersion)) { manifest.HostContractVersion = external.HostContractVersion; applied.Add("manifest.hostContractVersion"); }
+            if (string.IsNullOrWhiteSpace(manifest.SdkVersion) && !string.IsNullOrWhiteSpace(external.SdkVersion)) { manifest.SdkVersion = external.SdkVersion; applied.Add("manifest.sdkVersion"); }
             if (manifest.Kind.Count == 0 && external.Kind.Count > 0) { manifest.Kind = external.Kind; applied.Add("manifest.kind"); }
             if (manifest.Capabilities.Count == 0 && external.Capabilities.Count > 0) { manifest.Capabilities = external.Capabilities; applied.Add("manifest.capabilities"); }
             if (manifest.Tags.Count == 0 && external.Tags.Count > 0) { manifest.Tags = external.Tags; applied.Add("manifest.tags"); }
@@ -346,6 +370,7 @@ internal sealed class PluginLoader : IHostedService
             if (string.IsNullOrWhiteSpace(manifest.DefaultMenuActionLabel) && !string.IsNullOrWhiteSpace(external.DefaultMenuActionLabel)) { manifest.DefaultMenuActionLabel = external.DefaultMenuActionLabel; applied.Add("manifest.defaultActionLabel"); }
             if (manifest.DefaultMenuActionPriority == 1000 && external.DefaultMenuActionPriority > 0) { manifest.DefaultMenuActionPriority = external.DefaultMenuActionPriority; applied.Add("manifest.defaultActionPriority"); }
             if (!manifest.ToolWindowShowInTaskbar && external.ToolWindowShowInTaskbar == true) { manifest.ToolWindowShowInTaskbar = true; applied.Add("manifest.showInTaskbar"); }
+            if (string.IsNullOrWhiteSpace(manifest.ToolWindowTitle) && !string.IsNullOrWhiteSpace(external.ToolWindowTitle)) { manifest.ToolWindowTitle = external.ToolWindowTitle; applied.Add("manifest.toolWindowTitle"); }
         }
 
         if (ui is not null)
@@ -363,10 +388,11 @@ internal sealed class PluginLoader : IHostedService
             if (string.IsNullOrWhiteSpace(ui.DefaultMenuActionLabel) && !string.IsNullOrWhiteSpace(external.DefaultMenuActionLabel)) { ui.DefaultMenuActionLabel = external.DefaultMenuActionLabel; applied.Add("ui.defaultActionLabel"); }
             if (ui.DefaultMenuActionPriority == 1000 && external.DefaultMenuActionPriority > 0) { ui.DefaultMenuActionPriority = external.DefaultMenuActionPriority; applied.Add("ui.defaultActionPriority"); }
             if (!ui.ToolWindowShowInTaskbar && external.ToolWindowShowInTaskbar == true) { ui.ToolWindowShowInTaskbar = true; applied.Add("ui.showInTaskbar"); }
+            if (string.IsNullOrWhiteSpace(ui.ToolWindowTitle) && !string.IsNullOrWhiteSpace(external.ToolWindowTitle)) { ui.ToolWindowTitle = external.ToolWindowTitle; applied.Add("ui.toolWindowTitle"); }
         }
 
         _log.Add("PLUGIN_EXTERNAL_MANIFEST", plugin.Name,
-            $"result=MERGED source={Path.GetFileName(external.SourcePath)} contract=v0.11.315 fields=id|name|version|route|kind|capabilities|permissions|ui|menu|window toolWindowSize={external.ToolWindowWidth}x{external.ToolWindowHeight} toolWindowMinSize={external.ToolWindowMinWidth}x{external.ToolWindowMinHeight} applied={(applied.Count == 0 ? "none" : string.Join(',', applied))} rule=v0.11.315_plugin_host_contract_foundation");
+            $"result=MERGED source={Path.GetFileName(external.SourcePath)} contract=release_contract fields=id|name|version|route|kind|capabilities|permissions|ui|menu|window toolWindowSize={external.ToolWindowWidth}x{external.ToolWindowHeight} toolWindowMinSize={external.ToolWindowMinWidth}x{external.ToolWindowMinHeight} applied={(applied.Count == 0 ? "none" : string.Join(',', applied))} rule={TvAIrVersionContract.PublicContractName}");
     }
 
     private static JsonElement? TryGetObject(JsonElement root, params string[] names)
@@ -521,6 +547,38 @@ internal sealed class PluginLoader : IHostedService
         return null;
     }
 
+
+
+    private static bool IsLegacyPluginContract(PluginExternalManifestContract? contract)
+        => contract is not null && (
+            TvAIrVersionContract.IsLegacyZeroMajor(contract.HostContractVersion) ||
+            TvAIrVersionContract.IsLegacyZeroMajor(contract.SdkVersion));
+
+    private static bool IsUnsupportedPluginContract(PluginExternalManifestContract? contract)
+    {
+        if (contract is null) return false;
+        return IsUnsupportedPluginVersion(contract.HostContractVersion)
+            || IsUnsupportedPluginVersion(contract.SdkVersion);
+    }
+
+    private static bool IsUnsupportedPluginVersion(string? version)
+    {
+        if (string.IsNullOrWhiteSpace(version)) return false;
+        return !TvAIrVersionContract.IsLegacyZeroMajor(version)
+            && !TvAIrVersionContract.IsSupportedPluginContract(version);
+    }
+
+    private static Exception UnwrapPluginException(Exception ex)
+    {
+        while (ex is TargetInvocationException tie && tie.InnerException is not null)
+        {
+            ex = tie.InnerException;
+        }
+        return ex;
+    }
+
+    private static string SafePluginLog(string? value)
+        => string.IsNullOrWhiteSpace(value) ? "-" : value.Trim().Replace('\r', ' ').Replace('\n', ' ');
 
     /// <summary>ロード済み全プラグインの OnStart を呼び出す。</summary>
     private void StartAll()

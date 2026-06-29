@@ -1,4 +1,4 @@
-﻿using TvAIrPlugin;
+using TvAIrPlugin;
 
 
 namespace TvAIr.Plugin;
@@ -151,6 +151,7 @@ public sealed class PluginExternalManifestContract
     public string Vendor { get; set; } = string.Empty;
     public string Icon { get; set; } = string.Empty;
     public string HostContractVersion { get; set; } = string.Empty;
+    public string SdkVersion { get; set; } = string.Empty;
     public IReadOnlyList<string> Kind { get; set; } = Array.Empty<string>();
     public IReadOnlyList<string> Capabilities { get; set; } = Array.Empty<string>();
     public IReadOnlyList<string> Permissions { get; set; } = Array.Empty<string>();
@@ -159,6 +160,7 @@ public sealed class PluginExternalManifestContract
     public int ToolWindowHeight { get; set; }
     public int ToolWindowMinWidth { get; set; }
     public int ToolWindowMinHeight { get; set; }
+    public string ToolWindowTitle { get; set; } = string.Empty;
     public string DefaultMenuActionKind { get; set; } = string.Empty;
     public string DefaultMenuActionLabel { get; set; } = string.Empty;
     public int DefaultMenuActionPriority { get; set; }

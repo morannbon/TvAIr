@@ -1,9 +1,9 @@
-﻿// AribDecodeBridge.cpp  v23.9
+// AribDecodeBridge.cpp
 // static wstring廃止 → 固定wchar_tバッファ方式
 // JIS→SJIS→CP932変換、外部コードページ依存なし
-// v23.7: HandleAddSym default を □(U+25A1) に変更（JIS誤変換バグ修正）。
-// v23.8: ARIB STD-B24 AddSym 全テーブル追加（90〜94区）。
-// v23.9: 外字テーブル追加（85/86区）。LibISDB KanjiTable1/2 準拠。BMP外はサロゲートペア。
+// HandleAddSym default を □(U+25A1) に変更（JIS誤変換バグ修正）。
+// ARIB STD-B24 AddSym 全テーブル追加（90〜94区）。
+// 外字テーブル追加（85/86区）。LibISDB KanjiTable1/2 準拠。BMP外はサロゲートペア。
 
 #include <windows.h>
 #include "AribDecodeBridge.h"
@@ -11,7 +11,7 @@
 extern "C" __declspec(dllexport)
 const char* GetAribBridgeVersion()
 {
-    return "AribDecodeBridge v23.9 AddSym-kanji-gaiji-table";
+    return "AribDecodeBridge AddSym-kanji-gaiji-table";
 }
 
 // ---------------------------------------------------------------------------
@@ -225,7 +225,7 @@ static void HandleAddSym(wchar_t* buf, int& pos, int cap, unsigned int code, uns
     case 0x7D27: PutChar(buf,pos,cap,0x65E5); break; // 日
     case 0x7D28: PutChar(buf,pos,cap,0x795D); break; // 祝
 
-    // ── 追加シンボル（v23.8: LibISDB/ARIB STD-B24完全準拠） ──────────────────────────────
+    // ── 追加シンボル（LibISDB/ARIB STD-B24完全準拠） ──────────────────────────────
 
     // 90区 0x7A21〜0x7A48: 丸数字①〜㊿
     case 0x7A21: PutChar(buf,pos,cap,0x2460); break; // ①

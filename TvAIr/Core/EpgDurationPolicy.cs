@@ -1,9 +1,9 @@
-﻿namespace TvAIr.Core;
+namespace TvAIr.Core;
 
 /// <summary>
 /// EPG深度・取得秒数の共通ポリシー。
 ///
-/// v0.8.43:
+/// release_contract:
 ///   設定表示、定時EPG枠見積り、通常EPG実取得、録画前EPG確認、ログ出力が
 ///   個別に depth -> seconds を変換していたため、deeper 表示なのに実取得が120秒へ戻る
 ///   経路が発生した。以後、EPGの秒数変換はこのクラスを唯一の入口にする。
@@ -34,7 +34,7 @@ public static class EpgDurationPolicy
         var normalizedDepth = NormalizeDepth(depth);
         var configuredBase = BaseSecondsForDepth(normalizedDepth);
 
-        // v0.8.01以降の方針を共通化:
+        // release_contract以降の方針を共通化:
         // BS/CSや多サービスTSを秒数の隠れ延長で補わず、チャンネル/TS/SID束ねの監査で追う。
         var effectiveBase = configuredBase;
         var configuredExtra = Math.Max(0, configuredExtraPerServiceSeconds);

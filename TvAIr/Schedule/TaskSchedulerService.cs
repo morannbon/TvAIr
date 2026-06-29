@@ -1,29 +1,29 @@
-﻿/* v0.11.444 wake-credential-probe-diagnostics: Wake本線を変えず、CredentialProbeの必要判定・実行理由・probeタスク名を診断ログへ露出する。 */
-/* v0.11.443 wake-responsibility-log-cleanup: Wake本線の挙動を維持し、plan読取副作用・CredentialProbe名前空間・ログ分類を整理する。 */
-/* v0.11.131 wake-log-alignment-cleanup: v0.11.130のWAKE本線は維持し、個別登録rule名・差分適用next表示・activeExtra監査名だけを整理する。 */
-/* v0.11.130 wake-coverage-required-deferred-fix: Task Schedulerは起床だけ。Coverageは直近必須範囲と将来Deferredを分離し、未来予約をmissing扱いしない。 */
-/* v0.11.129 wake-tvrock-style-minimal-wakeup: Task Schedulerは起床時刻だけ、TvAIr本体がWakeCoverage/予約DBから判断する。通常Wake本数目標は録画チューナー数、13本は非常用上限。 */
-﻿/* v0.11.125 wake-coverage-complete: WAKE時刻スロット化をWakeCoverageItemへ完全分離し、TaskScheduler登録単位と予約メタ属性を混在させない。 */
-/* v0.11.123 wake-time-slot-coverage-simplification: Task Scheduler側の主単位を起床時刻へ寄せ、予約/目的メタ属性はWakeCoverageへ分離する。 */
-/* v0.10.20 wake-stale-orphan-quarantine-fix: 削除不能な旧世代WakeSlotを現行Wake判定から隔離し、current_processで消せないタスクへ資格情報削除を連発しない。 */
-/* v0.10.19 wake-diff-apply-generation-log-fix: WakeSlot世代を安定化し、計画変更時の全削除/全登録とOVERFLOW誤用を抑制、再構築中要求を最新pendingへ集約する。 */
-/* v0.10.18 wake-slot-dynamic-cap-contract: WakeSlot上限を「録画チューナー総数×2＋制御用1」に定義化し、固定13から動的算出へ変更する。 */
-/* v0.10.17 wake-slot-overflow-cleanup: 遅延Wake再構築中でもTask Scheduler上のWakeSlot過剰残骸を即時検出・掃除し、一覧増殖を抑止する。 */
-/* v0.10.16 task-management-local-maintenance-fix: WakeSlot削除/掃除はローカルタスク管理として現在プロセストークンを先行し、資格情報失敗ノイズと掃除遅延を抑制する。 */
-/* v0.10.14 wake-credential-context-record-verdict-crosscheck: Wake操作の資格情報コンテキストを横串化し、録画結果判定の後段TS検証を統合する。 */
-/* v0.10.13 wake-log-polish-quality-wording-noise-reduce: 安定経路を変えず、Wake/品質/周期ログの誤解とノイズを抑制する。 */
-/* v0.10.12 wake-stale-task-safe-cleanup: WakePlan世代登録成功後に旧世代/旧固定/同世代余剰WakeSlotだけを安全削除する。 */
-/* v0.10.11 wake-plan-generation-slot-guard: WakeSlot世代をアプリ版固定からWakePlan単位へ移し、同世代余剰Wakeの実行をslotId照合で防ぐ。 */
-/* v0.10.10 wake-generation-credential-probe: WakeSlotを世代化し、旧世代/削除不能タスクを現行Wake同期から分離する。 */
-/* v0.9.62 wake-slot-rebuild: Primary/Backup固定名の上書き再登録をやめ、予約時刻入りのWakeSlotタスクを最大13本生成して既存固定名権限不整合を回避する。 */
-/* v0.9.61 near-wake-immediate-rebuild: 近接予約のWake再構築はデバウンスせず即時実行し、スリープ前にWakeタスク実体を作る。 */
-/* v0.9.60 wake-register-fallback-contract: Password方式Wake登録がアクセス拒否等で失敗した場合、InteractiveToken方式へフォールバックし、失敗時はWAKE_REGISTER_CRITICALで明示する。 */
-/* v0.9.38 wake-fixed-slot-recovery-scheduler: Wakeタスク起動時は --wake-task を単一インスタンス合流シグナルとして扱い、既存TvAIrがいる場合は本体二重起動せず signal ファイル経由で常駐プロセスへ合流する。 */
-/* v0.2.52 wake-plan-hash-trigger-limit: Wake計画ハッシュが不変なら短時間内のschtasks照合も省略し、再構築発火をさらに抑制する。 */
-/* v0.9.35 wake-contract-validated-kept-tasks: 既存Wakeタスクを名前一致だけでkeptにせず、Action/WakeToRun/StartWhenAvailable/ExecutionTimeLimit/Triggerを検証して不一致なら再登録する。 */
-/* v0.2.51 wake-task-nochange-skip: Wakeタスク計画が前回適用済みで実体も一致する場合は削除→再登録を省略し、不要なschtasks I/Oを抑制する。 */
-/* v0.2.49 wake-task-clean-rebuild: TvAIr_Wake_* を再構築前に完全削除し、現在必要なWakeタスクだけ再登録する。 */
-/* v0.2.34 STOP_PHASE_WAKE_GUARD: 録画停止フェーズ中のWake再構築は即時実行せず遅延・バッチ化する。 */
+/* release_contract wake-credential-probe-diagnostics: Wake本線を変えず、CredentialProbeの必要判定・実行理由・probeタスク名を診断ログへ露出する。 */
+/* release_contract wake-responsibility-log-cleanup: Wake本線の挙動を維持し、plan読取副作用・CredentialProbe名前空間・ログ分類を整理する。 */
+/* release_contract wake-log-alignment-cleanup: release_contractのWAKE本線は維持し、個別登録rule名・差分適用next表示・activeExtra監査名だけを整理する。 */
+/* release_contract wake-coverage-required-deferred-fix: Task Schedulerは起床だけ。Coverageは直近必須範囲と将来Deferredを分離し、未来予約をmissing扱いしない。 */
+/* release_contract wake-tvrock-style-minimal-wakeup: Task Schedulerは起床時刻だけ、TvAIr本体がWakeCoverage/予約DBから判断する。通常Wake本数目標は録画チューナー数、13本は非常用上限。 */
+﻿/* release_contract wake-coverage-complete: WAKE時刻スロット化をWakeCoverageItemへ完全分離し、TaskScheduler登録単位と予約メタ属性を混在させない。 */
+/* release_contract wake-time-slot-coverage-simplification: Task Scheduler側の主単位を起床時刻へ寄せ、予約/目的メタ属性はWakeCoverageへ分離する。 */
+/* release_contract wake-stale-orphan-quarantine-fix: 削除不能な旧世代WakeSlotを現行Wake判定から隔離し、current_processで消せないタスクへ資格情報削除を連発しない。 */
+/* release_contract wake-diff-apply-generation-log-fix: WakeSlot世代を安定化し、計画変更時の全削除/全登録とOVERFLOW誤用を抑制、再構築中要求を最新pendingへ集約する。 */
+/* release_contract wake-slot-dynamic-cap-contract: WakeSlot上限を「録画チューナー総数×2＋制御用1」に定義化し、固定13から動的算出へ変更する。 */
+/* release_contract wake-slot-overflow-cleanup: 遅延Wake再構築中でもTask Scheduler上のWakeSlot過剰残骸を即時検出・掃除し、一覧増殖を抑止する。 */
+/* release_contract task-management-local-maintenance-fix: WakeSlot削除/掃除はローカルタスク管理として現在プロセストークンを先行し、資格情報失敗ノイズと掃除遅延を抑制する。 */
+/* release_contract wake-credential-context-record-verdict-crosscheck: Wake操作の資格情報コンテキストを横串化し、録画結果判定の後段TS検証を統合する。 */
+/* release_contract wake-log-polish-quality-wording-noise-reduce: 安定経路を変えず、Wake/品質/周期ログの誤解とノイズを抑制する。 */
+/* release_contract wake-stale-task-safe-cleanup: WakePlan世代登録成功後に旧世代/旧固定/同世代余剰WakeSlotだけを安全削除する。 */
+/* release_contract wake-plan-generation-slot-guard: WakeSlot世代をアプリ版固定からWakePlan単位へ移し、同世代余剰Wakeの実行をslotId照合で防ぐ。 */
+/* release_contract wake-generation-credential-probe: WakeSlotを世代化し、旧世代/削除不能タスクを現行Wake同期から分離する。 */
+/* release_contract wake-slot-rebuild: Primary/Backup固定名の上書き再登録をやめ、予約時刻入りのWakeSlotタスクを最大13本生成して既存固定名権限不整合を回避する。 */
+/* release_contract near-wake-immediate-rebuild: 近接予約のWake再構築はデバウンスせず即時実行し、スリープ前にWakeタスク実体を作る。 */
+/* release_contract wake-register-fallback-contract: Password方式Wake登録がアクセス拒否等で失敗した場合、InteractiveToken方式へフォールバックし、失敗時はWAKE_REGISTER_CRITICALで明示する。 */
+/* release_contract wake-fixed-slot-recovery-scheduler: Wakeタスク起動時は --wake-task を単一インスタンス合流シグナルとして扱い、既存TvAIrがいる場合は本体二重起動せず signal ファイル経由で常駐プロセスへ合流する。 */
+/* release_contract wake-plan-hash-trigger-limit: Wake計画ハッシュが不変なら短時間内のschtasks照合も省略し、再構築発火をさらに抑制する。 */
+/* release_contract wake-contract-validated-kept-tasks: 既存Wakeタスクを名前一致だけでkeptにせず、Action/WakeToRun/StartWhenAvailable/ExecutionTimeLimit/Triggerを検証して不一致なら再登録する。 */
+/* release_contract wake-task-nochange-skip: Wakeタスク計画が前回適用済みで実体も一致する場合は削除→再登録を省略し、不要なschtasks I/Oを抑制する。 */
+/* release_contract wake-task-clean-rebuild: TvAIr_Wake_* を再構築前に完全削除し、現在必要なWakeタスクだけ再登録する。 */
+/* release_contract STOP_PHASE_WAKE_GUARD: 録画停止フェーズ中のWake再構築は即時実行せず遅延・バッチ化する。 */
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Security.Principal;
@@ -34,9 +34,8 @@ namespace TvAIr.Schedule;
 /// <summary>
 /// Windowsタスクスケジューラーへの登録・削除を schtasks.exe 経由で行うサービス。
 ///
-/// v32.86:
-///   固定2タスク + 複数Trigger 方式を廃止し、
-///   v0.9.62:
+/// ///   固定2タスク + 複数Trigger 方式を廃止し、
+///   release_contract:
 ///   固定名 Primary/Backup/SystemEpg の削除・上書き方式を廃止し、
 ///   Wake時刻・種別・予約IDを含む TvAIr_WakeSlot_* を「録画チューナー総数×2＋制御用1」の上限で生成する。
 ///
@@ -57,7 +56,7 @@ public sealed class TaskSchedulerService
     private const string WakeEpgTaskPrefix = "TvAIr_Wake_Epg_";
     private const string WakeRecTaskPrefix = "TvAIr_Wake_Rec_";
 
-    // v0.9.62:
+    // release_contract:
     // 固定名 Primary/Backup を毎回削除・上書きする方式は、Windows側で既存タスクの
     // 作成者/権限が食い違った瞬間にアクセス拒否で詰む。録画失敗を避けるため、
     // 新しい名前空間の時刻入りWakeSlotを必要分だけ生成し、既存固定名タスクには触らない。
@@ -65,7 +64,7 @@ public sealed class TaskSchedulerService
     private const string WakeProbeTaskPrefix = "TvAIr_WakeProbe_";
     private const string WakeSlotGenerationFallback = "g01013";
     private const int WakeSlotControlTaskCount = 1;
-    // v0.10.19:
+    // release_contract:
     // WakeSlot名に含める世代を計画内容ハッシュから安定世代へ変更する。
     // 計画変更ごとに全WakeSlot名が変わると、同じ時刻/種別/予約のタスクまで毎回13本総入替になり、
     // 連続予約追加時のTask Scheduler I/Oが重くなる。stale判定は active-slots で担保する。
@@ -93,7 +92,7 @@ public sealed class TaskSchedulerService
     private DateTime _lastEpgWakePlanLogUtc = DateTime.MinValue;
     private List<string> _lastWakeCoverageLines = new();
 
-    // v0.5.65:
+    // release_contract:
     // 自動検索予約更新・UI操作直後に schtasks の削除/登録を同期実行すると、
     // ブラウザ描画や外部LIVETest視聴と負荷が重なりやすい。
     // Wake計画変更は数秒デバウンスし、同一更新内の多重要求を1回に集約する。
@@ -111,7 +110,7 @@ public sealed class TaskSchedulerService
     private string _deferredWakeReason = string.Empty;
     private int _deferredWakeRequestCount;
 
-    // v0.10.19:
+    // release_contract:
     // Wake再構築中に別操作が入った場合、単に already-running で捨てず、
     // 最新要求だけを保持し、実行完了後に1回だけ再実行する。
     private readonly object _wakePendingGate = new();
@@ -146,7 +145,7 @@ public sealed class TaskSchedulerService
         {
             var pendingCount = MarkWakeRebuildPending(triggerReason);
             _log.Add("TaskScheduler", "WAKE_REBUILD_PENDING_COALESCED",
-                $"reason=already-running latest={CompactOneLine(triggerReason)} pendingCount={pendingCount} action=run_latest_after_current rule=v0.10.19_wake_diff_apply_generation_log_fix");
+                $"reason=already-running latest={CompactOneLine(triggerReason)} pendingCount={pendingCount} action=run_latest_after_current rule=release_contract");
             return;
         }
 
@@ -218,7 +217,7 @@ public sealed class TaskSchedulerService
         _log.Add("TaskScheduler", "WAKE_PLAN_HASH",
             $"class=summary before={previousHash} after={currentHash} changed={planChanged} validationExpired={validationExpired} desired={desired.Count} recordingTunerCount={recordingTunerCountForWakePlan} targetTaskCount={targetWakeSlotLimit} emergencyLimit={emergencyWakeSlotLimit} formula=recording_tuners_target_emergency_limit next={nextDesiredText}");
 
-        // v0.10.18:
+        // release_contract:
         // 予約追加/キャンセルを短時間に繰り返した場合、Wake再構築自体を遅延集約していても
         // Windowsタスクスケジューラの一覧には旧WakeSlotが先に積み上がって見える。
         // plan-hash fast skip や遅延待ちに入る前に、現行desired以外のWakeSlotが残っているかだけを軽量確認し、
@@ -226,7 +225,7 @@ public sealed class TaskSchedulerService
         CleanupWakeSlotOverflowIfNeeded(desiredGeneration, desired.Select(t => t.Name).ToHashSet(StringComparer.OrdinalIgnoreCase),
             reason: planChanged ? "plan_changed_preflight" : validationExpired ? "validation_preflight" : "fast_skip_preflight");
 
-        // v0.2.52:
+        // release_contract:
         // 録画終了後Tick・通常Tickなど、予約構造が変わっていない発火では
         // schtasks /Query すら行わない。Windows側の実体照合は5分に1回だけ通す。
         // 起動直後・予約構造変更時・検証期限切れ時は従来どおり実体照合し、
@@ -245,12 +244,12 @@ public sealed class TaskSchedulerService
         var missingDesired = desiredNames.Where(name => !existing.Contains(name)).OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToList();
         var unexpectedExisting = existing.Where(name => !desiredNames.Contains(name)).OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToList();
 
-        // v0.5.68:
+        // release_contract:
         // 「登録できている」だけではWake保証にならない。Windows側で予定時刻を過ぎても
         // LastRunTime が未実行/0x41303 のまま残っている管理対象タスクを、削除前に監査する。
         AuditManagedWakeRuntimeState(existing, desiredNames, DateTime.Now, validationExpired || planChanged);
 
-        // v0.9.35:
+        // release_contract:
         // 名前と予定時刻が同じでも、Windowsタスクの中身が旧契約のままならWake保証にならない。
         // 既存タスクをkept扱いにする前に、Action / Arguments / StartBoundary / WakeToRun /
         // StartWhenAvailable / ExecutionTimeLimit / LogonType / RunLevel を検証し、
@@ -270,11 +269,11 @@ public sealed class TaskSchedulerService
             }
         }
 
-        // v0.2.51 + v0.9.35:
+        // release_contract + release_contract:
         // 同じ予約状態でも、名前一致だけでは省略しない。契約検証まで一致した場合だけkeptにする。
         if (!planChanged && missingDesired.Count == 0 && unexpectedExisting.Count == 0 && contractMismatchDesired.Count == 0)
         {
-            // v0.10.12:
+            // release_contract:
             // 現行Wakeは正しく保持されていても、旧世代/旧固定/同世代余剰WakeSlotが
             // タスクスケジューラ上に積み上がると、一覧上も運用上も不安定に見える。
             // 契約検証OKのタイミングでだけ、現行desiredを保護しながら、録画チューナー数から算出した正式上限で安全掃除する。
@@ -291,8 +290,8 @@ public sealed class TaskSchedulerService
                 $"Wakeタスク実体差異検出: class=audit missing={missingDesired.Count} unexpected={unexpectedExisting.Count} contractMismatch={contractMismatchDesired.Count} managed={existing.Count} desired={desired.Count} rule=wake_log_polish_quality_wording_noise_reduce");
         }
 
-        // v0.5.66:
-        // v0.10.10:
+        // release_contract:
+        // release_contract:
         // 現行Wake保護を優先するため、Wake同期本線では削除を先行しない。
         // current generation の差分外タスクも登録成功後の後処理対象として扱い、旧世代/旧名の削除不能は
         // 現行Wake登録の成否と分離する。削除リトライで録画直前Wakeを巻き込まない。
@@ -301,7 +300,7 @@ public sealed class TaskSchedulerService
         if (unexpectedExisting.Count > 0)
         {
             _log.Add("TaskScheduler", "WAKE_CURRENT_GENERATION_EXTRA_AUDIT",
-                $"result=INFO unexpectedCurrentGeneration={unexpectedExisting.Count} action=post_register_cleanup_deferred recording_blocking=False rule=v0.10.11_wake_plan_generation_slot_guard");
+                $"result=INFO unexpectedCurrentGeneration={unexpectedExisting.Count} action=post_register_cleanup_deferred recording_blocking=False rule=release_contract");
         }
 
         if (desired.Count == 0)
@@ -360,7 +359,7 @@ public sealed class TaskSchedulerService
             .FirstOrDefault();
 
         var keptCount = desired.Count - specsToRegister.Count;
-        // v0.11.131:
+        // release_contract:
         // 差分登録が「後方の1本」だけ発生した場合でも、サマリの next は registeredNext ではなく
         // 現在有効な desired 全体の最短Wakeを表示する。ユーザー/監査が「次に起きるべき時刻」を
         // 誤読しないよう、登録差分と実効最短Wakeを分離する。
@@ -387,23 +386,23 @@ public sealed class TaskSchedulerService
                 .FirstOrDefault();
             var failedTarget = firstFailed is null ? "none" : $"{firstFailed.When:MM/dd HH:mm:ss} {firstFailed.Name} R{firstFailed.Reservation.Id} {CompactOneLine(firstFailed.Reservation.Title)}";
 
-            // v0.11.117:
+            // release_contract:
             // Wake registration failures are Task Scheduler diagnostics, not routine user-operation events.
             // Do not surface raw AccessDenied / kept / failed counters in the user log on every rebuild.
             // A user-facing wake event must be emitted only from a future WakeCoverage guarantee layer
             // when a concrete recording has no alternative wake coverage and user action is actually required.
             _log.Add("TaskScheduler", "WAKE_REGISTER_CRITICAL",
-                $"result=FAILED failed={failedCount} deleteFailed={deleteFailedCount} firstFailed={failedTarget} userLogSuppressed=True suppressionReason=task_scheduler_diagnostic_not_user_actionable risk=sleep_resume_not_guaranteed action=internal_diagnose_wake_coverage rule=v0.11.117_wake_userlog_noise_suppression_base116");
+                $"result=FAILED failed={failedCount} deleteFailed={deleteFailedCount} firstFailed={failedTarget} userLogSuppressed=True suppressionReason=task_scheduler_diagnostic_not_user_actionable risk=sleep_resume_not_guaranteed action=internal_diagnose_wake_coverage rule=release_contract");
         }
         else if (deleteFailedCount > 0)
         {
-            // v0.9.86:
+            // release_contract:
             // 実証ログで、予定Wakeは kept/register 済みなのに、過去または差分外の WakeSlot 削除だけが
             // アクセス拒否になるケースを確認した。これは「次の復帰タスクが無い」危険とは別種なので、
             // 登録失敗と同じ WAKE_REGISTER_CRITICAL にはしない。desired 側の契約が満たせていれば
             // 計画署名は採用し、不要タスク削除失敗は別警告として次回検証周期で再試行する。
             _log.Add("TaskScheduler", "WAKE_DELETE_STALE_DENIED",
-                $"result=WARNING deleteFailed={deleteFailedCount} failed=0 desired={desired.Count} kept={keptCount} registered={successCount} risk=stale_wake_task_may_remain recording_blocking=False sleep_resume_desired_tasks_preserved=True action=retry_on_next_validation_or_manual_cleanup_or_manual_cleanup rule=v0.10.00_wake_stale_delete_warning_only");
+                $"result=WARNING deleteFailed={deleteFailedCount} failed=0 desired={desired.Count} kept={keptCount} registered={successCount} risk=stale_wake_task_may_remain recording_blocking=False sleep_resume_desired_tasks_preserved=True action=retry_on_next_validation_or_manual_cleanup_or_manual_cleanup rule=release_contract");
         }
 
         _lastPlanSignature = failedCount == 0 ? planSignature : null;
@@ -420,7 +419,7 @@ public sealed class TaskSchedulerService
             if (TryConsumeWakeRebuildPending(out var pendingReason, out var pendingCount))
             {
                 _log.Add("TaskScheduler", "WAKE_REBUILD_PENDING_FLUSHED",
-                    $"latest={CompactOneLine(pendingReason)} mergedRequests={pendingCount} action=run_once rule=v0.10.19_wake_diff_apply_generation_log_fix");
+                    $"latest={CompactOneLine(pendingReason)} mergedRequests={pendingCount} action=run_once rule=release_contract");
                 UpdateWakeTaskCore($"pending_flush:{pendingReason}");
             }
         }
@@ -462,7 +461,7 @@ public sealed class TaskSchedulerService
         var effectiveDelay = delay ?? DeferredWakeDefaultDelay;
         var reason = $"source={source} action={action}";
 
-        // v0.9.61:
+        // release_contract:
         // Wake再構築の遅延集約は大量更新時のI/O抑制には有効だが、
         // 近接予約では「スリープに入る前にWakeタスクが存在しない」事故になる。
         // 直近Wakeが30分以内なら、低優先扱いのAdd/Updateであっても同期的に再構築する。
@@ -475,7 +474,7 @@ public sealed class TaskSchedulerService
         DateTime currentDue;
         lock (_deferredWakeGate)
         {
-            // v0.5.65:
+            // release_contract:
             // 連続ON/OFF操作中に、前のdueがちょうどTickで拾われて schtasks 削除/登録が走ると、
             // UIちらつき・LIVETestカクつき・操作中の見た目ズレを誘発する。
             // 常に最後の操作時刻を記録し、実行側でも一定の無操作期間を確認する。
@@ -490,9 +489,9 @@ public sealed class TaskSchedulerService
         }
 
         _log.Add("TaskScheduler", "WakeDebounce",
-            $"Wakeタスク再構築を遅延予約: {reason} dueInMs={(int)effectiveDelay.TotalMilliseconds} requestCount={count} dueUtc={currentDue:O} quietMs={(int)DeferredWakeQuietPeriod.TotalMilliseconds} nearWindowMin={(int)DeferredWakeImmediateWindow.TotalMinutes} rule=v0.9.61_near_wake_immediate_rebuild");
+            $"Wakeタスク再構築を遅延予約: {reason} dueInMs={(int)effectiveDelay.TotalMilliseconds} requestCount={count} dueUtc={currentDue:O} quietMs={(int)DeferredWakeQuietPeriod.TotalMilliseconds} nearWindowMin={(int)DeferredWakeImmediateWindow.TotalMinutes} rule=release_contract");
 
-        // v0.10.17:
+        // release_contract:
         // Wake本体の再構築を遅延させる場合でも、一覧上の旧WakeSlot増殖はすぐ分かる。
         // 新規登録は行わず、現在のdesiredに含まれない残骸だけを安全掃除する。
         var desiredNow = BuildDesiredTasks(DateTime.Now, emitAudit: false);
@@ -524,7 +523,7 @@ public sealed class TaskSchedulerService
         }
 
         _log.Add("TaskScheduler", "WakeDebounce",
-            $"Wakeタスク再構築を即時実行: {reason} reason=near-wake next={nextWake.When:MM/dd HH:mm:ss} task={nextWake.Name} kind={nextWake.Kind} res=R{nextWake.Reservation.Id} delaySec={(int)Math.Max(0, nextDelay.TotalSeconds)} requestedDelayMs={(int)requestedDelay.TotalMilliseconds} clearedDeferredRequests={clearedRequests} action=update_now rule=v0.9.61_near_wake_immediate_rebuild");
+            $"Wakeタスク再構築を即時実行: {reason} reason=near-wake next={nextWake.When:MM/dd HH:mm:ss} task={nextWake.Name} kind={nextWake.Kind} res=R{nextWake.Reservation.Id} delaySec={(int)Math.Max(0, nextDelay.TotalSeconds)} requestedDelayMs={(int)requestedDelay.TotalMilliseconds} clearedDeferredRequests={clearedRequests} action=update_now rule=release_contract");
 
         UpdateWakeTaskCore($"near-wake:{reason}");
         return true;
@@ -553,7 +552,7 @@ public sealed class TaskSchedulerService
             {
                 _deferredWakeDueUtc = _deferredWakeLastRequestUtc.Add(DeferredWakeQuietPeriod);
                 _log.Add("TaskScheduler", "WakeDebounce",
-                    $"Wakeタスク遅延再構築を再延期: reason=quiet-period lastRequestUtc={_deferredWakeLastRequestUtc:O} quietMs={(int)quietFor.TotalMilliseconds} nextDueUtc={_deferredWakeDueUtc:O} requestCount={_deferredWakeRequestCount} rule=v0.5.66_viewing_safe_wake");
+                    $"Wakeタスク遅延再構築を再延期: reason=quiet-period lastRequestUtc={_deferredWakeLastRequestUtc:O} quietMs={(int)quietFor.TotalMilliseconds} nextDueUtc={_deferredWakeDueUtc:O} requestCount={_deferredWakeRequestCount} rule=release_contract");
                 return false;
             }
 
@@ -565,7 +564,7 @@ public sealed class TaskSchedulerService
             {
                 _deferredWakeDueUtc = now.Add(DeferredWakeDefaultDelay);
                 _log.Add("TaskScheduler", "WakeDebounce",
-                    $"Wakeタスク遅延再構築を再延期: reason=far-next-wake next={(nextWake is null ? "none" : nextWake.When.ToString("MM/dd HH:mm:ss"))} nextDelayMin={(nextWakeDelay == TimeSpan.MaxValue ? -1 : (int)nextWakeDelay.TotalMinutes)} heldMs={(int)heldFor.TotalMilliseconds} nextDueUtc={_deferredWakeDueUtc:O} requestCount={_deferredWakeRequestCount} rule=v0.5.66_viewing_safe_wake_hold");
+                    $"Wakeタスク遅延再構築を再延期: reason=far-next-wake next={(nextWake is null ? "none" : nextWake.When.ToString("MM/dd HH:mm:ss"))} nextDelayMin={(nextWakeDelay == TimeSpan.MaxValue ? -1 : (int)nextWakeDelay.TotalMinutes)} heldMs={(int)heldFor.TotalMilliseconds} nextDueUtc={_deferredWakeDueUtc:O} requestCount={_deferredWakeRequestCount} rule=release_contract");
                 return false;
             }
 
@@ -579,7 +578,7 @@ public sealed class TaskSchedulerService
         }
 
         _log.Add("TaskScheduler", "WakeDebounce",
-            $"Wakeタスク遅延再構築を実行: {reason} mergedRequests={count} rule=v0.5.66_viewing_safe_wake_hold");
+            $"Wakeタスク遅延再構築を実行: {reason} mergedRequests={count} rule=release_contract");
         UpdateWakeTaskCore($"deferred:{reason}");
         return true;
     }
@@ -604,7 +603,7 @@ public sealed class TaskSchedulerService
     }
 
     /// <summary>
-    /// v0.10.23: プラグインSDK/読み取りAPI向けのWake計画スナップショット。
+    /// release_contract: プラグインSDK/読み取りAPI向けのWake計画スナップショット。
     /// Windowsタスクの直接操作情報ではなく、TvAIrが現在必要と判断している安全なWake計画だけを返す。
     /// </summary>
     public IReadOnlyList<WakeTaskPlanItem> GetWakePlanSnapshot(DateTime? from = null, DateTime? to = null, int limit = 100)
@@ -630,7 +629,7 @@ public sealed class TaskSchedulerService
 
     private int GetRecordingWakeTunerCount()
     {
-        // v0.11.129:
+        // release_contract:
         // 通常Wake運用の目標は録画チューナー数。Viewingチューナーは録画Wakeの収容数へ入れない。
         // Recording/Shared/空欄など、Viewing以外は録画用として扱う。
         var count = _ini.Tuners
@@ -641,7 +640,7 @@ public sealed class TaskSchedulerService
 
     private int GetWakeSlotLimit()
     {
-        // v0.11.129:
+        // release_contract:
         // 通常目標は既存Wake運用寄せで「録画チューナー数ぶんの起床時刻スロット」。
         // 13本(録画チューナー数×2+制御1)は常時目標ではなく、異常/非常時の上限としてログに残す。
         var recordingTunerCount = GetRecordingWakeTunerCount();
@@ -667,7 +666,7 @@ public sealed class TaskSchedulerService
         var preMarSec  = Math.Max(0, _ini.PreStartMarginSeconds);
         var wakeAddSec = Math.Max(0, _ini.WakeAdditionalSeconds);
 
-        // v0.11.129:
+        // release_contract:
         // WakeTaskSpec は Task Scheduler 登録専用。予約/目的/予約もと/チェーン等のメタ属性は
         // WakeCoverageItem に分離し、Reservation 契約を要求する既存メソッドへ疑似Specを流し込まない。
         // PRE_EPG / REC / SYSTEM_EPG は Task Scheduler の登録単位にせず、WakeCoverage として
@@ -730,8 +729,8 @@ public sealed class TaskSchedulerService
         var targetWakeSlotLimit = GetWakeSlotLimit();
         var emergencyWakeSlotLimit = GetWakeSlotEmergencyLimit();
 
-        // v0.11.130:
-        // v0.11.129では全未来Coverageを必須扱いし、録画チューナー数ぶんに収まらないものを
+        // release_contract:
+        // release_contractでは全未来Coverageを必須扱いし、録画チューナー数ぶんに収まらないものを
         // missingCoverage として出していた。これは「次に起こす」既存Wake運用寄せの意味ではなく、
         // 単なる未来予約の未登録一覧になってしまう。
         // ここでは、近い起床目的をWakeセッションへ束ね、録画チューナー数ぶんの直近Wakeだけを
@@ -785,7 +784,7 @@ public sealed class TaskSchedulerService
             var deferredCoverage = Math.Max(0, orderedCoverage.Count - requiredCoverage);
             var missingCoverage = 0;
             _log.Add("TaskScheduler", "WAKE_PLAN_COVERAGE",
-                $"result=OK class=audit mode=tvrock_style_minimal_wakeup requiredScope=next_wake_sessions coverageSlots={desired.Count} coverageItems={orderedCoverage.Count} requiredCoverage={requiredCoverage} coveredCoverage={requiredCoverage} missingCoverage={missingCoverage} deferredCoverage={deferredCoverage} deferredSessions={Math.Max(0, wakeSessionGroups.Count - slotGroups.Count)} targetTaskCount={targetWakeSlotLimit} emergencyLimit={emergencyWakeSlotLimit} recordingTunerCount={GetRecordingWakeTunerCount()} recoveryWakeTasks=0 recoveryPolicy=internal_timer_or_runtime_monitor taskKind=WAKE first={(desired.FirstOrDefault()?.When.ToString("MM/dd HH:mm:ss") ?? "none")} source=apply_path rule=v0.11.443_wake_responsibility_log_cleanup");
+                $"result=OK class=audit mode=tvrock_style_minimal_wakeup requiredScope=next_wake_sessions coverageSlots={desired.Count} coverageItems={orderedCoverage.Count} requiredCoverage={requiredCoverage} coveredCoverage={requiredCoverage} missingCoverage={missingCoverage} deferredCoverage={deferredCoverage} deferredSessions={Math.Max(0, wakeSessionGroups.Count - slotGroups.Count)} targetTaskCount={targetWakeSlotLimit} emergencyLimit={emergencyWakeSlotLimit} recordingTunerCount={GetRecordingWakeTunerCount()} recoveryWakeTasks=0 recoveryPolicy=internal_timer_or_runtime_monitor taskKind=WAKE first={(desired.FirstOrDefault()?.When.ToString("MM/dd HH:mm:ss") ?? "none")} source=apply_path rule=release_contract");
         }
 
         return desired
@@ -826,7 +825,7 @@ public sealed class TaskSchedulerService
 
     private static string BuildWakePlanGeneration(IEnumerable<WakeTaskSpec> specs)
     {
-        // v0.10.19:
+        // release_contract:
         // 計画ハッシュ由来の世代名は、予約追加/キャンセルのたびに同一内容タスクの名前まで変え、
         // 13本全削除→13本全登録を誘発していた。
         // Wakeの鮮度判定は wake-active-slots.txt のスロットID照合で行うため、
@@ -944,7 +943,7 @@ public sealed class TaskSchedulerService
     {
         var kind = string.IsNullOrWhiteSpace(spec.Kind) ? "UNKNOWN" : spec.Kind.Trim();
         var generation = ExtractWakeGenerationFromTaskName(spec.Name);
-        // v0.11.129: Task Scheduler の起動引数に予約IDを主キーとして持たせない。
+        // release_contract: Task Scheduler の起動引数に予約IDを主キーとして持たせない。
         // 予約/目的メタ属性は runtime/wake-active-coverage.txt を正として保持し、
         // 起床後は既存TvAIrが予約DBから再評価する。
         return $"--wake-task {kind} --wake-at {spec.When:yyyyMMddHHmmss} --wake-generation {generation} --wake-slot-id {SanitizeTaskSegment(spec.Name)} --wake-reservation-id -";
@@ -952,7 +951,7 @@ public sealed class TaskSchedulerService
 
     private WakeTaskApplyResult RegisterOrUpdateTask(WakeTaskSpec spec)
     {
-        // v0.10.10:
+        // release_contract:
         // 世代付きWakeSlotは衝突回避を名前で担保する。登録前削除はアクセス拒否を誘発しやすいため、
         // 同名契約不一致の再登録以外では行わない。ここでは新規登録/上書き登録だけに寄せる。
         var userName = _ini.TaskUserName;
@@ -965,12 +964,12 @@ public sealed class TaskSchedulerService
         var workDir = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
         _log.Add("TaskScheduler", spec.Name,
-            $"Wakeタスク登録開始 kind={spec.Kind} tuner={spec.TunerName} coverage={spec.CoverageCount} at={spec.When:MM/dd HH:mm:ss} user=(configured) logon=Password runLevel=LeastPrivilege action=wake_task_signal_contract exe={CompactOneLine(wakeExe)} rule=v0.11.131_wake_log_alignment_cleanup");
+            $"Wakeタスク登録開始 kind={spec.Kind} tuner={spec.TunerName} coverage={spec.CoverageCount} at={spec.When:MM/dd HH:mm:ss} user=(configured) logon=Password runLevel=LeastPrivilege action=wake_task_signal_contract exe={CompactOneLine(wakeExe)} rule=release_contract");
 
         if (string.IsNullOrWhiteSpace(userName) || string.IsNullOrWhiteSpace(password))
         {
             _log.Add("TaskScheduler", spec.Name,
-                $"WakeタスクPassword登録スキップ kind={spec.Kind} coverage={spec.CoverageCount} reason=missing_credentials action=try_interactive_fallback rule=v0.11.131_wake_log_alignment_cleanup");
+                $"WakeタスクPassword登録スキップ kind={spec.Kind} coverage={spec.CoverageCount} reason=missing_credentials action=try_interactive_fallback rule=release_contract");
         }
         else
         {
@@ -980,7 +979,7 @@ public sealed class TaskSchedulerService
                 return VerifyRegisteredTaskResult(spec, expectedLogon: "Password", fallbackUsed: false);
 
             _log.Add("TaskScheduler", spec.Name,
-                $"WakeタスクPassword登録失敗 kind={spec.Kind} tuner={spec.TunerName} coverage={spec.CoverageCount} at={spec.When:MM/dd HH:mm:ss} error={CompactOneLine(passwordResult.Output)} action=try_interactive_fallback rule=v0.11.131_wake_log_alignment_cleanup");
+                $"WakeタスクPassword登録失敗 kind={spec.Kind} tuner={spec.TunerName} coverage={spec.CoverageCount} at={spec.When:MM/dd HH:mm:ss} error={CompactOneLine(passwordResult.Output)} action=try_interactive_fallback rule=release_contract");
         }
 
         var fallbackUser = GetCurrentUserNameForTask();
@@ -989,12 +988,12 @@ public sealed class TaskSchedulerService
         if (!interactiveResult.Success)
         {
             _log.Add("TaskScheduler", spec.Name,
-                $"Wakeタスク登録失敗 kind={spec.Kind} tuner={spec.TunerName} coverage={spec.CoverageCount} at={spec.When:MM/dd HH:mm:ss} passwordFallback=FAILED interactiveFallback=FAILED error={CompactOneLine(interactiveResult.Output)} risk=sleep_resume_not_guaranteed rule=v0.11.131_wake_log_alignment_cleanup");
+                $"Wakeタスク登録失敗 kind={spec.Kind} tuner={spec.TunerName} coverage={spec.CoverageCount} at={spec.When:MM/dd HH:mm:ss} passwordFallback=FAILED interactiveFallback=FAILED error={CompactOneLine(interactiveResult.Output)} risk=sleep_resume_not_guaranteed rule=release_contract");
             return new WakeTaskApplyResult(spec, false);
         }
 
         _log.Add("TaskScheduler", spec.Name,
-            $"WakeタスクInteractiveFallback登録成功 kind={spec.Kind} tuner={spec.TunerName} coverage={spec.CoverageCount} at={spec.When:MM/dd HH:mm:ss} note=run_only_when_user_is_logged_on WakeToRun=true risk=lower_than_password_but_better_than_no_wake rule=v0.11.131_wake_log_alignment_cleanup");
+            $"WakeタスクInteractiveFallback登録成功 kind={spec.Kind} tuner={spec.TunerName} coverage={spec.CoverageCount} at={spec.When:MM/dd HH:mm:ss} note=run_only_when_user_is_logged_on WakeToRun=true risk=lower_than_password_but_better_than_no_wake rule=release_contract");
 
         return VerifyRegisteredTaskResult(spec, expectedLogon: "InteractiveToken", fallbackUsed: true);
     }
@@ -1012,7 +1011,7 @@ public sealed class TaskSchedulerService
         var runLevelEffective = runLevelReadback == "UNAVAILABLE" ? "ASSUMED_LEAST_PRIVILEGE" : runLevelReadback;
         var success = verify.QuerySucceeded && verify.WakeToRun && verify.StartWhenAvailable && logonOk;
         _log.Add("TaskScheduler", spec.Name,
-            $"Wakeタスク登録 kind={spec.Kind} tuner={spec.TunerName} coverage={spec.CoverageCount} at={spec.When:MM/dd HH:mm:ss} verify WakeToRun={(verify.WakeToRun ? "OK" : "NG")} StartWhenAvailable={(verify.StartWhenAvailable ? "OK" : "NG")} LogonType={verify.LogonType} expectedLogon={expectedLogon} RunLevelRequested=LeastPrivilege RunLevelReadback={runLevelReadback} RunLevelEffective={runLevelEffective} Query={(verify.QuerySucceeded ? "OK" : "NG")} fallbackUsed={fallbackUsed} action=wake_task_signal_contract rule=v0.11.131_wake_log_alignment_cleanup");
+            $"Wakeタスク登録 kind={spec.Kind} tuner={spec.TunerName} coverage={spec.CoverageCount} at={spec.When:MM/dd HH:mm:ss} verify WakeToRun={(verify.WakeToRun ? "OK" : "NG")} StartWhenAvailable={(verify.StartWhenAvailable ? "OK" : "NG")} LogonType={verify.LogonType} expectedLogon={expectedLogon} RunLevelRequested=LeastPrivilege RunLevelReadback={runLevelReadback} RunLevelEffective={runLevelEffective} Query={(verify.QuerySucceeded ? "OK" : "NG")} fallbackUsed={fallbackUsed} action=wake_task_signal_contract rule=release_contract");
         return new WakeTaskApplyResult(spec, success);
     }
 
@@ -1171,7 +1170,7 @@ public sealed class TaskSchedulerService
             var taskName = firstField.Trim().Trim('"').Trim();
             taskName = taskName.TrimStart('\\');
 
-            // v0.9.62:
+            // release_contract:
             // 新方式のWakeSlotだけをTvAIr管理対象として扱う。
             // 旧Primary/Backup/SystemEpg固定名は、権限不整合で削除・上書きできない場合があるため、
             // ここでは管理対象に含めず、新規WakeSlot登録を阻害させない。
@@ -1213,13 +1212,13 @@ public sealed class TaskSchedulerService
         if (staleCount > 0)
         {
             _log.Add("TaskScheduler", "WAKE_STALE_GENERATION_AUDIT",
-                $"result=INFO stale={staleCount} currentGeneration={activeGeneration} sample={CompactOneLine(string.Join(",", sample))} action=ignore_for_current_plan deleteInMainSync=False recording_blocking=False rule=v0.10.11_wake_plan_generation_slot_guard");
+                $"result=INFO stale={staleCount} currentGeneration={activeGeneration} sample={CompactOneLine(string.Join(",", sample))} action=ignore_for_current_plan deleteInMainSync=False recording_blocking=False rule=release_contract");
         }
     }
 
     private void CleanupStaleWakeSlotTasksAfterSuccessfulApply(string activeGeneration, HashSet<string> desiredNames, string reason)
     {
-        // v0.10.20:
+        // release_contract:
         // 旧世代WakeSlotのうち current_process でも削除できないものは、通常同期で毎回Delete/Disableを試すと
         // アクセス拒否と資格情報NGを増幅し、現行Wake登録を重くする。現行世代 desired を唯一の管理対象とし、
         // 旧世代は wake-active-generation / wake-active-slots により実行時に無効化される orphan として隔離する。
@@ -1302,7 +1301,7 @@ public sealed class TaskSchedulerService
             }
             else
             {
-                // v0.10.60: current-generation extra tasks are non-blocking as long as desired WakeSlots are preserved.
+                // release_contract: current-generation extra tasks are non-blocking as long as desired WakeSlots are preserved.
                 // Do not emit per-task identity diagnostics for those repeated access-denied failures in normal logs.
                 if (targetKind == "current_extra")
                 {
@@ -1359,7 +1358,7 @@ public sealed class TaskSchedulerService
             $"currentProcessUser={CompactOneLine(GetCurrentUserNameForTask())} isElevated={IsCurrentProcessElevated()} configuredUser={(string.IsNullOrWhiteSpace(_ini.TaskUserName) ? "(missing)" : "(configured)")} " +
             $"principalUser={CompactOneLine(principalUser)} logonType={CompactOneLine(logonType)} runLevel={CompactOneLine(runLevel)} author={CompactOneLine(author)} " +
             $"state={CompactOneLine(runtime.Status)} nextRun={CompactOneLine(runtime.NextRun)} lastRun={CompactOneLine(runtime.LastRun)} lastResult={CompactOneLine(runtime.LastResult)} " +
-            $"queryXml={(xmlResult.Success ? "OK" : "NG")} rule=v0.10.14_wake_credential_context_record_verdict_crosscheck");
+            $"queryXml={(xmlResult.Success ? "OK" : "NG")} rule=release_contract");
     }
 
     private HashSet<string> GetAllWakeSlotTaskNames()
@@ -1385,7 +1384,7 @@ public sealed class TaskSchedulerService
 
     private void CleanupWakeSlotOverflowIfNeeded(string activeGeneration, HashSet<string> desiredNames, string reason)
     {
-        // v0.10.20:
+        // release_contract:
         // allWakeSlots には削除不能な旧世代 orphan が含まれるため、上限超過判定にそのまま使わない。
         // リリース前Wake品質の正は、activeGeneration 配下で desired と照合できる managedActiveWakeSlots が
         // 「録画チューナー総数×2＋1」に収まること。旧世代は実行時slotId照合で無効化される別枠として隔離する。
@@ -1424,7 +1423,7 @@ public sealed class TaskSchedulerService
         }
 
         var desiredActivePreserved = activeWakeSlots.Count - activeExtra.Count >= desiredNames.Count;
-        // v0.11.131:
+        // release_contract:
         // activeExtra は「現行desiredは守れているが、同世代の余剰が残っている」監査であり、
         // overflow や plan changed と同じ警告名にしない。録画阻害ではないものは常に非阻害名へ寄せる。
         var currentExtraNonBlocking = activeExtra.Count > 0 && !activeOverflow;
@@ -1436,7 +1435,7 @@ public sealed class TaskSchedulerService
             : (activeOverflow ? $"active_overflow_{reason}" : $"active_plan_changed_{reason}");
         var action = currentExtraNonBlocking ? "safe_cleanup_active_extra_only_nonblocking" : "safe_cleanup_active_only";
         _log.Add("TaskScheduler", eventName,
-            $"result={(currentExtraNonBlocking ? "INFO_NONBLOCKING" : "INFO")} recordingTunerCount={recordingTunerCount} targetTaskCount={expectedLimit} emergencyLimit={emergencyLimit} allWakeSlots={allWakeSlots.Count} managedActiveWakeSlots={activeWakeSlots.Count} desired={desiredNames.Count} desiredActivePreserved={desiredActivePreserved} activeExtra={activeExtra.Count} orphanedStale={staleOrphan.Count} activeGeneration={activeGeneration} reason={reason} actualOverflow={activeOverflow} generationRotate=False action={action} recording_blocking=False formula=recording_tuners_target_emergency_limit rule=v0.11.131_wake_log_alignment_cleanup");
+            $"result={(currentExtraNonBlocking ? "INFO_NONBLOCKING" : "INFO")} recordingTunerCount={recordingTunerCount} targetTaskCount={expectedLimit} emergencyLimit={emergencyLimit} allWakeSlots={allWakeSlots.Count} managedActiveWakeSlots={activeWakeSlots.Count} desired={desiredNames.Count} desiredActivePreserved={desiredActivePreserved} activeExtra={activeExtra.Count} orphanedStale={staleOrphan.Count} activeGeneration={activeGeneration} reason={reason} actualOverflow={activeOverflow} generationRotate=False action={action} recording_blocking=False formula=recording_tuners_target_emergency_limit rule=release_contract");
 
         CleanupStaleWakeSlotTasksAfterSuccessfulApply(activeGeneration, desiredNames, reason: cleanupReason);
     }
@@ -1631,7 +1630,7 @@ public sealed class TaskSchedulerService
                                 || runtime.LastRun.Equals("なし", StringComparison.OrdinalIgnoreCase);
 
             _log.Add("TaskScheduler", "WAKE_RUNTIME_AUDIT",
-                $"task={taskName} scheduled={scheduledAt:MM/dd HH:mm:ss} overdueSec={(int)overdue.TotalSeconds} inDesired={stillDesired} status={runtime.Status} next={runtime.NextRun} lastRun={runtime.LastRun} lastResult={runtime.LastResult} suspectNeverRun={looksNeverRun} action={(stillDesired ? "keep" : "delete_if_unexpected")} rule=v0.5.68_wake_runtime_audit");
+                $"task={taskName} scheduled={scheduledAt:MM/dd HH:mm:ss} overdueSec={(int)overdue.TotalSeconds} inDesired={stillDesired} status={runtime.Status} next={runtime.NextRun} lastRun={runtime.LastRun} lastResult={runtime.LastResult} suspectNeverRun={looksNeverRun} action={(stillDesired ? "keep" : "delete_if_unexpected")} rule=release_contract");
         }
     }
 
@@ -1749,7 +1748,7 @@ public sealed class TaskSchedulerService
 
     private SchtasksResult DeleteTask(string taskName, bool suppressMaintenanceLog = false)
     {
-        // v0.10.20:
+        // release_contract:
         // ローカルWakeSlot削除は current_process のみを本線にする。
         // Delete失敗後の資格情報付きDelete/Disableは、/S localhost /U /P のローカル不可エラーを増幅するため通常同期では行わない。
         var args = $"/Delete /TN \"{taskName}\" /F";
@@ -1773,7 +1772,7 @@ public sealed class TaskSchedulerService
         var elevated = IsCurrentProcessElevated();
         var configured = string.IsNullOrWhiteSpace(userName) ? "(missing)" : "(configured)";
 
-        // v0.10.20:
+        // release_contract:
         // ローカルの /Delete /Change は現在プロセストークンだけで実行する。
         // /S localhost /U /P はローカルタスク削除の権限昇格ではなく、
         // 「ユーザー資格情報がローカル コンピューターでは使用できません」を誘発する別失敗経路なので使わない。
@@ -1826,7 +1825,7 @@ public sealed class TaskSchedulerService
 
     private void TryDeleteLegacyFixedTasks()
     {
-        // v0.9.62:
+        // release_contract:
         // 旧固定名Wakeタスクは、作成者/権限が現在のTvAIr実行コンテキストと食い違うと
         // Delete/Create がアクセス拒否になり、近接予約のWake登録を巻き込んで失敗させる。
         // 録画失敗回避を最優先し、ここでは削除を試みない。新規WakeSlot名前空間だけを使う。

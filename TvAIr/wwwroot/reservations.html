@@ -1,23 +1,23 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 
 <html lang="ja">
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>予約リスト — TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.0"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.0"/>
-<link href="/tvair-notification.css?v=1.0.0" rel="stylesheet"/>
-<script src="/tvair-theme.js?v=1.0.0"></script>
-<script src="/genre-shared.js?v=1.0.0"></script>
-<script src="/tvair-user-log.js?v=1.0.0"></script>
-<link href="/tvair-reservations.css?v=1.0.0" rel="stylesheet"/>
-<link href="/tvair-epg-panel.css?v=1.0.0" rel="stylesheet"/>
-<link href="/tvair-ui-foundation.css?v=1.0.0" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.0.0" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.0.0" rel="stylesheet"/>
-<link href="/tvair-list-module.css?v=1.0.0" rel="stylesheet"/>
-<link href="/tvair-user-log.css?v=1.0.0" rel="stylesheet"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.4"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.4"/>
+<link href="/tvair-notification.css?v=1.0.4" rel="stylesheet"/>
+<script src="/tvair-theme.js?v=1.0.4"></script>
+<script src="/genre-shared.js?v=1.0.4"></script>
+<script src="/tvair-user-log.js?v=1.0.4"></script>
+<link href="/tvair-reservations.css?v=1.0.4" rel="stylesheet"/>
+<link href="/tvair-epg-panel.css?v=1.0.4" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.0.4" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.0.4" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.0.4" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.0.4" rel="stylesheet"/>
+<link href="/tvair-user-log.css?v=1.0.4" rel="stylesheet"/>
 </head>
 <body class="tvair-non-program-page tvair-reservation-page">
 <div class="tvair-topnav" id="nav">
@@ -91,7 +91,7 @@ let taggedLoadedOnce = { newprogram: false, finalepisode: false };
 let currentFilter = 'active';
 let keywordLoading = false;
 let keywordLoadedOnce = false;
-// v1.0.0: reservation sub-tabs share toolbar styling, but functional actions are materialized by tab capability.
+// .0: reservation sub-tabs share toolbar styling, but functional actions are materialized by tab capability.
 // The operation log tab is a reservation-family list surface, not a genre-capable surface.
 const reservationTabContracts = Object.freeze({
   active:       Object.freeze({ listRole:'reservation', supportsGenreColor:true,  supportsLogActions:false, supportsRefresh:true }),
@@ -191,7 +191,7 @@ function updateReservationColumnWidthVars(){
 
   root.style.setProperty('--rsv-col-channel', `${width}px`);
   root.style.setProperty('--tvair-col-service', `${width}px`);
-  // v0.11.112: the log tab owns its own column balance. Do not let long
+  // release_contract: the log tab owns its own column balance. Do not let long
   // station names consume the log message column; keep the target readable
   // and give the remaining width to 内容.
   const logTargetWidth = Math.max(120, Math.min(width, 180));
@@ -355,7 +355,7 @@ function buildGenreRowAttr(item){
 function buildGenreRowClass(item, state = {}){
   if(!canShowGenreColorButtonForFilter(currentFilter) || !isGenreColorEnabled(currentFilter)) return '';
 
-  // v0.11.378 reservation row-state owner rebuild:
+  // release_contract reservation row-state owner rebuild:
   // genre color is a data/background attribute, never a higher-priority row state.
   // Disabled/cancelled/conflicted/log rows must not receive genre row owner classes;
   // otherwise the genre background can fight the disabled/cancelled/conflict tokens.
@@ -608,6 +608,33 @@ async function load(forceRender=false){
   updateReservationColumnWidthVars();
 }
 
+
+async function reloadReservationRowsOnly(forceRender=true){
+  // release_contract ReservationListActionRefreshContract:
+  // Row-level actions only need the reservation list as their immediate UI source.
+  // Logs, keyword groups, tagged program lists, and station metadata are refreshed by
+  // the normal polling path so button recovery is not blocked by full page reload work.
+  const reservationResponse = await fetch('/api/reservations', { cache:'no-store' }).catch(()=>null);
+  const nextData = await readJsonSafely(reservationResponse, []);
+  if(!reservationResponse || !reservationResponse.ok){
+    showToast('取得エラー: 予約一覧の取得に失敗しました。');
+    return false;
+  }
+  const nextSignature = stableSignature(nextData);
+  const changed = nextSignature !== lastReservationSignature;
+  allData = nextData;
+  rebuildMissingDuplicateConflictIds(allData);
+  updateReservationColumnWidthVars();
+  if(changed){
+    lastReservationSignature = nextSignature;
+    idleTick = 0;
+  }
+  if(hasRealtimeReservation(allData)) idleTick = 0;
+  if(forceRender || changed) render();
+  updateReservationColumnWidthVars();
+  return true;
+}
+
 async function refreshReservations(btn){
   if(btn) btn.disabled = true;
   const originalText = btn ? btn.textContent : '';
@@ -633,7 +660,7 @@ async function refreshReservations(btn){
 }
 
 function updateReservationScrollLayout(){
-  // v0.11.314: ListGrid owns the column contract. JS only supplies the semi-fixed
+  // release_contract: ListGrid owns the column contract. JS only supplies the semi-fixed
   // service/station width derived from the current known service set.
   updateReservationColumnWidthVars();
 }
@@ -716,7 +743,7 @@ function isProgramGuideMissingReservation(r){
   if(!r) return false;
   if(r.isProgramGuideMissing === true) return true;
   if(reservationOriginKind(r) === 'ProgramGuideMissingProgramRule') return true;
-  // v0.11.378 fallback only for older API payloads; canonical owner is ReservationOriginClassifier.
+  // release_contract fallback only for older API payloads; canonical owner is ReservationOriginClassifier.
   if(String(r.source||'').toLowerCase() !== 'program') return false;
   if(!Number(r.sourceRuleId||0)) return false;
   const title=String(r.titleDisplay||r.title||'').trim();
@@ -1238,7 +1265,7 @@ function render(){
     const titleClass = isEpg ? 'title-epg' : 'title-normal';
 
     // 操作ボタン（EPGエントリは操作なし）
-    // v32.68: scheduled の「解除」ボタンを撤去。予約の能動的意思表示は◯✗トグルに集約。
+    // scheduled の「解除」ボタンを撤去。予約の能動的意思表示は◯✗トグルに集約。
     // 横断的な予約リスト表示(予約一覧 / 自動検索予約一覧 / 局別 / 曜日別)で
     // 同じ◯✗状態を維持することに設計上の意味がある。
     const isManual = r.source === 'manual';
@@ -1246,7 +1273,7 @@ function render(){
     if(currentFilter === 'done'){
       actionBtn = `<span class="reservation-action-empty" data-state-role="empty-action-cell" data-state-context="reservation-list-row">—</span>`;
     } else if(isRecording){
-      // v0.11.178: プログラム予約も実行後は共通停止ルートで止められるようにする。
+      // release_contract: プログラム予約も実行後は共通停止ルートで止められるようにする。
       actionBtn = `<button class="act-btn reservation-action-button reservation-action-button--stop" data-program-action="stop" data-action-role="recording-stop" data-action-label="録画停止" data-action-context="reservation-list-row" onclick="stopRec(${r.id},this)">録画停止</button>`;
     } else if(isEpg || isProgram){
       actionBtn = `<span class="reservation-action-empty" data-state-role="empty-action-cell" data-state-context="reservation-list-row">—</span>`;
@@ -1328,7 +1355,7 @@ async function reserveTaggedProgram(ev, btn){
     let data = {};
     try{ data = await res.json(); }catch(_){ }
     if(res.ok){
-      await load();
+      await reloadReservationRowsOnly(true);
       scheduleNextPoll(true);
       showToast(`「${ev.title || '番組'}」を予約しました。`);
     }else{
@@ -1352,7 +1379,7 @@ async function toggleEnabled(id, newVal, btn){
       body: JSON.stringify({ isEnabled: newVal })
     });
     if(res.ok){
-      await load();
+      await reloadReservationRowsOnly(true);
       scheduleNextPoll(true);
     } else {
       const d = await res.json();
@@ -1367,7 +1394,7 @@ async function stopRec(id, btn){
   try{
     const res = await fetch(`/api/reservations/${id}/stop`, { method: 'POST' });
     const d = await res.json();
-    if(res.ok){ await load(); scheduleNextPoll(true); }
+    if(res.ok){ await reloadReservationRowsOnly(true); scheduleNextPoll(true); }
     else{ showToast(d.message || '停止に失敗しました。'); btn.disabled = false; btn.textContent = '録画停止'; }
   } catch(e){ showToast('通信エラー'); btn.disabled = false; btn.textContent = '録画停止'; }
 }
@@ -1377,7 +1404,7 @@ async function deleteRsv(id, btn){
   try{
     const res = await fetch(`/api/reservations/${id}`, { method: 'DELETE' });
     const d = await res.json();
-    if(res.ok){ await load(); scheduleNextPoll(true); }
+    if(res.ok){ await reloadReservationRowsOnly(true); scheduleNextPoll(true); }
     else{ showToast(d.message || '削除に失敗しました。'); btn.disabled = false; btn.textContent = '削除'; }
   } catch(e){ showToast('通信エラー'); btn.disabled = false; btn.textContent = '削除'; }
 }
@@ -1419,7 +1446,7 @@ async function cancelManualReservation(id, btn){
   try{
     const res = await fetch(`/api/reservations/${id}`, { method: 'DELETE' });
     const d = await res.json();
-    if(res.ok){ await load(); scheduleNextPoll(true); }
+    if(res.ok){ await reloadReservationRowsOnly(true); scheduleNextPoll(true); }
     else{ showToast(d.message || '予約取消に失敗しました。'); btn.disabled = false; btn.textContent = '予約取消'; }
   } catch(e){ showToast('通信エラー'); btn.disabled = false; btn.textContent = '予約取消'; }
 }
@@ -1507,7 +1534,7 @@ applyReservationListRole();
 updateGenreColorButton();
 load(true).then(() => { applyConflictJumpHint(); applyReservationListRole(); updateGenreColorButton(); updateReservationScrollLayout(); scheduleNextPoll(true); });
 
-/* v0.11.531 MenuLegacyEntryCleanupContract: page menu ownership is centralized in tvair-menu-spine.js. */
+/* release_contract MenuLegacyEntryCleanupContract: page menu ownership is centralized in tvair-menu-spine.js. */
 
 document.addEventListener('DOMContentLoaded', ()=>{
   applyReservationListRole();
@@ -1517,9 +1544,9 @@ document.addEventListener('DOMContentLoaded', ()=>{
 });
 
 </script>
-<script src="/tvair-notification.js?v=1.0.0"></script>
-<script src="/tvair-epg-run-contract.js?v=1.0.0"></script>
-<script src="/tvair-epg-widget.js?v=1.0.0"></script>
-<script src="/tvair-menu-spine.js?v=1.0.0"></script>
+<script src="/tvair-notification.js?v=1.0.4"></script>
+<script src="/tvair-epg-run-contract.js?v=1.0.4"></script>
+<script src="/tvair-epg-widget.js?v=1.0.4"></script>
+<script src="/tvair-menu-spine.js?v=1.0.4"></script>
 </body>
 </html>

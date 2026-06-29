@@ -1,4 +1,4 @@
-﻿using TvAIr.Channel;
+using TvAIr.Channel;
 using TvAIr.Core;
 using TvAIr.Epg;
 using TvAIr.Tuner;
@@ -428,7 +428,7 @@ public sealed class ReservationPresentationService
     {
         try
         {
-            // v0.11.393 ARIB raw-field: 予約行のジャンルも、同一EIDで取得済みの EPG 値だけを使う。
+            // release_contract ARIB raw-field: 予約行のジャンルも、同一EIDで取得済みの EPG 値だけを使う。
             // 同一時刻帯の既存イベントを探して色を補う経路は、EPG取得結果の見え方を曖昧にするため撤去。
             var ev = _epgStore.GetOne(reservation.NetworkId, reservation.TransportStreamId, reservation.ServiceId, reservation.EventId);
             if (!string.IsNullOrWhiteSpace(ev?.GenreCodes))
@@ -446,7 +446,7 @@ public sealed class ReservationPresentationService
 
     private string? ResolveGenreCodesFromRangeFallback(Reservation reservation)
     {
-        // v0.11.225:
+        // release_contract:
         // Some user-facing reservations, especially program/search-generated rows, can carry
         // incomplete triplet/EID metadata while still showing the correct service/title/time.
         // Do not let that leak into the UI as uncolored rows.  The fallback remains bounded
@@ -633,7 +633,7 @@ public sealed class ReservationPresentationService
         var title = NormalizeTitle(r.Title);
         if (!string.IsNullOrWhiteSpace(title)) return title;
 
-        // v0.11.437: Existing reservations may have been persisted while the legacy title
+        // release_contract: Existing reservations may have been persisted while the legacy title
         // field was empty.  The reservation list is a presentation surface, so recover the
         // visible title from the same DB raw-descriptor projection used by the program guide.
         if (r.EventId != 0)
@@ -653,7 +653,7 @@ public sealed class ReservationPresentationService
             }
         }
 
-        // v0.11.516 ReservationTitleDisplayContract:
+        // release_contract ReservationTitleDisplayContract:
         // raw Reservation.Title may intentionally remain empty for blank-title EPG events.
         // Reservation list / keyword reservation list are user-facing surfaces, so display
         // the same unavailable label as ProgramGuide without writing it back to storage.
@@ -727,7 +727,7 @@ public sealed class ReservationPresentationService
         if (string.Equals(current.Trim(), canonical.Trim(), StringComparison.Ordinal))
             return false;
 
-        // v0.11.330: Reservation.ServiceName may be polluted by EPG text/title fragments
+        // release_contract: Reservation.ServiceName may be polluted by EPG text/title fragments
         // such as 「詳しくはご案内」. A triplet match from ch2 is the authoritative
         // channel label for reservation list display.
         return true;
@@ -735,7 +735,7 @@ public sealed class ReservationPresentationService
 
     private static string GetSourceLabel(Reservation reservation)
     {
-        // v0.11.101: 予約もと列は「予約が発生した起点」という同一メタ属性だけを表示する。
+        // release_contract: 予約もと列は「予約が発生した起点」という同一メタ属性だけを表示する。
         // source名をそのまま表示名へ丸めない。
         //
         //   番組表   : 番組表直接予約 / キーワード検索結果からのユーザー手動予約 / 今すぐ録画

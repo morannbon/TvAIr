@@ -1,11 +1,11 @@
-﻿using TvAIr.Core;
+using TvAIr.Core;
 
 namespace TvAIr.Epg;
 
 /// <summary>
 /// EPG取得済みTSファイルからGR地デジロゴを抽出してDBに保存する。
 ///
-/// 取得方針 (v0.9.44):
+/// 取得方針 (release_contract):
 ///   - CDT (table_id=0xC8) は PID 0x0029 を本線とする (TVTest/EDCB実態寄せ)
 ///   - NIT (PID=0x0010) は到達確認・ONID補助のみ。CDT PID動的解決は行わない
 ///   - DSM-CC / DII / carousel 追跡は実装しない (スコープ外)
@@ -41,7 +41,7 @@ public sealed class EpgLogoExtractor
             var result = parser.Parse(tsFile, defaultNetworkId, defaultTransportStreamId);
 
             // PNG保存: (ONID, logo_id, logo_type) ごとに最新 version のみ保存。
-            // v0.9.66: 表示へ直結せず、まず取得できた type を在庫として保持する。
+            // release_contract: 表示へ直結せず、まず取得できた type を在庫として保持する。
             var saved = new Dictionary<(ushort NetworkId, int LogoId, int LogoType), string>();
             var savedLogoData = new Dictionary<(ushort NetworkId, int LogoId, int LogoType), CdtLogoData>();
             foreach (var logo in result.Logos
@@ -140,7 +140,7 @@ public sealed class EpgLogoExtractor
                 $"logosFound={result.Logos.Count} sdtMaps={result.ServiceMaps.Count} " +
                 $"savedPng={saved.Count} savedTypes=[{Safe(savedTypes)}] upserted={upserted} inventoryUpserted={inventoryUpserted} " +
                 $"inventoryTypes=[{Safe(inventoryTypeCounts)}] centerType5Services={centerReady} centerType2FallbackServices={centerFallback} " +
-                $"displayPhase=deferred rule=v0.9.66_logo_inventory_acquisition_only " +
+                $"displayPhase=deferred rule=release_contract " +
                 $"file={Safe(tsFile)}");
             return upserted;
         }
@@ -148,7 +148,7 @@ public sealed class EpgLogoExtractor
         {
             log.Add("SERVICE_LOGO_CAPTURE", $"TS{defaultTransportStreamId}",
                 $"result=ERROR error={ex.GetType().Name}:{Safe(ex.Message)} " +
-                $"file={Safe(tsFile)} rule=v0.9.44_gr_pid0029_nit_aux");
+                $"file={Safe(tsFile)} rule=release_contract");
             return 0;
         }
     }

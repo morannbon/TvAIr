@@ -1,4 +1,4 @@
-﻿using System.Security.Cryptography;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using TvAIr.Core;
@@ -20,7 +20,7 @@ internal sealed class PluginAllowItem
 
 internal sealed class PluginAllowListService
 {
-    // Alpha 0.2.6: 開発中はプラグインDLLの更新頻度が高いため、
+    // Alpha 1.0.0: 開発中はプラグインDLLの更新頻度が高いため、
     // SHA-256許可リスト検証は土台だけ残して実行時OFFにする。
     // 正式リリース段階で true 化、または設定ファイル制御へ移行する想定。
     private static readonly bool EnableHashAllowListCheck = false;

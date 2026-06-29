@@ -1,11 +1,11 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Management;
 using System.Text.RegularExpressions;
 
 namespace TvAIr.Tuner;
 
 /// <summary>
-/// v32.83(項目3): プロセス一覧から LIVE視聴中の TVTest.exe を検出し、
+/// プロセス一覧から LIVE視聴中の TVTest.exe を検出し、
 /// 使用中の (BonDriverファイル名, DID) ペアを返す。
 ///
 /// 判定条件:

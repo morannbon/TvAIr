@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 
 namespace TvAIr.Core;
 
@@ -30,7 +30,7 @@ public sealed class BroadcastClockService
 
     public TimeSpan GetValidOffsetOrZero()
     {
-        // v0.10.43: 放送波時刻は観測専用。TvAIr内部offsetとしても使用しない。
+        // release_contract: 放送波時刻は観測専用。TvAIr内部offsetとしても使用しない。
         return TimeSpan.Zero;
     }
 

@@ -1,5 +1,5 @@
-﻿/*
- * TvAIr shared EPG status widget - v0.11.306
+/*
+ * TvAIr shared EPG status widget - release_contract
  *
  * Purpose:
  * - Unify manual EPG operation and status panel across every browser page.
@@ -138,7 +138,7 @@
   function setDisplay(id, show){ const e=byId(id); if(e) e.style.display = show ? 'inline-block' : 'none'; }
   function setDisabled(id, disabled){ const e=byId(id); if(e) e.disabled = !!disabled; }
   function hidePanel(){ const p = byId(PANEL_ID); if(p) p.classList.remove('show'); }
-  // v0.11.178: EPG専用通知・標準alertを持たず、TvAIr共通の無音通知へ集約する。
+  // release_contract: EPG専用通知・標準alertを持たず、TvAIr共通の無音通知へ集約する。
   function hideStartBlockedNotice(){
     if(window.TvAIrNotification && typeof window.TvAIrNotification.hide === 'function'){
       window.TvAIrNotification.hide();
@@ -269,7 +269,7 @@
     setDisplay('epg-close-btn', true);
   }
   function renderCancelled(s){
-    // v0.11.359 EPG cancel status noise cleanup:
+    // release_contract EPG cancel status noise cleanup:
     // Show the cancelled state once only. Do not repeat it in title, group, and detail lines.
     setText('epg-title', 'EPG取得');
     setWidth('bar-inner','0%');

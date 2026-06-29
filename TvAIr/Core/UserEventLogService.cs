@@ -1,5 +1,5 @@
-﻿/* v0.11.128 remaining-core-release-readiness-closure: 予約/録画/Wake/EPG/表版ログの正本分離を縦横串Z軸で統合。 */
-/* v0.11.127 remaining-backlog-final-closure: WAKE/SameVersion/録画終了/取消/無効化のユーザー運用ログ整合を統合検証対象として固定。 */
+/* release_contract remaining-core-release-readiness-closure: 予約/録画/Wake/EPG/表版ログの正本分離を縦横串Z軸で統合。 */
+/* release_contract remaining-backlog-final-closure: WAKE/SameVersion/録画終了/取消/無効化のユーザー運用ログ整合を統合検証対象として固定。 */
 ﻿using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
@@ -10,9 +10,9 @@ namespace TvAIr.Core;
 /// ユーザー向けの軽量運用ログ。
 /// /api/log の開発診断ログとは別に、不具合報告で貼れる最小限のイベントだけを保存する。
 ///
-/// v0.11.116: 予約追加/取消/有効化/無効化の起点分類を固定し、内部予約を通常ユーザー運用ログから分離する。
-/// v0.11.119: 取消・無効/有効化系のユーザー運用ログ詳細status/状態メタ属性を追加系と同粒度へ整理。
-/// v0.11.126: SameVersionProcessStart / WAKE / DROP / 軽微品質ログを通常ユーザー運用ログから閉じ、報告用正本を維持。
+/// release_contract: 予約追加/取消/有効化/無効化の起点分類を固定し、内部予約を通常ユーザー運用ログから分離する。
+/// release_contract: 取消・無効/有効化系のユーザー運用ログ詳細status/状態メタ属性を追加系と同粒度へ整理。
+/// release_contract: SameVersionProcessStart / WAKE / DROP / 軽微品質ログを通常ユーザー運用ログから閉じ、報告用正本を維持。
 /// - ログタブ: ユーザーが日常運用で確認する短い事実だけを表示する。
 /// - 報告用コピー: 同じ UserOperationEvent のメタ属性を展開する。/api/log の丸写しではない。
 /// - /api/log: 裏版・開発診断用。表版では切ってもログタブ/報告用コピーが残る構造にする。
@@ -167,7 +167,7 @@ public sealed class UserEventLogService
         var operationId = BuildOperationId("APP_START", createdAt ?? DateTime.Now);
         var versionState = ResolveAppVersionStory(appVersion);
 
-        // v0.11.137:
+        // release_contract:
         // 実プロセス起動は同一バージョンでもユーザー運用ログへ残す。
         // Wakeシグナルや既存プロセス通知はここへ来ない入口側で分離し、
         // ここでは「TvAIr.exe が実際に起動した事実」を表ログの正本として扱う。
@@ -923,7 +923,7 @@ public sealed class UserEventLogService
 
     public void AddWakeRegistrationFailed(Reservation? reservation, int failedCount, string? detail = null, DateTime? createdAt = null)
     {
-        // v0.11.125:
+        // release_contract:
         // Wake登録失敗はユーザー運用ログへ直接出さない。Task Scheduler の AccessDenied/failed/kept は
         // /api/log 側の診断情報に閉じ、ユーザー運用ログは録画本線の実失敗・成功だけを正本にする。
         // ここで追加すると同じ予約に対して繰り返し不安ログが出るため、明示的に no-op とする。
@@ -1044,7 +1044,7 @@ public sealed class UserEventLogService
 
     private static ReservationAddRoute ClassifyReservationAddRoute(Reservation reservation)
     {
-        // v0.11.116: 予約追加/取消/有効化/無効化ログは source 文字列の見た目ではなく、予約の性質から共通分類する。
+        // release_contract: 予約追加/取消/有効化/無効化ログは source 文字列の見た目ではなく、予約の性質から共通分類する。
         // SystemEpg / 録画前EPG子予約などの内部予約は通常ユーザー運用ログへ出さない。
         if (reservation.Source == ReservationSource.Epg)
         {
@@ -1144,7 +1144,7 @@ public sealed class UserEventLogService
         var title = NormalizeOperationText(reservation.Title);
         if (!string.IsNullOrWhiteSpace(title)) return title;
 
-        // v0.11.466: 自動検索予約の個別有効/無効ログでは、古い予約や投影由来の予約で
+        // release_contract: 自動検索予約の個別有効/無効ログでは、古い予約や投影由来の予約で
         // Reservation.Title が空になることがある。録画/予約本線は触らず、ユーザー運用ログ表示だけ
         // EPG raw DB の同一 event identity から番組名を補完する。
         if (reservation.NetworkId == 0 || reservation.TransportStreamId == 0 || reservation.ServiceId == 0 || reservation.EventId == 0)
@@ -1349,7 +1349,7 @@ public sealed class UserEventLogService
 
     private void CleanupResolvedRecordingInterrupted(LogEntry entry)
     {
-        // v0.11.96:
+        // release_contract:
         // 起動時復旧に成功した場合でも、ユーザー向けには
         // 「録画が中断されました(STOP) → 録画を再開しました(OK)」の流れを残す。
         // ここで STOP 行を消すと、TvAIr起動ログだけが唐突に見えるため削除しない。
@@ -1417,7 +1417,7 @@ public sealed class UserEventLogService
             using var con = db.Open();
             using var cmd = con.CreateCommand();
 
-            // v0.11.86:
+            // release_contract:
             // チェーン境界では内部的な一時失敗後に再試行成功することがある。
             // ユーザー向けログでは後続成功が確認できた失敗を残さない。
             if (!string.IsNullOrWhiteSpace(target) && target != "—")
@@ -1716,12 +1716,12 @@ public sealed class UserEventLogService
         var upperTitle = title.ToUpperInvariant();
         var upperMsg = msg.ToUpperInvariant();
 
-        // v0.11.101:
+        // release_contract:
         // ユーザー向けログは event 名から直接文言を作らない。
         // いったん Origin/Role/Visibility/Actionability を持つ UserEventStory に分類し、
         // その結果だけを表示へ変換する。判定不能な内部シグナルは出さない。
 
-        // v0.11.109:
+        // release_contract:
         // Wake/EPG/録画前EPG/チェーン/プラグインのユーザー運用ログは本線から直接発行する。
         // /api/log 由来の詳細ログを UserOperationEvent 正本へ変換しない。
         if (upperEv == "WAKE_REGISTER_CRITICAL") return null;
@@ -1757,7 +1757,7 @@ public sealed class UserEventLogService
 
         if (upperEv == "PLUGIN") return null;
 
-        // v0.11.109:
+        // release_contract:
         // 予約/録画のユーザー運用ログは ReservationStore/録画本線から直接発行する。
         // RESERVATION_AUDIT は /api/log 向け監査ログであり、TrimForAudit 済み文字列を含むため、
         // UserOperationEvent 正本へ変換しない。
@@ -1767,7 +1767,7 @@ public sealed class UserEventLogService
 
         if (upperEv == "REC_INTERRUPTED_DETECTED")
         {
-            // v0.11.137:
+            // release_contract:
             // 起動時復旧の録画中断は ReservationStore 側で予約状態を Failed へ終端化し、
             // UserOperationEvent も REC_INTERRUPTED として直接発行する。
             // ここで開発ログから推測生成すると INFO/STOP と ERROR/FAILED が二重化するため出さない。
@@ -2274,7 +2274,7 @@ public sealed class UserEventLogService
             if (obj is null || obj == DBNull.Value) return true;
             if (!DateTime.TryParse(Convert.ToString(obj), out var last)) return true;
 
-            // v0.11.101:
+            // release_contract:
             // APP_LIFECYCLE START は「起動」という起点メタ属性だけではユーザー表示可否を決めない。
             // 直近の録画/予約/EPGストーリーが既に存在する場合、Wake/Recovery/single-instance
             // の内部シグナルとして扱い、ユーザー向けには出さない。

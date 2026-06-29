@@ -1,4 +1,4 @@
-﻿/* v0.3.37 RECORDING_START_DUE_QUIET_GUARD: 録画停止中/停止直後の録画開始系も共通ゲートで抑制する。 */
+/* release_contract RECORDING_START_DUE_QUIET_GUARD: 録画停止中/停止直後の録画開始系も共通ゲートで抑制する。 */
 using System;
 using System.Threading;
 
@@ -8,7 +8,7 @@ namespace TvAIr.Schedule
     /// 録画停止中に ALLOC_ROUTE / Wake再構築等が侵入して BonDriver へ
     /// 多重アクセスすることを防ぐための停止フェーズゲート。
     ///
-    /// v0.3.36:
+    /// release_contract:
     /// 停止フェーズ中の遅延に加え、停止フェーズ終了直後の短い静穏期間も
     /// 共通入口で抑制する。停止処理自身が行う「停止後の1回だけの再評価」は
     /// ReservationAllocationRouteRequest.BypassStopPhaseGate で明示的に通す。

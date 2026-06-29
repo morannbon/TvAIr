@@ -1,4 +1,4 @@
-﻿using TvAIr.Core;
+using TvAIr.Core;
 
 namespace TvAIr.Schedule;
 
@@ -30,7 +30,7 @@ public sealed record ReservationOriginClassification(
     string Reason);
 
 /// <summary>
-/// v0.11.370: 予約元と同定軸の分類を一箇所へ集約する。
+/// release_contract: 予約元と同定軸の分類を一箇所へ集約する。
 /// ここはチューナー割当を行わず、ALLOC_ROUTE/TUNER_ALLOCへ渡す前の意味付けだけを扱う。
 /// </summary>
 public static class ReservationOriginClassifier

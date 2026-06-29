@@ -1,4 +1,4 @@
-﻿using TvAIrPlugin;
+using TvAIrPlugin;
 
 namespace TvAIr.Plugin;
 
@@ -11,7 +11,7 @@ public sealed class PluginActionTokenStore
     private readonly object _gate = new();
     private readonly Dictionary<string, PluginActionTokenEntry> _tokens = new(StringComparer.OrdinalIgnoreCase);
     private readonly TimeSpan _ttl = TimeSpan.FromMinutes(30);
-    // v0.11.36: host-managed tool window は本体側safe-event host scriptから定期keepaliveされる。
+    // release_contract: host-managed tool window は本体側safe-event host scriptから定期keepaliveされる。
     // 同じHTMLに埋め込まれた既存tokenを延命し、長時間無操作後のtoken_not_found/expiredを避ける。
 
     public PluginActionTokenEntry Issue(string pluginId, string routeSegment)

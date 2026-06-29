@@ -1,4 +1,4 @@
-﻿/* TvAIr Settings Help Surface v0.11.610
+/* TvAIr Settings Help Surface release_contract
    Scope: help.html only.
    Contract: one shared help page for hamburger/context menu entry; theme colors come from role tokens. */
 
@@ -66,11 +66,11 @@ body.in-modal .setting-card dl{grid-template-columns:96px minmax(0,1fr)}
 }
 
 
-/* v0.11.678: in-modal layout already has higher specificity than the generic max-width:900px help layout, so no duplicate modal media override is needed here. */
+/* release_contract: in-modal layout already has higher specificity than the generic max-width:900px help layout, so no duplicate modal media override is needed here. */
 @media (max-width:760px){
   body.in-modal .help-sidebar{flex-basis:150px}
   body.in-modal .setting-card,
   body.in-modal .setting-card.compact{grid-template-columns:1fr}
 }
 
-/* v0.11.610: right-pane cards use a single shared pane width across hamburger modal and context/direct help. */
+/* release_contract: right-pane cards use a single shared pane width across hamburger modal and context/direct help. */

@@ -18,6 +18,16 @@ public sealed record EpgUpsertMergeStats(
     public static readonly EpgUpsertMergeStats Empty = new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 }
 
+public sealed record EpgStaleRetireStats(
+    int Services,
+    int IncomingEvents,
+    int DeletedRows,
+    DateTime? ScopeStart,
+    DateTime? ScopeEnd)
+{
+    public static readonly EpgStaleRetireStats Empty = new(0, 0, 0, null, null);
+}
+
 /// <summary>
 /// EPG取得データだけを保持するキャッシュ。
 /// 予約状態・自動検索結果・旧DB互換キーはここに持たない。
@@ -174,6 +184,71 @@ public sealed class EpgStore
 
         tx.Commit();
         return count;
+    }
+
+    /// <summary>
+    /// 今回取得に成功した service/time range を正本として、同一取得スコープ内に残る旧 event 行を退場させる。
+    /// 値の補完・タイトル合成・予約タイトル借用は行わない。
+    /// </summary>
+    public EpgStaleRetireStats RetireStaleEventsForCapturedScope(IEnumerable<EpgEvent> capturedEvents)
+    {
+        var normalized = capturedEvents
+            .Where(e => e.Start != DateTime.MinValue && e.End != DateTime.MinValue && e.End > e.Start)
+            .Select(NormalizeEventForStorage)
+            .ToList();
+        if (normalized.Count == 0) return EpgStaleRetireStats.Empty;
+
+        var groups = normalized
+            .GroupBy(e => new { e.NetworkId, e.TransportStreamId, e.ServiceId })
+            .ToList();
+
+        using var con = db.Open();
+        using var tx = con.BeginTransaction();
+        var deleted = 0;
+        DateTime? scopeStart = null;
+        DateTime? scopeEnd = null;
+
+        foreach (var g in groups)
+        {
+            var ids = g.Select(e => e.EventId).Distinct().OrderBy(x => x).ToList();
+            if (ids.Count == 0) continue;
+
+            var start = g.Min(e => e.Start);
+            var end = g.Max(e => e.End);
+            if (end <= start) continue;
+
+            scopeStart = !scopeStart.HasValue || start < scopeStart.Value ? start : scopeStart;
+            scopeEnd = !scopeEnd.HasValue || end > scopeEnd.Value ? end : scopeEnd;
+
+            using var cmd = con.CreateCommand();
+            cmd.Transaction = tx;
+            var idParams = new List<string>();
+            for (var i = 0; i < ids.Count; i++)
+            {
+                var name = $"$eid{i}";
+                idParams.Add(name);
+                cmd.Parameters.AddWithValue(name, (int)ids[i]);
+            }
+
+            cmd.CommandText = $"""
+                DELETE FROM epg_events
+                WHERE network_id = $nid
+                  AND transport_stream_id = $tsid
+                  AND service_id = $sid
+                  AND end_time > $scopeStart
+                  AND start_time < $scopeEnd
+                  AND event_id NOT IN ({string.Join(",", idParams)});
+                """;
+            cmd.Parameters.AddWithValue("$nid", (int)g.Key.NetworkId);
+            cmd.Parameters.AddWithValue("$tsid", (int)g.Key.TransportStreamId);
+            cmd.Parameters.AddWithValue("$sid", (int)g.Key.ServiceId);
+            cmd.Parameters.AddWithValue("$scopeStart", start.ToString("O"));
+            cmd.Parameters.AddWithValue("$scopeEnd", end.ToString("O"));
+            deleted += cmd.ExecuteNonQuery();
+        }
+
+        tx.Commit();
+        return new EpgStaleRetireStats(groups.Count, normalized.Count, deleted, scopeStart, scopeEnd);
     }
 
     private static EpgEvent NormalizeEventForStorage(EpgEvent source)

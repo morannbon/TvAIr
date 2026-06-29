@@ -1,4 +1,4 @@
-﻿using TvAIr.Core;
+using TvAIr.Core;
 
 namespace TvAIr.Tuner;
 
@@ -50,12 +50,12 @@ public sealed class ExternalTunerLeaseService
                     if (compatibility.CanReuse)
                     {
                         _log.Add("EXTERNAL_TUNER", "Reuse",
-                            $"source={source} clientId={clientId} leaseId={existing.LeaseId} group={existing.Group} requestedGroup={requiredGroup} viewerProfile={existing.ViewerProfileId} requestedViewerProfile={viewerProfileId} viewerProfileFrame={request.ViewerProfileFrameIndex} tvTestPathKey={Safe(existing.TvTestPathKey)} tuner={existing.TunerName} did={existing.Did} bonDriver={existing.BonDriverFileName} rule=v0.11.72_viewer_profile_contract_cleanup");
+                            $"source={source} clientId={clientId} leaseId={existing.LeaseId} group={existing.Group} requestedGroup={requiredGroup} viewerProfile={existing.ViewerProfileId} requestedViewerProfile={viewerProfileId} viewerProfileFrame={request.ViewerProfileFrameIndex} tvTestPathKey={Safe(existing.TvTestPathKey)} tuner={existing.TunerName} did={existing.Did} bonDriver={existing.BonDriverFileName} rule=release_contract");
                         return ExternalTunerLeaseResult.Ok(existing.ToDto(), reused: true);
                     }
 
                     _log.Add("EXTERNAL_TUNER", "ReuseBlocked",
-                        $"source={source} clientId={clientId} leaseId={existing.LeaseId} existingGroup={existing.Group} requestedGroup={requiredGroup} existingViewerProfile={existing.ViewerProfileId} requestedViewerProfile={viewerProfileId} viewerProfileFrame={request.ViewerProfileFrameIndex} existingTvTestPathKey={Safe(existing.TvTestPathKey)} requestedTvTestPathKey={Safe(tvTestPathKey)} existingBonDriver={existing.BonDriverFileName} requiredBonDriver={Safe(request.RequiredBonDriverFileName)} reason={compatibility.Reason} action=release_and_reassign rule=v0.11.72_viewer_profile_contract_cleanup");
+                        $"source={source} clientId={clientId} leaseId={existing.LeaseId} existingGroup={existing.Group} requestedGroup={requiredGroup} existingViewerProfile={existing.ViewerProfileId} requestedViewerProfile={viewerProfileId} viewerProfileFrame={request.ViewerProfileFrameIndex} existingTvTestPathKey={Safe(existing.TvTestPathKey)} requestedTvTestPathKey={Safe(tvTestPathKey)} existingBonDriver={existing.BonDriverFileName} requiredBonDriver={Safe(request.RequiredBonDriverFileName)} reason={compatibility.Reason} action=release_and_reassign rule=release_contract");
                     entryReleaseUnsafe(existing);
                     _leases.Remove(existing.LeaseId);
                 }
@@ -66,7 +66,7 @@ public sealed class ExternalTunerLeaseService
             {
                 var status = _tunerPool.GetStatusSummary();
                 _log.Add("EXTERNAL_TUNER", "Denied",
-                    $"source={source} clientId={clientId ?? "-"} group={group} reason=no_free_tuner status={status} rule=v0.10.92_plugin_viewer_api_cleanup");
+                    $"source={source} clientId={clientId ?? "-"} group={group} reason=no_free_tuner status={status} rule=release_contract");
                 return ExternalTunerLeaseResult.Denied("tunerUnavailable", status);
             }
 
@@ -97,7 +97,7 @@ public sealed class ExternalTunerLeaseService
             _leases[id] = entry;
 
             _log.Add("EXTERNAL_TUNER", "Granted",
-                $"source={source} clientId={clientId ?? "-"} leaseId={id} group={group} viewerProfile={viewerProfileId} viewerProfileName={Safe(viewerProfileName)} viewerProfileFrame={request.ViewerProfileFrameIndex} tvTestPathKey={Safe(tvTestPathKey)} tuner={lease.Name} did={lease.Did} slot={lease.SlotIndex} bonDriver={lease.BonDriverFileName} rule=v0.11.72_viewer_profile_contract_cleanup");
+                $"source={source} clientId={clientId ?? "-"} leaseId={id} group={group} viewerProfile={viewerProfileId} viewerProfileName={Safe(viewerProfileName)} viewerProfileFrame={request.ViewerProfileFrameIndex} tvTestPathKey={Safe(tvTestPathKey)} tuner={lease.Name} did={lease.Did} slot={lease.SlotIndex} bonDriver={lease.BonDriverFileName} rule=release_contract");
             return ExternalTunerLeaseResult.Ok(entry.ToDto(), reused: false);
         }
     }
@@ -112,7 +112,7 @@ public sealed class ExternalTunerLeaseService
             entry.AttachViewerProcess(processId, channelArgument ?? string.Empty, state, launchResult, tuneResult, activateResult);
             entry.UpdateTarget(networkId, transportStreamId, serviceId, channelSpace, channelIndex);
             _log.Add("EXTERNAL_TUNER", "ViewerProcessAttached",
-                $"leaseId={entry.LeaseId} pid={processId} viewerProfile={entry.ViewerProfileId} viewerProfileName={Safe(entry.ViewerProfileName)} tvTestPathKey={Safe(entry.TvTestPathKey)} tuner={entry.TunerName} did={entry.Did} state={state} nid={(networkId.HasValue ? networkId.Value.ToString() : "-")} tsid={(transportStreamId.HasValue ? transportStreamId.Value.ToString() : "-")} sid={(serviceId.HasValue ? serviceId.Value.ToString() : "-")} channelArgument={Safe(channelArgument)} rule=v0.11.52_viewer_profile_contract");
+                $"leaseId={entry.LeaseId} pid={processId} viewerProfile={entry.ViewerProfileId} viewerProfileName={Safe(entry.ViewerProfileName)} tvTestPathKey={Safe(entry.TvTestPathKey)} tuner={entry.TunerName} did={entry.Did} state={state} nid={(networkId.HasValue ? networkId.Value.ToString() : "-")} tsid={(transportStreamId.HasValue ? transportStreamId.Value.ToString() : "-")} sid={(serviceId.HasValue ? serviceId.Value.ToString() : "-")} channelArgument={Safe(channelArgument)} rule=release_contract");
             return true;
         }
     }
@@ -288,7 +288,7 @@ public sealed class ExternalTunerLeaseRequest
     public int? ProcessId { get; set; }
     public string? Note { get; set; }
 
-    // v0.10.37: Viewer lease reuse compatibility contract.
+    // release_contract: Viewer lease reuse compatibility contract.
     // Existing leases are reusable only when the requested viewing target is compatible
     // with the already leased tuner class.  This prevents a GR viewer lease from being
     // reused for BS/CS viewerStart requests that require a BSCS tuner/BonDriver.
@@ -300,13 +300,13 @@ public sealed class ExternalTunerLeaseRequest
     public int? ChannelSpace { get; set; }
     public int? ChannelIndex { get; set; }
 
-    // v0.11.52: Viewer profile identity is part of the viewer reuse contract.
+    // release_contract: Viewer profile identity is part of the viewer reuse contract.
     // Different viewer profiles must not share an existing viewer process or lease.
     public string? ViewerProfileId { get; set; }
     public string? ViewerProfileName { get; set; }
     public string? TvTestPathKey { get; set; }
 
-    // v0.11.72: viewerProfile はautoを内部状態へ残さず、放送波を跨いだTVTest枠IDとして扱う。
+    // release_contract: viewerProfile はautoを内部状態へ残さず、放送波を跨いだTVTest枠IDとして扱う。
     // tvtest1 + GR はGR側1番目のViewingチューナー、tvtest1 + BSCS はBSCS側1番目のViewingチューナーを使う。
     public int ViewerProfileFrameIndex { get; set; }
 }

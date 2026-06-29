@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Core;
+namespace TvAIr.Core;
 
 /// <summary>
 /// TvAIr.ini を読み書きするサービス。
@@ -33,7 +33,7 @@ public sealed class IniSettingsService
     public int    PostEndMarginSeconds  { get; private set; } = 30;
     public int    RecDelaySeconds       { get; private set; } = 10;
     public int    WakeMinutesBefore     { get; private set; } = 10;
-    /// <summary>v32.85新設: スリープ復帰の余裕秒数。EPG確認起床と録画起床の両方に加算される。</summary>
+    /// <summary>新設: スリープ復帰の余裕秒数。EPG確認起床と録画起床の両方に加算される。</summary>
     public int    WakeAdditionalSeconds { get; private set; } = 30;
     /// <summary>同一物理チューナースロットを連続で確保する際の最小間隔（ミリ秒）。0で無効。
     /// BonDriverのClose/Open競合を緩和するための TunerSlotCooldownMs。</summary>
@@ -59,19 +59,19 @@ public sealed class IniSettingsService
     public Dictionary<string, Dictionary<string, string>> ThemeGenrePalettes { get; private set; } = CreateDefaultThemeGenrePalettes();
 
     // ─── EPG worker launch timing / tuner cooldown policy ───
-    /// <summary>項目6: EPG用TVTestプロセスをBelowNormal優先度で起動するか（true=有効、デフォルトtrue）。
+    /// <summary>EPG用TVTestプロセスをBelowNormal優先度で起動するか（true=有効、デフォルトtrue）。
     /// LIVE視聴TVTestと同優先度競合によるカクつきを軽減。</summary>
     public bool   EpgUseBelowNormalPriority    { get; private set; } = true;
-    /// <summary>項目1+7: 同時並列起動するチューナー間のジョブ投入間隔（ミリ秒）。
+    /// <summary>同時並列起動するチューナー間のジョブ投入間隔（ミリ秒）。
     /// 並列上限内であってもこの間隔ずつ起動を遅らせて初期化集中を分散。0で無効。デフォルト2000ms。</summary>
     public int    EpgLaunchStaggerMs           { get; private set; } = 2000;
-    /// <summary>項目2: TVTest起動成功後にチャンネル安定化を待つ時間（ミリ秒）。
+    /// <summary>TVTest起動成功後にチャンネル安定化を待つ時間（ミリ秒）。
     /// 起動直後の連続CmdSetCh発火を抑制。0で無効。デフォルト4000ms。</summary>
     public int    EpgPostLaunchStabilizeMs     { get; private set; } = 4000;
-    /// <summary>項目3: LIVE視聴中(視聴用TVTest=/recなしで起動された)チューナーをEPG取得対象から除外する。
+    /// <summary>LIVE視聴中(視聴用TVTest=/recなしで起動された)チューナーをEPG取得対象から除外する。
     /// true=プロセス一覧でTVTest.exeを検出し /d と /DID から該当チューナーを除外。デフォルトtrue。</summary>
     public bool   EpgExcludeLiveTvTest         { get; private set; } = true;
-    /// <summary>項目5: 同一TSのattempt即時リトライを無効化する。
+    /// <summary>同一TSのattempt即時リトライを無効化する。
     /// true=失敗局は再巡回パスのみで対応（即時の負荷スパイク回避）。デフォルトtrue。</summary>
     public bool   EpgDisableImmediateRetry     { get; private set; } = true;
 
@@ -222,7 +222,7 @@ public sealed class IniSettingsService
         var runtimeTvTestExecutablePath = TvTestExecutablePath;
         var runtimeViewingTvTestExecutablePath = ViewingTvTestExecutablePath;
         var runtimeBonDriverDirectory = BonDriverDirectory;
-        // v0.11.681: ch2/ChSet はチューナーRuntimeTopologyではなくChannelMap契約。
+        // release_contract: ch2/ChSet はチューナーRuntimeTopologyではなくChannelMap契約。
         // チューナー変更でRuntimeTopology反映を保留する場合でも、保存済みChannelMapはChannelFileLoader側でcache key/invalidateにより反映する。
         var runtimeUseMinOption = UseMinOption;
         var runtimeUseNodshowOption = UseNodshowOption;
@@ -300,7 +300,7 @@ public sealed class IniSettingsService
                 Role = NormalizeTunerRole(t.Role),
             };
         }).ToList();
-        // v0.11.95: チューナー変更は再起動必須。
+        // release_contract: チューナー変更は再起動必須。
         // iniファイルへは保存するが、稼働中のRuntimeTopology(TunerPool/Wake/EPG/PluginUiContext/ExternalTuner)へは即時反映しない。
         Tuners = applyTunerTopologyToRuntime ? persistedTuners : runtimeTunersBeforeSave;
         IsFirstRun           = false;
@@ -376,7 +376,7 @@ public sealed class IniSettingsService
             $"EpgDisableImmediateRetry  = {(EpgDisableImmediateRetry ? "true" : "false")}",
             "",
             "[UiGenreColors]",
-            "; v0.11.302: ジャンル色はテーマ連動。LightはTvRock標準色、Darkはダークテーマ専用色。",
+            "; release_contract: ジャンル色はテーマ連動。LightはTvRock標準色、Darkはダークテーマ専用色。",
         });
 
         foreach (var kv in ThemeGenrePalettes["light"].OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase))
@@ -692,7 +692,7 @@ public sealed class IniSettingsDto
     public int    PostEndMarginSeconds  { get; set; } = 30;
     public int    RecDelaySeconds       { get; set; } = 10;
     public int    WakeMinutesBefore     { get; set; } = 10;
-    /// <summary>v32.85新設: スリープ復帰の余裕秒数。</summary>
+    /// <summary>新設: スリープ復帰の余裕秒数。</summary>
     public int    WakeAdditionalSeconds { get; set; } = 30;
     /// <summary>同一物理チューナースロットを連続で確保する際の最小間隔（ミリ秒）。0で無効。</summary>
     public int    TunerSlotCooldownMs   { get; set; } = 15000;
@@ -712,15 +712,15 @@ public sealed class IniSettingsDto
     public Dictionary<string, Dictionary<string, string>> ThemeGenrePalettes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     // EPG worker launch timing / tuner cooldown policy
-    /// <summary>項目6: EPG用TVTestをBelowNormal優先度で起動</summary>
+    /// <summary>EPG用TVTestをBelowNormal優先度で起動</summary>
     public bool   EpgUseBelowNormalPriority { get; set; } = true;
-    /// <summary>項目1+7: 並列チューナー間のジョブ投入インターバル(ms)</summary>
+    /// <summary>並列チューナー間のジョブ投入インターバル(ms)</summary>
     public int    EpgLaunchStaggerMs        { get; set; } = 2000;
-    /// <summary>項目2: TVTest起動後の安定化待機(ms)</summary>
+    /// <summary>TVTest起動後の安定化待機(ms)</summary>
     public int    EpgPostLaunchStabilizeMs  { get; set; } = 4000;
-    /// <summary>項目3: LIVE視聴中チューナーをEPGから除外</summary>
+    /// <summary>LIVE視聴中チューナーをEPGから除外</summary>
     public bool   EpgExcludeLiveTvTest      { get; set; } = true;
-    /// <summary>項目5: 同一TS内 attempt即時リトライ無効化(再巡回パスのみ使用)</summary>
+    /// <summary>同一TS内 attempt即時リトライ無効化(再巡回パスのみ使用)</summary>
     public bool   EpgDisableImmediateRetry  { get; set; } = true;
 
 

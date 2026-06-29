@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <Platforms>AnyCPU;x86;x64</Platforms>
@@ -8,11 +8,11 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>TvAIrPlugin</RootNamespace>
     <AssemblyName>TvAIrPlugin</AssemblyName>
-    <Version>1.0.4</Version>
-    <FileVersion>0.11.315.0</FileVersion>
-    <AssemblyVersion>1.0.4.0</AssemblyVersion>
-    <InformationalVersion>0.11.315-plugin-host-contract-foundation</InformationalVersion>
-    <!-- 実装を持たない契約定義専用 DLL。AssemblyVersionは既存プラグイン互換のため固定する。 -->
+    <Version>$(TvAIrPluginSdkVersion)</Version>
+    <FileVersion>$(TvAIrFileVersion)</FileVersion>
+    <AssemblyVersion>$(TvAIrPluginSdkAssemblyVersion)</AssemblyVersion>
+    <InformationalVersion>$(TvAIrPluginSdkVersion)</InformationalVersion>
+    <!-- TvAIr 1.0.0 を Plugin SDK の新しい互換開始点とする。旧0.x SDK互換は維持しない。 -->
     <OutputType>Library</OutputType>
   </PropertyGroup>
 

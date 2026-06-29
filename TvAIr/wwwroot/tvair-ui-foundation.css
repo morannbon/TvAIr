@@ -1,12 +1,12 @@
-﻿/* TvAIr UI Foundation v0.11.375
+/* TvAIr UI Foundation release_contract
    Active UI color foundation. Legacy theme/color/css files are kept only as backup.
    Edit light/dark colors here, not page-local CSS. */
 
-/* v0.11.375 ProgramCellTitleAccentPaletteFinalize
+/* release_contract ProgramCellTitleAccentPaletteFinalize
    Final title accent palette: light keeps the earlier readable blue, dark uses a restrained
    intermediate blue so titles stay distinct from summary/detail without the strong cyan glare. */
 
-/* v0.11.375 ThemeAliasSideEffectAudit
+/* release_contract ThemeAliasSideEffectAudit
    Light/dark theme selection must be explicit. Do not use broad body:not(.theme-dark)
    selectors because legacy/body alias timing can leak light tokens into dark modules. */
 :root,
@@ -100,7 +100,7 @@ body[data-theme="dark"]{
   --tvair-module-menu-hover-fg:var(--tvair-text-a);
   --tvair-module-menu-disabled-fg:var(--tvair-text-disabled);
 }
-/* Legacy variable aliases: active definitions are mapped to the simple v0.11.225 token spine. */
+/* Legacy variable aliases: active definitions are mapped to the simple release_contract token spine. */
 :root{
   --app-bg:var(--tvair-bg-a);--panel-bg:var(--tvair-bg-b);--text-main:var(--tvair-text-a);--white:var(--tvair-text-inverse);
   --nav-bg:var(--tvair-bg-b);--nav-sub-bg:var(--tvair-bg-c);--nav-time-bg:var(--tvair-bg-c);--nav-corner-bg:var(--tvair-bg-d);--nav-border:var(--tvair-border-a);--nav-btn-bg:var(--tvair-bg-c);--nav-btn-hover:var(--tvair-bg-hover);--nav-text:var(--tvair-text-a);--nav-button-text:var(--tvair-text-a);
@@ -118,7 +118,7 @@ body[data-theme="dark"]{
   --panel-border:var(--tvair-border-a);--input-border:var(--tvair-border-a);--label-color:var(--tvair-text-a);--label-sub-color:var(--tvair-text-b);--scrollbar-thumb:var(--tvair-border-a);--nav-active-outline:var(--tvair-focus-a);--nav-active-text:var(--tvair-text-a);--table-head-bg:var(--tvair-bg-c);--row-border:var(--tvair-border-b);--row-hover:var(--tvair-bg-hover);--reserved-row-bg:var(--tvair-accent-soft);--muted-text:var(--tvair-text-c);--text-dark:var(--tvair-text-a);--text-body:var(--tvair-text-b);--ch-list-bg:var(--tvair-bg-b);--ch-list-border:var(--tvair-border-a);--ch-hover-bg:var(--tvair-bg-hover);--rsv-new-btn:var(--tvair-accent-a);--rsv-new-btn-hover:var(--tvair-accent-a-hover);--rsv-done-bg:var(--tvair-accent-soft);--rsv-done-text:var(--tvair-success-a);--rsv-done-border:var(--tvair-border-a);--btn-lite-bg:var(--tvair-bg-c);--btn-lite-border:var(--tvair-border-a);--btn-lite-text:var(--tvair-text-b);--btn-lite-hover:var(--tvair-bg-hover);--del-btn-bg:var(--tvair-danger-soft);--del-btn-text:var(--tvair-danger-a);--del-btn-border:var(--tvair-danger-a);--del-btn-hover:var(--tvair-danger-soft);--toggle-off-bg:var(--tvair-border-a);
 }
 
-/* v0.11.225 Color Group Contract
+/* release_contract Color Group Contract
    This defines the stable group spine that modules must consume.
    Page/local text selectors must not define ad-hoc colors; route changes through these groups. */
 :root{
@@ -219,7 +219,7 @@ body[data-theme="dark"]{
   --tvair-genre-anime-strong:var(--tvair-genre-anime-guide);     --tvair-genre-anime-soft:var(--tvair-genre-anime-row);
   --tvair-genre-docu-strong:var(--tvair-genre-docu-guide);       --tvair-genre-docu-soft:var(--tvair-genre-docu-row);
   --tvair-genre-other-strong:var(--tvair-genre-other-guide);     --tvair-genre-other-soft:var(--tvair-genre-other-row);
-  /* v0.11.502 SettingsGenreEditorSpacingContract */
+  /* release_contract SettingsGenreEditorSpacingContract */
   --tvair-settings-genre-editor-column-min:220px;
   --tvair-settings-genre-editor-row-gap:6px;
   --tvair-settings-genre-editor-column-gap:18px;
@@ -260,7 +260,7 @@ body[data-theme="dark"]{
   --tvair-module-menu-disabled-fg:var(--tvair-color-text-disabled);
 }
 
-/* v0.11.225 Role Token Contract
+/* release_contract Role Token Contract
    Modules consume these role tokens. Literal color tuning stays here, never in page-local selectors. */
 :root{
   /* Page width roles */
@@ -285,7 +285,7 @@ body[data-theme="dark"]{
   --tvair-col-rule-order:78px;
 
   /* ProgramGuide cell text roles
-     v0.11.375 ProgramCellTitleAccentPaletteFinalize
+     release_contract ProgramCellTitleAccentPaletteFinalize
      Program titles are titles first and links second.  The title uses a theme-owned
      blue-accent title token, while summary/detail stays on subordinate text tokens. */
   --tvair-color-program-time:var(--tvair-color-text-main);
@@ -310,7 +310,7 @@ body[data-theme="dark"]{
 }
 
 
-/* v0.11.225 Theme Module Role Additions
+/* release_contract Theme Module Role Additions
    Theme values remain grouped; modules consume these roles instead of per-text color patches. */
 :root{
   --tvair-role-page-width-full:calc(100vw - 12px);
@@ -321,7 +321,7 @@ body[data-theme="dark"]{
   --tvair-color-app-notice-fg:var(--tvair-color-text-main);
   --tvair-color-app-notice-border:var(--tvair-color-border-soft);
 
-  /* v0.11.554 ListThemeTokenCleanupContract
+  /* release_contract ListThemeTokenCleanupContract
      Page-local list/editor CSS must consume shared dialog/list theme tokens instead
      of embedding fallback rgba paints. Values preserve the current light/dark meaning. */
   --tvair-list-dialog-backdrop:var(--tvair-dialog-backdrop);
@@ -330,14 +330,14 @@ body[data-theme="dark"]{
   --tvair-list-dialog-close-hover-border:var(--tvair-color-border-inset,var(--tvair-color-border-soft));
 }
 
-/* v0.11.225 Column Role Rebuild Defaults */
+/* release_contract Column Role Rebuild Defaults */
 :root{
   --rsv-col-channel-min:150px;
   --rsv-col-channel:var(--tvair-col-service);
   --tvair-col-service:150px;
 }
 
-/* v0.11.225 Reservation/Rule schema role tokens
+/* release_contract Reservation/Rule schema role tokens
    Fixed columns are computed here; service is measured at runtime; title/content/keyword absorb remaining width. */
 :root{
   --tvair-col-index:42px;
@@ -355,7 +355,7 @@ body[data-theme="dark"]{
   --tvair-col-rule-order:78px;
   --tvair-col-rule-actions:116px;
 
-  /* v0.11.554 ListThemeTokenCleanupContract
+  /* release_contract ListThemeTokenCleanupContract
      List-family width consumers use these aliases. They resolve to existing
      column roles, so current geometry is preserved while metadata/action/state
      ownership is explicit. */
@@ -374,7 +374,7 @@ body[data-theme="dark"]{
 }
 
 
-/* v0.11.225 WorkAreaShell role tokens
+/* release_contract WorkAreaShell role tokens
    The successful ReservationArea 80vw shell is promoted to a shared work-area contract.
    Reservation/list/search/form pages consume this; page-local width logic must not own the root width. */
 :root{
@@ -404,7 +404,7 @@ body[data-theme="dark"]{
   }
 }
 
-/* v0.11.225 List Density Role Tokens
+/* release_contract List Density Role Tokens
    Layout/readability contract only. Theme color tuning can replace these role values later. */
 :root{
   --tvair-list-row-odd-bg:var(--tvair-bg-b);
@@ -418,7 +418,7 @@ body[data-theme="dark"]{
   --tvair-col-time:132px;
 }
 
-/* v0.11.302 ListRowThemeSet contract
+/* release_contract ListRowThemeSet contract
    List rows are basic list surfaces.  Odd/even/hover are theme fundamentals, not reservation-state colors.
    Legacy data-row aliases are routed through the list-row set so table modules do not split responsibility. */
 :root{
@@ -435,7 +435,7 @@ body[data-theme="dark"]{
 
 
 
-/* v0.11.240 ProgramGuide-only daypart/date/broadcast-wave role tokens.
+/* release_contract ProgramGuide-only daypart/date/broadcast-wave role tokens.
    Light/dark switch at the theme root; ProgramGuide selectors only consume these tokens.
    Broadcast wave tokens are shared by wave filter buttons and service headers. */
 :root,
@@ -512,7 +512,7 @@ body[data-theme="dark"]{
   --tvair-programguide-timeaxis-secondary-border:var(--tvair-border-a);
 }
 
-/* v0.11.225 DisabledRowState role tokens
+/* release_contract DisabledRowState role tokens
    Disabled rows must be visually stronger than ordinary odd/even stripes.
    Light/dark theme tuning is done by changing these tokens, not page-local CSS. */
 :root,
@@ -535,7 +535,7 @@ body[data-theme="dark"]{
   --tvair-list-row-disabled-accent:#94a3b8;
 }
 
-/* v0.11.240 LightTheme Reservation/Event State Color Contract
+/* release_contract LightTheme Reservation/Event State Color Contract
    Reservation/recording/disabled/unknown are state layers, not genres.
    Modules consume these tokens; light/dark changes only values here. */
 :root,
@@ -596,7 +596,7 @@ body[data-theme="dark"]{
   --tvair-program-gap-border:var(--tvair-event-unknown-border);
 }
 
-/* v0.11.240 Unified Theme Entry Contract
+/* release_contract Unified Theme Entry Contract
    Every UI module consumes this single theme entrance. Modules stay light/dark agnostic;
    light/dark change only these role token values, not module CSS structure. */
 :root{
@@ -656,7 +656,7 @@ body[data-theme="dark"]{
   --tvair-guide-now-button-border:#237456;
   --tvair-guide-now-button-fg:#f3fff8;
 
-  /* v0.11.302 ProgramCellStateThemeSet
+  /* release_contract ProgramCellStateThemeSet
      ProgramGuide cells are time-axis cells, not reservation-list rows.
      State backgrounds and semantic text roles are paired here; reservation-list tokens must not be reused. */
   --tvair-programcell-reserved-bg:var(--tvair-state-reserved-surface);
@@ -702,7 +702,7 @@ body[data-theme="dark"]{
   --tvair-program-event-disabled-strong-fg:var(--tvair-programcell-disabled-title-fg);
   --tvair-program-event-disabled-border:var(--tvair-programcell-disabled-border);
 
-  /* v0.11.358 EPGProgressPanelThemeRoleRebuild
+  /* release_contract EPGProgressPanelThemeRoleRebuild
      EPG progress panel is a tool/dialog surface. Keep panel tokens as role aliases only;
      do not let the old fixed navy palette override light theme dialogs. */
   --tvair-epg-panel-bg:var(--tvair-role-dialog-bg);
@@ -733,7 +733,7 @@ body.tvair-theme-dark{
   --tvair-guide-now-button-fg:#ecfff6;
 
 
-  /* v0.11.302 ProgramCellStateThemeSet dark values */
+  /* release_contract ProgramCellStateThemeSet dark values */
 
   --tvair-programcell-recording-bg:#823241;
   --tvair-programcell-recording-hover-bg:#913a4a;
@@ -772,7 +772,7 @@ body.tvair-theme-dark{
 }
 :root{--tvair-aux-label-text:var(--tvair-theme-text-sub)}
 
-/* v0.11.254 Unified list-role/action/log tokens
+/* release_contract Unified list-role/action/log tokens
    The list module stays common; role tokens define log vs reservation behavior and remain theme-swappable. */
 :root,
 html[data-theme="light"],
@@ -803,7 +803,7 @@ body[data-theme="dark"]{
   --tvair-log-action-danger-fg:#ffe3e8;
 }
 
-/* v0.11.254 ProgramGuide toolbar/action role tokens
+/* release_contract ProgramGuide toolbar/action role tokens
    One button module, role/context tokens only. */
 :root,
 html[data-theme="light"],
@@ -841,7 +841,7 @@ body[data-theme="dark"]{
   --tvair-reservation-row-conflict-border:#7f1d1d;
 }
 
-/* v0.11.302 Light theme completion role tokens.
+/* release_contract Light theme completion role tokens.
    Page modules consume these tokens; literal color values stay in this foundation layer. */
 :root{
   --tvair-programcell-title-lines-default:999;
@@ -867,10 +867,10 @@ body[data-theme="dark"]{
   --tvair-control-inset-highlight:rgba(255,255,255,.18);
 }
 
-/* v0.11.302 ProgramGuideTimeAxisRole token fallbacks */
+/* release_contract ProgramGuideTimeAxisRole token fallbacks */
 :root{--tvair-programguide-timeaxis-primary-font-size:11px;--tvair-programguide-timeaxis-secondary-font-size:11px;}
 
-/* v0.11.302 LightThemeRoleFinish
+/* release_contract LightThemeRoleFinish
    Final light-theme pass for TvAIr host UI only.  These aliases keep legacy page code
    on semantic role tokens so later dark-theme work changes values here, not per page. */
 :root{
@@ -934,7 +934,7 @@ body[data-theme="dark"]{
 
 
 
-/* v0.11.302 DarkThemeTokenSet
+/* release_contract DarkThemeTokenSet
    Dark theme is a token-set swap for TvAIr host UI.  Modules must consume role tokens;
    ProgramCell state tokens and ReservationList row tokens remain separated. */
 html[data-theme="dark"],
@@ -954,7 +954,7 @@ body[data-theme="dark"]{
   --tvair-text-disabled:#64748b;
   --tvair-text-inverse:#ffffff;
   --tvair-text-link:#93c5fd;
-  /* v0.11.375 ProgramCellTitleAccentPaletteFinalize
+  /* release_contract ProgramCellTitleAccentPaletteFinalize
      Dark ProgramGuide titles stay on the ProgramCell title token path.  Generic link
      tokens must not own the base title color even when the title is rendered as <a>. */
   --tvair-programcell-title-fg:var(--tvair-color-program-title);
@@ -1053,7 +1053,7 @@ body[data-theme="dark"]{
 }
 
 
-/* v0.11.302 Theme Role Matrix rebuild
+/* release_contract Theme Role Matrix rebuild
    Light/Dark are paired theme faces.  Each role carries bg+fg together;
    modules must consume roles, not raw light/dark leftovers. */
 :root,
@@ -1160,8 +1160,8 @@ body.tvair-theme-dark{
 }
 
 
-/* v0.11.302 ThemeRoleMatrix visible repair
-   This is the application pass after the v0.11.302 role spine.
+/* release_contract ThemeRoleMatrix visible repair
+   This is the application pass after the release_contract role spine.
    Light/Dark keep identical role names; modules consume these aliases. */
 :root,
 html[data-tvair-selected-theme="light"],
@@ -1263,7 +1263,7 @@ body[data-tvair-effective-theme="dark"]{
 }
 
 
-/* v0.11.302 ThemeCrossRoleRepair
+/* release_contract ThemeCrossRoleRepair
    Vertical theme roles + horizontal module roles for TimeBand, DateNav, SegmentTab. */
 :root,
 html[data-tvair-selected-theme="light"],
@@ -1348,7 +1348,7 @@ body[data-tvair-effective-theme="dark"]{
 }
 
 
-/* v0.11.302 ThemeCoverageAuditRepair
+/* release_contract ThemeCoverageAuditRepair
    Coverage layer for all TvAIr-host UI modules.
    Contract: every visible module consumes role tokens for bg/fg/border/hover/active/disabled/muted/focus. */
 :root,
@@ -1469,7 +1469,7 @@ body[data-tvair-effective-theme="dark"]{
 }
 
 
-/* v0.11.302 FluentPaletteRebase
+/* release_contract FluentPaletteRebase
    Palette-first rebuild.  TvAIr no longer invents dark colors module-by-module.
    The base follows a Windows/Fluent-style neutral ramp: light/dark surfaces,
    paired foregrounds, control states, borders, disabled, focus, and semantic state layers.
@@ -1785,7 +1785,7 @@ body{
 }
 
 
-/* v0.11.302 WindowsDefinitionFinish
+/* release_contract WindowsDefinitionFinish
    WinUI/Fluent-style brush alias finish.
    Source model:
    - ThemeResource-like aliases: values change by Light/Dark.
@@ -2085,10 +2085,10 @@ body[data-tvair-effective-theme="dark"]{
 }
 
 
-/* v0.11.302 WindowsSemanticBrushFinish
+/* release_contract WindowsSemanticBrushFinish
    Final Windows-like semantic brush layer.
    This adds explicit SystemControl / TextFill / Card / Layer / Accent / Subtle / Disabled aliases,
-   then maps TvAIr roles from those aliases.  It is intentionally later than v0.11.302. */
+   then maps TvAIr roles from those aliases.  It is intentionally later than release_contract. */
 :root,
 html[data-tvair-selected-theme="light"],
 body[data-tvair-selected-theme="light"],
@@ -2315,7 +2315,7 @@ body[data-tvair-effective-theme="dark"]{
   --button-disabled-border:var(--tvair-role-border-soft);
 }
 
-/* v0.11.314 ReservationColorContract
+/* release_contract ReservationColorContract
    Explicit light/dark values. Row paint is owned by tvair-list-module.css;
    tabs/actions/log controls are owned by tvair-reservations.css. */
 :root,
@@ -2332,7 +2332,7 @@ body[data-theme="light"]{
   --tvair-reservation-tab-active-text:#ffffff;
   --tvair-reservation-tab-border:#b8c2ce;
 
-  /* v0.11.502 ReservationSubtabThemeTokenContract
+  /* release_contract ReservationSubtabThemeTokenContract
      Reservation-list sub tabs use dedicated theme tokens so their selected
      state does not depend on the generic .ftab/.nav button repair pass. */
   --tvair-reservation-subtab-strip-bg:#e5e9ee;
@@ -2417,7 +2417,7 @@ body.tvair-theme-dark{
   --tvair-reservation-tab-active-text:#ffffff;
   --tvair-reservation-tab-border:#334155;
 
-  /* v0.11.502 ReservationSubtabThemeTokenContract */
+  /* release_contract ReservationSubtabThemeTokenContract */
   --tvair-reservation-subtab-strip-bg:#07101d;
   --tvair-reservation-subtab-bg:#111c2d;
   --tvair-reservation-subtab-fg:#e5edf8;
@@ -2485,7 +2485,7 @@ body.tvair-theme-dark{
   --panel-border:#334155;
 }
 
-/* v0.11.314 ActionColorContract
+/* release_contract ActionColorContract
    Operation semantics only: reserve/start=blue, cancel=rose, stop=strong red,
    enable=green, disable=neutral gray. ProgramGuide and ReservationList share this owner. */
 :root,
@@ -2494,7 +2494,7 @@ body.theme-light,
 body[data-theme="light"]{
   --tvair-reservation-action-empty-fg:#667085;
 
-  /* v0.11.358 LightThemeActionButtonLuminanceTuning
+  /* release_contract LightThemeActionButtonLuminanceTuning
      Light action buttons sit on bright surfaces and genre-colored cells. Keep semantic hue,
      reduce harsh saturation, and keep hover/active as the stronger visual step. */
   --tvair-action-reserve-bg:#2563A8;
@@ -2536,7 +2536,7 @@ body[data-theme="light"]{
   --tvair-action-disabled-border:#AEB8C4;
   --tvair-action-disabled-fg:#667085;
 
-  /* v0.11.333 ProgramCellActionTokenContract.
+  /* release_contract ProgramCellActionTokenContract.
      Program-guide cell buttons have their own semantic tokens because they sit on genre-colored cells,
      stay compact, and may appear side by side. Generic action tokens feed these; CSS consumes these. */
   --tvair-programcell-button-reserve-bg:var(--tvair-action-reserve-bg);
@@ -2644,7 +2644,7 @@ body[data-tvair-selected-theme="dark"],
 body.tvair-theme-dark{
   --tvair-reservation-action-empty-fg:#a8b4c7;
 
-  /* v0.11.356 DarkThemeActionButtonLuminanceTuning
+  /* release_contract DarkThemeActionButtonLuminanceTuning
      Dark action buttons sit on saturated ProgramGuide cells. Keep semantic hue, lower resting luminance,
      and reserve the brighter step for hover/focus instead of the normal state. */
   --tvair-action-reserve-bg:#1D4F91;
@@ -2686,7 +2686,7 @@ body.tvair-theme-dark{
   --tvair-action-disabled-border:#526073;
   --tvair-action-disabled-fg:#a8b4c7;
 
-  /* v0.11.333 ProgramCellActionTokenContract.
+  /* release_contract ProgramCellActionTokenContract.
      Program-guide cell buttons have their own semantic tokens because they sit on genre-colored cells,
      stay compact, and may appear side by side. Generic action tokens feed these; CSS consumes these. */
   --tvair-programcell-button-reserve-bg:var(--tvair-action-reserve-bg);
@@ -2787,7 +2787,7 @@ body.tvair-theme-dark{
   --tvair-reservation-toggle-off-fg:var(--tvair-action-disable-fg);
 }
 
-/* v0.11.375 ProgramGuideNextDayFloatingActionRebuild
+/* release_contract ProgramGuideNextDayFloatingActionRebuild
    Dedicated role tokens for the ProgramGuide next-day floating action. */
 :root,
 html[data-tvair-selected-theme="light"],

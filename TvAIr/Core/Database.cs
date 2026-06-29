@@ -1,4 +1,4 @@
-﻿using Microsoft.Data.Sqlite;
+using Microsoft.Data.Sqlite;
 
 namespace TvAIr.Core;
 
@@ -199,7 +199,7 @@ public sealed class Database
             CREATE INDEX IF NOT EXISTS idx_user_event_logs_severity
                 ON user_event_logs (severity, created_at);
 
-            -- v32.84: EPG取得ベースライン（TSごとの最大取得件数・平均取得件数を蓄積）
+            -- EPG取得ベースライン（TSごとの最大取得件数・平均取得件数を蓄積）
             -- 目的: 各TSが過去どれくらい取れているかを記録し、run完了時に達成率を
             -- ログ出力することで取りこぼし傾向を可視化する。運用中の実測から
             -- 「このTSはこれくらい取れて当たり前」という基準値を育てていく。
@@ -301,7 +301,7 @@ public sealed class Database
         EnsureColumn(con, "reservations", "user_chain_previous_id", "INTEGER NULL");
         EnsureColumn(con, "reservations", "user_chain_root_id", "INTEGER NULL");
 
-        // v0.11.108: ユーザー運用ログは /api/log からの推測ではなく、
+        // release_contract: ユーザー運用ログは /api/log からの推測ではなく、
         // UserOperationEvent 正本として報告用メタ属性を保持する。
         EnsureColumn(con, "user_event_logs", "operation_id", "TEXT NOT NULL DEFAULT ''");
         EnsureColumn(con, "user_event_logs", "app_version", "TEXT NOT NULL DEFAULT ''");

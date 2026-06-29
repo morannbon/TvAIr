@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Core;
+namespace TvAIr.Core;
 
 /// <summary>
 /// インメモリの循環バッファでログエントリを保持するリポジトリ。
@@ -6,7 +6,7 @@
 /// </summary>
 public sealed class LogRepository
 {
-    // v0.11.128: 表版/裏版ログプロファイル入口。Developmentは従来診断、Releaseは開発者詳細を強く抑制する。
+    // release_contract: 表版/裏版ログプロファイル入口。Developmentは従来診断、Releaseは開発者詳細を強く抑制する。
     private enum RuntimeLogProfile { PublicRelease }
 
     private readonly object gate = new();
@@ -80,7 +80,7 @@ public sealed class LogRepository
         var title = entry.Title ?? string.Empty;
         var msg = entry.Message ?? string.Empty;
 
-        // v0.11.84: 通常運用ログでは、周期監視・keepalive・内部割当トレースを抑制する。
+        // release_contract: 通常運用ログでは、周期監視・keepalive・内部割当トレースを抑制する。
         // 必要な場合は TVAIR_VERBOSE_LOG=1 または verbose-log.flag で詳細診断ログを復活させる。
         if (ev == "ALLOC_TRACE") return true;
         if (ev is "EPG_CH2_TS_SCOPE_AUDIT" or "EPG_TS_SCOPE_AUDIT" or "EPG_EIT_COVERAGE" or "EPG_PROCESS_COVERAGE") return true;
@@ -90,7 +90,7 @@ public sealed class LogRepository
         if (ev == "RESERVATION_AUDIT" && string.Equals(title, "TickWindow", StringComparison.OrdinalIgnoreCase)) return true;
         if (ev == "RESERVATION_AUDIT" && string.Equals(title, "DueForce", StringComparison.OrdinalIgnoreCase)) return true;
         if (ev == "RESERVATION_AUDIT" && title.EndsWith("_PAST_TERMINAL_SUMMARY", StringComparison.OrdinalIgnoreCase)) return true;
-        if (ev == "RESERVATION_AUDIT" && msg.Contains("rule=v0.5.78_service_title_first_audit", StringComparison.OrdinalIgnoreCase)) return true;
+        if (ev == "RESERVATION_AUDIT" && msg.Contains("rule=release_contract", StringComparison.OrdinalIgnoreCase)) return true;
         if (ev == "RESERVATION_PIPELINE_AUDIT" && msg.Contains("stage=start_request", StringComparison.OrdinalIgnoreCase) && msg.Contains("conflicted=True", StringComparison.OrdinalIgnoreCase)) return true;
         if (ev == "REC_DUE_SCAN" && msg.Contains("conflicted=True", StringComparison.OrdinalIgnoreCase)) return true;
         if (ev == "REC_START_REQUEST" && msg.Contains("conflicted=True", StringComparison.OrdinalIgnoreCase)) return true;
@@ -130,7 +130,7 @@ public sealed class LogRepository
         if (ev == "REC_DUE_SCAN" && !title.StartsWith("R", StringComparison.OrdinalIgnoreCase)) return true;
         if (ev == "REC_TUNER_CHECK" && !msg.Contains("FAIL", StringComparison.OrdinalIgnoreCase)) return true;
 
-        // v0.11.136: 表版前の通常診断ログ整理。ユーザー運用ログ正本とは分離し、
+        // release_contract: 表版前の通常診断ログ整理。ユーザー運用ログ正本とは分離し、
         // 録画・競合・Wakeの実異常以外の内部経路トレースを通常ログから外す。
         if (ev == "ALLOC_POLICY") return true;
         if (ev == "ALLOC_ROUTE"

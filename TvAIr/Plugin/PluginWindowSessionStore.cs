@@ -1,9 +1,9 @@
-﻿namespace TvAIr.Plugin;
+namespace TvAIr.Plugin;
 
 using TvAIrPlugin;
 
 /// <summary>
-/// v0.10.62: 本体管理のプラグイン独立/ToolWindow契約セッション管理。
+/// release_contract: 本体管理のプラグイン独立/ToolWindow契約セッション管理。
 /// pluginId + routeSegment を reuseKey とし、host close / closeWindow / state persistence を同じ経路で扱う。
 /// </summary>
 public sealed class PluginWindowSessionStore

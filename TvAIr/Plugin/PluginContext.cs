@@ -1,4 +1,4 @@
-﻿using System.Reflection;
+using System.Reflection;
 using TvAIr.Channel;
 using TvAIr.Core;
 using TvAIr.Epg;
@@ -281,7 +281,7 @@ internal sealed class PluginContext : IPluginReadContextV4, ILiveCommentPublishe
             };
             var id = _reservationStore.Add(reservation);
             ReevaluateAllocations("AddReservation");
-            AddAuditLog("AddReservation", $"title={draft.Title} id=R{id} rule=v0.5.78_title_first_plugin_audit");
+            AddAuditLog("AddReservation", $"title={draft.Title} id=R{id} rule=release_contract");
             return new PluginReservationOperationResult { Success = true, ReservationId = id, Message = "予約を追加しました。" };
         }
         catch (Exception ex)
@@ -303,7 +303,7 @@ internal sealed class PluginContext : IPluginReadContextV4, ILiveCommentPublishe
             if (update.IsEnabled.HasValue)
                 _reservationStore.UpdateEnabled(update.ReservationId, update.IsEnabled.Value);
             ReevaluateAllocations("UpdateReservation");
-            AddAuditLog("UpdateReservation", $"id=R{update.ReservationId} enabled={update.IsEnabled} rule=v0.5.78_plugin_audit_tag");
+            AddAuditLog("UpdateReservation", $"id=R{update.ReservationId} enabled={update.IsEnabled} rule=release_contract");
             return new PluginReservationOperationResult { Success = true, ReservationId = update.ReservationId, Message = "予約を更新しました。" };
         }
         catch (Exception ex)
@@ -324,7 +324,7 @@ internal sealed class PluginContext : IPluginReadContextV4, ILiveCommentPublishe
                 return new PluginReservationOperationResult { Success = false, ReservationId = reservationId, Message = "このプラグインが作成した予約ではありません。" };
             _reservationStore.Delete(reservationId);
             ReevaluateAllocations("DeleteReservation");
-            AddAuditLog("DeleteReservation", $"id=R{reservationId} force={force} rule=v0.5.78_plugin_audit_tag");
+            AddAuditLog("DeleteReservation", $"id=R{reservationId} force={force} rule=release_contract");
             return new PluginReservationOperationResult { Success = true, ReservationId = reservationId, Message = "予約を削除しました。" };
         }
         catch (Exception ex)
@@ -335,7 +335,7 @@ internal sealed class PluginContext : IPluginReadContextV4, ILiveCommentPublishe
     }
 
 
-    // ─── v0.10.23 Phase 2 読み取りAPI拡張 ──────────────────────
+    // ─── release_contract Phase 2 読み取りAPI拡張 ──────────────────────
 
     public PluginProgramGuideSnapshot GetProgramGuideSnapshot(PluginProgramGuideQuery? query = null)
     {
@@ -618,13 +618,13 @@ internal sealed class PluginContext : IPluginReadContextV4, ILiveCommentPublishe
 
     public PluginViewerOperationResult RequestViewerStart(PluginViewerStartRequest request)
     {
-        AddAuditLog("RequestViewerStart", $"service={request.ServiceName} nid={request.NetworkId} tsid={request.TransportStreamId} sid={request.ServiceId} result=accepted_as_request_only rule=v0.10.23_plugin_read_api_phase2");
+        AddAuditLog("RequestViewerStart", $"service={request.ServiceName} nid={request.NetworkId} tsid={request.TransportStreamId} sid={request.ServiceId} result=accepted_as_request_only rule=release_contract");
         return new PluginViewerOperationResult { Success = false, Message = "視聴操作APIはPhase 2では読み取りAPI拡張の対象外です。" };
     }
 
     public PluginViewerOperationResult RequestViewerStop(PluginViewerStopRequest request)
     {
-        AddAuditLog("RequestViewerStop", $"nid={request.NetworkId} tsid={request.TransportStreamId} sid={request.ServiceId} result=accepted_as_request_only rule=v0.10.23_plugin_read_api_phase2");
+        AddAuditLog("RequestViewerStop", $"nid={request.NetworkId} tsid={request.TransportStreamId} sid={request.ServiceId} result=accepted_as_request_only rule=release_contract");
         return new PluginViewerOperationResult { Success = false, Message = "視聴操作APIはPhase 2では読み取りAPI拡張の対象外です。" };
     }
 
@@ -917,7 +917,7 @@ internal sealed class PluginContext : IPluginReadContextV4, ILiveCommentPublishe
                 .Select(x => PluginProgramGuideAuditName(x.Channel.ServiceName))
                 .Take(6));
             _log.Add("PLUGIN_PROGRAMGUIDE_NOW_NEXT_RESOLVE_AUDIT", _pluginName,
-                $"result=OK channels={channels.Count} events={rangeEvents.Count} exact={exact} nameSid={nameSid} groupSid={groupSid} exactNoRangeOverlap={exactNoOverlap} unresolved={unresolved} unresolvedSample={(string.IsNullOrWhiteSpace(unresolvedSample) ? "-" : unresolvedSample)} commonResolver=programguide_projection_fallback rule=v0.11.622_epg_live_exclusion_concurrency_fix");
+                $"result=OK channels={channels.Count} events={rangeEvents.Count} exact={exact} nameSid={nameSid} groupSid={groupSid} exactNoRangeOverlap={exactNoOverlap} unresolved={unresolved} unresolvedSample={(string.IsNullOrWhiteSpace(unresolvedSample) ? "-" : unresolvedSample)} commonResolver=programguide_projection_fallback rule=release_contract");
         }
 
         return result;
@@ -1155,7 +1155,7 @@ internal sealed class PluginContext : IPluginReadContextV4, ILiveCommentPublishe
 
     private static PluginViewerControlHostContract BuildViewerControlHostContract() => new()
     {
-        ContractVersion = "0.11.28",
+        ContractVersion = TvAIrVersionContract.PluginHostContractVersion,
         ToolWindowOnlySafeEvents = true,
         PluginScriptAllowed = false,
         SupportedEvents = new[] { "dblclick", "click" },

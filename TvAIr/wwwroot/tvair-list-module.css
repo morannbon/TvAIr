@@ -1,4 +1,4 @@
-﻿/* TvAIr List Pages Scoped Rebuild v0.11.314
+/* TvAIr List Pages Scoped Rebuild release_contract
    One file owns list-page geometry, scroll roots, and column schemas.
    Scope: reservations.html, keyword.html, program-rules.html, new-reservation.html.
    Not in scope: program guide, plugins, recording/EPG/tuner logic. */
@@ -131,7 +131,7 @@ body.tvair-reservation-page #keyword-wrap{
   background:var(--tvair-role-table-bg,var(--tvair-role-shell-bg,var(--tvair-role-page-bg)))!important;
 }
 
-/* v0.11.554 ListWidthTokenCleanupContract
+/* release_contract ListWidthTokenCleanupContract
    Reservation/search/program list family uses the same row spine while keeping
    metadata cells, State cells and Action cells separate while consuming shared list width tokens:
    - col-toggle / ○ / × / — are state/boolean display controls, not operation actions.
@@ -469,7 +469,7 @@ body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table t
   line-height:normal!important;
 }
 
-/* Reservation row state / genre guard contract (v0.11.502 ReservationSubtabThemeTokenContract)
+/* Reservation row state / genre guard contract (release_contract ReservationSubtabThemeTokenContract)
    Owner: tvair-list-module.css.
    Priority order for reservation-family rows:
      1. base odd/even row rhythm
@@ -685,12 +685,12 @@ body.tvair-reservation-page .col-main{
   max-width:none!important;
 }
 
-/* v0.11.502 ReservationSubtabThemeTokenContract:
+/* release_contract ReservationSubtabThemeTokenContract:
    User-log column schema, message clipping, numeric formatting and severity text
    are explicitly out of this shared module and live in tvair-user-log.css.
    This module keeps reservation-family row state, genre/disabled guards,
    shared list geometry and generic alignment only. */
-/* v0.11.502 ListPageShellOwnerImportantReduction: non-reservation list page scroll geometry lives here; page CSS keeps local content/table/form styling only. */
+/* release_contract ListPageShellOwnerImportantReduction: non-reservation list page scroll geometry lives here; page CSS keeps local content/table/form styling only. */
 /* Other list pages */
 body.tvair-keyword-page #page-scroll,
 body.tvair-rule-list-page #page-scroll,
@@ -800,7 +800,7 @@ body.tvair-program-reservation-page #program-rules-table .td-ch{
 
 
 
-/* v0.11.502 ListTableStateImportantReduction: non-reservation list table geometry, header, row rhythm and base row-state paint live here. Page CSS keeps page-specific text semantics, columns, modal tables and action meaning only. */
+/* release_contract ListTableStateImportantReduction: non-reservation list table geometry, header, row rhythm and base row-state paint live here. Page CSS keeps page-specific text semantics, columns, modal tables and action meaning only. */
 body.tvair-keyword-page{
   --tvair-list-page-table-min:560px;
   --tvair-list-page-head-bg:var(--table-head-bg);
@@ -917,7 +917,7 @@ body.tvair-rule-list-page #rules-table tbody tr.disabled-row td{
   color:var(--tvair-list-page-disabled-fg);
 }
 
-/* v0.11.502 ListActionButtonImportantReduction: list-page action column alignment and
+/* release_contract ListActionButtonImportantReduction: list-page action column alignment and
    action button geometry live in the shared list module. Page CSS keeps only
    page-local action colors/semantic variants. */
 body.tvair-keyword-page #result-table td:nth-child(5),
@@ -958,7 +958,7 @@ body.tvair-program-reservation-page .btn-del[disabled]{
   cursor:default;
 }
 
-/* v0.11.590 KeywordReservationActionCellCenterContract:
+/* release_contract KeywordReservationActionCellCenterContract:
    Keyword-search result reservation action cells stay real table cells while their
    button/state content is centered on both axes.  Do not apply flex geometry to
    the <td> itself; doing so breaks row baseline/rhythm and makes the Reserve
@@ -987,7 +987,7 @@ body.tvair-keyword-page #result-table td[data-cell-role="reservation-action"] .r
 }
 
 
-/* v0.11.502 ProgramReservationFormActionOwnership:
+/* release_contract ProgramReservationFormActionOwnership:
    program reservation weekday chips and form/modal action buttons share geometry here.
    Page CSS keeps semantic paint and state colors only. */
 body.tvair-program-reservation-page .dow-chip{
@@ -1043,7 +1043,7 @@ body.tvair-program-reservation-page .btn-reset:disabled{
   cursor:default;
 }
 
-/* v0.11.502 ProgramReservationModalActionOwnership:
+/* release_contract ProgramReservationModalActionOwnership:
    program reservation edit-modal close button geometry lives here.
    Modal surface/layout remains in tvair-program-reservation.css; submit/reset
    button geometry reuses the shared program reservation form action contract above. */
@@ -1080,7 +1080,7 @@ body.tvair-rule-list-page #preview-table .preview-col-channel{width:var(--tvair-
 body.tvair-rule-list-page #preview-table .preview-col-status{width:var(--tvair-list-expire-col);}
 body.tvair-program-reservation-page #program-rules-table .program-rule-col-enabled{width:var(--tvair-list-enabled-col);text-align:center;}
 
-/* v0.11.375 Reservation row-state genre owner guard
+/* release_contract Reservation row-state genre owner guard
    Disabled rows are a higher-priority state than genre coloring. This block is a
    stale-DOM insurance layer; the primary fix is that reservations.html no longer
    attaches genre row owner classes to disabled/cancelled/conflict rows. */
@@ -1102,7 +1102,7 @@ body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table t
   background:var(--tvair-reservation-list-row-disabled-hover-bg)!important;
 }
 
-/* v0.11.502 ListFormFilterOwnership: non-reservation list pages share basic form controls and toolbar/filter geometry here. Toast geometry/paint is owned by tvair-notification.css. Page CSS keeps page-specific labels, panels, modal layout and semantic colors. */
+/* release_contract ListFormFilterOwnership: non-reservation list pages share basic form controls and toolbar/filter geometry here. Toast geometry/paint is owned by tvair-notification.css. Page CSS keeps page-specific labels, panels, modal layout and semantic colors. */
 body.tvair-keyword-page .form-row input[type=text],
 body.tvair-keyword-page .time-row select,
 body.tvair-keyword-page .date-row input[type=date],
@@ -1166,7 +1166,7 @@ body.tvair-rule-list-page #toolbar-left{flex:1 1 auto}
 body.tvair-rule-list-page #toolbar-right{margin-left:auto;flex:0 0 auto}
 
 
-/* v0.11.502 KeywordFormChoiceChannelOwnership:
+/* release_contract KeywordFormChoiceChannelOwnership:
    keyword search option/time/weekday/date rows and channel picker list item
    geometry live here. tvair-keyword.css keeps page-specific panel paint,
    label colors, channel selection colors and result semantics only. */
@@ -1217,7 +1217,7 @@ body.tvair-keyword-page .ch-item{
 }
 
 
-/* v0.11.502 KeywordResultPanelOwnership:
+/* release_contract KeywordResultPanelOwnership:
    keyword search result panel, summary geometry, scroll wrapper, and init/empty
    result-state layout live here. tvair-keyword.css keeps page-specific
    surface paint, text semantics and result cell meaning only. */
@@ -1264,7 +1264,7 @@ body.tvair-keyword-page #result-empty{
 }
 
 
-/* v0.11.502 ProgramRuleListPanelOwnership:
+/* release_contract ProgramRuleListPanelOwnership:
    Auto-search rule list page panel/toolbar/table wrap/empty-state geometry lives here.
    tvair-program-rules.css keeps page-local semantic paint, modal surface and preview meaning. */
 body.tvair-rule-list-page #main{
@@ -1314,7 +1314,7 @@ body.tvair-rule-list-page #empty{
   line-height:1.9;
 }
 
-/* v0.11.502 ProgramRuleFieldLayoutOwnership:
+/* release_contract ProgramRuleFieldLayoutOwnership:
    auto-search rule modal field/row/check geometry lives here.
    tvair-program-rules.css keeps modal surface, label colors and semantic paint only. */
 body.tvair-rule-list-page #modal-box .field{
@@ -1338,7 +1338,7 @@ body.tvair-rule-list-page #modal-box .check{
   cursor:pointer;
 }
 
-/* v0.11.502 ProgramRuleModalActionOwnership:
+/* release_contract ProgramRuleModalActionOwnership:
    auto-search rule modal choice chips and footer/action buttons share geometry here.
    tvair-program-rules.css keeps modal surface layout and semantic paint only. */
 body.tvair-rule-list-page #modal-box .btn-lite,
@@ -1400,7 +1400,7 @@ body.tvair-rule-list-page #modal-box .btn-secondary:disabled{
   cursor:default;
 }
 
-/* v0.11.502 ListPrimaryButtonOwnership:
+/* release_contract ListPrimaryButtonOwnership:
    list-page primary/tool buttons share geometry here. Page CSS keeps semantic
    paint only (primary/search/bulk/edit/delete colors and hover meaning). */
 body.tvair-keyword-page #search-btn,
@@ -1447,7 +1447,7 @@ body.tvair-rule-list-page .toolbar-btn:disabled{
 }
 
 
-/* v0.11.610 ListPageShellParityContract:
+/* release_contract ListPageShellParityContract:
    Top-tab non-program pages must share the same page shell width contract.
    Page width belongs to #page-scroll / PageShell, not to page-local toolbars,
    tables, or buttons.  This prevents auto-search toolbar/button edits from
@@ -1483,7 +1483,7 @@ body.tvair-program-reservation-page #main{
   border:0!important;
   border-radius:0!important;
 }
-/* v0.11.610 SplitPaneParity: keyword/program split pages share the same left-pane width token. */
+/* release_contract SplitPaneParity: keyword/program split pages share the same left-pane width token. */
 body.tvair-keyword-page #body{
   display:grid!important;
   grid-template-columns:var(--tvair-keyword-form-pane,var(--tvair-split-form-pane,340px)) minmax(0,1fr)!important;

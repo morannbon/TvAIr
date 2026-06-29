@@ -1,13 +1,13 @@
-﻿namespace TvAIrEpgRec.CommonTsRoute;
+namespace TvAIrEpgRec.CommonTsRoute;
 
 /// <summary>
-/// v0.7.56 integrated TvAIrEpgRec route attachment for the DirectRecorderBridge-derived TS runtime.
+/// release_contract integrated TvAIrEpgRec route attachment for the DirectRecorderBridge-derived TS runtime.
 /// TvAIrEpgRec is the successor executable name; it must not launch DirectRecorderBridge.exe as a child process.
 /// The DirectRecorderBridge recording/runtime lineage is kept inside this process boundary, then mode-specific EPG logic is attached after service selection.
 /// </summary>
 internal static class DirectRecorderTsRouteFacade
 {
-    public const string Rule = "v0.7.56_tvairepgrec_integrated_runtime_boundary";
+    public const string Rule = "release_contract";
 
     public static CommonTsRouteAttachment AttachForMode(string mode, DirectRecorderTsRouteRequest request)
     {

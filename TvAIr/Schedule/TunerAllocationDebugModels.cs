@@ -1,4 +1,4 @@
-﻿using System.Text.Json.Serialization;
+using System.Text.Json.Serialization;
 using TvAIr.Core;
 
 namespace TvAIr.Schedule;
@@ -6,7 +6,7 @@ namespace TvAIr.Schedule;
 public sealed class TunerAllocationDebugSnapshot
 {
     public DateTime GeneratedAt { get; set; }
-    public string Version { get; set; } = "v34.01-debug";
+    public string Version { get; set; } = "tuner-allocation-diagnostic";
     public TunerAllocationDebugSettings Settings { get; set; } = new();
     public Dictionary<string, int> TunerLimits { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public TunerAllocationDebugSummary Summary { get; set; } = new();
@@ -32,7 +32,7 @@ public sealed class TunerAllocationDebugSettings
     // setting is enabled but no explicit user-chain pair exists.
     public bool PseudoContinuousRecording { get; set; }
 
-    // v0.11.582: Keep configured/effective chain state separate in diagnostics.
+    // release_contract: Keep configured/effective chain state separate in diagnostics.
     // This is audit-only and must not affect allocation.
     public bool ConfiguredPseudoContinuousRecording { get; set; }
     public bool ChainModeEnabled { get; set; }

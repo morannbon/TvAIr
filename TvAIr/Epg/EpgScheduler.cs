@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Hosting;
 using TvAIr.Channel;
 using TvAIr.Core;
 using TvAIr.Schedule;
@@ -70,7 +70,7 @@ public sealed class EpgScheduler : BackgroundService
     // 自動スケジューラーの待機を中断するためのトークン（設定変更時にリセット）
     private CancellationTokenSource schedulerWakeCts = new();
 
-    // v0.9.33: 定時EPGは Wake 起動契約で定刻実行させる。
+    // release_contract: 定時EPGは Wake 起動契約で定刻実行させる。
     // 以前の2時間catchupは「7時に始まらない」問題を遅延実行で隠していたため、
     // 起動遅延救済は最小限に制限する。
     private static readonly TimeSpan ScheduledEpgCatchupGrace = TimeSpan.FromMinutes(5);
@@ -141,7 +141,7 @@ public sealed class EpgScheduler : BackgroundService
         var normalizedKind = string.IsNullOrWhiteSpace(kind) ? "UNKNOWN" : kind.Trim();
         var normalizedAt = string.IsNullOrWhiteSpace(at) ? "-" : at.Trim();
         log.Add("WAKE_SIGNAL", "EPG_SCHEDULER",
-            $"result=RECEIVED kind={normalizedKind} at={normalizedAt} source={source} action=wake_scheduler_loop rule=v0.11.393_libisdb_style_eit_reader_rebuild");
+            $"result=RECEIVED kind={normalizedKind} at={normalizedAt} source={source} action=wake_scheduler_loop rule=release_contract");
         try
         {
             var old = schedulerWakeCts;
@@ -242,7 +242,7 @@ public sealed class EpgScheduler : BackgroundService
         var normalizedSource = string.IsNullOrWhiteSpace(requestedBy) ? "ManualUi" : requestedBy.Trim();
         var normalizedScope = NormalizeTargetScope(targetScope);
 
-        // v0.11.147:
+        // release_contract:
         // 通常EPGは録画中でも空き録画チューナーがあれば実行してよい。
         // ただし、録画開始待ち / 今すぐ録画 / 開始時刻超過 / dueStart到達済みの予約がある波では、
         // EPGを新規投入してからプリエンプトするのではなく、EPG入口で録画を先に通す。
@@ -251,7 +251,7 @@ public sealed class EpgScheduler : BackgroundService
             RememberStartBlock(normalizedScope, normalizedSource, silent, dueReason, dueUntil, dueGroup, dueOwner);
             var dueDisplayMessage = BuildStartBlockDisplayMessage(dueReason, dueGroup);
             log.Add("EPG_RUN_BLOCKED", "BLOCKED",
-                $"{dueDisplayMessage}。targetScope={normalizedScope} blockedGroup={dueGroup} blockedUntil={(dueUntil.HasValue ? dueUntil.Value.ToString("MM/dd HH:mm:ss") : "-")} blockedReason={dueReason} owner={dueOwner} silent={silent} source={normalizedSource} action=recording_due_first rule=v0.11.175_notification_crosscut_cleanup");
+                $"{dueDisplayMessage}。targetScope={normalizedScope} blockedGroup={dueGroup} blockedUntil={(dueUntil.HasValue ? dueUntil.Value.ToString("MM/dd HH:mm:ss") : "-")} blockedReason={dueReason} owner={dueOwner} silent={silent} source={normalizedSource} action=recording_due_first rule=release_contract");
             userEvents.AddScheduledEpgCompleted(normalizedScope, normalizedSource, silent, "BLOCKED", 0, 0, 0, 0, $"blockedReason={dueReason}; blockedGroup={dueGroup}; owner={dueOwner}; recordingDue=True");
             return false;
         }
@@ -261,7 +261,7 @@ public sealed class EpgScheduler : BackgroundService
             RememberStartBlock(normalizedScope, normalizedSource, silent, blockedReason, blockedUntil, blockedGroup, string.Empty);
             var blockedDisplayMessage = BuildStartBlockDisplayMessage(blockedReason, blockedGroup);
             log.Add("EPG_RUN_BLOCKED", "BLOCKED",
-                $"{blockedDisplayMessage}。targetScope={normalizedScope} blockedGroup={blockedGroup} blockedUntil={(blockedUntil.HasValue ? blockedUntil.Value.ToString("MM/dd HH:mm:ss") : "-")} blockedReason={blockedReason} silent={silent} source={normalizedSource} action=recording_lifecycle_gate rule=v0.11.175_notification_crosscut_cleanup");
+                $"{blockedDisplayMessage}。targetScope={normalizedScope} blockedGroup={blockedGroup} blockedUntil={(blockedUntil.HasValue ? blockedUntil.Value.ToString("MM/dd HH:mm:ss") : "-")} blockedReason={blockedReason} silent={silent} source={normalizedSource} action=recording_lifecycle_gate rule=release_contract");
             userEvents.AddScheduledEpgCompleted(normalizedScope, normalizedSource, silent, "BLOCKED", 0, 0, 0, 0, $"blockedReason={blockedReason}; blockedGroup={blockedGroup}; recordingConcurrent=True");
             return false;
         }
@@ -271,7 +271,7 @@ public sealed class EpgScheduler : BackgroundService
             if (isRunning)
             {
                 log.Add("EPG_RUN_GUARD", "EPG",
-                    $"result=BUSY requestedSource={normalizedSource} requestedSilent={silent} requestedScope={normalizedScope} runningSource={(pendingRunSource ?? "-")} runningSilent={pendingRunSilent} runningScope={pendingRunScope} action=reject_start rule=v0.8.78_epg_run_contract");
+                    $"result=BUSY requestedSource={normalizedSource} requestedSilent={silent} requestedScope={normalizedScope} runningSource={(pendingRunSource ?? "-")} runningSilent={pendingRunSilent} runningScope={pendingRunScope} action=reject_start rule=release_contract");
                 return false;
             }
             runCts?.Dispose();
@@ -287,7 +287,7 @@ public sealed class EpgScheduler : BackgroundService
         // Phase を即座に running にセット。silent=true の場合、ブラウザを開いてもツール表示不可。
         capture.SetRunning(uiVisible: !silent, runSource: normalizedSource, targetScope: normalizedScope);
         log.Add("EPG_RUN_REQUEST", "EPG",
-            $"result=START source={normalizedSource} silent={silent} uiMode={(silent ? "Silent" : "Visible")} targetScope={normalizedScope} route=EpgScheduler.TriggerNow samePipeline=True startGuard=reserved rule=v0.8.78_epg_run_contract");
+            $"result=START source={normalizedSource} silent={silent} uiMode={(silent ? "Silent" : "Visible")} targetScope={normalizedScope} route=EpgScheduler.TriggerNow samePipeline=True startGuard=reserved rule=release_contract");
         userEvents.AddScheduledEpgStarted(normalizedScope, normalizedSource, silent);
 
         _ = Task.Run(() => RunWithGuardAsync(cts.Token, normalizedScope, normalizedSource, silent));
@@ -308,11 +308,11 @@ public sealed class EpgScheduler : BackgroundService
         if (cts is null)
         {
             log.Add("EPG_CANCEL_REQUEST", "EPG",
-                $"result=IGNORED source={normalizedSource} reason=not_running rule=v0.5.97_endgap_cancel_genre_color_cleanup");
+                $"result=IGNORED source={normalizedSource} reason=not_running rule=release_contract");
             return false;
         }
         log.Add("EPG_CANCEL_REQUEST", "EPG",
-            $"result=ACCEPT source={normalizedSource} targetScope={scope} action=cancel_run_cts rule=v0.5.97_endgap_cancel_genre_color_cleanup");
+            $"result=ACCEPT source={normalizedSource} targetScope={scope} action=cancel_run_cts rule=release_contract");
         try { cts.Cancel(); } catch { }
         return true;
     }
@@ -326,7 +326,7 @@ public sealed class EpgScheduler : BackgroundService
         {
             config = new EpgScheduleConfig(enabled, Math.Clamp(hour, 0, 23), Math.Clamp(minute, 0, 59));
         }
-        // v0.5.95: EPG取得中の深度変更は現在のrunには混ぜず、次回runから反映する。
+        // release_contract: EPG取得中の深度変更は現在のrunには混ぜず、次回runから反映する。
         var nextDepth = NormalizeDepth(epgDepth);
         var beforeDepth = _currentDepth;
         var depthChanged = !string.Equals(beforeDepth, nextDepth, StringComparison.OrdinalIgnoreCase);
@@ -485,7 +485,7 @@ public sealed class EpgScheduler : BackgroundService
     {
         log.Add("EPG_SCHEDULER_START", "EPG", "EPGスケジューラーを開始しました。");
 
-        // v32.66: 起動時に自動検索予約の整合性をとる。
+        // 起動時に自動検索予約の整合性をとる。
         // 前回終了後にDBだけ残っているルール・予約の状態が最新のEPGと一致していない
         // 可能性があるため、起動直後に一度 Purge → RunMatching を走らせて予約リストを
         // 最新状態に揃える。これで「ルール作成後に再起動 → 朝まで何も反映されない」
@@ -576,14 +576,14 @@ public sealed class EpgScheduler : BackgroundService
                 var scopeToRun = deferredDue ? retryScope : ResolveScheduledEpgScopeOrDefer(now, out retryAt, out blockedGroup, out blockedReason);
 
                 log.Add("EPG_SCHEDULER_DUE", "EPG",
-                    $"result=DUE source=Scheduler.Daily scheduled={scheduledAt:yyyy-MM-dd HH:mm:ss} now={now:yyyy-MM-dd HH:mm:ss} catchup={(delaySec > 0)} delaySec={delaySec} windowEnd={catchupLimit:yyyy-MM-dd HH:mm:ss} requestedScope={(deferredDue ? retryScope : "All")} runnableScope={(string.IsNullOrWhiteSpace(scopeToRun) ? "-" : scopeToRun)} rule=v0.11.175_simple_epg_start_guard");
+                    $"result=DUE source=Scheduler.Daily scheduled={scheduledAt:yyyy-MM-dd HH:mm:ss} now={now:yyyy-MM-dd HH:mm:ss} catchup={(delaySec > 0)} delaySec={delaySec} windowEnd={catchupLimit:yyyy-MM-dd HH:mm:ss} requestedScope={(deferredDue ? retryScope : "All")} runnableScope={(string.IsNullOrWhiteSpace(scopeToRun) ? "-" : scopeToRun)} rule=release_contract");
 
                 if (string.IsNullOrWhiteSpace(scopeToRun))
                 {
                     deferredScheduledEpgAt = (retryAt ?? now.AddMinutes(10));
                     deferredScheduledEpgScope = "All";
                     log.Add("EPG_SCHEDULER_DEFER", "EPG",
-                        $"result=DEFER source=Scheduler.Daily targetScope=All blockedGroup={blockedGroup} reason={blockedReason} retryAt={deferredScheduledEpgAt.Value:yyyy-MM-dd HH:mm:ss} action=move_to_next_safe_slot rule=v0.11.175_simple_epg_start_guard");
+                        $"result=DEFER source=Scheduler.Daily targetScope=All blockedGroup={blockedGroup} reason={blockedReason} retryAt={deferredScheduledEpgAt.Value:yyyy-MM-dd HH:mm:ss} action=move_to_next_safe_slot rule=release_contract");
                 }
                 else
                 {
@@ -592,7 +592,7 @@ public sealed class EpgScheduler : BackgroundService
                         deferredScheduledEpgAt = (retryAt ?? now.AddMinutes(30));
                         deferredScheduledEpgScope = "All";
                         log.Add("EPG_SCHEDULER_DEFER", "EPG",
-                            $"result=PARTIAL_RUN_DEFER_REST source=Scheduler.Daily runScope={scopeToRun} blockedGroup={blockedGroup} reason={blockedReason} retryAt={deferredScheduledEpgAt.Value:yyyy-MM-dd HH:mm:ss} action=run_safe_scope_then_retry_all rule=v0.11.175_simple_epg_start_guard");
+                            $"result=PARTIAL_RUN_DEFER_REST source=Scheduler.Daily runScope={scopeToRun} blockedGroup={blockedGroup} reason={blockedReason} retryAt={deferredScheduledEpgAt.Value:yyyy-MM-dd HH:mm:ss} action=run_safe_scope_then_retry_all rule=release_contract");
                     }
                     else if (deferredDue)
                     {
@@ -632,14 +632,14 @@ public sealed class EpgScheduler : BackgroundService
                             deferredScheduledEpgScope = scopeToRun;
                         }
                         log.Add("EPG_SCHEDULER_DUE", "EPG",
-                            $"result=BUSY_OR_BLOCKED source=Scheduler.Daily scheduled={scheduledAt:yyyy-MM-dd HH:mm:ss} now={now:yyyy-MM-dd HH:mm:ss} targetScope={scopeToRun} retryAt={(deferredScheduledEpgAt.HasValue ? deferredScheduledEpgAt.Value.ToString("yyyy-MM-dd HH:mm:ss") : "-")} rule=v0.11.175_simple_epg_start_guard");
+                            $"result=BUSY_OR_BLOCKED source=Scheduler.Daily scheduled={scheduledAt:yyyy-MM-dd HH:mm:ss} now={now:yyyy-MM-dd HH:mm:ss} targetScope={scopeToRun} retryAt={(deferredScheduledEpgAt.HasValue ? deferredScheduledEpgAt.Value.ToString("yyyy-MM-dd HH:mm:ss") : "-")} rule=release_contract");
                     }
                 }
             }
             else if (now > catchupLimit && !alreadyRanToday && !deferredScheduledEpgAt.HasValue)
             {
-                // v0.9.33: 大幅遅延catchupで全体EPGを勝手に開始しない。
-                // v0.11.622: ただし、DBが部分的に埋まっていて可視チャンネルだけが欠けている場合は、
+                // release_contract: 大幅遅延catchupで全体EPGを勝手に開始しない。
+                // release_contract: ただし、DBが部分的に埋まっていて可視チャンネルだけが欠けている場合は、
                 // 全局catchupではなく欠損波だけを論理リソース経路で補修する。
                 var delaySec = Math.Max(0, (int)(now - todayDue).TotalSeconds);
                 if (lastPartialEpgRepairDate?.Date != now.Date
@@ -649,7 +649,7 @@ public sealed class EpgScheduler : BackgroundService
                     deferredScheduledEpgScope = repairScope;
                     lastPartialEpgRepairDate = now.Date;
                     log.Add("EPG_SCHEDULER_PARTIAL_REPAIR", "EPG",
-                        $"result=DEFER_PARTIAL_REPAIR source=Scheduler.Daily scheduled={todayDue:yyyy-MM-dd HH:mm:ss} now={now:yyyy-MM-dd HH:mm:ss} delaySec={delaySec} windowEnd={catchupLimit:yyyy-MM-dd HH:mm:ss} repairAt={deferredScheduledEpgAt.Value:yyyy-MM-dd HH:mm:ss} targetScope={repairScope} {repairDetail} rule=v0.11.622_partial_epg_repair_catchup");
+                        $"result=DEFER_PARTIAL_REPAIR source=Scheduler.Daily scheduled={todayDue:yyyy-MM-dd HH:mm:ss} now={now:yyyy-MM-dd HH:mm:ss} delaySec={delaySec} windowEnd={catchupLimit:yyyy-MM-dd HH:mm:ss} repairAt={deferredScheduledEpgAt.Value:yyyy-MM-dd HH:mm:ss} targetScope={repairScope} {repairDetail} rule=release_contract");
                 }
                 else
                 {
@@ -723,7 +723,7 @@ public sealed class EpgScheduler : BackgroundService
         owner = $"R{first.Id}";
 
         log.Add("EPG_RECORDING_PRIORITY_GATE", "EPG",
-            $"result=BLOCK_EPG targetScope={normalizedScope} blockedGroup={blockedGroup} owner=R{first.Id} reason={reason} dueStart={dueStart:MM/dd HH:mm:ss} now={now:MM/dd HH:mm:ss} start={first.StartTime:MM/dd HH:mm:ss} end={first.EndTime:MM/dd HH:mm:ss} source={first.Source} service={SafeValue(first.ServiceName)} title={ReservationTitleDisplayContract.ForLog(first.Title)} action=recording_first rule=v0.11.147_recording_lifecycle_epg_gate_state_split");
+            $"result=BLOCK_EPG targetScope={normalizedScope} blockedGroup={blockedGroup} owner=R{first.Id} reason={reason} dueStart={dueStart:MM/dd HH:mm:ss} now={now:MM/dd HH:mm:ss} start={first.StartTime:MM/dd HH:mm:ss} end={first.EndTime:MM/dd HH:mm:ss} source={first.Source} service={SafeValue(first.ServiceName)} title={ReservationTitleDisplayContract.ForLog(first.Title)} action=recording_first rule=release_contract");
         return true;
     }
 
@@ -756,7 +756,7 @@ public sealed class EpgScheduler : BackgroundService
         log.Add("EPG_START_PROTECTION_GATE", "EPG",
             $"result=BLOCK targetScope={normalizedScope} blockedGroup={blockedGroup} reason={reason} until={(until.HasValue ? until.Value.ToString("MM/dd HH:mm:ss") : "-")} " +
             $"details=[{string.Join("|", blocked.Select(x => $"{x.Group}:owner={x.Owner}:requiredSec={x.RequiredSeconds}:until={x.Until:MM/dd HH:mm:ss}:reason={x.Reason}"))}] " +
-            "action=do_not_enter_epg_worker_queue rule=v0.11.175_simple_epg_start_guard");
+            "action=do_not_enter_epg_worker_queue rule=release_contract");
         return true;
     }
 
@@ -895,11 +895,11 @@ public sealed class EpgScheduler : BackgroundService
             catch (Exception ex)
             {
                 log.Add("EPG_ALLOC_ROUTE", "WARN",
-                    $"result=WARN source={requestedBy} action={routeAction} silent={silent} targetScope={targetScope} error={ex.GetType().Name}:{ex.Message} rule=v0.8.78_epg_run_contract");
+                    $"result=WARN source={requestedBy} action={routeAction} silent={silent} targetScope={targetScope} error={ex.GetType().Name}:{ex.Message} rule=release_contract");
             }
 
             log.Add("EPG_PIPELINE_AUDIT", "RunWithGuard",
-                $"source={requestedBy} silent={silent} uiMode={(silent ? "Silent" : "Visible")} targetScope={targetScope} depth={_currentDepth} sameCapturePipeline=True commonRouteAction={routeAction} runScopedActivityKeeper=False activityKeeperTvTest=False rule=v0.8.78_epg_run_contract");
+                $"source={requestedBy} silent={silent} uiMode={(silent ? "Silent" : "Visible")} targetScope={targetScope} depth={_currentDepth} sameCapturePipeline=True commonRouteAction={routeAction} runScopedActivityKeeper=False activityKeeperTvTest=False rule=release_contract");
             var captureResult = await capture.RunAsync(ct, targetScope, _currentDepth, showProgress: !silent);
             userEvents.AddScheduledEpgCompleted(targetScope, requestedBy, silent, captureResult.RunResult, captureResult.CompletedGroups, captureResult.TotalGroups, captureResult.ImportedEvents, captureResult.MissingGroups, captureResult.Detail);
 
@@ -910,7 +910,7 @@ public sealed class EpgScheduler : BackgroundService
             // EPG取得完了後にキーワード自動予約を実行
             if (!ct.IsCancellationRequested)
             {
-                // v32.65: マッチング前に期限切れルールを掃除(期限切れルール由来の予約も物理削除)。
+                // マッチング前に期限切れルールを掃除(期限切れルール由来の予約も物理削除)。
                 // これで PurgeExpiredKeywordRules のデッドコード状態を解消し、
                 // EPG取得というメンテナンスタイミングに合わせて整合性を保つ。
                 try
@@ -925,7 +925,7 @@ public sealed class EpgScheduler : BackgroundService
                     log.Add("KEYWORD_RULE_PURGE", "ExpiredRules", $"期限切れルール掃除エラー: {ex.Message}");
                 }
 
-                // v0.11.380: EPG取り込み後の縦串順序を固定する。
+                // release_contract: EPG取り込み後の縦串順序を固定する。
                 // 先に既存EventIdentity予約を最新EITへ追従させ、その後に自動検索/ProgramRule/割当/PreRecEpg/Wakeを
                 // 1本の共通割当ルートで通す。古い時刻のまま一度割当評価してから追従する二段評価を避ける。
                 var timeFollowUpdated = 0;
@@ -935,7 +935,7 @@ public sealed class EpgScheduler : BackgroundService
                 }
                 catch (Exception ex)
                 {
-                    log.Add("EPG_SCHEDULER", "TimeFollow", $"時間追従エラー: {ex.Message} rule=v0.11.380_epg_update_route_order_batch");
+                    log.Add("EPG_SCHEDULER", "TimeFollow", $"時間追従エラー: {ex.Message} rule=release_contract");
                 }
 
                 try
@@ -951,11 +951,11 @@ public sealed class EpgScheduler : BackgroundService
                         EmitConflictLogs: true,
                         ConflictLogCategory: "EPG_SCHEDULER",
                         ConflictLogTitle: "Conflict(EpgCompletePostImport)"));
-                    log.Add("EPG_SCHEDULER", "PostImportRoute", $"result=OK timeFollowUpdated={timeFollowUpdated} route=ALLOC_ROUTE matcher=True syncProgram=True reevaluate=True preRec=True wake=True rule=v0.11.380_epg_update_route_order_batch");
+                    log.Add("EPG_SCHEDULER", "PostImportRoute", $"result=OK timeFollowUpdated={timeFollowUpdated} route=ALLOC_ROUTE matcher=True syncProgram=True reevaluate=True preRec=True wake=True rule=release_contract");
                 }
                 catch (Exception ex)
                 {
-                    log.Add("EPG_SCHEDULER", "PostImportRoute", $"result=ERROR timeFollowUpdated={timeFollowUpdated} error={ex.Message} rule=v0.11.380_epg_update_route_order_batch");
+                    log.Add("EPG_SCHEDULER", "PostImportRoute", $"result=ERROR timeFollowUpdated={timeFollowUpdated} error={ex.Message} rule=release_contract");
                 }
 
                 // 翌日のEPGスケジュールエントリを登録
@@ -976,7 +976,7 @@ public sealed class EpgScheduler : BackgroundService
         {
             var msg = $"EPG取得がキャンセルされました。source={requestedBy} silent={silent} targetScope={targetScope}";
 
-            // v0.8.78: EPG_RUN_END と ALLOC_ROUTE:EpgCancelled は、停止要求を出した直後ではなく、
+            // release_contract: EPG_RUN_END と ALLOC_ROUTE:EpgCancelled は、停止要求を出した直後ではなく、
             // TvAIrEpgRec worker 停止・Activity解放・EPG lease解放が落ち着いた後に出す。
             // これにより、キャンセル直後の再評価が Epg/R- 残存状態を見てしまう順序不整合を避ける。
             try
@@ -986,10 +986,10 @@ public sealed class EpgScheduler : BackgroundService
             catch (Exception ex)
             {
                 log.Add("EPG_CANCEL_RELEASE_WAIT", "WARN",
-                    $"result=WARN source={requestedBy} silent={silent} targetScope={targetScope} error={ex.GetType().Name}:{ex.Message} action=continue_before_epg_run_end rule=v0.8.78_epg_cancel_quiescence_contract");
+                    $"result=WARN source={requestedBy} silent={silent} targetScope={targetScope} error={ex.GetType().Name}:{ex.Message} action=continue_before_epg_run_end rule=release_contract");
             }
 
-            log.Add("EPG_RUN_END", "CANCELLED", $"result=CANCELLED source={requestedBy} silent={silent} targetScope={targetScope} releaseComplete=True rule=v0.8.78_epg_cancel_quiescence_contract");
+            log.Add("EPG_RUN_END", "CANCELLED", $"result=CANCELLED source={requestedBy} silent={silent} targetScope={targetScope} releaseComplete=True rule=release_contract");
             userEvents.AddScheduledEpgCancelled(targetScope, requestedBy, silent);
             log.Add("EPG_RUN_CANCELLED", "EPG", msg);
             capture.SetStatus(st => st with { Phase = "cancelled", CompletedGroups = 0, LastRunAt = DateTime.Now, LastRunMessage = "キャンセル済み", UiVisible = !silent, UiMode = silent ? "Silent" : "Visible", CancelRoute = silent ? "TrayOnly" : "WidgetOrTray" });
@@ -1009,7 +1009,7 @@ public sealed class EpgScheduler : BackgroundService
             catch (Exception ex)
             {
                 log.Add("EPG_ALLOC_ROUTE", "WARN",
-                    $"result=WARN source={requestedBy} action=EpgCancelled silent={silent} targetScope={targetScope} error={ex.GetType().Name}:{ex.Message} rule=v0.8.78_epg_cancel_quiescence_contract");
+                    $"result=WARN source={requestedBy} action=EpgCancelled silent={silent} targetScope={targetScope} error={ex.GetType().Name}:{ex.Message} rule=release_contract");
             }
         }
         catch (Exception ex)
@@ -1100,20 +1100,20 @@ public sealed class EpgScheduler : BackgroundService
 
         // ユーザー予約のみ・チューナー割り当て済み・直近順に取得。
         // Manual は番組表からの通常予約であり、録画前EPG確認の正式対象。
-        // v32.85: 無効(IsEnabled=false)と競合(IsConflicted=true)予約はEPG確認対象外
+        // 無効(IsEnabled=false)と競合(IsConflicted=true)予約はEPG確認対象外
         // (録画されない予約のためにEPGセッションを発生させる意味がない)
         var staleCleanup = reservationStore.DeleteInvalidScheduledPreRecordEpgEntries();
         if (staleCleanup.Deleted > 0)
         {
             log.Add("PRE_REC_EPG_PARENT_CLEANUP", "Summary",
-                $"result=DELETED deleted={staleCleanup.Deleted} parentMissing={staleCleanup.ParentMissing} parentDisabled={staleCleanup.ParentDisabled} parentTerminal={staleCleanup.ParentTerminal} parentConflicted={staleCleanup.ParentConflicted} parentUserChain={staleCleanup.ParentUserChain} parents=[{staleCleanup.ParentIds}] action=remove_orphan_or_non_recordable_prerec_epg rule=v0.11.254_prerec_parent_state_cleanup");
+                $"result=DELETED deleted={staleCleanup.Deleted} parentMissing={staleCleanup.ParentMissing} parentDisabled={staleCleanup.ParentDisabled} parentTerminal={staleCleanup.ParentTerminal} parentConflicted={staleCleanup.ParentConflicted} parentUserChain={staleCleanup.ParentUserChain} parents=[{staleCleanup.ParentIds}] action=remove_orphan_or_non_recordable_prerec_epg rule=release_contract");
         }
 
         var scheduledAll = reservationStore.GetByStatus(ReservationStatus.Scheduled).ToList();
         var userScheduled = scheduledAll
             // システム予約(source=Epg)には確認EPGを走らせない。
             // Program はプログラム録画系であり、番組表予約(Manual)とは別扱い。
-            // v0.9.70: ユーザー明示チェーン後続は独立したPreRecEpg/時間追従対象にしない。
+            // release_contract: ユーザー明示チェーン後続は独立したPreRecEpg/時間追従対象にしない。
             // 一挙放送の大量チェーン指定で、後続セグメントごとのEPG確認が
             // 連続契約を崩すことを防ぐ。チェーン境界はTvAIr本体の契約で扱う。
             .Where(r => (r.Source == ReservationSource.Manual || r.Source == ReservationSource.KeywordSearch || r.Source == ReservationSource.Keyword)
@@ -1133,7 +1133,7 @@ public sealed class EpgScheduler : BackgroundService
         if (userScheduled.Count == 0)
         {
             log.Add("EPG_SCHEDULER", "PreRecEpg",
-                $"result=NO_TARGETS candidates=0 skippedDisabled={skippedDisabled} skippedConflicted={skippedConflicted} skippedNoTuner={skippedNoTuner} manualIncluded=True skippedUserChain={skippedUserChain} action=restore_daily_epg rule=v0.9.71_chain_follow_preserve_tail");
+                $"result=NO_TARGETS candidates=0 skippedDisabled={skippedDisabled} skippedConflicted={skippedConflicted} skippedNoTuner={skippedNoTuner} manualIncluded=True skippedUserChain={skippedUserChain} action=restore_daily_epg rule=release_contract");
             // 予約イベントが無い状態では直前EPG確認を残さない。
             // 既存のEPG確認エントリを各チューナーごとに掃除し、必要なら定時EPGへ戻す。
             EpgScheduleConfig emptyCfg;
@@ -1214,7 +1214,7 @@ public sealed class EpgScheduler : BackgroundService
                 deletedExpiredDeadline += deleted;
                 epgEntryMutationCount += deleted;
                 log.Add("PRE_REC_EPG_DEADLINE", $"R{r.Id}",
-                    $"result=SKIP_REGISTER reason=deadline_already_passed parent=R{r.Id} service={SafeValue(r.ServiceName)} title={ReservationTitleDisplayContract.ForLog(r.Title)} now={now:MM/dd HH:mm:ss} epgStart={epgStart:MM/dd HH:mm:ss} programStart={r.StartTime:MM/dd HH:mm:ss} preMin={preMin} deletedScheduledEpg={deleted} action=recording_priority rule=v0.11.141_prerec_deadline_epg_blocked_classification");
+                    $"result=SKIP_REGISTER reason=deadline_already_passed parent=R{r.Id} service={SafeValue(r.ServiceName)} title={ReservationTitleDisplayContract.ForLog(r.Title)} now={now:MM/dd HH:mm:ss} epgStart={epgStart:MM/dd HH:mm:ss} programStart={r.StartTime:MM/dd HH:mm:ss} preMin={preMin} deletedScheduledEpg={deleted} action=recording_priority rule=release_contract");
                 continue;
             }
             if (epgEnd <= now) continue; // 既に過去ならスキップ
@@ -1244,7 +1244,7 @@ public sealed class EpgScheduler : BackgroundService
                     out var reusablePreRecStatus,
                     out var reusablePreRecTuner))
             {
-                // v0.10.09:
+                // release_contract:
                 // 同一親予約・同一イベント・同一時間窓のPreRecEpgは、チューナー再割当だけでは再生成しない。
                 // Scheduledの既存子予約だけは最新の録画予定チューナーへ付け替え、Wakeタスクは分離したまま維持する。
                 var keepScheduledEntry = reusablePreRecStatus is ReservationStatus.Scheduled or ReservationStatus.Recording;
@@ -1252,7 +1252,7 @@ public sealed class EpgScheduler : BackgroundService
                 var metaNormalized = false;
                 if (reusablePreRecStatus == ReservationStatus.Scheduled)
                 {
-                    // v0.11.197:
+                    // release_contract:
                     // 既存PreRecEpg子予約をdedupe再利用する場合も、子予約Titleは内部用途名へ固定し、
                     // 親番組名は parent/source_rule_id 側のメタ属性として分離する。
                     reservationStore.RebindScheduledPreRecordEpgEntry(reusablePreRecId, r.Id, epgStart, epgEnd, r.TunerName);
@@ -1270,7 +1270,7 @@ public sealed class EpgScheduler : BackgroundService
                 if (tunerRebound) dedupeTunerReboundCount++;
                 if (!keepScheduledEntry) dedupeCompletedOrTerminalCount++;
 
-                // v0.10.56: repeated successful PreRecEpg dedupe is expected during startup/re-evaluation.
+                // release_contract: repeated successful PreRecEpg dedupe is expected during startup/re-evaluation.
                 // Keep normal logs as a summary; emit per-reservation rows only when a visible action occurred.
                 if (tunerRebound || metaNormalized)
                 {
@@ -1278,7 +1278,7 @@ public sealed class EpgScheduler : BackgroundService
                         $"result={(tunerRebound ? "SKIP_REUSE_REBOUND" : "SKIP_REUSE_META_NORMALIZED")} existing=R{reusablePreRecId} existingStatus={reusablePreRecStatus} parent=R{r.Id} " +
                         $"existingTuner={reusablePreRecTuner} tuner={r.TunerName} tunerRebound={tunerRebound} metaNormalized={metaNormalized} group={group} eventId={r.EventId} epg={epgStart:MM/dd HH:mm:ss}〜{epgEnd:MM/dd HH:mm:ss} " +
                         $"keepScheduledEntry={keepScheduledEntry} reason=same_parent_event_window_already_checked_ignoring_tuner " +
-                        $"rule=v0.11.408_epg_db_cache_cleanup");
+                        $"rule=release_contract");
                 }
                 continue;
             }
@@ -1306,11 +1306,11 @@ public sealed class EpgScheduler : BackgroundService
         if (dedupeReuseCount > 0)
         {
             log.Add("PRE_REC_EPG_DEDUPE", "Summary",
-                $"result=OK reused={dedupeReuseCount} keepScheduled={dedupeKeepScheduledCount} terminalOrCompleted={dedupeCompletedOrTerminalCount} tunerRebound={dedupeTunerReboundCount} parents=[{string.Join(',', dedupeParentIds.Select(x => $"R{x}"))}] rule=v0.11.408_epg_db_cache_cleanup");
+                $"result=OK reused={dedupeReuseCount} keepScheduled={dedupeKeepScheduledCount} terminalOrCompleted={dedupeCompletedOrTerminalCount} tunerRebound={dedupeTunerReboundCount} parents=[{string.Join(',', dedupeParentIds.Select(x => $"R{x}"))}] rule=release_contract");
         }
 
         log.Add("EPG_SCHEDULER", "PreRecEpg",
-            $"result={(registeredCount > 0 ? "REGISTERED" : "NO_REGISTER")} candidates={userScheduled.Count} registered={registeredCount} dedupeReused={dedupeReuseCount} dedupeParents=[{string.Join(',', dedupeParentIds.Select(x => $"R{x}"))}] staleDeleted={staleCleanup.Deleted} staleParents=[{staleCleanup.ParentIds}] skippedDisabled={skippedDisabled} skippedConflicted={skippedConflicted} skippedNoTuner={skippedNoTuner} skippedExpiredDeadline={skippedExpiredDeadline} deletedExpiredDeadline={deletedExpiredDeadline} preMin={preMin} durMin={durMin} manualIncluded=True skippedUserChain={skippedUserChain} routeMutations={epgEntryMutationCount} wakeRefresh=by_caller rule=v0.11.378_prerec_epg_route_mutation_guard");
+            $"result={(registeredCount > 0 ? "REGISTERED" : "NO_REGISTER")} candidates={userScheduled.Count} registered={registeredCount} dedupeReused={dedupeReuseCount} dedupeParents=[{string.Join(',', dedupeParentIds.Select(x => $"R{x}"))}] staleDeleted={staleCleanup.Deleted} staleParents=[{staleCleanup.ParentIds}] skippedDisabled={skippedDisabled} skippedConflicted={skippedConflicted} skippedNoTuner={skippedNoTuner} skippedExpiredDeadline={skippedExpiredDeadline} deletedExpiredDeadline={deletedExpiredDeadline} preMin={preMin} durMin={durMin} manualIncluded=True skippedUserChain={skippedUserChain} routeMutations={epgEntryMutationCount} wakeRefresh=by_caller rule=release_contract");
         if (epgEntryMutationCount > 0 || registeredCount > 0)
         {
             ReevaluateAndLog("PreRecEpg", refreshWakeTask: false);
@@ -1320,7 +1320,7 @@ public sealed class EpgScheduler : BackgroundService
     /// <summary>
     /// 定時EPGエントリをチューナー1本1行で生成・更新する。
     /// 終了時刻 = CeilTo30Min(開始 + 各TSの所要秒数の合計 / チューナー本数)
-    /// 各TSの所要秒数 = waitSec。v0.8.01では、EPG不足を秒数延長で隠さず、チャンネル/TS/SID束ねを優先して監査する。
+    /// 各TSの所要秒数 = waitSec。release_contractでは、EPG不足を秒数延長で隠さず、チャンネル/TS/SID束ねを優先して監査する。
     /// </summary>
     private void UpsertEpgEntries(int hour, int minute)
     {
@@ -1370,7 +1370,7 @@ public sealed class EpgScheduler : BackgroundService
             list.AddRange(hybridTuners);
         }
 
-        // ─── v32.82: TS単位の所要時間集計に変更 ───
+        // ─── TS単位の所要時間集計に変更 ───
         // 旧式は「局数 × waitSec / チューナー数」だったが、
         // 実際の取得は TS単位なので、各TSのサービス数を考慮した所要秒の合計をベースに計算。
         // groupKey("GR" or "BSCS") → そのグループの全TSの所要秒合計
@@ -1380,12 +1380,12 @@ public sealed class EpgScheduler : BackgroundService
         foreach (var warning in channelLoad.Warnings)
             log.Add("EPG_CHANNEL_CONFIG", "Settings", warning);
 
-        // v0.11.678: ch2/ChSet明示設定が成立しない場合に、チューナー本数を局数へ読み替える旧式fallbackを禁止する。
+        // release_contract: ch2/ChSet明示設定が成立しない場合に、チューナー本数を局数へ読み替える旧式fallbackを禁止する。
         // 設定画面の入力値だけを正本にし、チャンネル正本が0件なら定時EPGエントリも作らない。
         if (channelLoad.Targets.Count == 0)
         {
             log.Add("EPG_SCHEDULER", "EpgEntry",
-                "result=SKIPPED reason=channel_settings_incomplete targets=0 action=do_not_create_daily_epg_entries source=explicit_settings rule=v0.11.678_explicit_channel_contract");
+                "result=SKIPPED reason=channel_settings_incomplete targets=0 action=do_not_create_daily_epg_entries source=explicit_settings rule=release_contract");
             return;
         }
 
@@ -1421,7 +1421,7 @@ public sealed class EpgScheduler : BackgroundService
                 !totalSecByGroup.TryGetValue(scheduleGroup, out var totalSec) || totalSec <= 0)
             {
                 log.Add("EPG_SCHEDULER", "EpgEntry",
-                    $"result=SKIPPED group={group} reason=no_explicit_channel_targets action=do_not_create_daily_epg_entry source=explicit_settings rule=v0.11.678_explicit_channel_contract");
+                    $"result=SKIPPED group={group} reason=no_explicit_channel_targets action=do_not_create_daily_epg_entry source=explicit_settings rule=release_contract");
                 continue;
             }
 
@@ -1439,14 +1439,14 @@ public sealed class EpgScheduler : BackgroundService
 
             log.Add("EPG_SCHEDULER", "EpgEntry",
                 $"定時EPGエントリ: group={group} 局数={channelCount} " +
-                $"チューナー={tuners.Count}本 {start:MM/dd HH:mm}〜{end:HH:mm} source=explicit_settings rule=v0.11.678_explicit_channel_contract");
+                $"チューナー={tuners.Count}本 {start:MM/dd HH:mm}〜{end:HH:mm} source=explicit_settings rule=release_contract");
         }
 
         try
         {
-            // v0.8.09:
+            // release_contract:
             // 定時EPGエントリは予約DBへ直接Upsertするだけで終わらせず、必ず共通割り当てルートへ戻す。
-            // v0.8.08 では TaskSchedulerService 側だけを直したため、EpgScheduler 起点の EpgEntry 作成時に
+            // release_contract では TaskSchedulerService 側だけを直したため、EpgScheduler 起点の EpgEntry 作成時に
             // RefreshWakeTask=false のまま通過し、07:00用Wake生成が他イベント依存になる余地が残っていた。
             // EpgEntry の作成/更新は ALLOC_ROUTE/TUNER_ALLOC → Wake再構築までを正式な一連処理にする。
             ReevaluateAndLog("EpgEntry", refreshWakeTask: true);
@@ -1477,7 +1477,7 @@ public sealed class EpgScheduler : BackgroundService
 
     private int ApplyTimeFollowingWithAudit(string requestedBy, string targetScope, bool reevaluateOnUpdated = true)
     {
-        // v0.11.378: conflicted scheduled reservations are intentionally included.
+        // release_contract: conflicted scheduled reservations are intentionally included.
         // EventIdentity reservations must follow EIT updates before the next allocation pass;
         // otherwise a conflict can remain pinned to an obsolete time range.
         var scheduled = reservationStore.GetByStatus(ReservationStatus.Scheduled)
@@ -1493,7 +1493,7 @@ public sealed class EpgScheduler : BackgroundService
         var unchanged = results.Count(r => r.Reason == "UNCHANGED_WITHIN_THRESHOLD");
 
         log.Add("EPG_SCHEDULER", "TimeFollowSummary",
-            $"source={requestedBy} targetScope={targetScope} checked={results.Count} updated={updated.Count} unchanged={unchanged} missing={missing} protectedSkip={protectedSkip} rule=v0.11.380_epg_update_route_order_batch");
+            $"source={requestedBy} targetScope={targetScope} checked={results.Count} updated={updated.Count} unchanged={unchanged} missing={missing} protectedSkip={protectedSkip} rule=release_contract");
 
         foreach (var r in results.Where(x => x.Updated || x.Reason == "EPG_EVENT_NOT_FOUND" || x.Reason == "EPG_EVENT_INVALID_RANGE" || x.Reason == "NO_SERVICE_OR_EVENT_ID"))
         {
@@ -1502,14 +1502,14 @@ public sealed class EpgScheduler : BackgroundService
                 ? $"{r.NewStart.Value:MM/dd HH:mm:ss}〜{r.NewEnd.Value:MM/dd HH:mm:ss}"
                 : "-";
             log.Add("EPG_SCHEDULER", r.Updated ? "TimeFollowUpdated" : "TimeFollowAudit",
-                $"service={r.ServiceName} title={r.Title} id=R{r.ReservationId} result={r.Reason} old={oldRange} new={newRange} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eid={r.EventId} rule=v0.11.380_epg_update_route_order_batch");
+                $"service={r.ServiceName} title={r.Title} id=R{r.ReservationId} result={r.Reason} old={oldRange} new={newRange} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eid={r.EventId} rule=release_contract");
         }
 
         if (updated.Count > 0)
         {
             var ids = string.Join(",", updated.Select(r => $"R{r.ReservationId}"));
             log.Add("EPG_SCHEDULER", "TimeFollow",
-                $"時間追従更新: {updated.Count}件 [{ids}] route=ALLOC_ROUTE wakeRefresh=True preRecRefresh=after_time_follow rule=v0.11.380_epg_update_route_order_batch");
+                $"時間追従更新: {updated.Count}件 [{ids}] route=ALLOC_ROUTE wakeRefresh=True preRecRefresh=after_time_follow rule=release_contract");
             if (reevaluateOnUpdated)
             {
                 ReevaluateAndLog("TimeFollow", refreshWakeTask: true);

@@ -1,4 +1,4 @@
-﻿using Microsoft.Data.Sqlite;
+using Microsoft.Data.Sqlite;
 using TvAIr.Core;
 
 namespace TvAIr.Epg;
@@ -35,13 +35,13 @@ public sealed class ServiceLogoStore
                     $"service={Safe(serviceName)} nid={networkId} tsid={transportStreamId} sid={serviceId} " +
                     $"titleBarPath={Safe(titleBar)} titleBarType={(titleType.HasValue ? titleType.Value.ToString() : "-")} " +
                     $"centerPath={Safe(center)} centerType={(centerType.HasValue ? centerType.Value.ToString() : "-")} " +
-                    $"source=inventory displayTargets=worker_titlebar_center rule=v0.10.45_cleanup_log_contract_polish");
+                    $"source=inventory displayTargets=worker_titlebar_center rule=release_contract");
             }
             return new ServiceLogoDisplayPaths(titleBar, center, titleType, centerType);
         }
         catch (Exception ex)
         {
-            log.Add("SERVICE_LOGO_RESOLVE", "ERROR", $"service={Safe(serviceName)} nid={networkId} tsid={transportStreamId} sid={serviceId} error={ex.GetType().Name}:{Safe(ex.Message)} rule=v0.10.45_cleanup_log_contract_polish");
+            log.Add("SERVICE_LOGO_RESOLVE", "ERROR", $"service={Safe(serviceName)} nid={networkId} tsid={transportStreamId} sid={serviceId} error={ex.GetType().Name}:{Safe(ex.Message)} rule=release_contract");
             return ServiceLogoDisplayPaths.Empty;
         }
     }
@@ -218,7 +218,7 @@ public sealed class ServiceLogoStore
         }
         catch (Exception ex)
         {
-            log.Add("SERVICE_LOGO_INVENTORY", "ERROR", $"result=ERROR phase=summary error={ex.GetType().Name}:{Safe(ex.Message)} rule=v0.9.66_logo_inventory_acquisition_only");
+            log.Add("SERVICE_LOGO_INVENTORY", "ERROR", $"result=ERROR phase=summary error={ex.GetType().Name}:{Safe(ex.Message)} rule=release_contract");
         }
         return summaries;
     }

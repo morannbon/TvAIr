@@ -1,5 +1,5 @@
-﻿/*
- * TvAIr page CSS module - v0.6.44
+/*
+ * TvAIr page CSS module - release_contract
  * Source: keyword.html
  * Scope: page-local form/help/list styles extracted from inline <style>.
  * Safety: exact CSS relocation only; no layout/property changes intended.
@@ -8,8 +8,8 @@
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:var(--app-bg);color:var(--text-main);height:100vh;display:flex;flex-direction:column;overflow:hidden}
 
-/* TopNav is owned by tvair-style-system.css (v0.11.198). */
-/* v0.11.502: list-page shell (#page-scroll/#page-menu-wrap/html/body sizing) is owned by tvair-ui-modules.css + tvair-list-module.css. This page file keeps page-local form/table content only. */
+/* TopNav is owned by tvair-style-system.css (release_contract). */
+/* release_contract: list-page shell (#page-scroll/#page-menu-wrap/html/body sizing) is owned by tvair-ui-modules.css + tvair-list-module.css. This page file keeps page-local form/table content only. */
 /* ── レイアウト */
 #body{position:static;inset:auto;transform:none;width:100%;max-width:none;min-width:0;height:calc(100vh - var(--tvair-top-nav-height));margin:0;display:grid;grid-template-columns:var(--tvair-keyword-form-pane,var(--tvair-split-form-pane,340px)) minmax(0,1fr);gap:0;overflow:hidden;background:var(--app-bg)}
 
@@ -23,22 +23,22 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
 
 .form-row{margin-bottom:6px}
 .form-row label{display:block;font-size:11px;color:var(--tvair-content-subtle);margin-bottom:2px;font-weight:bold}
-/* v0.11.502: basic text input geometry/paint/focus is owned by tvair-list-module.css. */
+/* release_contract: basic text input geometry/paint/focus is owned by tvair-list-module.css. */
 
 /* オプション */
-/* v0.11.502: option row/label geometry is owned by tvair-list-module.css. */
+/* release_contract: option row/label geometry is owned by tvair-list-module.css. */
 .opt-label{color:var(--label-color)}
 
 /* 時間帯 */
-/* v0.11.502: time row/select geometry is owned by tvair-list-module.css. */
+/* release_contract: time row/select geometry is owned by tvair-list-module.css. */
 .time-row{color:var(--label-color)}
 
 /* 曜日チェック */
-/* v0.11.502: weekday row/label geometry is owned by tvair-list-module.css. */
+/* release_contract: weekday row/label geometry is owned by tvair-list-module.css. */
 .dow-label{color:var(--label-color)}
 
 /* チャンネルリスト */
-/* v0.11.502: channel list/item geometry is owned by tvair-list-module.css. */
+/* release_contract: channel list/item geometry is owned by tvair-list-module.css. */
 .ch-list{background:var(--ch-list-bg);border:1px solid var(--ch-list-border)}
 .ch-list::-webkit-scrollbar-thumb{background:var(--scrollbar-thumb)}
 .ch-item{color:var(--text-body)}
@@ -46,7 +46,7 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
 .ch-item.selected{background:var(--tvair-action-primary-bg);color:var(--tvair-content-inverse)}
 
 /* 期間 */
-/* v0.11.502: date row/input geometry is owned by tvair-list-module.css. */
+/* release_contract: date row/input geometry is owned by tvair-list-module.css. */
 .date-row{color:var(--label-color)}
 
 #search-btn{background:var(--tvair-action-primary-bg);color:var(--tvair-content-inverse);border:none}
@@ -54,13 +54,13 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
 #search-btn:disabled{background:var(--scrollbar-thumb)}
 
 /* ── 結果パネル */
-/* v0.11.502: keyword result panel/wrap/init/empty geometry and scrollbar shape are owned by tvair-list-module.css. */
+/* release_contract: keyword result panel/wrap/init/empty geometry and scrollbar shape are owned by tvair-list-module.css. */
 #result-summary{color:var(--tvair-content-subtle);background:var(--tvair-surface-raised);border:1px solid var(--tvair-line-default)}
 #result-summary span{color:var(--nav-bg);font-weight:bold}
 #result-wrap{background:var(--tvair-surface-raised);border:1px solid var(--tvair-line-default)}
 #result-wrap::-webkit-scrollbar-thumb{background:var(--scrollbar-thumb)}
 
-/* v0.11.502: #result-table geometry/header/row-state/cell base ownership is centralized in tvair-list-module.css. */
+/* release_contract: #result-table geometry/header/row-state/cell base ownership is centralized in tvair-list-module.css. */
 
 .td-date{color:var(--tvair-content-subtle);white-space:nowrap;font-size:11px}
 .td-time{color:var(--text-dark);font-size:12px;font-weight:bold;white-space:nowrap}
@@ -69,19 +69,19 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
 .td-title .sub{font-weight:normal;font-size:11px;color:var(--tvair-content-muted);margin-top:2px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 .td-dur{color:var(--tvair-content-muted);font-size:11px;white-space:nowrap}
 
-/* v0.11.502: .rsv-btn and keyword form utility button geometry are owned by tvair-list-module.css. */
+/* release_contract: .rsv-btn and keyword form utility button geometry are owned by tvair-list-module.css. */
 .rsv-btn{border:none}
 .rsv-btn-new{background:var(--rsv-new-btn);color:var(--tvair-content-inverse)}
 .rsv-btn-new:hover{background:var(--rsv-new-btn-hover)}
 .rsv-btn-done{background:var(--rsv-done-bg);color:var(--rsv-done-text);border:1px solid var(--rsv-done-border);cursor:default}
 
 /* 初期・空状態 */
-/* v0.11.502: init/empty result-state geometry is owned by tvair-list-module.css. */
+/* release_contract: init/empty result-state geometry is owned by tvair-list-module.css. */
 #result-init{color:var(--tvair-content-muted);background:var(--tvair-surface-raised);border:1px solid var(--tvair-line-default)}
 #result-empty{color:var(--tvair-content-muted)}
 
 /* トースト */
-/* v0.11.502: #toast geometry/paint/animation is owned by tvair-notification.css. */
+/* release_contract: #toast geometry/paint/animation is owned by tvair-notification.css. */
 .kw-channel-bulk-btn{background:var(--btn-lite-bg);border:1px solid var(--btn-lite-border);color:var(--btn-lite-text)}
 
 

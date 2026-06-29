@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Epg;
+namespace TvAIr.Epg;
 
 internal sealed class EitSectionReader
 {
@@ -330,7 +330,7 @@ internal sealed class EitSectionReader
         string rawContentDescriptorHex,
         string genreCodes)
     {
-        // v0.11.682: descriptor boundary recovery is deliberately conservative.
+        // release_contract: descriptor boundary recovery is deliberately conservative.
         // If one malformed descriptor length overruns the loop, keep the original
         // raw descriptor loop for audit, but scan the remaining bytes only for
         // fully self-contained ARIB 0x4D/0x4E descriptors.  Nothing is invented,

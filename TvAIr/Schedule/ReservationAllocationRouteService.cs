@@ -1,4 +1,4 @@
-﻿/* v0.2.34 STOP_PHASE_ALLOC_ROUTE_GUARD: 録画停止フェーズ中のALLOC_ROUTEはStopPhaseGateで遅延扱いにする。 */
+/* release_contract STOP_PHASE_ALLOC_ROUTE_GUARD: 録画停止フェーズ中のALLOC_ROUTEはStopPhaseGateで遅延扱いにする。 */
 using TvAIr.Core;
 using TvAIr.Epg;
 using TvAIr.Tuner;
@@ -81,17 +81,17 @@ public sealed class ReservationAllocationRouteService
 
         if (request.ReevaluateAllocations)
         {
-            // v0.11.87:
+            // release_contract:
             // 同一イベントの親予約が複数残った場合は、割当評価へ入る前に正本を1件へ寄せる。
             // ここは共通割り当てルート内なので、番組表/局別/自動検索/起動復旧の横串で効く。
             var suppressedDuplicates = _store.SuppressDuplicateScheduledParentReservations(request.Source, request.Action);
             if (suppressedDuplicates > 0)
             {
                 _log.Add("RESERVATION_DEDUPE", "SUMMARY",
-                    $"result=SUPPRESSED count={suppressedDuplicates} source={request.Source} action={request.Action} commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=v0.11.87_reservation_parent_dedupe");
+                    $"result=SUPPRESSED count={suppressedDuplicates} source={request.Source} action={request.Action} commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
             }
 
-            // v0.3.33:
+            // release_contract:
             // チェーン判定は後番組優先の派生。
             // 設定上のPseudoContinuousRecordingだけでなく、DB上にUserChainが残っている場合は
             // 既存チェーンの整合性維持のため割当評価でchain=trueとして扱う。
@@ -129,7 +129,7 @@ public sealed class ReservationAllocationRouteService
                     {
                         taskScheduler.RequestWakeTaskRefreshSoon(request.Source, request.Action, TimeSpan.FromMinutes(2));
                         _log.Add("ALLOC_ROUTE", "Wake",
-                            $"source={request.Source} action={request.Action} Wakeタスク再構築を遅延集約: rule=v0.5.66_viewing_safe_wake");
+                            $"source={request.Source} action={request.Action} Wakeタスク再構築を遅延集約: rule=release_contract");
                     }
                     else
                     {
@@ -150,7 +150,7 @@ public sealed class ReservationAllocationRouteService
                 var state = conflicted ? "ON" : "OFF";
                 var displayTitle = ReservationTitleDisplayContract.ForLog(title);
                 var rawTitleBlank = ReservationTitleDisplayContract.RawBlankFlag(title);
-                var msg = $"競合フラグ {state}: service=[{serviceName}] title=[{displayTitle}] rawTitleBlank={rawTitleBlank} id=R{id} rule=v0.11.516_reservation_display_metadata_contract";
+                var msg = $"競合フラグ {state}: service=[{serviceName}] title=[{displayTitle}] rawTitleBlank={rawTitleBlank} id=R{id} rule=release_contract";
                 _log.Add(request.ConflictLogCategory, request.ConflictLogTitle, msg);
             }
         }
@@ -171,7 +171,7 @@ public sealed class ReservationAllocationRouteService
 
     private static bool IsLowPriorityWakeRefresh(ReservationAllocationRouteRequest request)
     {
-        // v0.5.66:
+        // release_contract:
         // 自動検索予約・UI編集・プラグイン操作などは、数秒遅れてもWake予約の実用性を損なわない。
         // ここで同期schtasks I/Oを避け、予約差分UI更新や外部LIVETest視聴と負荷が重なるのを抑える。
         if (request.Source.Contains("Keyword", StringComparison.OrdinalIgnoreCase)) return true;

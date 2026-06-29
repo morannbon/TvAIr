@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using Microsoft.Extensions.Options;
 using TvAIr.Core;
 
@@ -36,7 +36,7 @@ public sealed class ChannelFileLoader
 
     /// <summary>
     /// ch2 + ChSet.txt を読み込む。
-    /// v0.11.681: 起動時IOptions固定ではなく、TvAIr.iniの現在値を正とする。
+    /// release_contract: 起動時IOptions固定ではなく、TvAIr.iniの現在値を正とする。
     /// ch2/ChSet 4パスと各ファイルの更新時刻をcache keyに含め、設定変更・ファイル差し替え時は再読込する。
     /// </summary>
     public ChannelLoadResult Load()
@@ -132,7 +132,7 @@ public sealed class ChannelFileLoader
     private static string ResolveExistingCh2Path(string path, ChannelLoadResult result)
     {
         if (string.IsNullOrWhiteSpace(path)) return path;
-        // v0.11.678: ConfiguredCh2Path を正とし、特定環境名への自動rewriteは行わない。
+        // release_contract: ConfiguredCh2Path を正とし、特定環境名への自動rewriteは行わない。
         return File.Exists(path) ? TunerIsolationPolicy.ResolveConfiguredCh2Path(path) : path;
     }
 
@@ -398,7 +398,7 @@ public sealed class ChannelFileLoader
             return $"/ch {resolvedChannelIndex}";
         }
 
-        // BS/CSは v0.3.43 以前のTVTest通常録画ルートへ戻す。
+        // BS/CSは release_contract 以前のTVTest通常録画ルートへ戻す。
         // ChSetのTSID→BonDriverチャンネルを /chi として渡すことで、TVTest側の録画名・復号ルートを維持する。
         // ただしフジテレビONE/TWO/NEXT等の同一TS内複数サービスは /chi だけでは既定サービスに潰れるため、
         // /sid だけを最小追加する。/nid /tsid /reccurservice は復号事故の原因になるため使わない。

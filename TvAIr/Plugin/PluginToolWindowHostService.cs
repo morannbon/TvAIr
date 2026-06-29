@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Plugin;
+namespace TvAIr.Plugin;
 
 using System.Collections.Concurrent;
 using System.Threading;
@@ -11,7 +11,7 @@ using Microsoft.Win32;
 using TvAIr.Core;
 
 /// <summary>
-/// v0.10.68: TvAIr本体管理Plugin Tool Window direct content表示修正。
+/// release_contract: TvAIr本体管理Plugin Tool Window direct content表示修正。
 /// pluginId+routeSegment reuse、host close同期、状態保存、alwaysOnTop/size反映、JSON画面抑止fallbackを同じ境界へ集約する。
 /// </summary>
 public sealed class PluginToolWindowHostService
@@ -76,7 +76,7 @@ public sealed class PluginToolWindowHostService
             ScriptExecutionAllowed: false,
             SupportsManifestFormIcon: true,
             FormIconSourcePriority: "EmbeddedResource>plugin_file>default_TvAIr_icon",
-            ContractVersion: "0.11.58");
+            ContractVersion: TvAIrVersionContract.PluginHostContractVersion);
     }
 
     public bool IsHostAlive(string? windowId)
@@ -573,7 +573,7 @@ public sealed class PluginToolWindowHostService
                 {
                     _log.Add("PLUGIN_TOOL_WINDOW_MIN_SIZE",
                         string.IsNullOrWhiteSpace(_pluginName) ? "ToolWindow" : _pluginName,
-                        $"result=CLAMPED source={SafeLogValue(source)} windowId={SafeLogValue(_windowId)} oldSize={oldWidth}x{oldHeight} newSize={newWidth}x{newHeight} minSize={minWidth}x{minHeight} rule=v0.11.58_toolwindow_min_size_contract");
+                        $"result=CLAMPED source={SafeLogValue(source)} windowId={SafeLogValue(_windowId)} oldSize={oldWidth}x{oldHeight} newSize={newWidth}x{newHeight} minSize={minWidth}x{minHeight} rule=release_contract");
                 }
                 catch { }
             }
@@ -639,7 +639,7 @@ public sealed class PluginToolWindowHostService
             {
                 _log.Add("PLUGIN_TOOL_WINDOW_STATE_GUARD",
                     string.IsNullOrWhiteSpace(_pluginName) ? "ToolWindow" : _pluginName,
-                    $"result=IGNORED source={SafeLogValue(source)} rawState={rawState} effectiveState={_lastObservedWindowState} windowId={SafeLogValue(_windowId)} reason={SafeLogValue(reason)} bounds={Bounds.Left},{Bounds.Top},{Bounds.Width}x{Bounds.Height} showInTaskbar={ShowInTaskbar} topMost={TopMost} rule=v0.11.316_toolwindow_minimized_state_authoritative_guard");
+                    $"result=IGNORED source={SafeLogValue(source)} rawState={rawState} effectiveState={_lastObservedWindowState} windowId={SafeLogValue(_windowId)} reason={SafeLogValue(reason)} bounds={Bounds.Left},{Bounds.Top},{Bounds.Width}x{Bounds.Height} showInTaskbar={ShowInTaskbar} topMost={TopMost} rule=release_contract");
             }
             catch { }
         }
@@ -651,7 +651,7 @@ public sealed class PluginToolWindowHostService
                 var b = actualMinimized && !RestoreBounds.IsEmpty ? RestoreBounds : Bounds;
                 _log.Add("PLUGIN_TOOL_WINDOW_STATE",
                     string.IsNullOrWhiteSpace(_pluginName) ? "ToolWindow" : _pluginName,
-                    $"oldState={oldState} newState={newState} source={SafeLogValue(source)} windowId={SafeLogValue(_windowId)} bounds={b.Left},{b.Top},{b.Width}x{b.Height} showInTaskbar={ShowInTaskbar} topMost={TopMost} actualMinimized={actualMinimized} statePersisted={statePersisted} minimizedPersistenceSuppressed={actualMinimized} rule=v0.11.316_toolwindow_minimized_state_authoritative_guard");
+                    $"oldState={oldState} newState={newState} source={SafeLogValue(source)} windowId={SafeLogValue(_windowId)} bounds={b.Left},{b.Top},{b.Width}x{b.Height} showInTaskbar={ShowInTaskbar} topMost={TopMost} actualMinimized={actualMinimized} statePersisted={statePersisted} minimizedPersistenceSuppressed={actualMinimized} rule=release_contract");
             }
             catch { }
         }
@@ -746,7 +746,7 @@ public sealed class PluginToolWindowHostService
             {
                 _log.Add("PLUGIN_WINDOW_REFRESH_SCROLL",
                     string.IsNullOrWhiteSpace(_pluginName) ? "ToolWindow" : _pluginName,
-                    $"result={result} action=after_directcontent_refresh windowId={SafeLogValue(_windowId)} target={SafeLogValue(target)} mode={SafeLogValue(mode)} hostKind={SafeLogValue(_hostKind)} reason={SafeLogValue(reason)} rule=v0.11.28_viewer_retune_guard_light_stability");
+                    $"result={result} action=after_directcontent_refresh windowId={SafeLogValue(_windowId)} target={SafeLogValue(target)} mode={SafeLogValue(mode)} hostKind={SafeLogValue(_hostKind)} reason={SafeLogValue(reason)} rule=release_contract");
             }
             catch { }
         }

@@ -1,4 +1,4 @@
-﻿/* TvAIr v0.11.358 EPGProgressPanelThemeRoleRebuild
+/* TvAIr release_contract EPGProgressPanelThemeRoleRebuild
    Owner: EPG progress panel only.
    Purpose: keep EPG progress panel structure, role-based colors, progress bar and actions out of index.html,
    tvair-ui-modules.css and tvair-theme-contract.css. EPG panel colors must be dialog/progress/action roles, not fixed navy tokens. */
@@ -98,7 +98,7 @@
   white-space:nowrap;
   box-shadow:none;
 }
-/* v0.11.358 EPG action buttons consume action/control roles directly.
+/* release_contract EPG action buttons consume action/control roles directly.
    Do not inherit nav-bg/danger-btn aliases from unrelated toolbar or ProgramGuide owners. */
 .epg-btn-start{
   display:none;

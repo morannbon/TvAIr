@@ -1,20 +1,20 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 
 <html lang="ja">
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>プログラム予約 — TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.0"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.0"/>
-<link href="/tvair-notification.css?v=1.0.0" rel="stylesheet"/>
-<script src="/tvair-theme.js?v=1.0.0"></script>
-<link href="/tvair-epg-panel.css?v=1.0.0" rel="stylesheet"/>
-<link href="/tvair-program-reservation.css?v=1.0.0" rel="stylesheet"/>
-<link href="/tvair-ui-foundation.css?v=1.0.0" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.0.0" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.0.0" rel="stylesheet"/>
-<link href="/tvair-list-module.css?v=1.0.0" rel="stylesheet"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.4"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.4"/>
+<link href="/tvair-notification.css?v=1.0.4" rel="stylesheet"/>
+<script src="/tvair-theme.js?v=1.0.4"></script>
+<link href="/tvair-epg-panel.css?v=1.0.4" rel="stylesheet"/>
+<link href="/tvair-program-reservation.css?v=1.0.4" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.0.4" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.0.4" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.0.4" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.0.4" rel="stylesheet"/>
 </head>
 <body class="tvair-non-program-page tvair-program-reservation-page tvair-form-split-page">
 <div class="tvair-topnav" id="nav">
@@ -282,7 +282,7 @@ function buildTimeSelects(hId,mId,defaultH=0,defaultM=0){
 }
 
 // 曜日選択生成
-// v0.11.442: 予約系ページ横串の共通 choice-chip UI に接続する。
+// release_contract: 予約系ページ横串の共通 choice-chip UI に接続する。
 // 通常/編集/全選択/全解除はすべて setDowChipState() を通す。
 function getDowChips(wrapId){
   const wrap=document.getElementById(wrapId);
@@ -569,13 +569,13 @@ buildTimeSelects('e-eh','e-em',0,30);
 loadChannels();
 load();
 
-/* v0.11.531 MenuLegacyEntryCleanupContract: page menu ownership is centralized in tvair-menu-spine.js. */
+/* release_contract MenuLegacyEntryCleanupContract: page menu ownership is centralized in tvair-menu-spine.js. */
 
 </script>
 
-<script src="/tvair-notification.js?v=1.0.0"></script>
-<script src="/tvair-epg-run-contract.js?v=1.0.0"></script>
-<script src="/tvair-epg-widget.js?v=1.0.0"></script>
-<script src="/tvair-menu-spine.js?v=1.0.0"></script>
+<script src="/tvair-notification.js?v=1.0.4"></script>
+<script src="/tvair-epg-run-contract.js?v=1.0.4"></script>
+<script src="/tvair-epg-widget.js?v=1.0.4"></script>
+<script src="/tvair-menu-spine.js?v=1.0.4"></script>
 </body>
 </html>

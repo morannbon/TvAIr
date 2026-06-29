@@ -1,7 +1,8 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using System.Text;
 using System.Security.Cryptography;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Configuration;
 using TvAIr.Core;
 using TvAIr.Epg;
 using TvAIr.Channel;
@@ -47,7 +48,8 @@ public sealed class ReservationStore
     private readonly ChainDirectRecorderSessionRegistry chainSessionRegistry;
     private readonly ChannelFileLoader channelLoader;
     private readonly UserEventLogService userEvents;
-    // v0.3.33: 通常競合ポリシーから「自動救済1回だけ」の足かせを撤去。
+    private readonly bool tunerAllocationDebugEnabled;
+    // release_contract: 通常競合ポリシーから「自動救済1回だけ」の足かせを撤去。
     // 競合が判明した時点で、前番組優先/後番組優先の共通ポリシーだけで勝敗を決める。
 
 
@@ -70,13 +72,14 @@ public sealed class ReservationStore
     /// <summary>時間追従の変化検出閾値（秒）。この秒数以上ずれていれば更新対象とみなす。</summary>
     private const int TimeFollowThresholdSeconds = 30;
 
-    public ReservationStore(Database db, LogRepository log, ChainDirectRecorderSessionRegistry chainSessionRegistry, ChannelFileLoader channelLoader, UserEventLogService userEvents)
+    public ReservationStore(Database db, LogRepository log, ChainDirectRecorderSessionRegistry chainSessionRegistry, ChannelFileLoader channelLoader, UserEventLogService userEvents, IConfiguration configuration)
     {
         this.db = db;
         this.log = log;
         this.chainSessionRegistry = chainSessionRegistry;
         this.channelLoader = channelLoader;
         this.userEvents = userEvents;
+        tunerAllocationDebugEnabled = configuration.GetValue<bool>("Debug:EnableRouteReplayApi");
     }
 
     private static string SafeTuner(string? tuner)
@@ -114,7 +117,7 @@ public sealed class ReservationStore
 
     private int AutoDeleteResolvedProgramGuideMissingDuplicates(List<Reservation> allScheduled, List<Reservation> scheduled)
     {
-        // v0.11.378: 一覧上のReservation照合ではなく、DB上の予約実体で完全一致を確認する。
+        // release_contract: 一覧上のReservation照合ではなく、DB上の予約実体で完全一致を確認する。
         // UI説明は追加しない。安全な空欄ProgramRule重複だけ削除する。
         var targets = new List<(int MissingId, int? RuleId, int ResolvedId, string ServiceName, string StartText, string EndText, string ResolvedSource)>();
 
@@ -246,7 +249,7 @@ public sealed class ReservationStore
             }
 
             log.Add("PROGRAM_GUIDE_MISSING_DUPLICATE_CLEANUP", "AutoDelete",
-                $"result=DELETED missing=R{target.MissingId} resolved=R{target.ResolvedId} service={TrimForAudit(target.ServiceName)} start={TrimForAudit(target.StartText)} end={TrimForAudit(target.EndText)} origin=ProgramGuideMissingProgramRule identity=TimeIdentity resolvedSource={target.ResolvedSource} commonRoute=ALLOC_ROUTE/TUNER_ALLOC ui=none rule=v0.11.378_programguide_missing_duplicate_cleanup_trace_residue");
+                $"result=DELETED missing=R{target.MissingId} resolved=R{target.ResolvedId} service={TrimForAudit(target.ServiceName)} start={TrimForAudit(target.StartText)} end={TrimForAudit(target.EndText)} origin=ProgramGuideMissingProgramRule identity=TimeIdentity resolvedSource={target.ResolvedSource} commonRoute=ALLOC_ROUTE/TUNER_ALLOC ui=none rule=release_contract");
         }
 
         tx.Commit();
@@ -256,7 +259,7 @@ public sealed class ReservationStore
             allScheduled.RemoveAll(r => deletedReservationIds.Contains(r.Id));
             scheduled.RemoveAll(r => deletedReservationIds.Contains(r.Id));
             log.Add("PROGRAM_GUIDE_MISSING_DUPLICATE_CLEANUP", "Summary",
-                $"result=OK deletedReservations=[{string.Join(',', deletedReservationIds.OrderBy(x => x).Select(x => $"R{x}"))}] deletedRules=[{string.Join(',', deletedRuleIds.OrderBy(x => x))}] mode=db_same_service_exact_time_resolved_event_only ui=none commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=v0.11.378_programguide_missing_duplicate_cleanup_trace_residue");
+                $"result=OK deletedReservations=[{string.Join(',', deletedReservationIds.OrderBy(x => x).Select(x => $"R{x}"))}] deletedRules=[{string.Join(',', deletedRuleIds.OrderBy(x => x))}] mode=db_same_service_exact_time_resolved_event_only ui=none commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
         }
 
         return deletedReservationIds.Count;
@@ -453,7 +456,7 @@ public sealed class ReservationStore
             {
                 suppressIds.Add(duplicate.Id);
                 log.Add("RESERVATION_DEDUPE", "SUPPRESS_DUPLICATE",
-                    $"result=CANCEL_DUPLICATE source={source} action={action} keep=R{keep.Id} duplicate=R{duplicate.Id} service={TrimForAudit(duplicate.ServiceName)} title={TrimTitleForAudit(duplicate.Title)} rawTitleBlank={RawTitleBlankForAudit(duplicate.Title)} start={duplicate.StartTime:MM/dd HH:mm:ss} end={duplicate.EndTime:MM/dd HH:mm:ss} key={group.Key} commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=v0.11.87_reservation_parent_dedupe");
+                    $"result=CANCEL_DUPLICATE source={source} action={action} keep=R{keep.Id} duplicate=R{duplicate.Id} service={TrimForAudit(duplicate.ServiceName)} title={TrimTitleForAudit(duplicate.Title)} rawTitleBlank={RawTitleBlankForAudit(duplicate.Title)} start={duplicate.StartTime:MM/dd HH:mm:ss} end={duplicate.EndTime:MM/dd HH:mm:ss} key={group.Key} commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
             }
         }
 
@@ -484,7 +487,7 @@ public sealed class ReservationStore
 
     public int Add(Reservation r)
     {
-        // v0.11.175: 予約入口の最終防衛。EPG DB 側で修復できたタイトルだけでなく、
+        // release_contract: 予約入口の最終防衛。EPG DB 側で修復できたタイトルだけでなく、
         // 既存DB/自動検索/番組表から来た途中汚染もここで切り落とす。
         r.Title = NormalizeReservationTitleForStorage(r.Title, r.ServiceName, r.Id);
         var now = DateTime.Now.ToString("O");
@@ -560,7 +563,7 @@ public sealed class ReservationStore
         var affected = cmd.ExecuteNonQuery();
 
         log.Add("RESERVATION_AUDIT", "SKIP_CONFLICT_FINALIZE",
-            $"service={TrimForAudit(before?.ServiceName)} title={TrimTitleForAudit(before?.Title)} rawTitleBlank={RawTitleBlankForAudit(before?.Title)} id=R{id} affected={affected} from={(before is null ? "<missing>" : before.Status.ToString())} to=Failed reason={reason} group={group} enabled={(before?.IsEnabled.ToString() ?? "-")} conflicted={(before?.IsConflicted.ToString() ?? "-")} start={(before is null ? "-" : before.StartTime.ToString("MM/dd HH:mm:ss"))} end={(before is null ? "-" : before.EndTime.ToString("MM/dd HH:mm:ss"))} tuner={SafeTuner(EffectiveTunerName(before))} rule=v0.11.135_conflict_skip_terminal_state");
+            $"service={TrimForAudit(before?.ServiceName)} title={TrimTitleForAudit(before?.Title)} rawTitleBlank={RawTitleBlankForAudit(before?.Title)} id=R{id} affected={affected} from={(before is null ? "<missing>" : before.Status.ToString())} to=Failed reason={reason} group={group} enabled={(before?.IsEnabled.ToString() ?? "-")} conflicted={(before?.IsConflicted.ToString() ?? "-")} start={(before is null ? "-" : before.StartTime.ToString("MM/dd HH:mm:ss"))} end={(before is null ? "-" : before.EndTime.ToString("MM/dd HH:mm:ss"))} tuner={SafeTuner(EffectiveTunerName(before))} rule=release_contract");
     }
 
     public void UpdateStatus(int id, ReservationStatus status, bool force = false)
@@ -572,7 +575,7 @@ public sealed class ReservationStore
                 $"result=SUPPRESSED from={before!.Status} attempted=Scheduled kept=Recording reason=open_recording_runtime source=UpdateStatus force={force} " +
                 $"started={before.RecordingStartedAt:MM/dd HH:mm:ss} finished={(before.RecordingFinishedAt.HasValue ? before.RecordingFinishedAt.Value.ToString("MM/dd HH:mm:ss") : "-")} " +
                 $"end={before.EndTime:MM/dd HH:mm:ss} tuner={SafeTuner(EffectiveTunerName(before))} service={TrimForAudit(before.ServiceName)} title={TrimTitleForAudit(before.Title)} rawTitleBlank={RawTitleBlankForAudit(before.Title)} " +
-                $"rule=v0.10.08_recording_status_write_contract");
+                $"rule=release_contract");
             return;
         }
         if (!force && ShouldSuppressTransientFailedStatus(before, status))
@@ -581,7 +584,7 @@ public sealed class ReservationStore
                 $"result=SUPPRESSED requestedStatus=Failed currentStatus={before!.Status} reason=recording_window_status_flip_guard " +
                 $"start={before.StartTime:MM/dd HH:mm:ss} end={before.EndTime:MM/dd HH:mm:ss} now={DateTime.Now:MM/dd HH:mm:ss} " +
                 $"tuner={SafeTuner(EffectiveTunerName(before))} service={TrimForAudit(before.ServiceName)} title={TrimTitleForAudit(before.Title)} rawTitleBlank={RawTitleBlankForAudit(before.Title)} " +
-                $"rule=v0.9.83_failed_direct_route_guard");
+                $"rule=release_contract");
             return;
         }
 
@@ -616,8 +619,8 @@ public sealed class ReservationStore
         if (!before.RecordingStartedAt.HasValue) return false;
         if (before.RecordingFinishedAt.HasValue) return false;
 
-        // v0.9.83:
-        // v0.9.82では Recording -> Failed のみを抑止していたため、
+        // release_contract:
+        // release_contractでは Recording -> Failed のみを抑止していたため、
         // 録画開始済みセッションが一瞬別状態に見えた経路から Failed が
         // 書かれるケースを取りこぼしていた。
         // 録画開始実績があり、終了実績がなく、予定終了+2分以内であれば、
@@ -634,7 +637,7 @@ public sealed class ReservationStore
         if (reservation.RecordingFinishedAt.HasValue) return false;
         if (reservation.Status is ReservationStatus.Completed or ReservationStatus.Cancelled or ReservationStatus.Failed) return false;
 
-        // v0.10.08:
+        // release_contract:
         // DB status は永続化された表示状態であり、録画開始後の実行中判定の主ではない。
         // 録画開始実績があり終了実績がない予約は、予定終了+2分までは
         // Runtime/TunerPool 側の録画セッションとして扱い、Scheduled/Conflicted へ戻す書き込みを拒否する。
@@ -650,7 +653,7 @@ public sealed class ReservationStore
 
     private static bool ClearsConflictFlagForTerminalStatus(ReservationStatus status)
     {
-        // v0.8.23:
+        // release_contract:
         // Completed/Cancelled は予約実行上の終端であり、以後のチューナー競合判断対象ではない。
         // Failed は失敗原因として競合情報を残したいケースがあるため、ここでは触らない。
         return status == ReservationStatus.Completed
@@ -680,7 +683,7 @@ public sealed class ReservationStore
         cmd.Parameters.AddWithValue("$now", DateTime.Now.ToString("O"));
         var affected = cmd.ExecuteNonQuery();
         log.Add("RESERVATION_AUDIT", "STARTUP_INTERRUPTED_FINALIZE",
-            $"service={TrimForAudit(before?.ServiceName)} title={TrimTitleForAudit(before?.Title)} rawTitleBlank={RawTitleBlankForAudit(before?.Title)} id=R{id} affected={affected} from={(before is null ? "<missing>" : before.Status.ToString())} to=Failed reason={reason} started={(before?.RecordingStartedAt.HasValue == true ? before.RecordingStartedAt.Value.ToString("MM/dd HH:mm:ss") : "-")} finished={finishedAt:MM/dd HH:mm:ss} end={(before is null ? "-" : before.EndTime.ToString("MM/dd HH:mm:ss"))} tuner={SafeTuner(EffectiveTunerName(before))} rule=v0.11.138_recording_interruption_recovery_common");
+            $"service={TrimForAudit(before?.ServiceName)} title={TrimTitleForAudit(before?.Title)} rawTitleBlank={RawTitleBlankForAudit(before?.Title)} id=R{id} affected={affected} from={(before is null ? "<missing>" : before.Status.ToString())} to=Failed reason={reason} started={(before?.RecordingStartedAt.HasValue == true ? before.RecordingStartedAt.Value.ToString("MM/dd HH:mm:ss") : "-")} finished={finishedAt:MM/dd HH:mm:ss} end={(before is null ? "-" : before.EndTime.ToString("MM/dd HH:mm:ss"))} tuner={SafeTuner(EffectiveTunerName(before))} rule=release_contract");
         if (affected > 0)
             userEvents.AddRecordingInterruptedAtStartup(before, id, reason, fileEvidence, finishedAt, trigger);
     }
@@ -733,7 +736,7 @@ public sealed class ReservationStore
         cmd.Parameters.AddWithValue("$now", now.ToString("O"));
         var newId = Convert.ToInt32(cmd.ExecuteScalar());
         log.Add("RESERVATION_AUDIT", "STARTUP_RECOVERY_ADD",
-            $"source=R{original.Id} recovery=R{newId} service={TrimForAudit(original.ServiceName)} title={TrimTitleForAudit(original.Title)} rawTitleBlank={RawTitleBlankForAudit(original.Title)} start={original.StartTime:MM/dd HH:mm:ss} end={original.EndTime:MM/dd HH:mm:ss} tuner={SafeTuner(!string.IsNullOrWhiteSpace(original.ActualTunerName) ? original.ActualTunerName : original.TunerName)} userChainCopied={original.IsUserChain} chainPrev={(original.UserChainPreviousId.HasValue ? $"R{original.UserChainPreviousId.Value}" : "-")} chainRoot={(original.UserChainRootId.HasValue ? $"R{original.UserChainRootId.Value}" : "-")} reason=startup_interrupted_recording_recovery rule=v0.11.116_recovery_chain_context_preserve");
+            $"source=R{original.Id} recovery=R{newId} service={TrimForAudit(original.ServiceName)} title={TrimTitleForAudit(original.Title)} rawTitleBlank={RawTitleBlankForAudit(original.Title)} start={original.StartTime:MM/dd HH:mm:ss} end={original.EndTime:MM/dd HH:mm:ss} tuner={SafeTuner(!string.IsNullOrWhiteSpace(original.ActualTunerName) ? original.ActualTunerName : original.TunerName)} userChainCopied={original.IsUserChain} chainPrev={(original.UserChainPreviousId.HasValue ? $"R{original.UserChainPreviousId.Value}" : "-")} chainRoot={(original.UserChainRootId.HasValue ? $"R{original.UserChainRootId.Value}" : "-")} reason=startup_interrupted_recording_recovery rule=release_contract");
         return newId;
     }
 
@@ -924,7 +927,7 @@ WHERE source <> 'Epg'
         if (targets.Count == 0)
         {
             log.Add("CHAIN_STOP_POLICY", $"R{predecessorId}",
-                $"operation=ManualStop service={predecessorService} title={predecessorTitle} rawTitleBlank={predecessorRawTitleBlank} result=NO_SUCCESSOR_TO_DETACH cancelledSuccessors=0 detachedSuccessors=0 rule=v0.11.516_chain_stop_policy_title_metadata_contract");
+                $"operation=ManualStop service={predecessorService} title={predecessorTitle} rawTitleBlank={predecessorRawTitleBlank} result=NO_SUCCESSOR_TO_DETACH cancelledSuccessors=0 detachedSuccessors=0 rule=release_contract");
             return Array.Empty<Reservation>();
         }
 
@@ -957,7 +960,7 @@ WHERE source <> 'Epg'
 
         var targetText = string.Join(",", targets.Select(x => $"R{x.Id}:{TrimForAudit(x.ServiceName)}:{TrimTitleForAudit(x.Title)}:rawTitleBlank={RawTitleBlankForAudit(x.Title)}"));
         log.Add("CHAIN_STOP_POLICY", $"R{predecessorId}",
-            $"operation=ManualStop service={predecessorService} title={predecessorTitle} rawTitleBlank={predecessorRawTitleBlank} result=DETACH_SUCCESSORS cancelledSuccessors=0 detachedSuccessors={targets.Count} affected={affected} action=keep_successors_as_normal_scheduled_reservations targets=[{targetText}] rule=v0.11.516_chain_stop_policy_title_metadata_contract");
+            $"operation=ManualStop service={predecessorService} title={predecessorTitle} rawTitleBlank={predecessorRawTitleBlank} result=DETACH_SUCCESSORS cancelledSuccessors=0 detachedSuccessors={targets.Count} affected={affected} action=keep_successors_as_normal_scheduled_reservations targets=[{targetText}] rule=release_contract");
         foreach (var target in targets)
         {
             log.Add("RESERVATION_AUDIT", "CHAIN_DETACH",
@@ -997,7 +1000,7 @@ WHERE source <> 'Epg'
                     $"result=SUPPRESSED from={before!.Status} attempted=Scheduled kept=Recording reason=open_recording_runtime source=UpdateStatusMany " +
                     $"started={before.RecordingStartedAt:MM/dd HH:mm:ss} finished={(before.RecordingFinishedAt.HasValue ? before.RecordingFinishedAt.Value.ToString("MM/dd HH:mm:ss") : "-")} " +
                     $"end={before.EndTime:MM/dd HH:mm:ss} tuner={SafeTuner(EffectiveTunerName(before))} service={TrimForAudit(before.ServiceName)} title={TrimTitleForAudit(before.Title)} rawTitleBlank={RawTitleBlankForAudit(before.Title)} " +
-                    $"rule=v0.10.08_recording_status_write_contract");
+                    $"rule=release_contract");
                 continue;
             }
             pId.Value = targetId;
@@ -1023,7 +1026,7 @@ WHERE source <> 'Epg'
                 $"result=SUPPRESSED field=IsConflicted attempted=True kept=False reason=open_recording_runtime source=UpdateConflicted " +
                 $"status={before!.Status} started={before.RecordingStartedAt:MM/dd HH:mm:ss} end={before.EndTime:MM/dd HH:mm:ss} " +
                 $"tuner={SafeTuner(EffectiveTunerName(before))} service={TrimForAudit(before.ServiceName)} title={TrimTitleForAudit(before.Title)} rawTitleBlank={RawTitleBlankForAudit(before.Title)} " +
-                $"rule=v0.10.08_recording_status_write_contract");
+                $"rule=release_contract");
             return;
         }
         using var con = db.Open();
@@ -1042,7 +1045,7 @@ WHERE source <> 'Epg'
     }
 
     /// <summary>
-    /// v0.8.23: Completed / Cancelled に残った is_conflicted を整理する。
+    /// release_contract: Completed / Cancelled に残った is_conflicted を整理する。
     /// 競合は録画実行前の割当判断であり、終端予約が以後も競合表示されるとUI判断を誤らせる。
     /// Failed は失敗原因の保持対象になり得るため、ここでは触らない。
     /// </summary>
@@ -1091,7 +1094,7 @@ WHERE source <> 'Epg'
             .Select(x => $"R{x.Id}:{TrimForAudit(x.ServiceName)}:{x.Status}"));
 
         log.Add("RESERVATION_AUDIT", "TERMINAL_CONFLICT_CLEANUP",
-            $"affected={affected} candidates={targets.Count} reason={reason} statuses=Completed,Cancelled failedPreserved=True sample={sample} rule=v0.8.23_terminal_conflict_residue_cleanup");
+            $"affected={affected} candidates={targets.Count} reason={reason} statuses=Completed,Cancelled failedPreserved=True sample={sample} rule=release_contract");
 
         return affected;
     }
@@ -1112,7 +1115,7 @@ WHERE source <> 'Epg'
         cmd.Parameters.AddWithValue("$id",  id);
         var affected = cmd.ExecuteNonQuery();
 
-        // v0.5.65:
+        // release_contract:
         // 自動検索予約はルール更新時に scheduled の旧ヒットを削除し、同じ番組を別IDで再生成することがある。
         // そのためユーザーが個別に「無効」にした keyword 予約は、reservation.id だけでなく
         // ruleId + NID/TSID/SID + 開始/終了 + titleHash のヒット単位抑止として保存する。
@@ -1132,7 +1135,7 @@ WHERE source <> 'Epg'
     }
 
     /// <summary>
-    /// v32.85: 放送終了時刻を過ぎても scheduled のまま残っているユーザー予約を Cancelled に移行する。
+    /// 放送終了時刻を過ぎても scheduled のまま残っているユーザー予約を Cancelled に移行する。
     /// 無効予約(IsEnabled=false)・競合予約(IsConflicted=true)・録画失敗などで録画されなかった残骸を掃除する。
     /// EPG関連エントリ(source=Epg)は独自のライフサイクル管理があるため対象外。
     /// 録画中(Recording)・完了(Completed)・失敗(Failed)・キャンセル済(Cancelled)は一切触らない。
@@ -1149,7 +1152,7 @@ WHERE source <> 'Epg'
         foreach (var r in candidates)
         {
             log.Add("RESERVATION_AUDIT", "EXPIRE_CANDIDATE",
-                $"service={TrimForAudit(r.ServiceName)} title={TrimTitleForAudit(r.Title)} rawTitleBlank={RawTitleBlankForAudit(r.Title)} id=R{r.Id} status={r.Status} source={r.Source} enabled={r.IsEnabled} conflicted={r.IsConflicted} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} tuner={SafeTuner(r.TunerName)} userChain={r.IsUserChain} chainPrev={(r.UserChainPreviousId.HasValue ? $"R{r.UserChainPreviousId.Value}" : "-")} reason=end_time_past_without_recording rule=v0.5.78_service_title_first_audit");
+                $"service={TrimForAudit(r.ServiceName)} title={TrimTitleForAudit(r.Title)} rawTitleBlank={RawTitleBlankForAudit(r.Title)} id=R{r.Id} status={r.Status} source={r.Source} enabled={r.IsEnabled} conflicted={r.IsConflicted} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} tuner={SafeTuner(r.TunerName)} userChain={r.IsUserChain} chainPrev={(r.UserChainPreviousId.HasValue ? $"R{r.UserChainPreviousId.Value}" : "-")} reason=end_time_past_without_recording rule=release_contract");
         }
 
         using var con = db.Open();
@@ -1179,7 +1182,7 @@ WHERE source <> 'Epg'
             log.Add("RESERVATION_STATUS_WRITE_GUARD", $"R{id}",
                 $"result=SUPPRESSED field=TunerName attempted=blank kept={SafeTuner(before!.TunerName)} reason=open_recording_runtime source=UpdateTunerName " +
                 $"status={before.Status} started={before.RecordingStartedAt:MM/dd HH:mm:ss} end={before.EndTime:MM/dd HH:mm:ss} service={TrimForAudit(before.ServiceName)} title={TrimTitleForAudit(before.Title)} rawTitleBlank={RawTitleBlankForAudit(before.Title)} " +
-                $"rule=v0.10.08_recording_status_write_contract");
+                $"rule=release_contract");
             return;
         }
         using var con = db.Open();
@@ -1214,7 +1217,7 @@ WHERE source <> 'Epg'
         cmd.ExecuteNonQuery();
 
         log.Add("RESERVATION_AUDIT", "ACTUAL_TUNER",
-            $"id=R{id} actualTuner={SafeTuner(actual)} action=recording_started_actual_tuner_only rule=v0.5.78_audit_tag");
+            $"id=R{id} actualTuner={SafeTuner(actual)} action=recording_started_actual_tuner_only rule=release_contract");
     }
 
     /// <summary>録画終了実績を保存する。未録画の予約取消とは区別する。</summary>
@@ -1458,7 +1461,7 @@ WHERE source <> 'Epg'
 
     private static bool IsExactContinuousPair(Reservation predecessor, Reservation successor)
     {
-        // v0.9.67: チェーン録画の対象は「同一局=同一SID」の同一時刻またぎ連続番組のみ。
+        // release_contract: チェーン録画の対象は「同一局=同一SID」の同一時刻またぎ連続番組のみ。
         // チャンネル引数や局名のフォールバック一致は、同一TS内別SIDやサブチャンネル跨ぎを誤って
         // チェーン扱いする余地があるため、共通割り当てルートでも認めない。
         var sameServiceByIds = predecessor.ServiceId != 0 && successor.ServiceId != 0
@@ -1476,7 +1479,7 @@ WHERE source <> 'Epg'
 
     private static Dictionary<int, int> BuildPotentialChainPredecessors(IEnumerable<Reservation> reservations)
 {
-    // v0.2.34:
+    // release_contract:
     // 以前は「同一サービスで終了時刻==次番組開始時刻」なら自動でチェーン候補にしていた。
     // しかし (C) はユーザーが番組後半欠落を許容して明示的にチェーン予約した場合だけ表示・適用する。
     // そのため、自動検索/通常予約の連続番組からチェーンを自動生成しない。
@@ -1505,7 +1508,7 @@ WHERE source <> 'Epg'
     /// </summary>
     public Dictionary<int, int> GetChainPredecessors()
 {
-    // v0.2.34:
+    // release_contract:
     // 予約リストの (C) 表示、およびチェーン監査の元データは
     // DB上の明示チェーン(is_user_chain/user_chain_previous_id)だけを使う。
     // 同一チューナー・連続時間からの動的チェーン化は禁止。
@@ -1560,7 +1563,7 @@ WHERE source <> 'Epg'
 
     /// <summary>
     /// 録画前EPG確認の同一親予約・同一イベント・同一時間窓の再生成を抑止する。
-    /// v0.9.99: Completed済みのPreRecEpgも有効な実行済み証跡として扱い、
+    /// release_contract: Completed済みのPreRecEpgも有効な実行済み証跡として扱い、
     /// 録画開始直前の再評価で同じ確認をもう一度作らない。
     /// </summary>
     public bool TryFindReusablePreRecordEpgEntry(
@@ -1652,7 +1655,7 @@ WHERE source <> 'Epg'
     /// <summary>
     /// 録画直前EPG確認エントリを登録・更新する。
     /// チューナー名で一意に管理し、定時EPGエントリと差し替える形で登録する。
-    /// v0.11.197: Title は内部用途名に固定する。親番組タイトルは source_rule_id から辿るメタ属性であり、子予約Titleへ入れない。
+    /// release_contract: Title は内部用途名に固定する。親番組タイトルは source_rule_id から辿るメタ属性であり、子予約Titleへ入れない。
     /// </summary>
     public void UpsertPreRecordEpgEntry(int reservationId, string group, DateTime start, DateTime end, string tunerName = "")
     {
@@ -1660,9 +1663,9 @@ WHERE source <> 'Epg'
         var title = BuildPreRecordEpgStorageTitle(parent, tunerName);
         using var con = db.Open();
 
-        // v34.06: 定時EPG取得は表示上優先できるよう残す。
+        // 定時EPG取得は表示上優先できるよう残す。
         // 直前EPG確認を作る際に定時EPG取得を物理削除しない。
-        // v0.6.29: 直前EPG確認を実行ルートへ載せるため、親予約IDと局同定情報を保持する。
+        // release_contract: 直前EPG確認を実行ルートへ載せるため、親予約IDと局同定情報を保持する。
 
         using var sel = con.CreateCommand();
         sel.CommandText = """
@@ -1770,7 +1773,7 @@ WHERE source <> 'Epg'
 
     private static string BuildPreRecordEpgStorageTitle(Reservation? parent, string tunerName)
     {
-        // v0.11.197:
+        // release_contract:
         // PreRecEpg/SystemEpg は内部制御予約であり、予約一覧上の番組タイトルとして親番組名を名乗らせない。
         // 親番組名は parent/source_rule_id で辿れるメタ属性であり、内部予約の Title は用途名に固定する。
         var tuner = string.IsNullOrWhiteSpace(tunerName) ? string.Empty : tunerName.Trim();
@@ -1872,7 +1875,7 @@ WHERE source <> 'Epg'
 
     /// <summary>
     /// 時間追従の詳細適用。
-    /// v0.6.28: 完成確認用に、更新/未更新/EPG未検出/保護スキップを呼び出し側で監査できる形で返す。
+    /// release_contract: 完成確認用に、更新/未更新/EPG未検出/保護スキップを呼び出し側で監査できる形で返す。
     /// </summary>
     public IReadOnlyList<TimeFollowApplyResult> ApplyTimeFollowingDetailed(
         IEnumerable<Reservation> targets,
@@ -1884,7 +1887,7 @@ WHERE source <> 'Epg'
             if (r.Source == ReservationSource.Epg)
                 continue;
 
-            // v0.9.70: ユーザー明示チェーン後続は個別の時間追従で開始/終了時刻をずらさない。
+            // release_contract: ユーザー明示チェーン後続は個別の時間追従で開始/終了時刻をずらさない。
             // 連続一挙放送では chainRoot/chainPrev による連続契約が優先であり、
             // 後続1本だけのEPG確認結果で gap を作るとチェーン全体を壊す。
             if (r.IsUserChain)
@@ -1907,7 +1910,7 @@ WHERE source <> 'Epg'
 
             var wasConflicted = r.IsConflicted;
 
-            // v0.11.378:
+            // release_contract:
             // 競合中の予約も EventIdentity を持つ限り EIT 更新追従の対象にする。
             // ここで SKIP_CONFLICT すると、EPG側で時刻変更されて競合が解消可能になっても、
             // 古い時刻のまま共通割り当てルートへ戻り、競合が固定化する。
@@ -1935,7 +1938,7 @@ WHERE source <> 'Epg'
             var endDelta   = Math.Abs((ev.End   - r.EndTime).TotalSeconds);
             var timeChanged = startDelta > TimeFollowThresholdSeconds || endDelta > TimeFollowThresholdSeconds;
 
-            // v0.11.678: 録画前EPG/通常EPGの時刻追従で、既存予約タイトルを空タイトルへ戻さない。
+            // release_contract: 録画前EPG/通常EPGの時刻追従で、既存予約タイトルを空タイトルへ戻さない。
             // EPGの生値が空であること自体は許容するが、予約表示メタデータの正本は
             // 「ユーザーが予約した時点の表示タイトル」または既に解決済みの予約タイトルを保持する。
             // ファイル名だけ RECORD_FILENAME_TITLE_GUARD で救う局所復旧ではなく、
@@ -2052,7 +2055,7 @@ WHERE source <> 'Epg'
             return (profile.Name ?? string.Empty).Trim();
         }
 
-        // v0.11.678:
+        // release_contract:
         // 予約競合/最終割当ログのチューナー候補名は、RoleBinding の LogicalTunerDisplayName を正本にする。
         // Recording role だけを group 別 capacity として使い、表示名を T1/S1 などに再採番しない。
         // 再採番すると Viewing role を含む設定で「T2/T3/T4」が「T1/T2/T3」に見えるため、
@@ -2093,7 +2096,7 @@ WHERE source <> 'Epg'
             .Where(r => r.IsEnabled)
             .ToList();
 
-        // v0.11.378: 空欄ProgramRuleと同一局・同一時刻の正規イベント予約が存在する場合のみ、空欄側を自動削除する。
+        // release_contract: 空欄ProgramRuleと同一局・同一時刻の正規イベント予約が存在する場合のみ、空欄側を自動削除する。
         // UI説明は増やさない。削除判定と実処理は共通割り当てルート内に閉じる。
         AutoDeleteResolvedProgramGuideMissingDuplicates(allScheduled, scheduled);
 
@@ -2127,10 +2130,10 @@ WHERE source <> 'Epg'
         }
         var completedChainAnchorIds = completedChainAnchorById.Keys.ToHashSet();
 
-        // v0.4.9: ユーザー明示チェーンは「物理DID固定」ではなく、
+        // release_contract: ユーザー明示チェーンは「物理DID固定」ではなく、
         // 予約時点の LogicalTunerDisplayName を優先候補として扱う。
         // 実DIDは録画開始時にTunerPoolが空き状況・外部視聴ガードを見て決定する。
-        // v0.9.67: チェーンは「後番組優先ON＋チェーン録画ON」を利用条件にしたうえで、
+        // release_contract: チェーンは「後番組優先ON＋チェーン録画ON」を利用条件にしたうえで、
         // ユーザー明示の同一SID連続予約だけを共通割り当てルートで有効化する。
         var configuredPseudoContinuous = pseudoContinuous;
         var chainModeEnabled = laterProgramPriority && configuredPseudoContinuous;
@@ -2152,7 +2155,7 @@ WHERE source <> 'Epg'
                     ? "-"
                     : ((int)Math.Round((chainReservation.StartTime - predForContract.EndTime).TotalSeconds)).ToString();
                 log.Add("CHAIN_CONTRACT_AUDIT", $"R{chainReservation.Id}",
-                    $"result=IGNORED_AT_ALLOC_ROUTE reason=invalid_user_chain_contract predecessor={predecessorLabel} sameSid={sameSid} gapSec={gapText} rule=v0.9.67_user_chain_contract_gate");
+                    $"result=IGNORED_AT_ALLOC_ROUTE reason=invalid_user_chain_contract predecessor={predecessorLabel} sameSid={sameSid} gapSec={gapText} rule=release_contract");
                 continue;
             }
 
@@ -2186,7 +2189,7 @@ WHERE source <> 'Epg'
         var chainSuccessors    = new Dictionary<int, int>(); // key=前番組ID, value=後続ID
         if (pseudoContinuous)
         {
-            // v0.3.33: チェーンは「候補表示」と「確定予約」を分離する。
+            // release_contract: チェーンは「候補表示」と「確定予約」を分離する。
             // 共通割り当てルートでは、ユーザーが明示した UserChain のみを
             // チェーンとして扱う。通常予約・自動検索・EPG確認は、同一局連続でも
             // 勝手にチェーン化しない。
@@ -2200,21 +2203,21 @@ WHERE source <> 'Epg'
                 if (pred == null)
                 {
                     log.Add("CHAIN_CONTRACT_AUDIT", $"R{forced.Id}",
-                        $"result=IGNORED_AT_ALLOC_ROUTE reason=predecessor_missing predecessor=R{predId} rule=v0.9.67_user_chain_contract_gate");
+                        $"result=IGNORED_AT_ALLOC_ROUTE reason=predecessor_missing predecessor=R{predId} rule=release_contract");
                     continue;
                 }
 
                 if (pred.Status == ReservationStatus.Cancelled)
                 {
                     log.Add("CHAIN_CONTRACT_AUDIT", $"R{forced.Id}",
-                        $"result=IGNORED_AT_ALLOC_ROUTE reason=predecessor_cancelled predecessor=R{predId} rule=v0.9.67_user_chain_contract_gate");
+                        $"result=IGNORED_AT_ALLOC_ROUTE reason=predecessor_cancelled predecessor=R{predId} rule=release_contract");
                     continue;
                 }
 
                 if (!IsExactContinuousPair(pred, forced))
                 {
                     log.Add("CHAIN_CONTRACT_AUDIT", $"R{forced.Id}",
-                        $"result=IGNORED_AT_ALLOC_ROUTE reason=not_same_sid_adjacent predecessor=R{predId} prevNid={pred.NetworkId} prevTsid={pred.TransportStreamId} prevSid={pred.ServiceId} nextNid={forced.NetworkId} nextTsid={forced.TransportStreamId} nextSid={forced.ServiceId} gapSec={(int)Math.Round((forced.StartTime - pred.EndTime).TotalSeconds)} rule=v0.9.67_user_chain_contract_gate");
+                        $"result=IGNORED_AT_ALLOC_ROUTE reason=not_same_sid_adjacent predecessor=R{predId} prevNid={pred.NetworkId} prevTsid={pred.TransportStreamId} prevSid={pred.ServiceId} nextNid={forced.NetworkId} nextTsid={forced.TransportStreamId} nextSid={forced.ServiceId} gapSec={(int)Math.Round((forced.StartTime - pred.EndTime).TotalSeconds)} rule=release_contract");
                     continue;
                 }
 
@@ -2374,7 +2377,7 @@ WHERE source <> 'Epg'
         var debugTrace = new List<TunerAllocationDebugTraceEntry>();
         // チェーン占有終了調整用（ループ内DBアクセス回避）
         var scheduledById = scheduled.ToDictionary(s => s.Id);
-        // v0.11.447:
+        // release_contract:
         // チェーンroot/currentがRecordingへ移行した後も、後続を単独unit化させない。
         // ScheduledだけではなくRecording/CompletedアンカーもChainGroup構築対象に含める。
         var chainUnitCandidateById = scheduled
@@ -2453,7 +2456,7 @@ WHERE source <> 'Epg'
                 };
             }
 
-            // v0.11.447:
+            // release_contract:
             // 競合判定用ChainGroupは、Scheduled予約だけで作らない。
             // chainRoot/currentがRecordingへ移行した瞬間にrootが評価対象外になると、
             // R138->R141->R143 が R141単独/R143単独unitへ分裂し、後続がtuner_limit_exceededで落ちる。
@@ -2601,7 +2604,7 @@ WHERE source <> 'Epg'
                 Group = grpKey,
                 ReservationId = 0,
                 Title = "Policy",
-                Detail = $"policy={conflictPolicy} tunerLimit={tunerCount} capacitySource=RoleBinding/Recording recordingTuners={recordingCapacityTuners} displaySource=LogicalTunerDisplayName note=occupancy_unit_chain_group_folding user_chain_cost_one rule=v0.11.678_rolebinding_recording_tuner_display_contract"
+                Detail = $"policy={conflictPolicy} tunerLimit={tunerCount} capacitySource=RoleBinding/Recording recordingTuners={recordingCapacityTuners} displaySource=LogicalTunerDisplayName note=occupancy_unit_chain_group_folding user_chain_cost_one rule=release_contract"
             });
             var inGroup = scheduled
                 .Where(r => ResolveGroup(r) == grpKey)
@@ -2616,12 +2619,12 @@ WHERE source <> 'Epg'
                 var planRepresentative = occupancyUnits[0].PriorityReservation;
                 var planUnits = string.Join(";", occupancyUnits.Select(u => $"U{u.UnitId}:{u.MemberIds}:chain={u.IsUserChain}:active={u.HasActiveAnchor}:key={u.UnitKey}"));
                 AddTrace("OCCUPANCY_UNIT_PLAN_SUMMARY", planRepresentative,
-                    $"stage=occupancy_units_built group={grpKey} units={occupancyUnits.Count} recordingTuners={recordingCapacityTuners} displaySource=LogicalTunerDisplayName unitPlan={planUnits} source=occupancy_unit_evaluator_mirror result=VISIBLE rule=v0.11.678_rolebinding_recording_tuner_display_contract");
+                    $"stage=occupancy_units_built group={grpKey} units={occupancyUnits.Count} recordingTuners={recordingCapacityTuners} displaySource=LogicalTunerDisplayName unitPlan={planUnits} source=occupancy_unit_evaluator_mirror result=VISIBLE rule=release_contract");
             }
             else
             {
                 AddTrace("OCCUPANCY_UNIT_PLAN_SUMMARY", new Reservation { Id = 0, Title = "FinalConflictPlan" },
-                    $"stage=occupancy_units_built group={grpKey} units=0 recordingTuners={recordingCapacityTuners} displaySource=LogicalTunerDisplayName source=occupancy_unit_evaluator_mirror result=EMPTY rule=v0.11.678_rolebinding_recording_tuner_display_contract");
+                    $"stage=occupancy_units_built group={grpKey} units=0 recordingTuners={recordingCapacityTuners} displaySource=LogicalTunerDisplayName source=occupancy_unit_evaluator_mirror result=EMPTY rule=release_contract");
             }
             foreach (var unit in occupancyUnits)
             {
@@ -2632,7 +2635,7 @@ WHERE source <> 'Epg'
                 }
 
                 AddTrace(unit.IsUserChain ? "CHAIN_OCCUPANCY_UNIT" : "OCCUPANCY_UNIT", unit.PriorityReservation,
-                    $"unit={unit.UnitId} members={unit.MemberIds} chainRoot=R{(unit.ChainRootId.HasValue ? unit.ChainRootId.Value.ToString() : "-")} cost=1 occupy={unit.OccupyStart:MM/dd HH:mm:ss}〜{unit.OccupyEnd:MM/dd HH:mm:ss} capacitySource=RoleBinding/Recording recordingTuners={recordingCapacityTuners} displaySource=LogicalTunerDisplayName rule=v0.11.678_rolebinding_recording_tuner_display_contract");
+                    $"unit={unit.UnitId} members={unit.MemberIds} chainRoot=R{(unit.ChainRootId.HasValue ? unit.ChainRootId.Value.ToString() : "-")} cost=1 occupy={unit.OccupyStart:MM/dd HH:mm:ss}〜{unit.OccupyEnd:MM/dd HH:mm:ss} capacitySource=RoleBinding/Recording recordingTuners={recordingCapacityTuners} displaySource=LogicalTunerDisplayName rule=release_contract");
             }
 
             foreach (var unit in occupancyUnits)
@@ -2670,11 +2673,11 @@ WHERE source <> 'Epg'
                     MarkUnitAssigned(unit);
                     assignedOccupancyUnits[unit.UnitKey] = unit;
                     AddTrace(unit.IsUserChain ? "CHAIN_OCCUPANCY_APPLY" : "ASSIGN", representative,
-                        $"unit={unit.UnitId} members={unit.MemberIds} overlapUnits={overlappingAssigned} overlapVirtual={overlappingVirtual} total={totalOccupied} limit={tunerCount} capacitySource=RoleBinding/Recording recordingTuners={recordingCapacityTuners} result=ASSIGNED cost=1 displaySource=LogicalTunerDisplayName rule=v0.11.678_rolebinding_recording_tuner_display_contract");
+                        $"unit={unit.UnitId} members={unit.MemberIds} overlapUnits={overlappingAssigned} overlapVirtual={overlappingVirtual} total={totalOccupied} limit={tunerCount} capacitySource=RoleBinding/Recording recordingTuners={recordingCapacityTuners} result=ASSIGNED cost=1 displaySource=LogicalTunerDisplayName rule=release_contract");
                     if (!unit.IsUserChain)
                     {
                         AddTrace("OCCUPANCY_UNIT_ASSIGN_MIRROR", representative,
-                            $"stage=occupancy_apply_mirror unitKey={unit.UnitKey} unit={unit.UnitId} members={unit.MemberIds} chainRoot=R{(unit.ChainRootId.HasValue ? unit.ChainRootId.Value.ToString() : "-")} tuner={(unit.PreferredTuner ?? "-")} overlapUnits={overlappingAssigned} overlapVirtual={overlappingVirtual} total={totalOccupied} limit={tunerCount} group={grpKey} capacitySource=RoleBinding/Recording recordingTuners={recordingCapacityTuners} displaySource=LogicalTunerDisplayName source=occupancy_unit_evaluator_mirror result=ASSIGNED rule=v0.11.678_rolebinding_recording_tuner_display_contract");
+                            $"stage=occupancy_apply_mirror unitKey={unit.UnitKey} unit={unit.UnitId} members={unit.MemberIds} chainRoot=R{(unit.ChainRootId.HasValue ? unit.ChainRootId.Value.ToString() : "-")} tuner={(unit.PreferredTuner ?? "-")} overlapUnits={overlappingAssigned} overlapVirtual={overlappingVirtual} total={totalOccupied} limit={tunerCount} group={grpKey} capacitySource=RoleBinding/Recording recordingTuners={recordingCapacityTuners} displaySource=LogicalTunerDisplayName source=occupancy_unit_evaluator_mirror result=ASSIGNED rule=release_contract");
                     }
                     continue;
                 }
@@ -2708,12 +2711,12 @@ WHERE source <> 'Epg'
                                     : "PEER_Z_AXIS";
 
                     AddTrace("PRIORITY_CONFLICT", representative,
-                        $"winnerUnit={unit.UnitId} winner={unit.MemberIds} loserUnit={victim.UnitId} loser={victim.MemberIds} priorityLayer={priorityLayer} winnerChain={unit.IsUserChain} loserChain={victim.IsUserChain} rule=v0.11.447_chain_active_root_unit_core");
+                        $"winnerUnit={unit.UnitId} winner={unit.MemberIds} loserUnit={victim.UnitId} loser={victim.MemberIds} priorityLayer={priorityLayer} winnerChain={unit.IsUserChain} loserChain={victim.IsUserChain} rule=release_contract");
                     foreach (var loser in victim.Reservations)
                     {
                         AddTrace("DROP", loser, $"result=CONFLICT losingAgainstUnit={unit.UnitId} reason=occupancy_unit_priority priorityLayer={priorityLayer}");
                         AddTrace("OCCUPANCY_UNIT_CONFLICT_MIRROR", loser,
-                            $"stage=occupancy_priority_mirror unitKey={victim.UnitKey} unit={victim.UnitId} members={victim.MemberIds} losingAgainstUnit={unit.UnitId} group={grpKey} reason=occupancy_unit_priority priorityLayer={priorityLayer} source=occupancy_unit_evaluator_mirror rule=v0.11.502_settings_genre_editor_spacing_contract");
+                            $"stage=occupancy_priority_mirror unitKey={victim.UnitKey} unit={victim.UnitId} members={victim.MemberIds} losingAgainstUnit={unit.UnitId} group={grpKey} reason=occupancy_unit_priority priorityLayer={priorityLayer} source=occupancy_unit_evaluator_mirror rule=release_contract");
                     }
                 }
                 else
@@ -2740,19 +2743,19 @@ WHERE source <> 'Epg'
                                         ? "AUTO_SEARCH_RULE_PRIORITY"
                                         : "PEER_Z_AXIS";
                         AddTrace("PRIORITY_CONFLICT", representative,
-                            $"protectedUnit={protectedUnit.UnitId} protected={protectedUnit.MemberIds} droppedUnit={unit.UnitId} dropped={unit.MemberIds} priorityLayer={priorityLayer} conflictWindow={conflictStart:MM/dd HH:mm:ss}〜{conflictEnd:MM/dd HH:mm:ss} protectedSet={protectedList} currentScore={UnitChainPriorityScore(unit)} protectedScore={UnitChainPriorityScore(protectedUnit)} rule=v0.11.447_chain_active_root_unit_core");
+                            $"protectedUnit={protectedUnit.UnitId} protected={protectedUnit.MemberIds} droppedUnit={unit.UnitId} dropped={unit.MemberIds} priorityLayer={priorityLayer} conflictWindow={conflictStart:MM/dd HH:mm:ss}〜{conflictEnd:MM/dd HH:mm:ss} protectedSet={protectedList} currentScore={UnitChainPriorityScore(unit)} protectedScore={UnitChainPriorityScore(protectedUnit)} rule=release_contract");
                     }
                     else
                     {
                         AddTrace("PRIORITY_CONFLICT", representative,
-                            $"protected=virtual_or_unknown droppedUnit={unit.UnitId} dropped={unit.MemberIds} overlapVirtual={overlappingVirtual} total={totalOccupied} limit={tunerCount} currentScore={UnitChainPriorityScore(unit)} rule=v0.11.447_chain_active_root_unit_core");
+                            $"protected=virtual_or_unknown droppedUnit={unit.UnitId} dropped={unit.MemberIds} overlapVirtual={overlappingVirtual} total={totalOccupied} limit={tunerCount} currentScore={UnitChainPriorityScore(unit)} rule=release_contract");
                     }
 
                     foreach (var member in unit.Reservations)
                     {
                         AddTrace("DROP", member, $"result=CONFLICT reason=occupancy_unit_tuner_limit unit={unit.UnitId} members={unit.MemberIds}");
                         AddTrace("OCCUPANCY_UNIT_CONFLICT_MIRROR", member,
-                            $"stage=occupancy_limit_mirror unitKey={unit.UnitKey} unit={unit.UnitId} members={unit.MemberIds} group={grpKey} reason=occupancy_unit_tuner_limit overlapVirtual={overlappingVirtual} total={totalOccupied} limit={tunerCount} source=occupancy_unit_evaluator_mirror rule=v0.11.502_settings_genre_editor_spacing_contract");
+                            $"stage=occupancy_limit_mirror unitKey={unit.UnitKey} unit={unit.UnitId} members={unit.MemberIds} group={grpKey} reason=occupancy_unit_tuner_limit overlapVirtual={overlappingVirtual} total={totalOccupied} limit={tunerCount} source=occupancy_unit_evaluator_mirror rule=release_contract");
                     }
                 }
             }
@@ -2824,7 +2827,7 @@ WHERE source <> 'Epg'
             }
         }
 
-        // v0.2.24: チェーン後続が将来使用する同一チューナーを予約済みとして保護する。
+        // release_contract: チェーン後続が将来使用する同一チューナーを予約済みとして保護する。
         // 非チェーン予約が同時刻付近でそのチューナーを先取りすると、チェーン後続が録画開始時に
         // requested_chain_tuner_not_free で失敗するため、通常候補から除外する。
         var chainProtectedTunerClaims = new List<(string TunerName, DateTime OccupyStart, DateTime OccupyEnd, int ReservationId)>();
@@ -2854,7 +2857,7 @@ WHERE source <> 'Epg'
             return !IsBlockedByChainProtectedClaim(tunerName, current, currentStart, currentEnd);
         }
 
-        // v0.11.453:
+        // release_contract:
         // チェーンunitの最終チューナー選択は ReconcileFinalConflictPlanByUnitKey() に一本化。
         // 旧 ChooseChainUnitTuner / ApplyChainUnitTuner は final plan と二重正本になるため削除。
 
@@ -2916,19 +2919,19 @@ WHERE source <> 'Epg'
             if (reservationIdToOccupancyUnit.TryGetValue(r.Id, out var chainUnitForReservation)
                 && chainUnitForReservation.IsUserChain)
             {
-                // v0.11.453:
+                // release_contract:
                 // チェーン専用の CHAIN_UNIT_TUNER_ASSIGN / APPLY がここで先に最終チューナーを
                 // 決めると、後段の UnitKey final plan と二重正本になる。
                 // ここではチェーンunitとして評価対象へ残すだけにし、最終チューナー確定は
                 // ReconcileFinalConflictPlanByUnitKey() に一本化する。
                 AddTrace("CHAIN_UNIT_TUNER_DEFER", chainUnitForReservation.PriorityReservation,
-                    $"unitKey={chainUnitForReservation.UnitKey} unit={chainUnitForReservation.UnitId} members={chainUnitForReservation.MemberIds} chainRoot=R{(chainUnitForReservation.ChainRootId.HasValue ? chainUnitForReservation.ChainRootId.Value.ToString() : "-")} reason=final_unit_plan_is_single_source_of_truth rule=v0.11.502_settings_genre_editor_spacing_contract");
+                    $"unitKey={chainUnitForReservation.UnitKey} unit={chainUnitForReservation.UnitId} members={chainUnitForReservation.MemberIds} chainRoot=R{(chainUnitForReservation.ChainRootId.HasValue ? chainUnitForReservation.ChainRootId.Value.ToString() : "-")} reason=final_unit_plan_is_single_source_of_truth rule=release_contract");
                 continue;
             }
 
             if (r.IsUserChain)
             {
-                // v0.6.17:
+                // release_contract:
                 // チェーン後続の TunerName は、予約追加時点の仮値ではなく、
                 // 共通割り当てルートで確定した前番組の割当を最優先で継承する。
                 // これにより、通常予約追加などの再ALLOC後に R637→R640 が S3→S1 のように
@@ -2986,7 +2989,7 @@ WHERE source <> 'Epg'
 
             string? chosen = null;
 
-            // v0.11.97:
+            // release_contract:
             // ユーザー明示チェーンの先頭予約は通常予約扱いだが、後続チェーンの
             // チューナー継承元でもある。再ALLOCのたびに空き順/round-robinだけで
             // 先頭チューナーが揺れると、後続の IsUserChain がその揺れを正として
@@ -3073,12 +3076,12 @@ WHERE source <> 'Epg'
             RegisterChainSuccessorTunerClaim(r, chosen);
         }
 
-        // v0.11.453:
-        // 旧 v0.11.449 の active successor conflict suppress は症状別の上塗りだったため、
+        // release_contract:
+        // 旧 release_contract の active successor conflict suppress は症状別の上塗りだったため、
         // ここでは実行しない。active chain/current/successor の救済も UnitKey final plan が
         // 一括で担う。
 
-        // v0.11.450:
+        // release_contract:
         // 449の「後続だけ抑止」は症状別の上塗りになり始めていたため、最終の競合状態は
         // reservation単体ではなく ConflictOccupancyUnit(UnitKey) を正本にして再合算する。
         // active recording / active chain / normal reservation を同じUnitKeyタイムラインで一度だけ数え、
@@ -3086,7 +3089,7 @@ WHERE source <> 'Epg'
         void ReconcileFinalConflictPlanByUnitKey()
         {
             AddTrace("FINAL_CONFLICT_PLAN_BEGIN", new Reservation { Id = 0, Title = "FinalConflictPlan" },
-                $"scheduled={scheduled.Count} recording={recordingReservations.Count} occupancyUnits={allConflictOccupancyUnits.Count} groups={string.Join(',', allConflictOccupancyUnits.Select(u => u.Group).Distinct(StringComparer.OrdinalIgnoreCase))} rule=v0.11.502_settings_genre_editor_spacing_contract");
+                $"scheduled={scheduled.Count} recording={recordingReservations.Count} occupancyUnits={allConflictOccupancyUnits.Count} groups={string.Join(',', allConflictOccupancyUnits.Select(u => u.Group).Distinct(StringComparer.OrdinalIgnoreCase))} rule=release_contract");
             var evaluatedIds = scheduled.Select(x => x.Id).ToHashSet();
             var finalAssignedIds = new HashSet<int>();
             var finalConflictedIds = new HashSet<int>();
@@ -3122,7 +3125,7 @@ WHERE source <> 'Epg'
                         {
                             finalConflictedIds.Add(member.Id);
                             AddTrace("FINAL_UNIT_CONFLICT", member,
-                                $"unitKey={unit.UnitKey} unit={unit.UnitId} members={unit.MemberIds} reason=no_candidate_tuner_for_group group={grpKey} rule=v0.11.502_settings_genre_editor_spacing_contract");
+                                $"unitKey={unit.UnitKey} unit={unit.UnitId} members={unit.MemberIds} reason=no_candidate_tuner_for_group group={grpKey} rule=release_contract");
                         }
                     }
                     continue;
@@ -3144,7 +3147,7 @@ WHERE source <> 'Epg'
                         if (slot.PlannedEndTime!.Value > current)
                             finalFreeAt[virtualName] = slot.PlannedEndTime.Value;
                         AddTrace("FINAL_UNIT_EXTERNAL_OCCUPY", new Reservation { Id = slot.ReservationId ?? 0, Title = "ExternalOrActiveRecording" },
-                            $"group={grpKey} tuner={virtualName} reservation=R{(slot.ReservationId.HasValue ? slot.ReservationId.Value.ToString() : "-")} occupyUntil={slot.PlannedEndTime.Value:MM/dd HH:mm:ss} reason=active_recording_outside_unit rule=v0.11.502_settings_genre_editor_spacing_contract");
+                            $"group={grpKey} tuner={virtualName} reservation=R{(slot.ReservationId.HasValue ? slot.ReservationId.Value.ToString() : "-")} occupyUntil={slot.PlannedEndTime.Value:MM/dd HH:mm:ss} reason=active_recording_outside_unit rule=release_contract");
                     }
                 }
                 else
@@ -3159,7 +3162,7 @@ WHERE source <> 'Epg'
                         if (recEnd > finalFreeAt[virtualName])
                             finalFreeAt[virtualName] = recEnd;
                         AddTrace("FINAL_UNIT_EXTERNAL_OCCUPY", rec,
-                            $"group={grpKey} tuner={virtualName} reservation=R{rec.Id} occupyUntil={recEnd:MM/dd HH:mm:ss} reason=db_recording_outside_unit rule=v0.11.502_settings_genre_editor_spacing_contract");
+                            $"group={grpKey} tuner={virtualName} reservation=R{rec.Id} occupyUntil={recEnd:MM/dd HH:mm:ss} reason=db_recording_outside_unit rule=release_contract");
                     }
                 }
 
@@ -3325,7 +3328,7 @@ WHERE source <> 'Epg'
                                     var clickWinner = UnitUserDecisionTime(challenger) >= UnitUserDecisionTime(victim) ? challenger : victim;
                                     var boundaryWinner = CompareFinalUnitPriority(challenger, victim) >= 0 ? challenger : victim;
                                     AddTrace("FINAL_ADJACENT_BOUNDARY_SKIP", challenger.PriorityReservation,
-                                        $"challenger={UnitTraceId(challenger)} incumbent={UnitTraceId(victim)} tuner={name} group={grpKey} sameService={IsSameService(challenger.PriorityReservation, victim.PriorityReservation)} boundary=True marginOverlap=True laterPriority={laterProgramPriority} clickOrderWinner={UnitTraceId(clickWinner)} boundaryPriorityWinner={UnitTraceId(boundaryWinner)} overridden=False reason={skipReason} rule=v0.11.502_settings_genre_editor_spacing_contract");
+                                        $"challenger={UnitTraceId(challenger)} incumbent={UnitTraceId(victim)} tuner={name} group={grpKey} sameService={IsSameService(challenger.PriorityReservation, victim.PriorityReservation)} boundary=True marginOverlap=True laterPriority={laterProgramPriority} clickOrderWinner={UnitTraceId(clickWinner)} boundaryPriorityWinner={UnitTraceId(boundaryWinner)} overridden=False reason={skipReason} rule=release_contract");
                                 }
                             }
                             if (victims.Count == 0 || victims.Any(v => !IsAdjacentBoundaryOverride(challenger, v)))
@@ -3346,7 +3349,7 @@ WHERE source <> 'Epg'
                                     finalTunerAssignment.Remove(member.Id);
                                     finalConflictedIds.Add(member.Id);
                                     AddTrace("FINAL_UNIT_CONFLICT", member,
-                                        $"unitKey={victim.UnitKey} unit={victim.UnitId} members={victim.MemberIds} occupy={victim.OccupyStart:MM/dd HH:mm:ss}〜{victim.OccupyEnd:MM/dd HH:mm:ss} group={grpKey} reason=adjacent_boundary_priority_override loserAgainstUnit={challenger.UnitId} candidates={recordingCapacityTuners} displaySource=LogicalTunerDisplayName prioritySourceRank={SourcePriorityRank(victim.PriorityReservation)} userDecision={UnitUserDecisionTime(victim):MM/dd HH:mm:ss} ruleOrder={RuleOrderForUnit(victim)} rule=v0.11.502_settings_genre_editor_spacing_contract");
+                                        $"unitKey={victim.UnitKey} unit={victim.UnitId} members={victim.MemberIds} occupy={victim.OccupyStart:MM/dd HH:mm:ss}〜{victim.OccupyEnd:MM/dd HH:mm:ss} group={grpKey} reason=adjacent_boundary_priority_override loserAgainstUnit={challenger.UnitId} candidates={recordingCapacityTuners} displaySource=LogicalTunerDisplayName prioritySourceRank={SourcePriorityRank(victim.PriorityReservation)} userDecision={UnitUserDecisionTime(victim):MM/dd HH:mm:ss} ruleOrder={RuleOrderForUnit(victim)} rule=release_contract");
                                 }
                             }
                             var overriddenClickWinners = string.Join(",", victims
@@ -3355,7 +3358,7 @@ WHERE source <> 'Epg'
                             if (string.IsNullOrWhiteSpace(overriddenClickWinners))
                                 overriddenClickWinners = "-";
                             AddTrace("FINAL_ADJACENT_BOUNDARY_OVERRIDE", challenger.PriorityReservation,
-                                $"winner={UnitTraceId(challenger)} losers={string.Join(",", victims.Select(UnitTraceId))} tuner={name} group={grpKey} sameService=True boundary=True marginOverlap=True laterPriority={laterProgramPriority} clickOrderWinnerOverridden={overriddenClickWinners} boundaryPriorityWinner={UnitTraceId(challenger)} overridden=True reason=front_back_priority_overrides_manual_click_order rule=v0.11.502_settings_genre_editor_spacing_contract");
+                                $"winner={UnitTraceId(challenger)} losers={string.Join(",", victims.Select(UnitTraceId))} tuner={name} group={grpKey} sameService=True boundary=True marginOverlap=True laterPriority={laterProgramPriority} clickOrderWinnerOverridden={overriddenClickWinners} boundaryPriorityWinner={UnitTraceId(challenger)} overridden=True reason=front_back_priority_overrides_manual_click_order rule=release_contract");
                             return name;
                         }
                         return null;
@@ -3413,7 +3416,7 @@ WHERE source <> 'Epg'
                                     ? "front_back_priority_overrides_manual_click_order"
                                     : "front_back_priority_applied_without_click_order_change";
                                 AddTrace("FINAL_ADJACENT_BOUNDARY_OVERRIDE", unit.PriorityReservation,
-                                    $"challenger={UnitTraceId(unit)} incumbent={UnitTraceId(victim)} tuner={blocker.Tuner} group={grpKey} sameService=True boundary=True marginOverlap=True laterPriority={laterProgramPriority} clickOrderWinner={clickWinnerId} boundaryPriorityWinner={boundaryWinnerId} overridden={overridden} reason={reason} rule=v0.11.502_settings_genre_editor_spacing_contract");
+                                    $"challenger={UnitTraceId(unit)} incumbent={UnitTraceId(victim)} tuner={blocker.Tuner} group={grpKey} sameService=True boundary=True marginOverlap=True laterPriority={laterProgramPriority} clickOrderWinner={clickWinnerId} boundaryPriorityWinner={boundaryWinnerId} overridden={overridden} reason={reason} rule=release_contract");
                             }
                             else
                             {
@@ -3421,7 +3424,7 @@ WHERE source <> 'Epg'
                                     ? "different_service"
                                     : "different_priority_layer";
                                 AddTrace("FINAL_ADJACENT_BOUNDARY_SKIP", unit.PriorityReservation,
-                                    $"challenger={UnitTraceId(unit)} incumbent={UnitTraceId(victim)} tuner={blocker.Tuner} group={grpKey} sameService={sameService} boundary=True marginOverlap=True laterPriority={laterProgramPriority} clickOrderWinner={clickWinnerId} boundaryPriorityWinner={boundaryWinnerId} overridden=False reason={reason} rule=v0.11.502_settings_genre_editor_spacing_contract");
+                                    $"challenger={UnitTraceId(unit)} incumbent={UnitTraceId(victim)} tuner={blocker.Tuner} group={grpKey} sameService={sameService} boundary=True marginOverlap=True laterPriority={laterProgramPriority} clickOrderWinner={clickWinnerId} boundaryPriorityWinner={boundaryWinnerId} overridden=False reason={reason} rule=release_contract");
                             }
                         }
 
@@ -3437,7 +3440,7 @@ WHERE source <> 'Epg'
                         {
                             finalConflictedIds.Add(member.Id);
                             AddTrace("FINAL_UNIT_CONFLICT", member,
-                                $"unitKey={unit.UnitKey} unit={unit.UnitId} members={unit.MemberIds} occupy={unit.OccupyStart:MM/dd HH:mm:ss}〜{unit.OccupyEnd:MM/dd HH:mm:ss} group={grpKey} reason=no_free_recording_tuner_after_priority_plan candidates={recordingCapacityTuners} displaySource=LogicalTunerDisplayName prioritySourceRank={SourcePriorityRank(unit.PriorityReservation)} userDecision={UnitUserDecisionTime(unit):MM/dd HH:mm:ss} ruleOrder={RuleOrderForUnit(unit)} overlaps={overlapSummary} rule=v0.11.502_settings_genre_editor_spacing_contract");
+                                $"unitKey={unit.UnitKey} unit={unit.UnitId} members={unit.MemberIds} occupy={unit.OccupyStart:MM/dd HH:mm:ss}〜{unit.OccupyEnd:MM/dd HH:mm:ss} group={grpKey} reason=no_free_recording_tuner_after_priority_plan candidates={recordingCapacityTuners} displaySource=LogicalTunerDisplayName prioritySourceRank={SourcePriorityRank(unit.PriorityReservation)} userDecision={UnitUserDecisionTime(unit):MM/dd HH:mm:ss} ruleOrder={RuleOrderForUnit(unit)} overlaps={overlapSummary} rule=release_contract");
                         }
                         continue;
                     }
@@ -3455,12 +3458,12 @@ WHERE source <> 'Epg'
                         finalTunerAssignment[member.Id] = chosen;
                     }
                     AddTrace(unit.IsUserChain ? "FINAL_CHAIN_UNIT_ASSIGN" : "FINAL_UNIT_ASSIGN", unit.PriorityReservation,
-                        $"unitKey={unit.UnitKey} unit={unit.UnitId} members={unit.MemberIds} chainRoot=R{(unit.ChainRootId.HasValue ? unit.ChainRootId.Value.ToString() : "-")} tuner={chosen} previousFreeAt={previousFreeAt:MM/dd HH:mm:ss} occupy={unit.OccupyStart:MM/dd HH:mm:ss}〜{unit.OccupyEnd:MM/dd HH:mm:ss} group={grpKey} capacitySource=RoleBinding/Recording recordingTuners={recordingCapacityTuners} displaySource=LogicalTunerDisplayName prioritySourceRank={SourcePriorityRank(unit.PriorityReservation)} userDecision={UnitUserDecisionTime(unit):MM/dd HH:mm:ss} ruleOrder={RuleOrderForUnit(unit)} result=ASSIGNED rule=v0.11.678_rolebinding_recording_tuner_display_contract");
+                        $"unitKey={unit.UnitKey} unit={unit.UnitId} members={unit.MemberIds} chainRoot=R{(unit.ChainRootId.HasValue ? unit.ChainRootId.Value.ToString() : "-")} tuner={chosen} previousFreeAt={previousFreeAt:MM/dd HH:mm:ss} occupy={unit.OccupyStart:MM/dd HH:mm:ss}〜{unit.OccupyEnd:MM/dd HH:mm:ss} group={grpKey} capacitySource=RoleBinding/Recording recordingTuners={recordingCapacityTuners} displaySource=LogicalTunerDisplayName prioritySourceRank={SourcePriorityRank(unit.PriorityReservation)} userDecision={UnitUserDecisionTime(unit):MM/dd HH:mm:ss} ruleOrder={RuleOrderForUnit(unit)} result=ASSIGNED rule=release_contract");
                     if (unit.IsUserChain)
                     {
                         chainUnitAssignedTuner[unit.UnitKey] = chosen;
                         AddTrace("CHAIN_UNIT_TUNER_ASSIGN", unit.PriorityReservation,
-                            $"unitKey={unit.UnitKey} unit={unit.UnitId} members={unit.MemberIds} chainRoot=R{(unit.ChainRootId.HasValue ? unit.ChainRootId.Value.ToString() : "-")} tuner={chosen} unitOccupy={unit.OccupyStart:MM/dd HH:mm:ss}〜{unit.OccupyEnd:MM/dd HH:mm:ss} capacitySource=RoleBinding/Recording candidates={recordingCapacityTuners} displaySource=LogicalTunerDisplayName reason=final_unit_plan_selected result=ASSIGNED source=final_unit_plan rule=v0.11.678_rolebinding_recording_tuner_display_contract");
+                            $"unitKey={unit.UnitKey} unit={unit.UnitId} members={unit.MemberIds} chainRoot=R{(unit.ChainRootId.HasValue ? unit.ChainRootId.Value.ToString() : "-")} tuner={chosen} unitOccupy={unit.OccupyStart:MM/dd HH:mm:ss}〜{unit.OccupyEnd:MM/dd HH:mm:ss} capacitySource=RoleBinding/Recording candidates={recordingCapacityTuners} displaySource=LogicalTunerDisplayName reason=final_unit_plan_selected result=ASSIGNED source=final_unit_plan rule=release_contract");
                     }
                 }
             }
@@ -3484,7 +3487,7 @@ WHERE source <> 'Epg'
             foreach (var kv in finalTunerAssignment)
                 tunerAssignment[kv.Key] = kv.Value;
             AddTrace("FINAL_CONFLICT_PLAN_END", new Reservation { Id = 0, Title = "FinalConflictPlan" },
-                $"assigned={finalAssignedIds.Count} conflicted={finalConflictedIds.Count} tunerAssignments={finalTunerAssignment.Count} rule=v0.11.502_settings_genre_editor_spacing_contract");
+                $"assigned={finalAssignedIds.Count} conflicted={finalConflictedIds.Count} tunerAssignments={finalTunerAssignment.Count} rule=release_contract");
         }
 
         ReconcileFinalConflictPlanByUnitKey();
@@ -3513,7 +3516,7 @@ WHERE source <> 'Epg'
             conflictedIds.Add(missing.Id);
             assignedIds.Remove(missing.Id);
             tunerAssignment.Remove(missing.Id);
-            AddTrace("MISSING_DUPLICATE_CONFLICT", missing, $"duplicateWith=R{partner.Id} service=[{missing.ServiceName}] start={missing.StartTime:MM/dd HH:mm} end={missing.EndTime:MM/dd HH:mm} origin=ProgramGuideMissingProgramRule identity=TimeIdentity commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=v0.11.378_programguide_missing_duplicate_cleanup_trace_residue");
+            AddTrace("MISSING_DUPLICATE_CONFLICT", missing, $"duplicateWith=R{partner.Id} service=[{missing.ServiceName}] start={missing.StartTime:MM/dd HH:mm} end={missing.EndTime:MM/dd HH:mm} origin=ProgramGuideMissingProgramRule identity=TimeIdentity commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
         }
 
         // DBを更新（変化があった予約のみ）・変化内容をログ用に収集
@@ -3535,24 +3538,34 @@ WHERE source <> 'Epg'
             }
         }
 
-        WriteTunerAllocationDebugSnapshot(
-            allScheduled,
-            scheduled,
-            tunerProfiles,
-            tunerCountByGroup,
-            assignedIds,
-            conflictedIds,
-            tunerAssignment,
-            chainPredecessors,
-            chainSuccessors,
-            laterProgramPriority,
-            pseudoContinuous,
-            configuredPseudoContinuous,
-            chainModeEnabled,
-            userChainCandidatePairs,
-            preStartMarginSeconds,
-            postEndMarginSeconds,
-            debugTrace);
+        if (tunerAllocationDebugEnabled)
+        {
+            WriteTunerAllocationDebugSnapshot(
+                allScheduled,
+                scheduled,
+                tunerProfiles,
+                tunerCountByGroup,
+                assignedIds,
+                conflictedIds,
+                tunerAssignment,
+                chainPredecessors,
+                chainSuccessors,
+                laterProgramPriority,
+                pseudoContinuous,
+                configuredPseudoContinuous,
+                chainModeEnabled,
+                userChainCandidatePairs,
+                preStartMarginSeconds,
+                postEndMarginSeconds,
+                debugTrace);
+        }
+        else
+        {
+            log.Add("TUNER_CONFLICT_VISIBILITY_CONTRACT", "Summary",
+                $"candidatePreflight=False conflictVisibleAfterReservation=True programGuideUnreservedAction=reserve" +
+                $" finalSource=ReconcileFinalConflictPlanByUnitKey commonRoute=ALLOC_ROUTE/TUNER_ALLOC" +
+                $" finalPriorityAxis=rebuilt capacityFirst=True adjacentBoundaryOverridesClickOrder=True evaluated={scheduled.Count(r => r.Source != ReservationSource.Epg && r.IsEnabled)} conflict={conflictedIds.Count} rule=release_contract");
+        }
 
         return changes;
     }
@@ -3777,17 +3790,17 @@ WHERE source <> 'Epg'
             $"sourcePriority=ProgramGuideLike(Manual,Immediate,KeywordSearch)>AutoSearch(Keyword)>Program activeChainExplicitOnly=True overlapUsesMargins=True" +
             $" sameServiceBoundaryPriority=True peerProgramGuideUsesLatestUserDecision=True autoSearchUsesRuleSortOrder=True programUsesRuleOrder=True capacityFirst=True" +
             $" laterPriority={snapshot.Settings.LaterProgramPriority} chain={snapshot.Settings.PseudoContinuousRecording}" +
-            $" evaluated={snapshot.Summary.EvaluatedCount} conflict={snapshot.Summary.ConflictCount} rule=v0.11.502_settings_genre_editor_spacing_contract");
+            $" evaluated={snapshot.Summary.EvaluatedCount} conflict={snapshot.Summary.ConflictCount} rule=release_contract");
         log.Add("TUNER_CONFLICT_VISIBILITY_CONTRACT", "Summary",
             $"candidatePreflight=False conflictVisibleAfterReservation=True programGuideUnreservedAction=reserve" +
             $" finalSource=ReconcileFinalConflictPlanByUnitKey commonRoute=ALLOC_ROUTE/TUNER_ALLOC" +
-            $" finalPriorityAxis=rebuilt capacityFirst=True adjacentBoundaryOverridesClickOrder=True evaluated={snapshot.Summary.EvaluatedCount} conflict={snapshot.Summary.ConflictCount} rule=v0.11.502_settings_genre_editor_spacing_contract");
+            $" finalPriorityAxis=rebuilt capacityFirst=True adjacentBoundaryOverridesClickOrder=True evaluated={snapshot.Summary.EvaluatedCount} conflict={snapshot.Summary.ConflictCount} rule=release_contract");
 
-        // v0.11.456:
+        // release_contract:
         // 競合表示は、ユーザーが予約操作を確定して予約レコード化した後の状態表示である。
         // 未予約番組表セルに「予約すると競合」を予防表示する仮想競合投影は作らない。
         // ただし、予約後の判定は ReconcileFinalConflictPlanByUnitKey / ALLOC_ROUTE/TUNER_ALLOC を正本にする。
-        // v0.11.455:
+        // release_contract:
         // FINAL_* は ReconcileFinalConflictPlanByUnitKey の最終正本だけを可視化する。
         // 旧 occupancy_unit_evaluator_mirror は中間観測なので OCCUPANCY_* に格下げし、
         // FINAL_UNIT_CONFLICT / FINAL_UNIT_ASSIGN としては出さない。
@@ -3815,7 +3828,7 @@ WHERE source <> 'Epg'
                 $"group={t.Group} title={TrimTitleForAudit(t.Title)} rawTitleBlank={RawTitleBlankForAudit(t.Title)} {t.Detail} rule=common_allocation_route_contract");
         }
 
-        // v0.3.43: 通常運用ログの静音化。
+        // release_contract: 通常運用ログの静音化。
         // 割当結果の全件 TUNER_ALLOC / TUNER_TRACE は Tick ごとに数十件発生し、
         // 画面ポーリングやEPG取得中の体感負荷・ログ可読性を悪化させるため通常出力しない。
         // 競合だけは実運用上の確認対象なので残す。
@@ -3830,12 +3843,12 @@ WHERE source <> 'Epg'
                 log.Add("TUNER_CONFLICT", "Conflict",
                     $"service={e.ServiceName} title={TrimTitleForAudit(e.Title)} rawTitleBlank={RawTitleBlankForAudit(e.Title)} res=R{e.ReservationId} source={e.Source} enabled={e.IsEnabled} tuner={tuner} result={e.Result} reason={e.Reason} group={e.Group} svcId={e.ServiceId} occupy={e.OccupyStart:MM/dd HH:mm:ss}〜{e.OccupyEnd:MM/dd HH:mm:ss}{chain}");
                 log.Add("TUNER_CONFLICT_MIRROR", $"R{e.ReservationId}",
-                    $"stage=tuner_conflict_mirror service={e.ServiceName} title={TrimTitleForAudit(e.Title)} rawTitleBlank={RawTitleBlankForAudit(e.Title)} res=R{e.ReservationId} source={e.Source} enabled={e.IsEnabled} tuner={tuner} result={e.Result} reason={e.Reason} group={e.Group} svcId={e.ServiceId} occupy={e.OccupyStart:MM/dd HH:mm:ss}〜{e.OccupyEnd:MM/dd HH:mm:ss}{chain} source=TUNER_CONFLICT_MIRROR rule=v0.11.502_settings_genre_editor_spacing_contract");
+                    $"stage=tuner_conflict_mirror service={e.ServiceName} title={TrimTitleForAudit(e.Title)} rawTitleBlank={RawTitleBlankForAudit(e.Title)} res=R{e.ReservationId} source={e.Source} enabled={e.IsEnabled} tuner={tuner} result={e.Result} reason={e.Reason} group={e.Group} svcId={e.ServiceId} occupy={e.OccupyStart:MM/dd HH:mm:ss}〜{e.OccupyEnd:MM/dd HH:mm:ss}{chain} source=TUNER_CONFLICT_MIRROR rule=release_contract");
             }
         }
 
 
-        // v0.5.66:
+        // release_contract:
         // 予約ON/OFFを連続操作すると、無効化済み予約の TUNER_SKIP が毎回全件出力され、
         // ログI/Oだけで視聴中のLIVETestへ体感負荷が出る。通常は件数サマリだけにし、
         // disabled_by_user / epg_source_excluded 以外の未知スキップだけ少数サンプルを残す。
@@ -3846,13 +3859,13 @@ WHERE source <> 'Epg'
             var epgExcluded = skipped.Count(e => string.Equals(e.Reason, "epg_source_excluded", StringComparison.OrdinalIgnoreCase));
             var other = skipped.Count - disabled - epgExcluded;
             log.Add("TUNER_SKIP_SUMMARY", "Summary",
-                $"count={skipped.Count} disabled={disabled} epgExcluded={epgExcluded} other={other} rule=v0.5.66_skip_log_quiet");
+                $"count={skipped.Count} disabled={disabled} epgExcluded={epgExcluded} other={other} rule=release_contract");
 
             foreach (var e in skipped.Where(e => !string.Equals(e.Reason, "disabled_by_user", StringComparison.OrdinalIgnoreCase)
                                              && !string.Equals(e.Reason, "epg_source_excluded", StringComparison.OrdinalIgnoreCase)).Take(3))
             {
                 log.Add("TUNER_SKIP", "Skip",
-                    $"service={e.ServiceName} title={TrimTitleForAudit(e.Title)} rawTitleBlank={RawTitleBlankForAudit(e.Title)} res=R{e.ReservationId} source={e.Source} enabled={e.IsEnabled} result={e.Result} reason={e.Reason} group={e.Group} svcId={e.ServiceId} occupy={e.OccupyStart:MM/dd HH:mm:ss}〜{e.OccupyEnd:MM/dd HH:mm:ss} rule=v0.5.78_service_first_skip_log");
+                    $"service={e.ServiceName} title={TrimTitleForAudit(e.Title)} rawTitleBlank={RawTitleBlankForAudit(e.Title)} res=R{e.ReservationId} source={e.Source} enabled={e.IsEnabled} result={e.Result} reason={e.Reason} group={e.Group} svcId={e.ServiceId} occupy={e.OccupyStart:MM/dd HH:mm:ss}〜{e.OccupyEnd:MM/dd HH:mm:ss} rule=release_contract");
             }
         }
     }
@@ -3921,7 +3934,7 @@ WHERE source <> 'Epg'
         var deleted = cmd.ExecuteNonQuery();
 
         log.Add("KEYWORD_SUPPRESS", "UserEnabled",
-            $"service={TrimForAudit(r.ServiceName)} title={TrimTitleForAudit(r.Title)} rawTitleBlank={RawTitleBlankForAudit(r.Title)} result={(deleted > 0 ? "DELETE" : "NONE")} reason={reason} ruleId={r.SourceRuleId.Value} res=R{r.Id} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} rule=v0.5.78_keyword_hit_disable_persist_service_first");
+            $"service={TrimForAudit(r.ServiceName)} title={TrimTitleForAudit(r.Title)} rawTitleBlank={RawTitleBlankForAudit(r.Title)} result={(deleted > 0 ? "DELETE" : "NONE")} reason={reason} ruleId={r.SourceRuleId.Value} res=R{r.Id} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} rule=release_contract");
     }
 
     private void AddKeywordSuppression(Reservation r, string reason, bool emitLog)
@@ -3953,7 +3966,7 @@ WHERE source <> 'Epg'
         if (emitLog)
         {
             log.Add("KEYWORD_SUPPRESS", "UserDisabled",
-                $"service={TrimForAudit(r.ServiceName)} title={TrimTitleForAudit(r.Title)} rawTitleBlank={RawTitleBlankForAudit(r.Title)} result={(inserted > 0 ? "INSERT" : "EXISTS")} reason={reason} ruleId={r.SourceRuleId.Value} res=R{r.Id} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} rule=v0.5.78_keyword_hit_disable_persist_service_first");
+                $"service={TrimForAudit(r.ServiceName)} title={TrimTitleForAudit(r.Title)} rawTitleBlank={RawTitleBlankForAudit(r.Title)} result={(inserted > 0 ? "INSERT" : "EXISTS")} reason={reason} ruleId={r.SourceRuleId.Value} res=R{r.Id} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} rule=release_contract");
         }
     }
 
@@ -4228,11 +4241,11 @@ WHERE source <> 'Epg'
     /// <summary>
     /// 有効期限切れのキーワードルールを物理削除し、関連する scheduled 予約も物理削除する。
     /// 
-    /// v32.65 で再実装:
+    /// 自動検索予約の再実装:
     ///   ・旧実装は reservations に source_rule_id カラムが無い前提で、
     ///     期限切れルール1件でも存在すれば全 keyword 予約を一時的に cancelled 化する
     ///     危険なロジックになっていた(他有効ルール由来の予約まで巻き込む)。
-    ///   ・v32.55 で source_rule_id カラムが追加されたので、期限切れルール由来の
+    ///   ・source_rule_id カラムにより、期限切れルール由来の
     ///     予約のみをピンポイントで物理削除するよう修正。
     ///   ・DeleteScheduledByRuleId を再利用して「ルール由来予約解放」ロジックを単一化。
     ///   ・ユーザー確定方針に合わせて物理削除(cancelled化ではない)。
@@ -4427,7 +4440,7 @@ WHERE source <> 'Epg'
         tx.Commit();
 
         log.Add("PROGRAM_PLACEHOLDER_EXPIRED_CLEANUP", "ProgramRule",
-            $"result=OK deletedRules={targets.Count} deletedReservations={deletedReservations} ruleIds=[{string.Join(',', targets.Select(x => x.Id))}] reservationIds=[{string.Join(',', reservationIds.Distinct().OrderBy(x => x).Select(x => $"R{x}"))}] today={today} scope=program_guide_missing_only originClassifier=ReservationOriginClassifier normalProgramRules=untouched rule=v0.11.378_programguide_missing_duplicate_cleanup_trace_residue");
+            $"result=OK deletedRules={targets.Count} deletedReservations={deletedReservations} ruleIds=[{string.Join(',', targets.Select(x => x.Id))}] reservationIds=[{string.Join(',', reservationIds.Distinct().OrderBy(x => x).Select(x => $"R{x}"))}] today={today} scope=program_guide_missing_only originClassifier=ReservationOriginClassifier normalProgramRules=untouched rule=release_contract");
         return targets.Count;
     }
 
@@ -4528,7 +4541,7 @@ WHERE source <> 'Epg'
         var programGuideBlankProgramRules = rules.Count(ReservationOriginClassifier.IsProgramGuideMissingProgramRule);
         var explicitProgramRules = Math.Max(0, rules.Count - programGuideBlankProgramRules);
         if (rules.Count > 0)
-            log.Add("PROGRAM_RULE_ORIGIN_AUDIT", "Sync", $"total={rules.Count} explicitProgramRules={explicitProgramRules} programGuideMissingProgramRules={programGuideBlankProgramRules} classifier=ReservationOriginClassifier commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=v0.11.378_programguide_missing_duplicate_cleanup_trace_residue");
+            log.Add("PROGRAM_RULE_ORIGIN_AUDIT", "Sync", $"total={rules.Count} explicitProgramRules={explicitProgramRules} programGuideMissingProgramRules={programGuideBlankProgramRules} classifier=ReservationOriginClassifier commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
         var evaluatedProgramRules = 0;
         foreach (var rule in rules)
         {
@@ -4537,7 +4550,7 @@ WHERE source <> 'Epg'
         }
 
         if (evaluatedProgramRules > 0)
-            log.Add("RESERVE_ENTRY", "ProgramResolveSummary", $"result=OK evaluated={evaluatedProgramRules} okDetails=diagnostic_only errorsAndFallbacks=regular_log rule=program_projection_channel_resolve_release_candidate_summary");
+            log.Add("RESERVE_ENTRY", "ProgramResolveSummary", $"result=OK evaluated={evaluatedProgramRules} okDetails=diagnostic_only errorsAndFallbacks=regular_log rule=program_projection_channel_resolve_release_summary");
 
         using var con = db.Open();
         using var cmd = con.CreateCommand();
@@ -4566,11 +4579,11 @@ WHERE source <> 'Epg'
             delExpired.Parameters.AddWithValue("$ruleId", rule.Id);
             var deleted = delExpired.ExecuteNonQuery();
             if (deleted > 0)
-                log.Add("RESERVE_ENTRY", "ProgramSync", $"result=REMOVED ruleId={rule.Id} name=[{rule.Name}] reason=no_next_occurrence deleted={deleted} rule=v0.6.39_program_projection_channel_resolve");
+                log.Add("RESERVE_ENTRY", "ProgramSync", $"result=REMOVED ruleId={rule.Id} name=[{rule.Name}] reason=no_next_occurrence deleted={deleted} rule=release_contract");
             return;
         }
 
-        // v0.6.36:
+        // release_contract:
         // ProgramRule の投影予約は、ALLOC_ROUTE 内や PreRecEpg 再評価から複数回同期される。
         // 従来は毎回 scheduled/recording を削除して再挿入していたため、短時間に R851/R852 のような
         // ID churn が発生し、ログ上は重複生成に見え、Wake 差分再構築も増えやすかった。
@@ -4630,7 +4643,7 @@ WHERE source <> 'Epg'
                         fix.Parameters.AddWithValue("$now", now.ToString("O"));
                         fix.Parameters.AddWithValue("$id", id);
                         fix.ExecuteNonQuery();
-                        log.Add("RESERVE_ENTRY", "ProgramSync", $"result=METADATA_FIXED keep=R{id} ruleId={rule.Id} name=[{rule.Name}] service=[{reservation.ServiceName}] channel=[{reservation.ChannelArgument}] oldService=[{existingServiceName}] oldChannel=[{existingChannelArgument}] rule=v0.6.39_program_projection_channel_resolve");
+                        log.Add("RESERVE_ENTRY", "ProgramSync", $"result=METADATA_FIXED keep=R{id} ruleId={rule.Id} name=[{rule.Name}] service=[{reservation.ServiceName}] channel=[{reservation.ChannelArgument}] oldService=[{existingServiceName}] oldChannel=[{existingChannelArgument}] rule=release_contract");
                     }
                 }
                 else
@@ -4644,7 +4657,7 @@ WHERE source <> 'Epg'
                     using var delDup = con.CreateCommand();
                     delDup.CommandText = $"DELETE FROM reservations WHERE id IN ({string.Join(',', duplicateIds)})";
                     var removed = delDup.ExecuteNonQuery();
-                    log.Add("RESERVE_ENTRY", "ProgramSync", $"result=DEDUP keep=R{keepId.Value} removed={removed} ruleId={rule.Id} name=[{rule.Name}] rule=v0.6.39_program_projection_channel_resolve");
+                    log.Add("RESERVE_ENTRY", "ProgramSync", $"result=DEDUP keep=R{keepId.Value} removed={removed} ruleId={rule.Id} name=[{rule.Name}] rule=release_contract");
                 }
                 return;
             }
@@ -4652,7 +4665,7 @@ WHERE source <> 'Epg'
 
         using (var crossRuleDup = con.CreateCommand())
         {
-            // v0.11.197:
+            // release_contract:
             // Do not create a Program projection just to let the global reservation dedupe cancel it later.
             // ProgramRule projection owns one next reservation per rule, but if the exact same user-visible
             // reservation already exists from another ProgramRule, this rule stays silent instead of churning IDs.
@@ -4690,7 +4703,7 @@ WHERE source <> 'Epg'
                 cleanupThisRule.Parameters.AddWithValue("$ruleId", rule.Id);
                 var removed = cleanupThisRule.ExecuteNonQuery();
                 log.Add("RESERVE_ENTRY", "ProgramSync",
-                    $"result=SKIP_CROSS_RULE_DUPLICATE keep=R{Convert.ToInt32(keepDuplicate)} removedForRule={removed} ruleId={rule.Id} name=[{rule.Name}] title=[{ReservationTitleDisplayContract.ForLog(reservation.Title)}] rawTitleBlank={ReservationTitleDisplayContract.RawBlankFlag(reservation.Title)} start={reservation.StartTime:MM/dd HH:mm} rule=v0.11.197_program_projection_no_churn_before_global_dedupe");
+                    $"result=SKIP_CROSS_RULE_DUPLICATE keep=R{Convert.ToInt32(keepDuplicate)} removedForRule={removed} ruleId={rule.Id} name=[{rule.Name}] title=[{ReservationTitleDisplayContract.ForLog(reservation.Title)}] rawTitleBlank={ReservationTitleDisplayContract.RawBlankFlag(reservation.Title)} start={reservation.StartTime:MM/dd HH:mm} rule=release_contract");
                 return;
             }
         }
@@ -4737,9 +4750,9 @@ WHERE source <> 'Epg'
         using var lastIdCmd = con.CreateCommand();
         lastIdCmd.CommandText = "SELECT last_insert_rowid();";
         var insertedId = Convert.ToInt32(lastIdCmd.ExecuteScalar());
-        log.Add("RESERVE_ENTRY", "Program", $"共通入口要求/投影 source=Program id=R{insertedId} ruleId={rule.Id} name=[{rule.Name}] dayOfWeek={rule.DayOfWeek} start={reservation.StartTime:MM/dd HH:mm} end={reservation.EndTime:MM/dd HH:mm} service=[{reservation.ServiceName}] rule=v0.6.39_program_projection_channel_resolve");
+        log.Add("RESERVE_ENTRY", "Program", $"共通入口要求/投影 source=Program id=R{insertedId} ruleId={rule.Id} name=[{rule.Name}] dayOfWeek={rule.DayOfWeek} start={reservation.StartTime:MM/dd HH:mm} end={reservation.EndTime:MM/dd HH:mm} service=[{reservation.ServiceName}] rule=release_contract");
 
-        // v0.11.112: ProgramRule projection is a real user-visible reservation route.
+        // release_contract: ProgramRule projection is a real user-visible reservation route.
         // Emit it through the same UserOperationEvent source classifier as manual/auto/chain reservations,
         // but do not announce disabled rule projections as newly active reservations.
         if (reservation.IsEnabled)
@@ -4774,7 +4787,7 @@ WHERE source <> 'Epg'
 
             if (target is not null)
             {
-                // v0.10.54: successful ProgramResolve rows are expected on every startup.
+                // release_contract: successful ProgramResolve rows are expected on every startup.
                 // Keep success details in diagnostic mode conceptually; regular logs use ProgramResolveSummary.
                 return new ProgramRuleChannelResolution(
                     target.OriginalNetworkId,
@@ -4786,11 +4799,11 @@ WHERE source <> 'Epg'
         }
         catch (Exception ex)
         {
-            log.Add("RESERVE_ENTRY", "ProgramResolve", $"result=ERROR ruleId={rule.Id} name=[{rule.Name}] sid={rule.ServiceId} error={ex.GetType().Name}:{ex.Message} action=fallback_sid rule=v0.6.39_program_projection_channel_resolve");
+            log.Add("RESERVE_ENTRY", "ProgramResolve", $"result=ERROR ruleId={rule.Id} name=[{rule.Name}] sid={rule.ServiceId} error={ex.GetType().Name}:{ex.Message} action=fallback_sid rule=release_contract");
         }
 
         var fallbackName = rule.ServiceId > 0 ? $"SID{rule.ServiceId}" : string.Empty;
-        log.Add("RESERVE_ENTRY", "ProgramResolve", $"result=FALLBACK ruleId={rule.Id} name=[{rule.Name}] nid={rule.NetworkId} tsid={rule.TransportStreamId} sid={rule.ServiceId} service=[{fallbackName}] channel=[] action=keep_legacy_sid rule=v0.6.39_program_projection_channel_resolve");
+        log.Add("RESERVE_ENTRY", "ProgramResolve", $"result=FALLBACK ruleId={rule.Id} name=[{rule.Name}] nid={rule.NetworkId} tsid={rule.TransportStreamId} sid={rule.ServiceId} service=[{fallbackName}] channel=[] action=keep_legacy_sid rule=release_contract");
         return new ProgramRuleChannelResolution(rule.NetworkId, rule.TransportStreamId, rule.ServiceId, fallbackName, string.Empty);
     }
 

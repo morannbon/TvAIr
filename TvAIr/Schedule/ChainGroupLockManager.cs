@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -6,7 +6,7 @@ using System.Reflection;
 namespace TvAIr.Schedule
 {
     /// <summary>
-    /// v0.3.33: ユーザー明示チェーンを「単発予約」ではなく「予約群」として扱う共通ロック管理。
+    /// release_contract: ユーザー明示チェーンを「単発予約」ではなく「予約群」として扱う共通ロック管理。
     /// ALLOC_ROUTE/TUNER_ALLOC から安全に呼べるよう static facade も持つ。
     /// </summary>
     internal sealed class ChainGroupLockManager

@@ -1,9 +1,9 @@
-﻿namespace TvAIr.Core;
+namespace TvAIr.Core;
 
 /// <summary>
 /// 視聴用TVTest/LIVETestを録画・EPG系のOpen/Closeから隔離するためのチューナー役割ポリシー。
 ///
-/// v0.3.39 方針:
+/// release_contract 方針:
 ///   - 不可侵判定は BonDriver 名ではなく、設定画面の Role(Viewing/Recording) を正とする。
 ///   - BonDriver未設定時に環境固有名を補完しない。実行側は論理リソース解決失敗として扱う。
 /// </summary>
@@ -20,7 +20,7 @@ public static class TunerIsolationPolicy
 
     public static bool IsRecordingOnlyBonDriver(string? bonDriverFileName)
     {
-        // v0.3.39: 明示されたBonDriverはそのまま尊重する。
+        // release_contract: 明示されたBonDriverはそのまま尊重する。
         return !string.IsNullOrWhiteSpace(Path.GetFileName(bonDriverFileName ?? string.Empty));
     }
 
@@ -55,14 +55,14 @@ public static class TunerIsolationPolicy
 
     public static string NormalizeConfiguredBonDriverFileName(string? bonDriverFileName)
     {
-        // v0.11.678: 環境固有BonDriver名への自動変換をしない。
+        // release_contract: 環境固有BonDriver名への自動変換をしない。
         // 既存設定に書かれたDLL名は明示設定としてそのまま扱い、未設定は未解決のまま返す。
         return Path.GetFileName((bonDriverFileName ?? string.Empty).Trim());
     }
 
     public static string ResolveConfiguredCh2Path(string path)
     {
-        // v0.11.678: ch2も明示設定されたパスだけを正とする。
+        // release_contract: ch2も明示設定されたパスだけを正とする。
         // 旧構成名・特定BonDriver名への自動rewriteは通常経路へ混ぜない。
         return path;
     }

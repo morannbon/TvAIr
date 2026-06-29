@@ -1,4 +1,4 @@
-﻿/* TvAIr Menu Spine v1.0.0
+/* TvAIr Menu Spine v1.0.0
    Windows-style menu projection: shared tree, surface attributes, JS-managed flyout.
    MenuLegacyEntryCleanupContract: hamburger/page/context/tray keep a single command spine; page-local onclick menu fallbacks are removed, and only EPG silent remains a surface attribute.
    v1.0.0: menu page-open actions use a shared entry contract; Help opens as a separate tab from every menu surface.
@@ -9,7 +9,7 @@
   if(window.TvAIrMenuSpine && window.TvAIrMenuSpine.version === '1.0.0') return;
 
   const VERSION = '1.0.0';
-  const state = { actions:null, loading:null, epg:null, epgLoading:null, closeTimer:null, activeGroup:null, contract:'v0.11.531_menu_legacy_entry_cleanup_contract' };
+  const state = { actions:null, loading:null, epg:null, epgLoading:null, closeTimer:null, activeGroup:null, contract:'release_contract' };
   const q = (s,r=document)=>r.querySelector(s);
   const qa = (s,r=document)=>Array.from(r.querySelectorAll(s));
 
@@ -275,7 +275,7 @@
     return submenu(MENU_LABELS.plugins, surface, children);
   }
 
-  const MENU_SURFACE_CONTRACT = 'v0.11.531_menu_legacy_entry_cleanup_contract';
+  const MENU_SURFACE_CONTRACT = 'release_contract';
   const SETTINGS_ENTRY_CONTRACT = MENU_SURFACE_CONTRACT;
   const MENU_COMMANDS = Object.freeze({
     open:'open-app',

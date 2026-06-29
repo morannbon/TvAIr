@@ -1,5 +1,5 @@
-﻿/*
- * TvAIr common silent notification dialog - v0.11.254
+/*
+ * TvAIr common silent notification dialog - release_contract
  * Shared by EPG, settings, and future user-operation result notifications.
  * This is not a toast, balloon, or sound notification.
  */
@@ -92,7 +92,7 @@
 .tvair-notice-cancel{display:none}
 
 
-/* v0.11.502 NotificationToastCssOwnership
+/* release_contract NotificationToastCssOwnership
    tvair-notification.css owns silent dialog theme coverage and short #toast geometry/paint.
    List/reservation/user-log CSS must not own notification or toast schema. */
 body:is(.tvair-keyword-page,.tvair-program-reservation-page,.tvair-rule-list-page,.tvair-reservation-page) #toast{
@@ -118,7 +118,7 @@ body:is(.tvair-keyword-page,.tvair-program-reservation-page,.tvair-rule-list-pag
 body.tvair-reservation-page{--tvair-list-toast-pad:8px 14px}
 body.tvair-program-reservation-page{--tvair-list-toast-bg:var(--nav-bg)}
 
-/* v0.11.502: single semantic bridge for notification-like surfaces. */
+/* release_contract: single semantic bridge for notification-like surfaces. */
 .tvair-notification,.tvair-dialog,.toast,#toast,.notification,.confirm-dialog{
   background:var(--winui-card-background-fill-color-default,var(--tvair-role-dialog-bg))!important;
   color:var(--winui-text-fill-color-primary,var(--tvair-role-dialog-fg))!important;

@@ -1,4 +1,4 @@
-﻿/* TvAIr UI Modules v0.11.358
+/* TvAIr UI Modules release_contract
    EPGProgressPanelThemeRoleRebuild + LightThemeActionButtonLuminanceTuning; no layout, ProgramCell, Wake, EPG logic, or plugin behavior changes.
    Active definitions are grouped by role: AppShell, Shell, DataView, RuleList, ProgramGuide, HeaderCell, EnabledToggle, DisabledRowState.
    Backup CSS is intentionally excluded from distribution. */
@@ -157,15 +157,15 @@ body.tvair-plugin-page{
   font-size:15px!important;font-weight:700;line-height:1;cursor:pointer;
 }
 #menu-btn:hover,#menu-button:hover,#page-menu-btn:hover,#page-menu-button:hover{background:var(--tvair-nav-item-hover-bg)!important}
-/* ClassicMenu surface/item rules are owned by v0.11.321 ContextMenuCssOwnerContract below. */
-/* ProgramGuide shell/frame CSS remains final-audited through EPGProgressPanelThemeRoleRebuildLightButtonTuning v0.11.358. */
+/* ClassicMenu surface/item rules are owned by release_contract ContextMenuCssOwnerContract below. */
+/* ProgramGuide shell/frame CSS remains final-audited through EPGProgressPanelThemeRoleRebuildLightButtonTuning release_contract. */
 /* ProgramGuide service header wave colors are owned by service-head contract below. */
-/* ProgramCell geometry/content/action owner: v0.11.332 ProgramCellContentPriorityContract below. */
+/* ProgramCell geometry/content/action owner: release_contract ProgramCellContentPriorityContract below. */
 body.tvair-guide-page ::-webkit-scrollbar{width:12px;height:12px}
 body.tvair-guide-page ::-webkit-scrollbar-track{background:var(--tvair-bg-d)}
 body.tvair-guide-page ::-webkit-scrollbar-thumb{background:var(--tvair-border-a);border-radius:6px;border:2px solid var(--tvair-bg-d)}
 body.tvair-guide-page ::-webkit-scrollbar-thumb:hover{background:var(--tvair-text-c)}
-/* ProgramCell colors are owned by v0.11.332 ProgramCellContentPriorityContract. */
+/* ProgramCell colors are owned by release_contract ProgramCellContentPriorityContract. */
 /* Layout module contract: common host-page layout tokens and shell selectors. */
 :root{
   --tvair-layout-nav-height:32px;
@@ -387,7 +387,7 @@ th.col-title,th.col-main{text-align:center!important;min-width:0!important;}
   text-transform:none!important;
   letter-spacing:0!important;
 }
-/* v0.11.345 ProgramGuideRemainingSelectorAuditCleanup
+/* release_contract ProgramGuideRemainingSelectorAuditCleanup
    Generic form-row helpers must not own ProgramGuide time-axis rows.
    .time-row remains a DOM compatibility marker for ProgramGuide, but visual/layout ownership
    belongs to .program-guide-time-axis-row under ProgramGuideTimeAxisBodyOwnerContract. */
@@ -433,7 +433,7 @@ input,select,textarea,.input,.multi,.ch-list{
    Legacy direct background mappings were removed so ProgramCell/List surfaces consume
    --tvair-genre-guide-bg / --tvair-genre-row-bg through a single path. */
 
-/* ProgramGuide frame geometry remains final-audited through EPGProgressPanelThemeRoleRebuildLightButtonTuning v0.11.358. */
+/* ProgramGuide frame geometry remains final-audited through EPGProgressPanelThemeRoleRebuildLightButtonTuning release_contract. */
 
 /* List width contract: list-page geometry is owned by tvair-list-module.css. */
 :root{
@@ -568,7 +568,7 @@ body.tvair-program-reservation-page #list-panel #table-wrap{border:0!important;b
 /* RuleList area roles: page width is owned by tvair-list-module.css. */
 body.tvair-rule-list-page #rules-table th.col-enabled,
 body.tvair-rule-list-page #rules-table td.col-enabled{width:var(--tvair-col-rule-enabled)!important;}
-/* v0.11.554 ListWidthTokenCleanupContract: early RuleList width fallbacks resolve through shared list aliases. Later RuleList schema rules remain the owner of final widths. */
+/* release_contract ListWidthTokenCleanupContract: early RuleList width fallbacks resolve through shared list aliases. Later RuleList schema rules remain the owner of final widths. */
 body.tvair-rule-list-page #rules-table th.col-state,
 body.tvair-rule-list-page #rules-table td.col-state{width:var(--tvair-list-col-rule-state,190px)!important;}
 body.tvair-rule-list-page #rules-table th.col-order,
@@ -756,7 +756,7 @@ body:not(.tvair-guide-page):not(.tvair-reservation-page) th,body:not(.tvair-guid
   text-align:center!important;
   vertical-align:middle!important;
 }
-/* ProgramGuide header/service-column placement is owned by v0.11.337 ProgramGuideShellFrameOwnerContract. */body.tvair-keyword-page #result-table tbody tr:nth-child(odd),
+/* ProgramGuide header/service-column placement is owned by release_contract ProgramGuideShellFrameOwnerContract. */body.tvair-keyword-page #result-table tbody tr:nth-child(odd),
 body.tvair-rule-list-page #rules-table tbody tr:nth-child(odd),
 body.tvair-program-reservation-page #program-rules-table tbody tr:nth-child(odd),
 body.tvair-program-reservation-page #rules-table tbody tr:nth-child(odd),
@@ -911,12 +911,12 @@ tr.disabled-row .tvair-enabled-toggle-thumb{
   filter:none!important;
 }
 
-/* ProgramGuide header spacer geometry/paint remains final-audited through EPGProgressPanelThemeRoleRebuildLightButtonTuning v0.11.358. */
+/* ProgramGuide header spacer geometry/paint remains final-audited through EPGProgressPanelThemeRoleRebuildLightButtonTuning release_contract. */
 
 
-/* EPGProgressPanelThemeRoleRebuildLightButtonTuning v0.11.358
+/* EPGProgressPanelThemeRoleRebuildLightButtonTuning release_contract
    Final host-UI cross-page residue audit after the ProgramGuide CSS owner pass; dark action button tokens tuned without layout changes.
-   ProgramGuideCssOwnerFinalAudit: final audited owner map for ProgramGuide CSS after the v0.11.338-v0.11.346 cleanup pass.
+   ProgramGuideCssOwnerFinalAudit: final audited owner map for ProgramGuide CSS after the release_contract cleanup pass.
    Shell/frame: this block owns #guide-*, #ch-*, .ch-col/.ch-head geometry, structural spacers, and now-line paint.
    Program cells: ProgramCellContentPriorityContract / ProgramCellActionTokenContract.
    Toolbar filters: ProgramGuideToolbarFilterOwnerContract.
@@ -1100,7 +1100,7 @@ body.tvair-keyword-page #result-table tbody tr.disabled-row > td,
 table.tvair-striped-table tbody tr.disabled-row > td{background:var(--tvair-disabled-row-bg)!important;color:var(--tvair-disabled-row-text)!important}body.tvair-rule-list-page table tbody tr.disabled-row .tvair-enabled-toggle,
 body.tvair-program-reservation-page table tbody tr.disabled-row .tvair-enabled-toggle{opacity:1!important}
 
-/* ClassicMenu module moved to v0.11.321 ContextMenuCssOwnerContract. */
+/* ClassicMenu module moved to release_contract ContextMenuCssOwnerContract. */
 
 
 
@@ -1123,7 +1123,7 @@ body.tvair-program-reservation-page table tbody tr.disabled-row .tvair-enabled-t
 :where(th,.tvair-header-cell):not(.program-guide-header-cell){
   text-align:center!important;
 }
-/* ProgramGuide service/header centering is owned by ProgramGuide shell/header contracts as of v0.11.343. */
+/* ProgramGuide service/header centering is owned by ProgramGuide shell/header contracts as of release_contract. */
 
 /* Control/chip/button labels: vertical center by shared inline-flex contract. */
 :where(button:not(.epg-btn),.btn,.nav-btn,.stab,.tab-btn,.tvair-action-button,
@@ -1188,7 +1188,7 @@ body.tvair-program-reservation-page table tbody tr.disabled-row .tvair-enabled-t
   line-height:var(--tvair-text-cell-line-height)!important;
 }
 
-/* ProgramCellContentPriorityContract v0.11.437
+/* ProgramCellContentPriorityContract release_contract
    Owner: tvair-ui-modules.css.
    Contract: fixed ProgramGuide frame; Meiryo text; time/title/actions are mandatory.
    cellText is decoded from DB raw descriptors, but cell display is priority-gated with a bottom glyph guard:
@@ -1229,7 +1229,7 @@ body.tvair-guide-page .prog-start{
   text-overflow:clip;
   text-align:left!important;
 }
-/* v0.11.365 ProgramCellTitleAccentPaletteFinalize: title/time/description/meta/action text roles are isolated; title anchors do not consume generic link color. */
+/* release_contract ProgramCellTitleAccentPaletteFinalize: title/time/description/meta/action text roles are isolated; title anchors do not consume generic link color. */
 body.tvair-guide-page .prog-title{
   flex:0 0 auto;
   align-self:stretch!important;
@@ -1367,7 +1367,7 @@ body.tvair-guide-page .prog-bar{
 /* ProgramGuide genre filter cell dimming belongs to ProgramCell owner because it changes cell interaction. */
 body.tvair-guide-page .prog.genre-dimmed{opacity:.12!important;pointer-events:none!important;}
 
-/* ProgramGuideServiceHeaderWaveColorOwnerContract v0.11.343
+/* ProgramGuideServiceHeaderWaveColorOwnerContract release_contract
    Service header wave paint is owned here only. Shell/frame owns geometry; toolbar wave buttons own their own action paint. */
 body.tvair-guide-page #ch-header .program-guide-service-head.wave-gr,
 body.tvair-guide-page #ch-header .ch-head.wave-gr,
@@ -1460,7 +1460,7 @@ body.tvair-guide-page .prog.epg-gap .prog-desc{
   color:var(--tvair-event-unknown-fg)!important;
 }
 
-/* ProgramCell action button layout contract v0.11.333.
+/* ProgramCell action button layout contract release_contract.
    Layout only: inline, compact, and side-by-side. Visual meaning colors are owned below by
    ProgramCellActionTokenContract and consume programcell-button tokens. */
 body.tvair-guide-page .prog .rsv-btn,
@@ -1496,7 +1496,7 @@ body.tvair-guide-page .prog .program-cell-action-btn,
   position:relative;
   z-index:2;
 }
-/* ProgramCell action colors are intentionally defined once in v0.11.333 ProgramCellActionTokenContract below, after generic button guards. */
+/* ProgramCell action colors are intentionally defined once in release_contract ProgramCellActionTokenContract below, after generic button guards. */
 .tvair-action-button.program-cell-action-btn--list-context,
 body.tvair-keyword-page .tvair-action-button.program-cell-action-btn--list-context{
   min-width:var(--tvair-reservation-action-button-min-width,64px);
@@ -1506,11 +1506,11 @@ body.tvair-keyword-page .tvair-action-button.program-cell-action-btn--list-conte
   line-height:1;
 }
 
-/* Menu disabled-state guard is owned by v0.11.321 ContextMenuCssOwnerContract. */
+/* Menu disabled-state guard is owned by release_contract ContextMenuCssOwnerContract. */
 
 
 
-/* v0.11.339 ProgramGuideTimeAxisHeaderOwnerContract audit
+/* release_contract ProgramGuideTimeAxisHeaderOwnerContract audit
    Time-axis header spacers are structural cells. Geometry and paint are owned here once;
    body time-axis rows remain owned by the ProgramGuide time-axis body contract below. */
 body.tvair-guide-page .program-guide-time-axis-header-spacer{
@@ -1583,12 +1583,12 @@ body.tvair-non-program-page table tbody tr.cancelled-row b{
 
 /* ThemeRoleMatrix visible repair
    Module horizontal pass: ProgramGuideHeader, TimeAxis, ReservationList, Settings shell. */
-/* ProgramGuide toolbar labels/chips are owned by v0.11.340 ProgramGuideToolbarFilterOwnerContract. */
+/* ProgramGuide toolbar labels/chips are owned by release_contract ProgramGuideToolbarFilterOwnerContract. */
 
 /* ThemeCoverageAuditRepair
    Late module coverage: apply the same role set to every host module class family,
    not only the last user-reported locations.
-   v0.11.336: ProgramGuide is excluded here and owned by ProgramGuide-specific contracts. */
+   release_contract: ProgramGuide is excluded here and owned by ProgramGuide-specific contracts. */
 body:not(.tvair-guide-page) .tvair-topnav,body:not(.tvair-guide-page) #nav,body:not(.tvair-guide-page) #filter-tabs,body:not(.tvair-guide-page) .toolbar,body:not(.tvair-guide-page) .filter-bar,body:not(.tvair-guide-page) .sub-panel,body:not(.tvair-guide-page) .summary,body:not(.tvair-guide-page) .status-box,
 body:not(.tvair-guide-page) .keyword-group-head,body:not(.tvair-guide-page) .tvair-log-action-host{
   background:var(--tvair-role-toolbar-bg)!important;
@@ -1664,7 +1664,7 @@ body:not(.tvair-guide-page):not(.tvair-reservation-page) tbody tr:not(.disabled-
 
 /* FluentPaletteRebase module bridge
    Final cross-module role pass after the palette rebase.
-   v0.11.336: ProgramGuide is excluded here and owned by ProgramGuide-specific contracts. */
+   release_contract: ProgramGuide is excluded here and owned by ProgramGuide-specific contracts. */
 body:not(.tvair-guide-page) input:disabled,body:not(.tvair-guide-page) select:disabled,body:not(.tvair-guide-page) textarea:disabled,body:not(.tvair-guide-page) button:disabled:not(.epg-btn):not(.program-cell-action-btn),body:not(.tvair-guide-page) .disabled:not(.program-cell-action-btn),body:not(.tvair-guide-page) .is-disabled:not(.program-cell-action-btn){
   background:var(--tvair-role-control-disabled-bg)!important;
   color:var(--tvair-role-control-disabled-fg)!important;
@@ -1687,7 +1687,7 @@ body:not(.tvair-guide-page) small,body:not(.tvair-guide-page) .help,body:not(.tv
 }
 /* WindowsDefinitionFinish module bridge
    Use Windows/WinUI-like brush aliases through TvAIr roles.
-   v0.11.336: ProgramGuide is excluded here and owned by ProgramGuide-specific contracts. */
+   release_contract: ProgramGuide is excluded here and owned by ProgramGuide-specific contracts. */
 html,body{
   background:var(--tvair-role-page-bg)!important;
   color:var(--tvair-role-page-fg)!important;
@@ -1715,7 +1715,7 @@ body:not(.tvair-guide-page) input:disabled,body:not(.tvair-guide-page) select:di
 
 /* WindowsSemanticBrushFinish module final pass
    Explicitly follows Windows semantic brushes exposed by the foundation layer.
-   v0.11.336: ProgramGuide is excluded here and owned by ProgramGuide-specific contracts. */
+   release_contract: ProgramGuide is excluded here and owned by ProgramGuide-specific contracts. */
 html,body{
   background:var(--winui-application-page-bg,var(--tvair-role-page-bg))!important;
   color:var(--winui-text-fill-color-primary,var(--tvair-role-page-fg))!important;
@@ -1778,7 +1778,7 @@ body:not(.tvair-guide-page) small,body:not(.tvair-guide-page) .help,body:not(.tv
 
 
 
-/* v0.11.554 MenuFlyoutBehaviorContract
+/* release_contract MenuFlyoutBehaviorContract
    Single surface-token owner for hamburger, page menu, and right-click context menu surfaces.
    tvair-menu-spine.js owns the shared tree and EPG silent attribute; this block owns presentation, classic flyout geometry, disabled/selected states, and z-order. */
 #menu-dropdown,
@@ -1995,7 +1995,7 @@ body:not(.tvair-guide-page) small,body:not(.tvair-guide-page) .help,body:not(.tv
   pointer-events:none!important;
 }
 
-/* v0.11.342 ProgramGuideAxisNavOwnerContract
+/* release_contract ProgramGuideAxisNavOwnerContract
    Single owner for ProgramGuide axis navigation frame geometry.
    Z axis = #date-nav, Y jump selector = #time-nav shell, X axis = channel scroll.
    Time-band chip paint is owned by ProgramGuideToolbarFilterOwnerContract.
@@ -2091,7 +2091,7 @@ body.tvair-guide-page #time-nav{
 body.tvair-guide-page #time-nav-left{display:flex!important;align-items:center!important;gap:4px!important;padding:2px 8px!important;width:50%!important;flex:0 0 50%!important;border-right:1px solid var(--tvair-role-border-soft)!important;color:var(--tvair-role-header-fg)!important}
 body.tvair-guide-page #time-nav #time-btns{display:flex!important;flex:1 1 auto!important;gap:4px!important;min-width:0!important}
 
-/* v0.11.340 ProgramGuideToolbarFilterOwnerContract
+/* release_contract ProgramGuideToolbarFilterOwnerContract
    Single owner for ProgramGuide top toolbar filters and chip alignment.
    Broadcast wave, time band and genre controls share the same toolbar label/chip contract.
    Date navigation is owned by ProgramGuideAxisNavOwnerContract; time-axis body rows remain owned by ProgramGuideTimeAxisBodyOwnerContract.
@@ -2252,7 +2252,7 @@ body.tvair-guide-page .program-guide-time-axis-secondary{
   border-color:var(--tvair-role-time-axis-border)!important;
   overflow:hidden!important;
 }
-/* v0.11.344 ProgramGuideTimeAxisBodyOwnerContract
+/* release_contract ProgramGuideTimeAxisBodyOwnerContract
    Single owner for ProgramGuide body time-axis rows and time-band rail paint.
    Rows are generated as .program-guide-time-axis-row time-row; the owner now targets
    the ProgramGuide-specific class instead of the generic .time-row helper.
@@ -2307,7 +2307,7 @@ body.tvair-guide-page .program-guide-time-axis-primary .program-guide-time-axis-
 body.tvair-guide-page .time-col-repeat .program-guide-time-axis-row.tz-late,
 body.tvair-guide-page .program-guide-time-axis-secondary .program-guide-time-axis-row.tz-late{background:var(--tvair-role-timeband-late-bg)!important;color:var(--tvair-role-timeband-late-fg)!important}
 
-/* v0.11.321 SettingsModalCssOwnerRegressionFix
+/* release_contract SettingsModalCssOwnerRegressionFix
    Settings modal is owned here. Context/right-click menu remains a separate entry owner. */
 body.tvair-guide-page #cfg-overlay{display:none;position:fixed;inset:0;align-items:center;justify-content:center;padding:18px;z-index:2000;background:var(--tvair-dialog-backdrop)!important;}
 body.tvair-guide-page #cfg-overlay.open{display:flex!important;}
@@ -2344,7 +2344,7 @@ body.tvair-guide-page #cfg-overlay #cfg-save,body.tvair-guide-page #cfg-overlay 
 body.tvair-guide-page #cfg-overlay #cfg-save:hover,body.tvair-guide-page #cfg-overlay #cfg-dialog-ok:hover{background:var(--tvair-settings-accent-soft)!important;color:var(--tvair-settings-text)!important;}
 body.tvair-guide-page #cfg-overlay .cfg-note,body.tvair-guide-page #cfg-overlay .cfg-current,body.tvair-guide-page #cfg-overlay .cfg-slider-labels,body.tvair-guide-page #cfg-overlay small{font-size:10px;color:var(--tvair-settings-text-muted)!important;line-height:1.5;}
 body.tvair-guide-page #cfg-overlay .cfg-slider-wrap{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;max-width:460px;}
-/* v0.11.330 SettingsModalRangeSliderVisualFix: range sliders are not text inputs.
+/* release_contract SettingsModalRangeSliderVisualFix: range sliders are not text inputs.
    Define local fallbacks and suppress generic input focus boxes for Web modal sliders. */
 body.tvair-guide-page #cfg-overlay input[type="range"].cfg-slider,body.tvair-guide-page #cfg-overlay .cfg-slider{--tvair-slider-fill-percent:0%;--tvair-slider-track-active:var(--tvair-settings-slider-active);--tvair-slider-track-rest:var(--tvair-settings-slider-rest);--tvair-slider-thumb-bg:var(--tvair-settings-slider-thumb);--tvair-slider-thumb-border:var(--tvair-slider-track-active);display:block;width:100%;height:18px;margin:0;padding:0!important;border:0!important;border-radius:0!important;box-shadow:none!important;outline:0!important;appearance:none;-webkit-appearance:none;background:transparent!important;color:inherit!important;accent-color:var(--tvair-slider-track-active);cursor:pointer;}
 body.tvair-guide-page #cfg-overlay input[type="range"].cfg-slider:focus,body.tvair-guide-page #cfg-overlay input[type="range"].cfg-slider:focus-visible,body.tvair-guide-page #cfg-overlay input[type="range"].cfg-slider:active{border:0!important;box-shadow:none!important;outline:0!important;background:transparent!important;}
@@ -2365,7 +2365,7 @@ body.tvair-guide-page #cfg-overlay #cfg-tuner-table td{padding:5px;border:1px so
 body.tvair-guide-page #cfg-overlay #cfg-tuner-table tbody tr:nth-child(even) td{background:var(--tvair-settings-subpanel-bg)!important;}
 body.tvair-guide-page #cfg-overlay #cfg-footer{display:flex;justify-content:flex-end;gap:8px;padding:10px 14px;background:var(--tvair-settings-subpanel-bg)!important;border-top:1px solid var(--tvair-settings-border-soft)!important;}
 
-/* v0.11.321 SettingsModalDialogOverlayContract: keep the embedded confirm dialog out of normal layout until it is explicitly opened. */
+/* release_contract SettingsModalDialogOverlayContract: keep the embedded confirm dialog out of normal layout until it is explicitly opened. */
 body.tvair-guide-page #cfg-overlay #cfg-dialog-overlay{display:none;position:absolute;inset:0;align-items:center;justify-content:center;background:var(--tvair-dialog-backdrop)!important;z-index:5;}
 body.tvair-guide-page #cfg-overlay #cfg-dialog-overlay.open{display:flex!important;}
 body.tvair-guide-page #cfg-overlay #cfg-dialog{width:min(420px,88vw);background:var(--tvair-settings-panel-bg)!important;color:var(--tvair-settings-text)!important;border:1px solid var(--tvair-dialog-border)!important;box-shadow:var(--tvair-theme-shadow)!important;border-radius:4px;overflow:hidden;}
@@ -2378,7 +2378,7 @@ body.tvair-guide-page #cfg-overlay #cfg-panel-appearance .cfg-theme-card{display
 body.tvair-guide-page #cfg-overlay #cfg-panel-appearance .cfg-theme-card input{margin:0;flex:0 0 auto;}
 body.tvair-guide-page #cfg-overlay #cfg-panel-appearance .cfg-theme-card:hover,body.tvair-guide-page #cfg-overlay #cfg-panel-appearance .cfg-theme-card:focus-within,body.tvair-guide-page #cfg-overlay #cfg-panel-appearance .cfg-theme-card:has(input:checked){background:var(--tvair-settings-display-card-hover-bg)!important;border-color:var(--tvair-settings-display-card-selected-border)!important;}
 body.tvair-guide-page #cfg-overlay #cfg-panel-appearance .cfg-theme-card:has(input:checked){box-shadow:inset 3px 0 0 var(--tvair-settings-display-card-selected-shadow);}
-/* v0.11.582 SettingsThemeDisplaySampleGeometryAliasContract: appearance tab sample geometry aliases are owned by tvair-theme-contract.css. This module consumes display-tab geometry tokens and keeps only local layout rules. */
+/* release_contract SettingsThemeDisplaySampleGeometryAliasContract: appearance tab sample geometry aliases are owned by tvair-theme-contract.css. This module consumes display-tab geometry tokens and keeps only local layout rules. */
 body.tvair-guide-page #cfg-overlay #cfg-panel-appearance .cfg-theme-chip{position:relative;display:inline-flex;width:var(--tvair-settings-display-sample-width);height:var(--tvair-settings-display-sample-height);flex:0 0 var(--tvair-settings-display-sample-width);overflow:hidden;background:var(--tvair-settings-display-sample-light-surface);border:1px solid var(--tvair-settings-display-sample-frame);box-shadow:inset 0 0 0 1px var(--tvair-settings-display-sample-inset);}
 body.tvair-guide-page #cfg-overlay #cfg-panel-appearance .cfg-theme-chip::after{content:'';position:absolute;inset:3px;border-radius:1px;border:1px solid var(--tvair-settings-display-sample-frame-soft);}
 body.tvair-guide-page #cfg-overlay #cfg-panel-appearance .cfg-theme-chip-current{background:linear-gradient(to right,var(--tvair-settings-display-sample-light-surface) 0 50%,var(--tvair-settings-display-sample-dark-surface) 50% 100%);}
@@ -2387,7 +2387,7 @@ body.tvair-guide-page #cfg-overlay #cfg-panel-appearance .cfg-theme-chip-light{b
 body.tvair-guide-page #cfg-overlay #cfg-panel-appearance .cfg-theme-chip-dark{background:var(--tvair-settings-display-sample-dark-surface);}
 
 
-/* v0.11.502 SettingsGenreEditorSpacingContract: owns Settings appearance genre color grid and palette. */
+/* release_contract SettingsGenreEditorSpacingContract: owns Settings appearance genre color grid and palette. */
 body.tvair-guide-page #cfg-overlay #cfg-panel-appearance .cfg-genre-color-grid,
 body.tvair-guide-page #cfg-overlay #cfg-genre-color-grid{display:grid;grid-template-columns:repeat(2,minmax(var(--tvair-settings-genre-editor-column-min),1fr));gap:var(--tvair-settings-genre-editor-row-gap) var(--tvair-settings-genre-editor-column-gap);max-width:760px;background:transparent!important;}
 body.tvair-guide-page #cfg-overlay #cfg-panel-appearance .cfg-genre-color-row,
@@ -2419,7 +2419,7 @@ body.tvair-guide-page .cfg-genre-palette-close{font-size:12px;border:0;backgroun
 
 @media (max-width:900px){body.tvair-guide-page #cfg-box{width:96vw;height:84vh;}body.tvair-guide-page #cfg-layout{grid-template-columns:150px 1fr;}}
 
-/* v0.11.333 ProgramCellActionTokenContract
+/* release_contract ProgramCellActionTokenContract
    Final and only visual owner for program-guide cell action buttons.
    Position, flow, width, and multi-button layout are unchanged by this block. */
 body.tvair-guide-page .prog .program-cell-action-btn,
@@ -2526,7 +2526,7 @@ body.tvair-guide-page .prog .program-cell-action-btn[data-program-action="confli
 .tvair-action-label.rsv-btn.program-cell-action-btn{pointer-events:none!important;}
 
 
-/* v0.11.394 ProgramGuideNextDayBottomCenter
+/* release_contract ProgramGuideNextDayBottomCenter
    Owner: ProgramGuide next-day auxiliary action only.
    Purpose: keep the next-day action outside normal flow and anchor it at the
    bottom center of the guide viewport, controlled only by hidden/aria-hidden/is-visible. */
@@ -2585,7 +2585,7 @@ body.tvair-guide-page button#next-day-btn[data-floating-action="next-day"]:focus
   outline-offset:2px!important;
 }
 
-/* v0.11.375 ProgramCellActionIdentityOverlapGuard
+/* release_contract ProgramCellActionIdentityOverlapGuard
    Owner: ProgramGuide cell action geometry and identity-safety only.
    Purpose: short cells must not visually stack action buttons, and unsafe long
    events must not own click targets above valid neighboring cells. */
@@ -2627,7 +2627,7 @@ body.tvair-guide-page .prog.prog-action-unsafe .program-cell-action-btn{
   display:none!important;
 }
 
-/* v0.11.465 Settings tuner table column balance/alignment.
+/* release_contract Settings tuner table column balance/alignment.
    The tuner settings virtual-slot column is a read-only/layout field.
    It is separate from reservation-list priority and from action buttons. */
 body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-name-col,
@@ -2654,7 +2654,7 @@ body.tvair-guide-page #cfg-overlay #cfg-tuner-table td:nth-child(4) select{text-
 body.tvair-guide-page #cfg-overlay #cfg-tuner-table td:nth-child(2) select{width:100%;min-width:0;box-sizing:border-box;}
 
 
-/* v0.11.465 Program/search result state labels are state, not action. */
+/* release_contract Program/search result state labels are state, not action. */
 .rsv-state-label{
   display:inline-flex;
   align-items:center;
@@ -2669,13 +2669,13 @@ body.tvair-guide-page #cfg-overlay #cfg-tuner-table td:nth-child(2) select{width
   color:var(--tvair-muted-text, var(--tvair-text-muted));
 }
 
-/* v0.11.516 ProgramCellFrameLaneStructureContract
+/* release_contract ProgramCellFrameLaneStructureContract
    Owner: ProgramGuide cell frame/lane semantics.
    Purpose: body text, title/time chrome, and action footer lanes are named by the
    shared JS frame contract.  This is not a per-cell visual override; it prevents
    future initial-render and reservation-diff paths from diverging on short-cell
    body visibility or action-lane ownership. */
-body.tvair-guide-page .prog[data-cell-frame-contract="v0.11.516_programcell_frame_lane_structure_contract"]{
+body.tvair-guide-page .prog[data-cell-frame-contract="release_contract"]{
   overflow:hidden!important;
 }
 body.tvair-guide-page .prog[data-body-lane="chrome-only"] .prog-desc{
@@ -2686,24 +2686,24 @@ body.tvair-guide-page .prog[data-action-lane="program-cell-action-footer"] .prog
   align-self:stretch!important;
 }
 
-/* v0.11.516 ProgramCellRenderStructureContract
+/* release_contract ProgramCellRenderStructureContract
    Owner: ProgramGuide cell render structure semantics.
    Purpose: initial render and reservation-diff reflow consume the same frame,
    chrome, event-time state, and reservation signature inputs.  This section is
    intentionally semantic-only; it does not change cell geometry, EPG data,
    reservation allocation, Wake, or plugin UI ownership. */
-body.tvair-guide-page .prog[data-cell-render-structure-contract="v0.11.516_programcell_render_structure_contract"]{
+body.tvair-guide-page .prog[data-cell-render-structure-contract="release_contract"]{
   contain:layout paint;
 }
 
-/* v0.11.516 ProgramCellActionStateStructureContract
+/* release_contract ProgramCellActionStateStructureContract
    Owner: ProgramGuide cell action/state semantics.
    Purpose: reserve/record-now/chain/cancel/toggle/stop/conflict button state is
    derived from one JS action-state contract shared by initial render and
    reservation-diff reflow.  This section is semantic-only; visual colors remain
    owned by ProgramCellActionTokenContract / theme tokens. */
-body.tvair-guide-page .prog[data-cell-action-structure-contract="v0.11.516_programcell_action_state_structure_contract"]{
-  --tvair-programcell-action-state-contract:v0.11.516_programcell_action_state_structure_contract;
+body.tvair-guide-page .prog[data-cell-action-structure-contract="release_contract"]{
+  --tvair-programcell-action-state-contract:release_contract;
 }
 body.tvair-guide-page .prog[data-program-action-mode="no-action"] .prog-footer:empty{
   display:none!important;
@@ -2712,7 +2712,7 @@ body.tvair-guide-page .prog[data-program-can-chain="0"] .prog-footer .chain-btn{
   display:none!important;
 }
 
-/* v0.11.516 ProgramCellBlankTitleDisplayContract
+/* release_contract ProgramCellBlankTitleDisplayContract
    Ownership: ProgramGuide cell title chrome only.  Raw cellText title remains empty
    when the DB raw short-event descriptor has no title; this selector only ensures
    the mandatory title lane remains visible to the user as 未取得. */

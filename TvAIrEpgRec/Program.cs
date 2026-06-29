@@ -1,7 +1,8 @@
-﻿using System.Drawing;
+using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
+using System.Reflection;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -11,7 +12,10 @@ namespace TvAIrEpgRec;
 
 internal static class Program
 {
-    private const string Version = "0.10.27";
+    internal static readonly string AppVersion = typeof(Program).Assembly
+        .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+        ?? typeof(Program).Assembly.GetName().Version?.ToString()
+        ?? "1.0.0";
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
@@ -62,7 +66,7 @@ internal static class Program
                 await WriteProgressAsync(progressPath, new WorkerProgress
                 {
                     Timestamp = DateTimeOffset.Now,
-                    Version = Version,
+                    Version = AppVersion,
                     JobId = loadedJobId,
                     Mode = NormalizeMode(mode) ?? "runtime",
                     Stage = "job_loaded",
@@ -82,7 +86,7 @@ internal static class Program
             await WriteProgressAsync(progressPath, new WorkerProgress
             {
                 Timestamp = startedAt,
-                Version = Version,
+                Version = AppVersion,
                 JobId = jobId,
                 Mode = mode,
                 Stage = "started",
@@ -132,7 +136,7 @@ internal static class Program
             {
                 Success = resultSuccess,
                 Cancelled = cancelled,
-                Version = Version,
+                Version = AppVersion,
                 JobId = jobId,
                 Mode = mode,
                 StartedAt = startedAt,
@@ -173,7 +177,7 @@ internal static class Program
             await WriteProgressAsync(progressPath, new WorkerProgress
             {
                 Timestamp = endedAt,
-                Version = Version,
+                Version = AppVersion,
                 JobId = jobId,
                 Mode = mode,
                 Stage = cancelled ? "cancelled" : "completed",
@@ -190,7 +194,7 @@ internal static class Program
             {
                 Success = false,
                 Cancelled = false,
-                Version = Version,
+                Version = AppVersion,
                 JobId = job?.JobId ?? parsed.Get("job-id") ?? "unknown",
                 Mode = mode ?? "unknown",
                 StartedAt = startedAt,
@@ -212,7 +216,7 @@ internal static class Program
             await WriteProgressAsync(progressPath, new WorkerProgress
             {
                 Timestamp = endedAt,
-                Version = Version,
+                Version = AppVersion,
                 JobId = result.JobId,
                 Mode = result.Mode,
                 Stage = "failed",
@@ -614,7 +618,7 @@ internal static class Program
         await WriteProgressAsync(progressPath, new WorkerProgress
         {
             Timestamp = DateTimeOffset.Now,
-            Version = Version,
+            Version = AppVersion,
             JobId = jobId,
             Mode = mode,
             Stage = "epg_contract_loaded",
@@ -627,7 +631,7 @@ internal static class Program
             await WriteProgressAsync(progressPath, new WorkerProgress
             {
                 Timestamp = DateTimeOffset.Now,
-                Version = Version,
+                Version = AppVersion,
                 JobId = jobId,
                 Mode = mode,
                 Stage = "epg_contract_channel_resolved",
@@ -648,7 +652,7 @@ internal static class Program
             parsed.Get("tvtest"));
         var tvTestDir = ResolveTvTestDirectoryForCardReader(tvTestExe, summary.ResolvedPath);
         summary.CardReaderTvTestDirectory = tvTestDir;
-        summary.CardReaderReferenceRule = "v0.7.78_tvairepgrec_camel_result_and_b25_no_raw_fallback";
+        summary.CardReaderReferenceRule = "release_contract";
 
         if (string.IsNullOrWhiteSpace(tvTestDir))
         {
@@ -690,7 +694,7 @@ internal static class Program
             catch { }
         }
 
-        // v0.11.678: CardReaderRuntimeProbeDirectory は ConfiguredTvTestExecutablePath だけから解決する。
+        // release_contract: CardReaderRuntimeProbeDirectory は ConfiguredTvTestExecutablePath だけから解決する。
         // BonDriver 配置から TVTest ディレクトリを推測しない。
         return null;
     }
@@ -844,7 +848,7 @@ internal static class Program
         await WriteProgressAsync(progressPath, new WorkerProgress
         {
             Timestamp = DateTimeOffset.Now,
-            Version = Version,
+            Version = AppVersion,
             JobId = jobId,
             Mode = mode,
             Stage = "bondriver_path_resolved",
@@ -858,7 +862,7 @@ internal static class Program
             await WriteProgressAsync(progressPath, new WorkerProgress
             {
                 Timestamp = DateTimeOffset.Now,
-                Version = Version,
+                Version = AppVersion,
                 JobId = jobId,
                 Mode = mode,
                 Stage = "bondriver_open_runtime_failed",
@@ -873,7 +877,7 @@ internal static class Program
             await WriteProgressAsync(progressPath, new WorkerProgress
             {
                 Timestamp = DateTimeOffset.Now,
-                Version = Version,
+                Version = AppVersion,
                 JobId = jobId,
                 Mode = mode,
                 Stage = stage,
@@ -908,7 +912,7 @@ internal static class Program
         await WriteProgressAsync(progressPath, new WorkerProgress
         {
             Timestamp = DateTimeOffset.Now,
-            Version = Version,
+            Version = AppVersion,
             JobId = jobId,
             Mode = mode,
             Stage = "setchannel_path_resolved",
@@ -922,7 +926,7 @@ internal static class Program
             await WriteProgressAsync(progressPath, new WorkerProgress
             {
                 Timestamp = DateTimeOffset.Now,
-                Version = Version,
+                Version = AppVersion,
                 JobId = jobId,
                 Mode = mode,
                 Stage = "setchannel_runtime_failed",
@@ -937,7 +941,7 @@ internal static class Program
             await WriteProgressAsync(progressPath, new WorkerProgress
             {
                 Timestamp = DateTimeOffset.Now,
-                Version = Version,
+                Version = AppVersion,
                 JobId = jobId,
                 Mode = mode,
                 Stage = stage,
@@ -1020,21 +1024,21 @@ internal static class Program
         await WriteProgressAsync(progressPath, new WorkerProgress
         {
             Timestamp = DateTimeOffset.Now,
-            Version = Version,
+            Version = AppVersion,
             JobId = jobId,
             Mode = mode,
             Stage = "record_segment_plan_loaded",
-            Message = $"result=OK count={summary.RecordSegments.Count} segmentReservations={string.Join(',', summary.RecordSegments.Select(x => "R" + x.ReservationId))} outputPaths={string.Join('|', summary.RecordSegments.Select(x => x.OutputPath ?? "-"))} rule=v0.9.79_chain_restart_same_tuner_cooldown_bypass",
+            Message = $"result=OK count={summary.RecordSegments.Count} segmentReservations={string.Join(',', summary.RecordSegments.Select(x => "R" + x.ReservationId))} outputPaths={string.Join('|', summary.RecordSegments.Select(x => x.OutputPath ?? "-"))} rule=release_contract",
             ProcessId = Environment.ProcessId
         }).ConfigureAwait(false);
         await WriteProgressAsync(progressPath, new WorkerProgress
         {
             Timestamp = DateTimeOffset.Now,
-            Version = Version,
+            Version = AppVersion,
             JobId = jobId,
             Mode = mode,
             Stage = "card_reader_reference_prepared",
-            Message = $"result={summary.CardReaderReferenceResult} tvTestDir={summary.CardReaderTvTestDirectory ?? "-"} winscardPath={summary.CardReaderWinscardPath ?? "-"} loaded={summary.CardReaderWinscardLoaded} loadedPath={summary.CardReaderLoadedModulePath ?? "-"} rule=v0.7.78_tvairepgrec_camel_result_and_b25_no_raw_fallback",
+            Message = $"result={summary.CardReaderReferenceResult} tvTestDir={summary.CardReaderTvTestDirectory ?? "-"} winscardPath={summary.CardReaderWinscardPath ?? "-"} loaded={summary.CardReaderWinscardLoaded} loadedPath={summary.CardReaderLoadedModulePath ?? "-"} rule=release_contract",
             ProcessId = Environment.ProcessId
         }).ConfigureAwait(false);
 
@@ -1045,7 +1049,7 @@ internal static class Program
                 await WriteProgressAsync(progressPath, new WorkerProgress
                 {
                     Timestamp = DateTimeOffset.Now,
-                    Version = Version,
+                    Version = AppVersion,
                     JobId = jobId,
                     Mode = mode,
                     Stage = stage,
@@ -1076,7 +1080,7 @@ internal static class Program
         await WriteProgressAsync(progressPath, new WorkerProgress
         {
             Timestamp = DateTimeOffset.Now,
-            Version = Version,
+            Version = AppVersion,
             JobId = jobId,
             Mode = mode,
             Stage = "common_ts_route_facade_attached",
@@ -1090,11 +1094,11 @@ internal static class Program
             await WriteProgressAsync(progressPath, new WorkerProgress
             {
                 Timestamp = DateTimeOffset.Now,
-                Version = Version,
+                Version = AppVersion,
                 JobId = jobId,
                 Mode = mode,
                 Stage = "common_ts_route_ready_gate_blocked",
-                Message = $"routeReady={summary.CommonTsRoute?.RouteReadyForMode} issues={string.Join(',', summary.CommonTsRoute?.ValidationIssues ?? new List<string>())} action=bonDriver_open_not_started rule=v0.7.78_tvairepgrec_camel_result_and_b25_no_raw_fallback",
+                Message = $"routeReady={summary.CommonTsRoute?.RouteReadyForMode} issues={string.Join(',', summary.CommonTsRoute?.ValidationIssues ?? new List<string>())} action=bonDriver_open_not_started rule=release_contract",
                 ProcessId = Environment.ProcessId
             }).ConfigureAwait(false);
             return summary;
@@ -1103,11 +1107,11 @@ internal static class Program
         await WriteProgressAsync(progressPath, new WorkerProgress
         {
             Timestamp = DateTimeOffset.Now,
-            Version = Version,
+            Version = AppVersion,
             JobId = jobId,
             Mode = mode,
             Stage = "common_ts_route_ready_gate_passed",
-            Message = $"routeReady=true action={mode}_ts_read_allowed service={service} target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} rule=v0.7.78_tvairepgrec_camel_result_and_b25_no_raw_fallback",
+            Message = $"routeReady=true action={mode}_ts_read_allowed service={service} target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} rule=release_contract",
             ProcessId = Environment.ProcessId
         }).ConfigureAwait(false);
 
@@ -1117,7 +1121,7 @@ internal static class Program
             await WriteProgressAsync(progressPath, new WorkerProgress
             {
                 Timestamp = DateTimeOffset.Now,
-                Version = Version,
+                Version = AppVersion,
                 JobId = jobId,
                 Mode = mode,
                 Stage = "integrated_tsread_failed",
@@ -1132,7 +1136,7 @@ internal static class Program
             await WriteProgressAsync(progressPath, new WorkerProgress
             {
                 Timestamp = DateTimeOffset.Now,
-                Version = Version,
+                Version = AppVersion,
                 JobId = jobId,
                 Mode = mode,
                 Stage = stage,
@@ -1156,11 +1160,11 @@ internal static class Program
             await WriteProgressAsync(progressPath, new WorkerProgress
             {
                 Timestamp = DateTimeOffset.Now,
-                Version = Version,
+                Version = AppVersion,
                 JobId = jobId,
                 Mode = mode,
                 Stage = "pre_record_pretune_state_transition",
-                Message = $"display={targetLabel} action=epg_check_to_record_pretune_same_worker rule=v0.9.94_chain_head_pretune_state_transition",
+                Message = $"display={targetLabel} action=epg_check_to_record_pretune_same_worker rule=release_contract",
                 ProcessId = Environment.ProcessId
             }).ConfigureAwait(false);
         }
@@ -1228,7 +1232,7 @@ internal static class Program
                 await WriteProgressAsync(progressPath, new WorkerProgress
                 {
                     Timestamp = lastProgress,
-                    Version = Version,
+                    Version = AppVersion,
                     JobId = jobId,
                     Mode = mode,
                     Stage = "waiting",
@@ -1258,7 +1262,7 @@ internal static class Program
             DirectRecorderBridgeStillRequired = true,
             DirectRecorderBridgeRemovalAllowed = false,
             RecordDecisionOwner = "TvAIr common allocation route",
-            RecordExecutionOwner = "TvAIrEpgRec is allowed as production recording executable after v0.7.68 switch; DirectRecorderBridge remains as fallback/legacy reference",
+            RecordExecutionOwner = "TvAIrEpgRec is allowed as production recording executable after release_contract switch; DirectRecorderBridge remains as fallback/legacy reference",
             EpgExecutionOwner = "TvAIrEpgRec mode=epg",
             EpgCheckExecutionOwner = "TvAIrEpgRec mode=epg-check",
             ServiceIdentityRule = "NID/TSID/SID/chspace/chi; no station-name partial matching; no NEXT string search",
@@ -1268,7 +1272,7 @@ internal static class Program
             EpgModule = "TvAIrEpgRec mode=epg keeps EIT/ARIB/intermediate-model work only after the shared DirectRecorderBridge service route has selected/scoped the TS",
             EpgCheckModule = "Planned short timing-confirmation mode; DB write stays false",
             MigrationSafetyRule = "Do not modify DirectRecorderBridge files, do not spawn DirectRecorderBridge.exe from TvAIrEpgRec, do not switch production recording until integrated TvAIrEpgRec route is verified",
-            Rule = "v0.8.04_configured_sid_only_import_policy"
+            Rule = "release_contract"
         };
     }
 
@@ -1506,7 +1510,7 @@ internal sealed class ExternalB25DecoderRuntime : IDisposable
             var module = NativeMethods.LoadLibraryExW(candidate, IntPtr.Zero, NativeMethods.LOAD_WITH_ALTERED_SEARCH_PATH);
             if (module == IntPtr.Zero)
             {
-                progress("record_b25_decoder_probe", $"result=LOAD_NG path={candidate} lastError={Marshal.GetLastWin32Error()} rule=v0.7.78_tvairepgrec_camel_result_and_b25_no_raw_fallback").GetAwaiter().GetResult();
+                progress("record_b25_decoder_probe", $"result=LOAD_NG path={candidate} lastError={Marshal.GetLastWin32Error()} rule=release_contract").GetAwaiter().GetResult();
                 continue;
             }
 
@@ -1515,7 +1519,7 @@ internal sealed class ExternalB25DecoderRuntime : IDisposable
                 var createPtr = NativeMethods.GetProcAddress(module, "CreateB25Decoder");
                 if (createPtr == IntPtr.Zero)
                 {
-                    progress("record_b25_decoder_probe", $"result=EXPORT_MISSING path={candidate} export=CreateB25Decoder rule=v0.7.78_tvairepgrec_camel_result_and_b25_no_raw_fallback").GetAwaiter().GetResult();
+                    progress("record_b25_decoder_probe", $"result=EXPORT_MISSING path={candidate} export=CreateB25Decoder rule=release_contract").GetAwaiter().GetResult();
                     NativeMethods.FreeLibrary(module);
                     continue;
                 }
@@ -1524,7 +1528,7 @@ internal sealed class ExternalB25DecoderRuntime : IDisposable
                 var decoder = create();
                 if (decoder == IntPtr.Zero)
                 {
-                    progress("record_b25_decoder_probe", $"result=CREATE_NULL path={candidate} rule=v0.7.78_tvairepgrec_camel_result_and_b25_no_raw_fallback").GetAwaiter().GetResult();
+                    progress("record_b25_decoder_probe", $"result=CREATE_NULL path={candidate} rule=release_contract").GetAwaiter().GetResult();
                     NativeMethods.FreeLibrary(module);
                     continue;
                 }
@@ -1538,7 +1542,7 @@ internal sealed class ExternalB25DecoderRuntime : IDisposable
                 if (!initOk)
                 {
                     try { release(decoder); } catch { }
-                    progress("record_b25_decoder_probe", $"result=INITIALIZE_NG path={candidate} rule=v0.7.78_tvairepgrec_camel_result_and_b25_no_raw_fallback").GetAwaiter().GetResult();
+                    progress("record_b25_decoder_probe", $"result=INITIALIZE_NG path={candidate} rule=release_contract").GetAwaiter().GetResult();
                     NativeMethods.FreeLibrary(module);
                     continue;
                 }
@@ -1547,19 +1551,19 @@ internal sealed class ExternalB25DecoderRuntime : IDisposable
                 summary.ExternalB25Available = true;
                 summary.ExternalB25ProbeResult = "OK_APP_LOCAL_B25DECODER_LOADED";
                 summary.ExternalB25LoadedPath = loadedPath;
-                progress("record_b25_decoder_prepared", $"result=OK_APP_LOCAL_B25DECODER_LOADED path={loadedPath} cardReader={summary.CardReaderLoadedModulePath ?? "-"} rule=v0.7.78_tvairepgrec_camel_result_and_b25_no_raw_fallback").GetAwaiter().GetResult();
+                progress("record_b25_decoder_prepared", $"result=OK_APP_LOCAL_B25DECODER_LOADED path={loadedPath} cardReader={summary.CardReaderLoadedModulePath ?? "-"} rule=release_contract").GetAwaiter().GetResult();
                 return new ExternalB25DecoderRuntime(module, decoder, release, decode, flush, loadedPath);
             }
             catch (Exception ex)
             {
-                progress("record_b25_decoder_probe", $"result=EXCEPTION path={candidate} error={ex.GetType().Name}:{ex.Message} rule=v0.7.78_tvairepgrec_camel_result_and_b25_no_raw_fallback").GetAwaiter().GetResult();
+                progress("record_b25_decoder_probe", $"result=EXCEPTION path={candidate} error={ex.GetType().Name}:{ex.Message} rule=release_contract").GetAwaiter().GetResult();
                 try { NativeMethods.FreeLibrary(module); } catch { }
             }
         }
 
         summary.ExternalB25Available = false;
         summary.ExternalB25ProbeResult = "NG_APP_LOCAL_B25DECODER_NOT_AVAILABLE";
-        progress("record_b25_decoder_prepared", $"result=NG_APP_LOCAL_B25DECODER_NOT_AVAILABLE candidates={string.Join("|", candidates)} rule=v0.7.78_tvairepgrec_camel_result_and_b25_no_raw_fallback").GetAwaiter().GetResult();
+        progress("record_b25_decoder_prepared", $"result=NG_APP_LOCAL_B25DECODER_NOT_AVAILABLE candidates={string.Join("|", candidates)} rule=release_contract").GetAwaiter().GetResult();
         return null;
     }
 
@@ -1918,7 +1922,7 @@ internal sealed class TsReadProbeSummary
 
 internal sealed class EpgCheckProbeSummary
 {
-    public string Rule { get; set; } = "v0.7.56_record_runtime_safe_rebase";
+    public string Rule { get; set; } = "release_contract";
     public string Mode { get; set; } = "epg-check";
     public bool DbWrite { get; set; }
     public string Purpose { get; set; } = "short target-program timing confirmation only";
@@ -2108,7 +2112,7 @@ internal static class CommonTsRouteModeExecutionGate
         var normalizedMode = string.IsNullOrWhiteSpace(mode) ? "epg" : mode.Trim().ToLowerInvariant();
         var boundary = new CommonTsRouteExecutionBoundary
         {
-            Rule = "v0.8.04_configured_sid_only_import_policy",
+            Rule = "release_contract",
             Mode = normalizedMode,
             RouteBeforeMode = summary.CommonTsRoute?.RouteBeforeMode == true,
             FacadeAttached = summary.CommonTsRoute?.FacadeAttached == true,
@@ -2141,7 +2145,7 @@ internal static class CommonTsRouteModeExecutionGate
         summary.CommonTsRouteExecution = boundary;
 
         await progress("common_ts_route_execution_gate_enter", $"rule={boundary.Rule} mode={boundary.Mode} facadeAttached={boundary.FacadeAttached} routeReady={boundary.RouteReadyForMode} bonDriverOpenAllowed={boundary.BonDriverOpenAllowed} setChannelAllowed={boundary.SetChannelAllowed} tsReadAllowed={boundary.TsReadAllowed} productionRecordRouteSwitchAllowed={boundary.ProductionRecordRouteSwitchAllowed} existingRecordRouteTouched={boundary.ExistingRecordRouteTouched}").ConfigureAwait(false);
-        await progress("common_ts_route_scope_policy", $"rule=v0.8.04_configured_sid_only_import_policy mode={normalizedMode} recordServiceFilterAllowed={(normalizedMode == "record")} epgTransportStreamScope={(normalizedMode == "epg")} epgCheckTargetEventScope={(normalizedMode == "epg-check")} target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} note=record_filters_must_not_be_shared_by_normal_epg").ConfigureAwait(false);
+        await progress("common_ts_route_scope_policy", $"rule=release_contract mode={normalizedMode} recordServiceFilterAllowed={(normalizedMode == "record")} epgTransportStreamScope={(normalizedMode == "epg")} epgCheckTargetEventScope={(normalizedMode == "epg-check")} target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} note=record_filters_must_not_be_shared_by_normal_epg").ConfigureAwait(false);
 
         if (!boundary.BonDriverOpenAllowed || !boundary.SetChannelAllowed || !boundary.TsReadAllowed)
         {
@@ -2558,7 +2562,7 @@ internal static class BonDriverNativeProbe
             {
                 await stream.FlushAsync().ConfigureAwait(false);
                 await stream.DisposeAsync().ConfigureAwait(false);
-                await progress("record_chain_segment_close", $"result=OK previousIndex={currentIndex} nextIndex={index} reason={reason} bytesWrittenTotal={summary.RecordBytesWritten} chunksWrittenTotal={summary.RecordChunksWritten} rule=v0.9.79_chain_restart_same_tuner_cooldown_bypass").ConfigureAwait(false);
+                await progress("record_chain_segment_close", $"result=OK previousIndex={currentIndex} nextIndex={index} reason={reason} bytesWrittenTotal={summary.RecordBytesWritten} chunksWrittenTotal={summary.RecordChunksWritten} rule=release_contract").ConfigureAwait(false);
             }
 
             stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.ReadWrite, 4 * 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
@@ -2568,7 +2572,7 @@ internal static class BonDriverNativeProbe
             summary.RecordCurrentSegmentReservationId = segment.ReservationId;
             summary.RecordCurrentSegmentTitle = segment.Title ?? string.Empty;
             var stage = reason == "initial" ? "record_write_open" : "record_chain_segment_switch";
-            await progress(stage, $"result=OK reason={reason} segmentIndex={index} reservation=R{segment.ReservationId} title={SafeProgress(segment.Title)} switchAt={segment.SwitchAt:yyyy-MM-dd HH:mm:ss} start={segment.StartTime:yyyy-MM-dd HH:mm:ss} end={segment.EndTime:yyyy-MM-dd HH:mm:ss} path={path} share=Read mode=Create segmentCount={segments.Count} rule=v0.9.79_chain_restart_same_tuner_cooldown_bypass").ConfigureAwait(false);
+            await progress(stage, $"result=OK reason={reason} segmentIndex={index} reservation=R{segment.ReservationId} title={SafeProgress(segment.Title)} switchAt={segment.SwitchAt:yyyy-MM-dd HH:mm:ss} start={segment.StartTime:yyyy-MM-dd HH:mm:ss} end={segment.EndTime:yyyy-MM-dd HH:mm:ss} path={path} share=Read mode=Create segmentCount={segments.Count} rule=release_contract").ConfigureAwait(false);
         }
 
         private static string SafeProgress(string? value)
@@ -2650,7 +2654,7 @@ internal static class BonDriverNativeProbe
                 summary.ExternalB25RawFallbackSuppressed++;
                 if (summary.ExternalB25RawFallbackSuppressed == 1 || summary.ExternalB25RawFallbackSuppressed % 1000 == 0)
                 {
-                    await progress("record_b25_raw_fallback_suppressed", $"count={summary.ExternalB25RawFallbackSuppressed} decodeOk={decoded.Ok} decodedBytes={decoded.Data.Length} inputBytes={length} rule=v0.8.04_configured_sid_only_import_policy").ConfigureAwait(false);
+                    await progress("record_b25_raw_fallback_suppressed", $"count={summary.ExternalB25RawFallbackSuppressed} decodeOk={decoded.Ok} decodedBytes={decoded.Data.Length} inputBytes={length} rule=release_contract").ConfigureAwait(false);
                 }
                 return;
             }
@@ -2673,14 +2677,14 @@ internal static class BonDriverNativeProbe
                         ? "setchannel_retry_and_fullts_fallback"
                         : "fullts_fallback_after_target_scope_wait";
                     summary.RecordStartupRecoveryResult = "fullts_fallback_active_until_target_scope_ready";
-                    await progress("record_startup_fullts_fallback", $"result=ACTIVE elapsedSec={(int)elapsedSec} reason=target_service_scope_not_ready bytesRead={summary.BytesRead} chunksRead={summary.ChunksRead} scopeInputPackets={summary.RecordServiceScopeInputPackets} target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} rule=v0.9.92_record_start_gate_result_response_stabilize").ConfigureAwait(false);
+                    await progress("record_startup_fullts_fallback", $"result=ACTIVE elapsedSec={(int)elapsedSec} reason=target_service_scope_not_ready bytesRead={summary.BytesRead} chunksRead={summary.ChunksRead} scopeInputPackets={summary.RecordServiceScopeInputPackets} target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} rule=release_contract").ConfigureAwait(false);
                 }
             }
             writeBytes = FilterRecordServiceScope(writeBytes, writeLength, summary);
             writeLength = writeBytes.Length;
             if (summary.RecordChunksWritten == 0 || summary.RecordChunksWritten % 1000 == 0)
             {
-                await progress("record_service_scope", $"enabled={summary.RecordServiceScopeEnabled} ready={summary.RecordServiceScopeReady} target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} targetPmt=0x{Math.Max(0, summary.RecordTargetPmtPid):X} pcr=0x{Math.Max(0, summary.RecordTargetPcrPid):X} streamPids={string.Join(',', summary.RecordTargetStreamPids.Select(x => "0x" + x.ToString("X")))} writtenServiceIds={string.Join(',', summary.RecordWrittenServiceIds)} excludedServiceIds={string.Join(',', summary.RecordExcludedServiceIds)} inputPackets={summary.RecordServiceScopeInputPackets} writtenPackets={summary.RecordServiceScopeWrittenPackets} droppedPackets={summary.RecordServiceScopeDroppedPackets} mediaPackets={summary.RecordServiceScopeMediaPackets} rule=v0.8.04_configured_sid_only_import_policy").ConfigureAwait(false);
+                await progress("record_service_scope", $"enabled={summary.RecordServiceScopeEnabled} ready={summary.RecordServiceScopeReady} target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} targetPmt=0x{Math.Max(0, summary.RecordTargetPmtPid):X} pcr=0x{Math.Max(0, summary.RecordTargetPcrPid):X} streamPids={string.Join(',', summary.RecordTargetStreamPids.Select(x => "0x" + x.ToString("X")))} writtenServiceIds={string.Join(',', summary.RecordWrittenServiceIds)} excludedServiceIds={string.Join(',', summary.RecordExcludedServiceIds)} inputPackets={summary.RecordServiceScopeInputPackets} writtenPackets={summary.RecordServiceScopeWrittenPackets} droppedPackets={summary.RecordServiceScopeDroppedPackets} mediaPackets={summary.RecordServiceScopeMediaPackets} rule=release_contract").ConfigureAwait(false);
             }
             if (writeLength <= 0)
             {
@@ -2695,18 +2699,18 @@ internal static class BonDriverNativeProbe
         AnalyzeRecordOutputBuffer(writeBytes.AsMemory(0, writeLength), summary);
         if (summary.RecordChunksWritten == 1 || summary.RecordChunksWritten % 1000 == 0)
         {
-            await progress("record_write_chunk", $"segmentReservation=R{summary.RecordCurrentSegmentReservationId} segmentTitle={summary.RecordCurrentSegmentTitle} outputPath={summary.RecordOutputPath} chunks={summary.RecordChunksWritten} bytesWritten={summary.RecordBytesWritten} outputPackets={summary.OutputPacketsAnalyzed} outputSyncErrors={summary.OutputSyncErrors} outputScrambled={summary.OutputScrambledLikePackets} externalB25Available={summary.ExternalB25Available} externalB25Loaded={summary.ExternalB25LoadedPath ?? "-"} externalB25DecodeCalls={summary.ExternalB25DecodeCalls} externalB25DecodeOk={summary.ExternalB25DecodeOk} externalB25Passthrough={summary.ExternalB25Passthrough} externalB25DecodeNg={summary.ExternalB25DecodeNg} externalB25BufferedEmpty={summary.ExternalB25BufferedEmpty} rawFallbackSuppressed={summary.ExternalB25RawFallbackSuppressed} serviceScopeReady={summary.RecordServiceScopeReady} targetPmt=0x{Math.Max(0, summary.RecordTargetPmtPid):X} targetStreams={string.Join(',', summary.RecordTargetStreamPids.Select(x => "0x" + x.ToString("X")))} mediaPackets={summary.RecordServiceScopeMediaPackets} rule=v0.8.04_configured_sid_only_import_policy").ConfigureAwait(false);
+            await progress("record_write_chunk", $"segmentReservation=R{summary.RecordCurrentSegmentReservationId} segmentTitle={summary.RecordCurrentSegmentTitle} outputPath={summary.RecordOutputPath} chunks={summary.RecordChunksWritten} bytesWritten={summary.RecordBytesWritten} outputPackets={summary.OutputPacketsAnalyzed} outputSyncErrors={summary.OutputSyncErrors} outputScrambled={summary.OutputScrambledLikePackets} externalB25Available={summary.ExternalB25Available} externalB25Loaded={summary.ExternalB25LoadedPath ?? "-"} externalB25DecodeCalls={summary.ExternalB25DecodeCalls} externalB25DecodeOk={summary.ExternalB25DecodeOk} externalB25Passthrough={summary.ExternalB25Passthrough} externalB25DecodeNg={summary.ExternalB25DecodeNg} externalB25BufferedEmpty={summary.ExternalB25BufferedEmpty} rawFallbackSuppressed={summary.ExternalB25RawFallbackSuppressed} serviceScopeReady={summary.RecordServiceScopeReady} targetPmt=0x{Math.Max(0, summary.RecordTargetPmtPid):X} targetStreams={string.Join(',', summary.RecordTargetStreamPids.Select(x => "0x" + x.ToString("X")))} mediaPackets={summary.RecordServiceScopeMediaPackets} rule=release_contract").ConfigureAwait(false);
         }
     }
 
     private static byte[] FilterRecordServiceScope(byte[] buffer, int length, TsReadProbeSummary summary)
     {
         summary.RecordServiceScopeEnabled = true;
-        summary.RecordServiceScopeRule = "v0.8.04_configured_sid_only_import_policy";
+        summary.RecordServiceScopeRule = "release_contract";
         if (length < 188) return Array.Empty<byte>();
 
         var packetCount = length / 188;
-        // v0.7.96 dropped non-target service payload while leaving the original multi-service PAT in place.
+        // release_contract dropped non-target service payload while leaving the original multi-service PAT in place.
         // TVTest then opened the first PAT service and saw no usable video.  Keep the service filter, but
         // only start writing after the target PMT/ES set is known and rewrite PAT packets to a single target SID.
         var output = new byte[(packetCount + 4) * 188];
@@ -2979,7 +2983,7 @@ internal static class BonDriverNativeProbe
         if (!string.Equals(summary.Mode, "record", StringComparison.OrdinalIgnoreCase)) return;
         summary.RecordShutdownStage = stage;
         summary.RecordShutdownStageAt = DateTimeOffset.Now;
-        await progress("record_shutdown_stage", $"stage={stage} {message} bytesWritten={summary.RecordBytesWritten} chunksWritten={summary.RecordChunksWritten} stopRequested={summary.RecordStopRequested} rule=v0.8.21_stop_root_trace_no_wait_extension").ConfigureAwait(false);
+        await progress("record_shutdown_stage", $"stage={stage} {message} bytesWritten={summary.RecordBytesWritten} chunksWritten={summary.RecordChunksWritten} stopRequested={summary.RecordStopRequested} rule=release_contract").ConfigureAwait(false);
     }
 
     public static async Task TsReadAsync(string bonDriverPath, TsReadProbeSummary summary, Func<string, string, Task> progress)
@@ -3134,12 +3138,12 @@ internal static class BonDriverNativeProbe
                             summary.RecordStartupRecoveryResult = set2Raw != 0 || set1Raw != 0
                                 ? "setchannel_retry_sent_waiting_for_target_service"
                                 : "setchannel_retry_returned_ng";
-                            await progress("record_startup_zero_write_recovery", $"attempt={summary.RecordStartupRecoveryCount} reason={reason} elapsedSec={(int)elapsedSec} bytesRead={summary.BytesRead} chunksRead={summary.ChunksRead} bytesWritten={summary.RecordBytesWritten} scopeReady={summary.RecordServiceScopeReady} targetPmt=0x{Math.Max(0, summary.RecordTargetPmtPid):X} set2Raw={set2Raw} set1Raw={set1Raw} action={summary.RecordStartupRecoveryAction} result={summary.RecordStartupRecoveryResult} rule=v0.9.92_record_start_gate_result_response_stabilize").ConfigureAwait(false);
+                            await progress("record_startup_zero_write_recovery", $"attempt={summary.RecordStartupRecoveryCount} reason={reason} elapsedSec={(int)elapsedSec} bytesRead={summary.BytesRead} chunksRead={summary.ChunksRead} bytesWritten={summary.RecordBytesWritten} scopeReady={summary.RecordServiceScopeReady} targetPmt=0x{Math.Max(0, summary.RecordTargetPmtPid):X} set2Raw={set2Raw} set1Raw={set1Raw} action={summary.RecordStartupRecoveryAction} result={summary.RecordStartupRecoveryResult} rule=release_contract").ConfigureAwait(false);
                         }
                         catch (Exception ex)
                         {
                             summary.RecordStartupRecoveryResult = "setchannel_retry_exception_" + ex.GetType().Name;
-                            await progress("record_startup_zero_write_recovery", $"attempt={summary.RecordStartupRecoveryCount} reason={reason} elapsedSec={(int)elapsedSec} exception={ex.GetType().Name} message={ex.Message} rule=v0.9.92_record_start_gate_result_response_stabilize").ConfigureAwait(false);
+                            await progress("record_startup_zero_write_recovery", $"attempt={summary.RecordStartupRecoveryCount} reason={reason} elapsedSec={(int)elapsedSec} exception={ex.GetType().Name} message={ex.Message} rule=release_contract").ConfigureAwait(false);
                         }
 
                         await Task.Delay(750).ConfigureAwait(false);
@@ -3256,7 +3260,7 @@ internal static class BonDriverNativeProbe
 
                         await progress("tsvariant_getts_ready_gate", $"variant={summary.Variant} threshold={summary.ReadyThreshold} reached={summary.ReadyThresholdReached} samples={summary.ReadyCountSamples} wait={waitResult} ready={ready}").ConfigureAwait(false);
 
-                        // v0.7.08: EPG normalize is a DB-preparation runtime, so it must wait long enough for the target
+                        // release_contract: EPG normalize is a DB-preparation runtime, so it must wait long enough for the target
                         // service event instead of failing only because another service on the same TS arrived first.
                         var isRecordModeForLimit = string.Equals(summary.Mode, "record", StringComparison.OrdinalIgnoreCase);
                         var readSecondsLimit = isRecordModeForLimit
@@ -3435,7 +3439,7 @@ internal static class BonDriverNativeProbe
                         if (summary.RecordStopRequested)
                         {
                             summary.RecordStopAcceptedAt ??= DateTimeOffset.Now;
-                            await progress("record_stop_signal_seen", $"result=STOP_REQUESTED reason={summary.RecordStopReason} bytesWritten={summary.RecordBytesWritten} chunksWritten={summary.RecordChunksWritten} rule=v0.8.21_stop_root_trace_no_wait_extension").ConfigureAwait(false);
+                            await progress("record_stop_signal_seen", $"result=STOP_REQUESTED reason={summary.RecordStopReason} bytesWritten={summary.RecordBytesWritten} chunksWritten={summary.RecordChunksWritten} rule=release_contract").ConfigureAwait(false);
                             await MarkRecordShutdownStageAsync(summary, progress, "stop_signal_accepted", $"reason={summary.RecordStopReason}").ConfigureAwait(false);
                         }
 
@@ -3526,7 +3530,7 @@ internal static class BonDriverNativeProbe
                                     AnalyzeRecordOutputBuffer(flushBytes, summary);
                                 }
                             }
-                            await progress("record_b25_flush", $"result={(flushed.Ok ? "OK" : "NG")} bytes={flushed.Data.Length} flushCalls={summary.ExternalB25FlushCalls} flushBytes={summary.ExternalB25FlushBytes} serviceScopeReady={summary.RecordServiceScopeReady} mediaPackets={summary.RecordServiceScopeMediaPackets} rule=v0.8.04_configured_sid_only_import_policy").ConfigureAwait(false);
+                            await progress("record_b25_flush", $"result={(flushed.Ok ? "OK" : "NG")} bytes={flushed.Data.Length} flushCalls={summary.ExternalB25FlushCalls} flushBytes={summary.ExternalB25FlushBytes} serviceScopeReady={summary.RecordServiceScopeReady} mediaPackets={summary.RecordServiceScopeMediaPackets} rule=release_contract").ConfigureAwait(false);
                             await MarkRecordShutdownStageAsync(summary, progress, "b25_flush_exit", $"result={(flushed.Ok ? "OK" : "NG")} flushBytes={summary.ExternalB25FlushBytes}").ConfigureAwait(false);
                         }
                         if (recordStream is not null && string.Equals(summary.Mode, "record", StringComparison.OrdinalIgnoreCase))
@@ -3536,7 +3540,7 @@ internal static class BonDriverNativeProbe
                             await MarkRecordShutdownStageAsync(summary, progress, "record_stream_flush_exit", "result=OK").ConfigureAwait(false);
                         }
 
-                        await progress("tsvariant_continuous_summary", $"result={(summary.BytesRead > 0 && summary.PacketsRead > 0 && summary.SyncErrors == 0 ? "OK" : "NG")} variant={summary.Variant} calls={summary.GetTsCalls} empty={summary.EmptyReads} bytes={summary.BytesRead} chunks={summary.ChunksRead} packets={summary.PacketsRead} syncErrors={summary.SyncErrors} tei={summary.TransportErrorPackets} scrambledLike={summary.ScrambledLikePackets} readyNonZero={summary.NonZeroReadyCountSamples}/{summary.ReadyCountSamples} threshold={summary.ReadyThreshold} reached={summary.ReadyThresholdReached} lastReady={summary.LastReadyCount} lastRemain={summary.LastRemain} readSecondsLimit={readSecondsLimit} maxChunks={maxChunks} externalB25Available={summary.ExternalB25Available} externalB25Loaded={summary.ExternalB25LoadedPath ?? "-"} externalB25DecodeCalls={summary.ExternalB25DecodeCalls} externalB25DecodeOk={summary.ExternalB25DecodeOk} externalB25Passthrough={summary.ExternalB25Passthrough} externalB25FlushBytes={summary.ExternalB25FlushBytes} cdtPid29In={summary.InputCdtPid29Packets} cdtPid29Out={summary.OutputCdtPid29Packets} logoPid29Preserve={summary.EpgLogoPid29PreserveRequested} rule=v0.9.43_gr_cdt_data_module_logo_save_bscs_no_deep").ConfigureAwait(false);
+                        await progress("tsvariant_continuous_summary", $"result={(summary.BytesRead > 0 && summary.PacketsRead > 0 && summary.SyncErrors == 0 ? "OK" : "NG")} variant={summary.Variant} calls={summary.GetTsCalls} empty={summary.EmptyReads} bytes={summary.BytesRead} chunks={summary.ChunksRead} packets={summary.PacketsRead} syncErrors={summary.SyncErrors} tei={summary.TransportErrorPackets} scrambledLike={summary.ScrambledLikePackets} readyNonZero={summary.NonZeroReadyCountSamples}/{summary.ReadyCountSamples} threshold={summary.ReadyThreshold} reached={summary.ReadyThresholdReached} lastReady={summary.LastReadyCount} lastRemain={summary.LastRemain} readSecondsLimit={readSecondsLimit} maxChunks={maxChunks} externalB25Available={summary.ExternalB25Available} externalB25Loaded={summary.ExternalB25LoadedPath ?? "-"} externalB25DecodeCalls={summary.ExternalB25DecodeCalls} externalB25DecodeOk={summary.ExternalB25DecodeOk} externalB25Passthrough={summary.ExternalB25Passthrough} externalB25FlushBytes={summary.ExternalB25FlushBytes} cdtPid29In={summary.InputCdtPid29Packets} cdtPid29Out={summary.OutputCdtPid29Packets} logoPid29Preserve={summary.EpgLogoPid29PreserveRequested} rule=release_contract").ConfigureAwait(false);
                         if (isPsiMinimal)
                         {
                             await progress("tsvariant_psi_minimal_summary", $"result={(summary.PsiMinimalOk ? "OK" : "NG")} pat={summary.PatSeen}/{summary.PatSections} pmt={summary.PmtSeen}/{summary.PmtSections} sdt={summary.SdtSeen}/{summary.SdtSections} eit={summary.EitSeen}/{summary.EitSections} nitPackets={summary.NitPackets} pmtPids={string.Join(',', summary.PmtPids)} streamPids={string.Join(',', summary.StreamPids.Take(16))}").ConfigureAwait(false);
@@ -3785,7 +3789,7 @@ internal static class BonDriverNativeProbe
                     await MarkRecordShutdownStageAsync(summary, progress, "b25_decoder_dispose_enter", "phase=before_b25_dispose").ConfigureAwait(false);
                     summary.RecordDescrambler.Dispose();
                     await MarkRecordShutdownStageAsync(summary, progress, "b25_decoder_dispose_exit", "result=CALLED").ConfigureAwait(false);
-                    await progress("record_b25_decoder_release", $"result=CALLED loaded={summary.ExternalB25LoadedPath ?? "-"} rule=v0.7.78_tvairepgrec_camel_result_and_b25_no_raw_fallback").ConfigureAwait(false);
+                    await progress("record_b25_decoder_release", $"result=CALLED loaded={summary.ExternalB25LoadedPath ?? "-"} rule=release_contract").ConfigureAwait(false);
                 }
                 catch { }
             }
@@ -3805,7 +3809,7 @@ internal static class BonDriverNativeProbe
 
     private static int CheckedTsCopySize(uint size)
     {
-        // v0.7.69: Do not truncate BonDriver GetTsStream buffers to 256 KiB.
+        // release_contract: Do not truncate BonDriver GetTsStream buffers to 256 KiB.
         // Truncating a live TS buffer cuts continuity counters in the middle of the stream and creates
         // replay-breaking DROP/CC errors even when B25 descrambling itself succeeds.
         if (size == 0 || size > 8 * 1024 * 1024)
@@ -4242,7 +4246,7 @@ internal static class BonDriverNativeProbe
             return new IntermediateServiceName(summary.ServiceName.Trim(), true, "target_request_service");
         }
 
-        // v0.7.08: never stamp the requested service name onto other TS/SID events.
+        // release_contract: never stamp the requested service name onto other TS/SID events.
         // Non-target events are kept raw-side only until service mapping is available for projection.
         return new IntermediateServiceName(string.Empty, false, targetOnly ? "target_service_not_matched" : "unresolved_non_target_service");
     }
@@ -4541,7 +4545,7 @@ internal sealed class DirectRecorderCompatibleResult
                 var runtimeLine = JsonSerializer.Serialize(new
                 {
                     timestamp = endedAt,
-                    version = "0.7.78",
+                    version = Program.AppVersion,
                     verdict,
                     bytesWritten,
                     packetsWritten,

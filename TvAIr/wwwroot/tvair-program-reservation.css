@@ -1,5 +1,5 @@
-﻿/*
- * TvAIr page CSS module - v0.6.44
+/*
+ * TvAIr page CSS module - release_contract
  * Source: new-reservation.html
  * Scope: page-local form/help/list styles extracted from inline <style>.
  * Safety: exact CSS relocation only; no layout/property changes intended.
@@ -8,8 +8,8 @@
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:var(--app-bg);color:var(--text-main);height:100vh;display:flex;flex-direction:column;overflow:hidden}
 
-/* TopNav is owned by tvair-style-system.css (v0.11.198). */
-/* v0.11.502: list-page shell (#page-scroll/#page-menu-wrap/html/body sizing) is owned by tvair-ui-modules.css + tvair-list-module.css. This page file keeps page-local form/table content only. */
+/* TopNav is owned by tvair-style-system.css (release_contract). */
+/* release_contract: list-page shell (#page-scroll/#page-menu-wrap/html/body sizing) is owned by tvair-ui-modules.css + tvair-list-module.css. This page file keeps page-local form/table content only. */
 /* ── メイン */
 #main{width:100%;max-width:none;min-width:0;margin:0;background:var(--tvair-surface-subtle);border:0;border-radius:0;padding:var(--tvair-layout-page-pad,8px);display:grid;grid-template-columns:var(--tvair-program-form-pane,var(--tvair-split-form-pane,340px)) minmax(0,1fr);gap:var(--tvair-layout-gap,8px);min-height:0;flex:1 1 auto;overflow:hidden}
 
@@ -25,11 +25,11 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
 .f-row{display:flex;flex-direction:column;gap:3px;margin-bottom:7px}
 .f-row:last-child{margin-bottom:0}
 .f-row label{font-size:11px;color:var(--tvair-content-subtle);font-weight:bold}
-/* v0.11.502: f-row text/select/date control geometry, paint and focus are owned by tvair-list-module.css. */
+/* release_contract: f-row text/select/date control geometry, paint and focus are owned by tvair-list-module.css. */
 
 /* 曜日チェック */
 .dow-wrap{display:flex;gap:4px;flex-wrap:wrap;margin-top:2px}
-/* v0.11.502: weekday chip/button geometry is owned by tvair-list-module.css. */
+/* release_contract: weekday chip/button geometry is owned by tvair-list-module.css. */
 .dow-chip{background:var(--tvair-surface-soft);border:1px solid var(--tvair-line-soft);color:var(--tvair-action-lite-text)}
 .dow-chip:hover{background:var(--tvair-surface-soft-hover)}
 .dow-chip:focus-visible{outline:2px solid var(--tvair-focus-a);outline-offset:1px}
@@ -44,7 +44,7 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
 
 /* フォームアクション */
 #form-actions{flex-shrink:0;padding:10px 12px;border-top:1px solid var(--tvair-line-soft);display:flex;gap:8px;justify-content:flex-end;background:var(--tvair-surface-raised)}
-/* v0.11.502: submit/reset button geometry is owned by tvair-list-module.css. */
+/* release_contract: submit/reset button geometry is owned by tvair-list-module.css. */
 .btn-submit{background:var(--tvair-action-primary-bg);color:var(--tvair-content-inverse);border:none}
 .btn-submit:hover{background:var(--tvair-action-primary-hover-bg)}
 .btn-reset{background:var(--tvair-action-lite-bg);color:var(--tvair-action-lite-text);border:1px solid var(--tvair-action-lite-border)}
@@ -58,7 +58,7 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
 #table-wrap::-webkit-scrollbar{width:6px}
 #table-wrap::-webkit-scrollbar-thumb{background:var(--scrollbar-thumb);border-radius:3px}
 
-/* v0.11.502: table/header/row-state/cell base ownership is centralized in tvair-list-module.css. */
+/* release_contract: table/header/row-state/cell base ownership is centralized in tvair-list-module.css. */
 
 .td-no{color:var(--tvair-content-muted);text-align:center;width:32px;font-size:11px}
 .td-name{color:var(--tvair-content-strong);font-weight:bold}
@@ -70,7 +70,7 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
 /* 有効トグル */
 
 /* アクションボタン */
-/* v0.11.502: .act-wrap layout is owned by tvair-list-module.css. */
+/* release_contract: .act-wrap layout is owned by tvair-list-module.css. */
 .act-wrap{white-space:nowrap}
 .btn-edit{background:var(--tvair-surface-soft);color:var(--tvair-content-link);border:1px solid var(--tvair-action-edit-border)}
 .btn-edit:hover{background:var(--tvair-surface-soft-hover)}
@@ -85,14 +85,14 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
 #modal-overlay.open{display:flex}
 #modal-box{background:var(--tvair-surface-raised);border-radius:3px;width:440px;max-width:95vw;max-height:90vh;display:flex;flex-direction:column;box-shadow:var(--tvair-shadow-modal);overflow:hidden}
 #modal-head{background:var(--table-head-bg);color:var(--tvair-content-inverse);padding:8px 14px;font-size:13px;font-weight:bold;flex-shrink:0;display:flex;align-items:center;justify-content:space-between}
-/* v0.11.502: modal close button geometry is owned by tvair-list-module.css. */
+/* release_contract: modal close button geometry is owned by tvair-list-module.css. */
 #modal-close{background:none;border:none;color:var(--tvair-content-inverse)}
 #modal-body{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:8px}
 #modal-footer{padding:10px 14px;border-top:1px solid var(--tvair-line-soft);display:flex;gap:8px;justify-content:flex-end;background:var(--tvair-surface-raised)}
-/* v0.11.502: modal footer button geometry reuses btn-submit/btn-reset ownership in tvair-list-module.css. */
+/* release_contract: modal footer button geometry reuses btn-submit/btn-reset ownership in tvair-list-module.css. */
 
 /* トースト */
-/* v0.11.502: #toast geometry/paint/animation is owned by tvair-notification.css. */
+/* release_contract: #toast geometry/paint/animation is owned by tvair-notification.css. */
 
 
 

@@ -1,4 +1,4 @@
-﻿using System.Drawing;
+using System.Drawing;
 using System.Windows.Forms;
 using TvAIr.Schedule;
 using TvAIr.Tuner;
@@ -29,7 +29,7 @@ public sealed class TrayIconService : IDisposable
     private bool _blinkOn;
     private bool _isActive;
     private SettingsWindow? _settingsWindow;
-    private const string MenuLegacyEntryCleanupContract = "v0.11.531_menu_legacy_entry_cleanup_contract";
+    private const string MenuLegacyEntryCleanupContract = "release_contract";
     private const string MenuLabelHelp = "ヘルプ";
     private const string MenuLabelVersion = "バージョン情報";
     private const string MenuLabelExit = "TvAIr終了";
@@ -52,7 +52,7 @@ public sealed class TrayIconService : IDisposable
     {
         if (_started)
         {
-            try { _log.Add("TRAY_ICON", "START_SKIPPED", "reason=already_started rule=v0.11.122_process_lifecycle_tray_recovery_complete"); } catch { }
+            try { _log.Add("TRAY_ICON", "START_SKIPPED", "reason=already_started rule=release_contract"); } catch { }
             return;
         }
         _started = true;
@@ -140,7 +140,7 @@ public sealed class TrayIconService : IDisposable
             };
 
             _icon.DoubleClick += (_, _) => openItem.PerformClick();
-            _log.Add("TRAY_ICON", "VISIBLE", $"result=OK port={_port} thread={Environment.CurrentManagedThreadId} rule=v0.11.122_process_lifecycle_tray_recovery_complete");
+            _log.Add("TRAY_ICON", "VISIBLE", $"result=OK port={_port} thread={Environment.CurrentManagedThreadId} rule=release_contract");
 
             _timer = new System.Windows.Forms.Timer
             {
@@ -263,10 +263,10 @@ public sealed class TrayIconService : IDisposable
             var started = _epgScheduler.TriggerNow($"TrayMenu.SilentEpg.{targetScope}", silent: true, targetScope: targetScope);
             var block = started ? null : _epgScheduler.GetLastStartBlockInfo(targetScope);
             _log.Add("TRAY_EPG_SILENT", "EPG", started
-                ? $"タスクトレイ右クリックメニューからEPG取得（サイレント）を開始しました。targetScope={targetScope} label={label} uiMode=Silent cancelRoute=TrayOnly rule=v0.11.175_notification_crosscut_cleanup"
+                ? $"タスクトレイ右クリックメニューからEPG取得（サイレント）を開始しました。targetScope={targetScope} label={label} uiMode=Silent cancelRoute=TrayOnly rule=release_contract"
                 : block is not null
-                    ? $"タスクトレイ右クリックメニューからEPG取得（サイレント）が開始できませんでした。targetScope={targetScope} label={label} reason={block.Reason} action=show_short_dialog rule=v0.11.175_notification_crosscut_cleanup"
-                    : $"タスクトレイ右クリックメニューからEPG取得（サイレント）が要求されましたが、既に取得中です。targetScope={targetScope} label={label} action=reject_start_cancel_required rule=v0.11.175_notification_crosscut_cleanup");
+                    ? $"タスクトレイ右クリックメニューからEPG取得（サイレント）が開始できませんでした。targetScope={targetScope} label={label} reason={block.Reason} action=show_short_dialog rule=release_contract"
+                    : $"タスクトレイ右クリックメニューからEPG取得（サイレント）が要求されましたが、既に取得中です。targetScope={targetScope} label={label} action=reject_start_cancel_required rule=release_contract");
 
             if (!started && block is not null)
             {
@@ -297,8 +297,8 @@ public sealed class TrayIconService : IDisposable
             menuItem.Enabled = false;
             var accepted = _epgScheduler.Cancel("TrayMenu.EpgCancel");
             _log.Add("TRAY_EPG_CANCEL", "EPG", accepted
-                ? "タスクトレイ右クリックメニューからEPG取得キャンセルを要求しました。cancelRoute=TrayOrWidget commonRoute=CancelCurrentEpgRun rule=v0.8.78_epg_run_contract"
-                : "タスクトレイ右クリックメニューからEPG取得キャンセルを要求しましたが、実行中ではありません。rule=v0.8.78_epg_run_contract");
+                ? "タスクトレイ右クリックメニューからEPG取得キャンセルを要求しました。cancelRoute=TrayOrWidget commonRoute=CancelCurrentEpgRun rule=release_contract"
+                : "タスクトレイ右クリックメニューからEPG取得キャンセルを要求しましたが、実行中ではありません。rule=release_contract");
             RefreshState();
         }
         catch (Exception ex)
@@ -326,11 +326,11 @@ public sealed class TrayIconService : IDisposable
                 };
                 var url = $"http://localhost:{_port}/plugin-menu/{Uri.EscapeDataString(safeRoute)}?source=tray";
                 using var response = await client.GetAsync(url).ConfigureAwait(false);
-                _log.Add("TRAY_PLUGIN_MENU", safeRoute, $"result={(response.IsSuccessStatusCode ? "OK" : "WARN")} route={safeRoute} status={(int)response.StatusCode} browserOpened=False programGuideOpened=False rule=v0.11.38_toolwindow_keepalive_recovery_tray_silent");
+                _log.Add("TRAY_PLUGIN_MENU", safeRoute, $"result={(response.IsSuccessStatusCode ? "OK" : "WARN")} route={safeRoute} status={(int)response.StatusCode} browserOpened=False programGuideOpened=False rule=release_contract");
             }
             catch (Exception ex)
             {
-                try { _log.Add("TRAY_PLUGIN_MENU", safeRoute, $"result=FAILED route={safeRoute} error={ex.GetType().Name} browserOpened=False rule=v0.11.38_toolwindow_keepalive_recovery_tray_silent"); } catch { }
+                try { _log.Add("TRAY_PLUGIN_MENU", safeRoute, $"result=FAILED route={safeRoute} error={ex.GetType().Name} browserOpened=False rule=release_contract"); } catch { }
             }
         });
     }
@@ -357,7 +357,7 @@ public sealed class TrayIconService : IDisposable
             if (!_icon.Visible)
             {
                 _icon.Visible = true;
-                _log.Add("TRAY_ICON", "RECOVER_VISIBLE", "result=OK reason=notifyicon_hidden rule=v0.11.122_process_lifecycle_tray_recovery_complete");
+                _log.Add("TRAY_ICON", "RECOVER_VISIBLE", "result=OK reason=notifyicon_hidden rule=release_contract");
             }
         }
         catch (Exception ex)
@@ -365,7 +365,7 @@ public sealed class TrayIconService : IDisposable
             try
             {
                 var message = (ex.Message ?? string.Empty).Replace("\r", " ").Replace("\n", " ").Trim();
-                _log.Add("TRAY_ICON", "RECOVER_FAILED", $"error={ex.GetType().Name} message={message} rule=v0.11.122_process_lifecycle_tray_recovery_complete");
+                _log.Add("TRAY_ICON", "RECOVER_FAILED", $"error={ex.GetType().Name} message={message} rule=release_contract");
             }
             catch { }
         }
@@ -413,7 +413,7 @@ public sealed class TrayIconService : IDisposable
 
         if (_icon is null) return;
 
-        // v0.8.80: TvAIrEpgRec のタスクバー表示をOFFにできるため、TvAIr本体トレイアイコンを
+        // release_contract: TvAIrEpgRec のタスクバー表示をOFFにできるため、TvAIr本体トレイアイコンを
         // 録画・通常EPG取得・サイレントEPG取得・録画前EPG確認の代表インジケータとして点滅させる。
         _blinkOn = !_blinkOn;
         _icon.Icon = _blinkOn ? (_recordingIcon ?? _idleIcon ?? SystemIcons.Application)

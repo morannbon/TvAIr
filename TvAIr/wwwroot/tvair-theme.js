@@ -1,8 +1,8 @@
-﻿(() => {
+(() => {
   const KEY = 'tvair-system-theme';
   const PREVIEW_SCOPE_KEY = 'tvair-theme-preview-scope';
   const PREVIEW_BUILD_KEY = 'tvair-theme-preview-build';
-  const PREVIEW_BUILD = '0.11.361';
+  const PREVIEW_BUILD = '1.0.4';
   const VALID = new Set(['current','light','dark']);
   const VALID_SCOPE = new Set(['off','non-program','all']);
   const DEFAULT_PREVIEW_THEME = 'dark';
@@ -25,7 +25,7 @@
       const applied = localStorage.getItem(PREVIEW_BUILD_KEY);
       if(applied === PREVIEW_BUILD) return;
 
-      // v0.11.306 applies the shared dark theme token set across TvAIr host UI.
+      // release_contract applies the shared dark theme token set across TvAIr host UI.
       // Apply once per build so program guide / list / plugin shell CSS use the same scope.
       localStorage.setItem(KEY, DEFAULT_PREVIEW_THEME);
       localStorage.setItem(PREVIEW_SCOPE_KEY, DEFAULT_PREVIEW_SCOPE);
@@ -68,7 +68,7 @@
   function computeScopedEffective(effective, scope){
     const eff = effective === 'dark' ? 'dark' : 'light';
 
-    // Scope rule for v0.8.45:
+    // Scope rule for release_contract:
     // - all: apply the selected theme to program guide, non-program pages, and plugin shell.
     // - non-program: keep the older safe preview scope for fallback testing.
     // - off: force light.
@@ -97,7 +97,7 @@
     }
 
     for(const el of [document.documentElement, document.body].filter(Boolean)){
-      // v0.11.361 ThemeStateClassAliasContract
+      // release_contract ThemeStateClassAliasContract
       // Keep modern tvair-theme-* classes and legacy theme-* / data-theme selectors in sync.
       // Older foundation selectors still use body.theme-dark/body:not(.theme-dark); without these
       // aliases, dark pages can receive light token fallbacks inside body-scoped rules.
@@ -135,7 +135,7 @@
   function dispatchRuntimeApplied(result, extra){
     dispatchApplied('tvair-theme-runtime-applied', result, Object.assign({
       source:'runtime-sync',
-      contract:'v0.11.590_settings_theme_cleanup_completion_audit_contract'
+      contract:'release_contract'
     }, extra || {}));
   }
 

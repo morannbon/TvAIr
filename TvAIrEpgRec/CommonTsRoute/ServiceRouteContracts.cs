@@ -1,7 +1,7 @@
-﻿namespace TvAIrEpgRec.CommonTsRoute;
+namespace TvAIrEpgRec.CommonTsRoute;
 
 /// <summary>
-/// v0.7.56 shared route contract boundary.
+/// release_contract shared route contract boundary.
 /// This is intentionally a contract-only type set. Production recording remains on DirectRecorderBridge
 /// until the DirectRecorderBridge TS service-scope implementation is extracted/wrapped, attached, and parity checked.
 /// </summary>
@@ -24,7 +24,7 @@ internal sealed record ServiceRouteContract(
 
 internal static class CommonTsRouteBoundary
 {
-    public const string Rule = "v0.7.56_tvairepgrec_integrated_runtime_boundary";
+    public const string Rule = "release_contract";
 
     public static readonly string[] RequiredBeforeMode =
     [

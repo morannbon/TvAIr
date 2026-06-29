@@ -2,16 +2,16 @@
 
 <html lang="ja">
 <head>
-<!-- TvAIr-UI-Version: 0.11.351 theme-state-source-of-truth-sync -->
+<!-- TvAIr-UI-Version: 1.0.0 -->
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.0"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.0"/>
-<link href="/tvair-notification.css?v=1.0.0" rel="stylesheet"/>
-<script src="/tvair-theme.js?v=1.0.0"></script>
-<script>var TVA_IR_UI_VERSION="0.4.21";</script>
-<script src="/genre-shared.js?v=1.0.0"></script>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.4"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.4"/>
+<link href="/tvair-notification.css?v=1.0.4" rel="stylesheet"/>
+<script src="/tvair-theme.js?v=1.0.4"></script>
+<script>var TVA_IR_UI_VERSION="1.0.4";</script>
+<script src="/genre-shared.js?v=1.0.4"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Meiryo',sans-serif;font-size:12px;background:var(--tvair-theme-surface-app);color:var(--tvair-theme-text-main);overflow:hidden;height:100vh;display:flex;flex-direction:column}
@@ -21,7 +21,7 @@ body{font-family:'Meiryo',sans-serif;font-size:12px;background:var(--tvair-theme
 
 /* ── 番組表 ──
    ProgramGuide skeleton/frame/current-time-line visual CSS is owned by
-   tvair-ui-modules.css v0.11.358 DarkThemeActionButtonLuminanceTuning / ProgramGuideFetchGuard.
+   tvair-ui-modules.css release_contract DarkThemeActionButtonLuminanceTuning / ProgramGuideFetchGuard.
    index.html owns only DOM generation, measurement, scroll synchronization,
    and dynamic now-line top assignment.
    ProgramCell content/action layout is owned by
@@ -48,7 +48,7 @@ body{font-family:'Meiryo',sans-serif;font-size:12px;background:var(--tvair-theme
 .help-modal-iframe{flex:1;border:none;width:100%;background:var(--tvair-settings-panel-bg)}
 
 /* ── EPGパネルボタン ── */
-/* EPG panel button CSS is owned by tvair-epg-panel.css v0.11.338. */
+/* EPG panel button CSS is owned by tvair-epg-panel.css release_contract. */
 
 /* ── 設定モーダル: 再起動ボタン ── */
 #cfg-restart-btn{display:none;background:var(--tvair-warning-a);color:var(--tvair-theme-text-inverse);border:none;padding:6px 14px;border-radius:2px;cursor:pointer;font-size:12px;font-family:'Meiryo','メイリオ',sans-serif}
@@ -61,7 +61,7 @@ body{font-family:'Meiryo',sans-serif;font-size:12px;background:var(--tvair-theme
 .wake-status-detail{display:none;margin-top:4px;font-size:11px;color:var(--tvair-theme-text-muted)}
 
 .cfg-radio-stack,.cfg-checkbox-stack{display:flex;flex-direction:column;gap:6px;align-items:flex-start}
-/* v0.11.590 SettingsPriorityCenterContract: the front/back recording priority
+/* release_contract SettingsPriorityCenterContract: the front/back recording priority
    selector is one policy field. Keep each option centered in its own lane so the
    Web modal matches the WinForms/right-click settings surface without borrowing
    reservation-list priority column styling. */
@@ -87,10 +87,10 @@ body{font-family:'Meiryo',sans-serif;font-size:12px;background:var(--tvair-theme
 
 /* ProgramGuide toolbar/theme repairs are owned by ProgramGuideToolbarFilterOwnerContract. */
 </style>
-<link href="/tvair-epg-panel.css?v=1.0.0" rel="stylesheet"/>
-<link href="/tvair-ui-foundation.css?v=1.0.0" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.0.0" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.0.0" rel="stylesheet"/>
+<link href="/tvair-epg-panel.css?v=1.0.4" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.0.4" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.0.4" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.0.4" rel="stylesheet"/>
 </head>
 <body class="tvair-guide-page">
 <div class="tvair-topnav" id="nav">
@@ -443,9 +443,9 @@ body{font-family:'Meiryo',sans-serif;font-size:12px;background:var(--tvair-theme
 </div>
 </div>
 </div>
-<script src="/tvair-notification.js?v=1.0.0"></script>
-<script src="/tvair-epg-run-contract.js?v=1.0.0"></script>
-<script src="/tvair-epg-widget.js?v=1.0.0"></script>
+<script src="/tvair-notification.js?v=1.0.4"></script>
+<script src="/tvair-epg-run-contract.js?v=1.0.4"></script>
+<script src="/tvair-epg-widget.js?v=1.0.4"></script>
 <script>
 const PROGRAM_GUIDE_GEOMETRY=Object.freeze({
   dayStartHour:4,
@@ -489,20 +489,15 @@ function esc(s){return(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace
 function fmt(d){return p2(d.getHours())+":"+p2(d.getMinutes())}
 
 // ── ハンバーガーメニュー ──────────────────────────────────────────
-// v0.11.531 MenuLegacyEntryCleanupContract: hamburger menu ownership is centralized in tvair-menu-spine.js.
+// release_contract MenuLegacyEntryCleanupContract: hamburger menu ownership is centralized in tvair-menu-spine.js.
 
 async function showVersionInfo(){
   try{
     const res=await fetch('/api/version');
     const d=res.ok?await res.json():{version:'unknown'};
-    const version=d.version||d.informationalVersion||d.fileVersion||d.assemblyVersion||'unknown';
-    const details=[];
-    if(d.fileVersion) details.push('FileVersion: '+esc(d.fileVersion));
-    if(d.assemblyVersion) details.push('AssemblyVersion: '+esc(d.assemblyVersion));
-    if(d.rule) details.push(esc(d.rule));
+    const version=d.version||'unknown';
     document.getElementById('ver-text').innerHTML=
-      '<strong>TvAIr v'+esc(version)+'</strong><br><br>録画予約・EPG管理アプリケーション<br>.NET 8 / ASP.NET Core / Vanilla JS' +
-      (details.length?'<br><br><span class="muted">'+details.join('<br>')+'</span>':'');
+      '<strong>TvAIr Alpha '+esc(version)+'</strong><br><br>録画予約・EPG管理アプリケーション';
   }catch(e){
     document.getElementById('ver-text').innerHTML='<strong>TvAIr</strong><br><br>バージョン情報を取得できませんでした。';
   }
@@ -1185,7 +1180,7 @@ function findProgramGuideRecordingId(evKey, ev){
   const identityId=identityKey && window.recordingIdentityMap && window.recordingIdentityMap.get(identityKey);
   if(identityId) return identityId;
 
-  // v0.11.613 root fix: Immediate recording keeps the real click/runtime start,
+  // release_contract root fix: Immediate recording keeps the real click/runtime start,
   // so the reservation frame may start inside the EPG event.  As a final display
   // resolver fallback, bind active recording to the cell by same service + overlap.
   // This affects ProgramGuide cell state only; reservation/recording time axes are
@@ -1209,7 +1204,7 @@ function getProgramDisplayState(evKey, ev){
     (identityKey && window.conflictedIdentityMap && window.conflictedIdentityMap.get(identityKey)) || '';
   const exactReserved=!!(window.reservedSet && window.reservedSet.has(evKey));
   const identityReserved=!!info;
-  // v0.11.456: ProgramGuide conflict is reservation-state visibility, not preflight prevention.
+  // release_contract: ProgramGuide conflict is reservation-state visibility, not preflight prevention.
   // Unreserved cells must not run a separate virtual tuner/conflict projection. They show
   // the normal reservation action; after the user confirms reservation, the shared
   // ALLOC_ROUTE/TUNER_ALLOC + FinalConflictPlan result becomes visible via conflictedMap.
@@ -1232,14 +1227,14 @@ function canToggleReservationFromProgram(reservedInfo){
 
 
 
-// v0.11.98: チェーン予約の隣接判定は TvAIr.Core.ChainReservationContract と同じ契約を使う。
+// release_contract: チェーン予約の隣接判定は TvAIr.Core.ChainReservationContract と同じ契約を使う。
 // 静的HTML側は起動直後の安全な既定値を持ち、起動後にAPIから同一契約を再取得する。
 const CHAIN_ADJACENCY_CONTRACT_DEFAULT = Object.freeze({
   minGapSeconds: -5,
   maxGapSeconds: 120,
   minGapMs: -5000,
   maxGapMs: 120000,
-  source: 'default-v0.11.98'
+  source: 'default-release_contract'
 });
 window.tvairChainReservationContract = Object.assign({}, CHAIN_ADJACENCY_CONTRACT_DEFAULT);
 function getChainAdjacencyContract(){
@@ -1273,7 +1268,7 @@ async function loadChainAdjacencyContract(){
 }
 loadChainAdjacencyContract();
 
-// v0.9.70: チェーン候補判定の共通関数。
+// release_contract: チェーン候補判定の共通関数。
 // チェーン予約は「後番組優先ON」かつ「チェーン録画ON」を利用条件にし、
 // そのうえでユーザーが同一SID連続番組のチェーンボタンを押した時だけ成立する。
 // 初回描画、差分更新、ボタン表示で必ず同じ判定を使う。
@@ -1287,7 +1282,7 @@ function chainUiSettingsSignature(){
 }
 
 
-// v0.3.41: チェーン候補の判断過程ログ。
+// release_contract: チェーン候補の判断過程ログ。
 // UI反映結果ではなく「なぜ候補になった/ならなかったか」を追う。
 function chainDiagEventLabel(ev){
   if(!ev) return '-';
@@ -1298,7 +1293,7 @@ function chainDiagEventLabel(ev){
 
 function chainDiagTrace(action, detail, reason){
   try{
-    // v0.3.43: CHAIN_EVAL_DETAIL / CHAIN_CONTEXT / CHAIN_SEQUENCE ã¯
+    // release_contract: CHAIN_EVAL_DETAIL / CHAIN_CONTEXT / CHAIN_SEQUENCE ã¯
     // çªçµè¡¨1000ã»ã«ç´ã®pollã§å¤§éçºçãããããéå¸¸éç¨ã§ã¯æç¤ºãã¬ã¼ã¹æã®ã¿åºãã
     // OKåè£ã¯ CHAIN_HINTS_REBUILT ã®éè¨ã¨ CHAIN_UI_APPLY ã§è¿½ãããããè©³ç´°ã­ã°ãå¸¸æåºããªãã
     const verbose = window.tvairManualChainTrace === true || window.tvairDebugTrace === true;
@@ -1425,7 +1420,7 @@ function markChainCandidateForEventInSequence(ev, prevEv){
 }
 
 function canShowChainButtonForEvent(ev, evKey, displayState, isEnded, isOnAir, isRecording){
-  // v0.11.302: chain is not a ProgramCell mode. It is an optional future-only
+  // release_contract: chain is not a ProgramCell mode. It is an optional future-only
   // action shown beside the normal reservation button when the shared chain-hint
   // pass has proven a valid predecessor. It must never replace ordinary reserve /
   // immediate recording, and it must disappear once the target event is on-air.
@@ -1470,7 +1465,7 @@ function getRawProgramTitle(ev){
 
 const PROGRAM_GUIDE_UNAVAILABLE_TITLE_TEXT='未取得';
 function buildProgramGuideTitleDisplayContract(ev, cellText){
-  // v0.11.516 ProgramCellBlankTitleDisplayContract:
+  // release_contract ProgramCellBlankTitleDisplayContract:
   // The raw cellText title remains the source of truth.  When the raw short-event
   // descriptor has no title, only the user-facing cell chrome receives the stable
   // "未取得" label so the title lane never becomes visually empty.  This does not
@@ -1508,7 +1503,7 @@ function buildMissingProgramReservationUrl(meta){
   return '#';
 }
 function buildProgramGuideTitleKeywordSearchUrl(ev, title){
-  // v0.11.590 ProgramGuideTitleKeywordRouteContract:
+  // release_contract ProgramGuideTitleKeywordRouteContract:
   // the program title itself is the navigation source.  The keyword page receives
   // the raw title plus event identity so the search can be scoped without changing
   // reservation, EPG, or cellText contracts.
@@ -1531,7 +1526,7 @@ function getProgramDisplayDescription(ev){
 }
 
 function buildProgramCellChromeContract(ev, frame){
-  // v0.11.516 ProgramCellChromeStructureContract:
+  // release_contract ProgramCellChromeStructureContract:
   // raw cellText handoff, time chrome, title keyword link, and provenance dataset are
   // owned by one helper.  Initial render and reservation-state diff reflow must not
   // rebuild these fragments from stale DOM snapshots.
@@ -1541,7 +1536,7 @@ function buildProgramCellChromeContract(ev, frame){
   const rawTitle=titleDisplay.rawTitle;
   const keywordUrl=titleDisplay.canKeywordLink ? buildProgramGuideTitleKeywordSearchUrl(ev, rawTitle) : '#';
   const titleBody=titleDisplay.canKeywordLink
-    ? `<a class="program-cell-title-link" href="${esc(keywordUrl)}" title="キーワード検索で開く" data-program-title-route="keyword-search" data-program-title-route-rule="v0.11.590_program_title_keyword_route_contract" onclick="event.stopPropagation()">${esc(safeTitle)}</a>`
+    ? `<a class="program-cell-title-link" href="${esc(keywordUrl)}" title="キーワード検索で開く" data-program-title-route="keyword-search" data-program-title-route-rule="release_contract" onclick="event.stopPropagation()">${esc(safeTitle)}</a>`
     : `<span class="program-cell-title-missing" data-title-display-source="${esc(titleDisplay.source)}">${esc(safeTitle)}</span>`;
   const startMs=Number(frame && frame.startMs);
   const endMs=Number(frame && frame.endMs);
@@ -1565,7 +1560,7 @@ function buildProgramCellChromeContract(ev, frame){
 
 
 function buildProgramCellFrameLayoutContract(ev, source){
-  // v0.11.516 ProgramCellFrameLaneStructureContract:
+  // release_contract ProgramCellFrameLaneStructureContract:
   // frame/time visibility, body-lane eligibility, and action-lane reservation are
   // computed once and shared by initial render and reservation-state diff reflow.
   // Cell geometry remains owned by the existing program guide layout; this helper
@@ -1600,7 +1595,7 @@ function applyProgramCellFrameLayoutDatasetContract(div, frame){
   // This is a semantic contract, not a visual patch: CSS can key off lane ownership
   // while JS keeps the exact same lane decision during initial render and diff reflow.
   const f=frame || {};
-  div.dataset.cellFrameContract='v0.11.516_programcell_frame_lane_structure_contract';
+  div.dataset.cellFrameContract='release_contract';
   div.dataset.bodyLane=String(f.bodyLane || 'chrome-only');
   div.dataset.actionLane=String(f.actionLane || 'program-cell-action-footer');
   div.dataset.descLines=f.canRenderDesc ? 'fit' : '0';
@@ -1632,7 +1627,7 @@ function applyProgramCellChromeDatasetContract(div, ev, chrome){
 }
 
 function buildProgramCellRenderStructureContract(div, ev, source){
-  // v0.11.516 ProgramCellRenderStructureContract:
+  // release_contract ProgramCellRenderStructureContract:
   // initial render and reservation-state diff reflow share one structure builder for
   // frame lanes, time/title chrome, current event-time state, and reservation UI
   // signature.  Callers may still decide actions, but they must not recalculate
@@ -1663,7 +1658,7 @@ function buildProgramCellRenderStructureContract(div, ev, source){
 
 
 function buildProgramCellActionStateStructureContract(ev, evKey, isOnAir, isEnded, displayState){
-  // v0.11.516 ProgramCellActionStateStructureContract:
+  // release_contract ProgramCellActionStateStructureContract:
   // Action mode, chain optionality, state CSS classes, and action-safety state are
   // derived once from the render structure.  Initial render and reservation-diff
   // reflow must not each reinvent the button-state matrix.
@@ -1685,7 +1680,7 @@ function buildProgramCellActionStateStructureContract(ev, evKey, isOnAir, isEnde
 
 function applyProgramCellActionStateDatasetContract(div, actionState){
   const a=actionState || {};
-  div.dataset.cellActionStructureContract='v0.11.516_programcell_action_state_structure_contract';
+  div.dataset.cellActionStructureContract='release_contract';
   div.dataset.programActionMode=String(a.mode || 'no-action');
   div.dataset.programCanChain=a.canUserChain ? '1' : '0';
   if(a.offair){
@@ -1718,7 +1713,7 @@ function buildProgramButtonDefs(div, ev, evKey, isOnAir, isEnded, displayState, 
   const state = action.state || displayState || getProgramDisplayState(evKey);
   const canUserChain = action.canUserChain === true;
   const transient = action.transient || null;
-  // v0.11.678 ProgramGuideActionPendingScopeContract:
+  // release_contract ProgramGuideActionPendingScopeContract:
   // Lock scope is the event cell, but visual pending scope is only the clicked action.
   // Do not collapse a multi-action cell (予約 + チェーン) into one pending button.
   const mode = transient ? (action.baseMode || action.mode) : action.mode;
@@ -1732,7 +1727,7 @@ function buildProgramButtonDefs(div, ev, evKey, isOnAir, isEnded, displayState, 
     return def;
   };
 
-  // v0.3.41 / v0.11.516:
+  // release_contract / release_contract:
   // セル内ボタンは action-state structure で一度だけ決める。
   // updateProgramCellReservationState() が既存footerを全削除し、
   // ここで許可されたボタンだけ再生成する。
@@ -1776,7 +1771,7 @@ function buildProgramButtonDefs(div, ev, evKey, isOnAir, isEnded, displayState, 
 
 
 function buildDescHtmlByPriority(cellText, durMin, textAvail, measureDiv){
-  // v0.11.437: ProgramGuide cellText capacity layout with clipped-line guard.
+  // release_contract: ProgramGuide cellText capacity layout with clipped-line guard.
   // The cell frame is fixed.  This creates a cell-local view from full cellText by
   // calculating whole visual lines once from the available lane.  It does not DOM-probe,
   // build alternate HTML candidates, or fill spare space by expanding text.  The final
@@ -1859,7 +1854,7 @@ function buildDescHtmlByPriority(cellText, durMin, textAvail, measureDiv){
     return { text:out, usedLines:usedLines, complete:complete || out.length===t.length };
   };
 
-  // v0.11.528: if an outline/summary is actually displayed, reserve a theme
+  // release_contract: if an outline/summary is actually displayed, reserve a theme
   // variable-driven gap between the title and the outline.  The base is the
   // outline line-height; the rate is controlled by --prog-title-outline-gap-rate.
   // When the outline is not displayed, this gap is deleted too.
@@ -2124,7 +2119,7 @@ function reapplyGenreFilter(){
 }
 
 
-// v0.11.582: ProgramGuide runtime theme hot-reload bridge.
+// release_contract: ProgramGuide runtime theme hot-reload bridge.
 // Right-click settings save updates TvAIrTheme first; the program guide must then
 // re-apply theme-linked genre palettes and repaint only theme-dependent DOM state.
 // This does not refetch EPG, rebuild cellText, or change cell geometry.
@@ -2269,7 +2264,7 @@ function buildReservationMaps(rsvData){
     const identityKey=identityKeyOf(r);
     const info=buildProgramGuideReservationInfo(r);
     rememberReservationInfo(window.reservedMap, frameKey, info);
-    // v0.11.613: ProgramGuide state resolution must be event-identity aware.
+    // release_contract: ProgramGuide state resolution must be event-identity aware.
     // Immediate/runtime rows keep the actual recording start as source of truth, so
     // their frame key can differ from the EPG cell frame while the event identity is
     // still the same.  Keep the old frame map and add identity lookup as fallback.
@@ -2295,7 +2290,7 @@ function buildReservationMaps(rsvData){
     };
   }).filter(r=>r.id && r.serviceKey && Number.isFinite(r.st) && Number.isFinite(r.en));
 
-  // v0.2.34:
+  // release_contract:
   // (C) / チェーン表示はユーザー明示チェーンだけに限定する。
   // 同一channelArgumentで end_time==next.start_time というだけの自動チェーン表示は禁止。
   window.chainJoinSet=new Set();
@@ -2393,7 +2388,7 @@ let lastGuideDataSignature = "";
 let lastReservationSignature = "";
 let lastGuideData = null;
 let chainHintWarmupPasses = 0;
-const CHAIN_HINT_WARMUP_MAX = 1; // v0.3.43: チェーン候補再計算キャッシュ。
+const CHAIN_HINT_WARMUP_MAX = 1; // release_contract: チェーン候補再計算キャッシュ。
 // EPG配列・予約状態・チェーン設定が同じなら候補フラグだけ復元する。
 let lastChainHintSignature = '';
 let lastChainHintCandidateMap = new Map();
@@ -2409,7 +2404,7 @@ function eventKeyFromEvent(ev){
   return base;
 }
 
-// v0.11.378 ProgramCellActionIdentityGuard
+// release_contract ProgramCellActionIdentityGuard
 // ProgramGuide actions must be tied to the visible event frame that produced the
 // button.  Extremely long or structurally suspicious events can visually cover
 // normal short cells; those events are not allowed to create clickable actions.
@@ -2615,12 +2610,12 @@ function renderProgramCellContentByPriorityContract(div, ev, buttonDefs, layout)
   const nextSig=layout && layout.nextReservationSignature;
 
   applyProgramCellFrameLayoutDatasetContract(div, frame);
-  div.dataset.cellRenderStructureContract='v0.11.528_programcell_title_outline_gap_contract';
+  div.dataset.cellRenderStructureContract='release_contract';
 
   const footerReserveH=measureFooterHeight(buttonDefs, measureDiv);
   const {startH,titleH}=measureProgramSkeleton(measureDiv, startHtml, titleHtml, true);
 
-  // v0.11.516 ProgramCellContentPriorityRendererContract:
+  // release_contract ProgramCellContentPriorityRendererContract:
   // Initial render and reservation-state diff reflow must use this single renderer.
   // Time/title/action footer/raw descriptor provenance remain mandatory;
   // outline/detail/items are the only flexible lane and are tail-trimmed through
@@ -2763,7 +2758,7 @@ function requestReservationSyncCooldown(reason, ms){
   uiTrace('reservation-state-sync-cooldown-start', 'reason='+reason+' ms='+ms+' '+guideDomSummary(), 'poll');
 }
 
-// v0.11.349: reservation-state差分同期は短周期pollの補助導線。
+// release_contract: reservation-state差分同期は短周期pollの補助導線。
 // 起動直後・ページ遷移直後・host再起動境界の一過性 fetch 失敗をユーザーログのエラーとして汚さない。
 // 連続失敗時だけ永続ログへ昇格し、単発失敗は短いbackoff後に次回pollへ委ねる。
 async function fetchGuideReservationsForDiffSync(){
@@ -2774,7 +2769,7 @@ async function fetchGuideReservationsForDiffSync(){
   return await res.json();
 }
 
-// v0.11.353: 番組表本体の低頻度pollも、起動直後・ページ遷移直後・host境界の
+// release_contract: 番組表本体の低頻度pollも、起動直後・ページ遷移直後・host境界の
 // 一過性 fetch 失敗を即エラー化しない。構造的な連続失敗だけ refreshGuide-error へ昇格する。
 async function fetchGuideJsonForFullRefresh(url, label){
   const res = await fetch(url, { cache:'no-store' });
@@ -3025,7 +3020,7 @@ function buildTimelineLayout(events, dayStartMs){
 
 
 // ── ProgramGuide TimeAxisRole ─────────────────────────────────────
-// v0.11.302: rebuilt as a formal role module.  The left rail and the
+// release_contract: rebuilt as a formal role module.  The left rail and the
 // 3-service divider rails share the same renderer; only role tokens differ.
 const PROGRAM_GUIDE_TIME_AXIS_ROLES = Object.freeze({
   primary: Object.freeze({ role:'timeAxisPrimary', axis:'primary', css:'program-guide-time-axis-primary', headerCss:'program-guide-time-axis-primary-header', aria:'左端時間軸' }),
@@ -3286,7 +3281,7 @@ function renderGuide(data, traceReason='renderGuide'){
       if(isContNext) div.dataset.contNext = "1";
 
       // ── 番組セル内容 ──
-      // v0.11.516: time chrome, raw cellText title link, and descriptor provenance
+      // release_contract: time chrome, raw cellText title link, and descriptor provenance
       // are built through one ProgramCell chrome contract.
       const chrome=buildProgramCellChromeContract(ev, frame);
       if(isProgramOffAirEvent(ev)){
@@ -3369,7 +3364,7 @@ function updateProgBars(){
     const dur=en-st;
     if(dur<=0) return;
 
-    // v0.11.302: ProgramCell actions depend on event-time state as well as
+    // release_contract: ProgramCell actions depend on event-time state as well as
     // reservation state.  When a future chain candidate reaches its start time,
     // the footer must switch from "予約 + チェーン" to "今すぐ録画" without
     // waiting for a reservation API diff.
@@ -3418,7 +3413,7 @@ function genreCls(c, label){
 }
 
 // ── EPG取得 ──────────────────────────────────────────────────────
-// v0.8.38: EPG操作/進捗表示は全ページ共通 tvair-epg-widget.js に集約。
+// release_contract: EPG操作/進捗表示は全ページ共通 tvair-epg-widget.js に集約。
 // ここでは既存の番組表側呼び出しとの互換ラッパだけ残す。
 function setEpgButtons(running){
   const start=document.getElementById("epg-start-btn");
@@ -3441,7 +3436,7 @@ function pollSt(){ return window.TvAirEpgWidget ? TvAirEpgWidget.refresh(false) 
 
 // ── 予約・録画 ──────────────────────────────────────────────────
 
-// v0.11.613 ProgramGuideActionCanonicalCellRebuildContract:
+// release_contract ProgramGuideActionCanonicalCellRebuildContract:
 // Program guide action buttons must not keep local busy labels after the
 // reservation/recording API has completed.  The canonical state is always
 // rebuilt from reservation maps and the cell action-state contract, across all
@@ -3513,7 +3508,7 @@ function clearAllProgramGuideActionPending(reason){
 
 function programGuideActionSleep(ms){ return new Promise(resolve=>setTimeout(resolve, ms)); }
 
-// v0.11.613 ProgramGuideActionTransientStateContract:
+// release_contract ProgramGuideActionTransientStateContract:
 // While an operation is settling, the cell action state has an explicit temporary
 // state.  Intermediate backend states such as Scheduled-after-record-now or
 // Recording-before-stop-finalized are not rendered as ordinary user actions.
@@ -3608,7 +3603,7 @@ function getProgramGuideActionTransientState(ev, state){
   return null;
 }
 
-// v0.11.613 ProgramGuideActionLifecycleController:
+// release_contract ProgramGuideActionLifecycleController:
 // Program-guide cell actions are serialized by event identity.  A successful
 // action never restores a previous button label; it must settle reservation maps
 // and rebuild cells from getProgramDisplayState()/buildProgramButtonDefs().
@@ -3645,7 +3640,7 @@ function programGuideCellsForActionKey(actionKey, ev){
   return cells;
 }
 function markProgramGuideActionCellsLocked(actionKey, ev, busyText, activeButton, activeProgramAction){
-  // v0.11.678 ProgramGuideActionPendingScopeContract:
+  // release_contract ProgramGuideActionPendingScopeContract:
   // Disable all sibling action buttons for the same event to prevent duplicate
   // operations, but keep non-clicked labels untouched.  Only the clicked action
   // receives visual-pending metadata. Chain keeps its short cell label.
@@ -3832,7 +3827,13 @@ function makeProgramGuideActionTarget(kind, ev, rsvId, extra){
   target.identityKey=ev ? reservationIdentityKeyFromEvent(ev) : '';
   target.rsvId=rsvId ? String(rsvId) : '';
   if(!Number.isFinite(Number(target.timeoutMs))){
-    target.timeoutMs = (kind==='recording' || kind==='unreserved') ? 9000 : 5000;
+    // release_contract ProgramGuideActionResponsivenessContract:
+    // Reservation/cancel state is DB-confirmed by the API, so normal button
+    // reconciliation can be short. Recording stop keeps the longer window because
+    // the recorder process and tuner release are finalized asynchronously.
+    if(kind==='recording') target.timeoutMs = 9000;
+    else if(kind==='unreserved') target.timeoutMs = 3000;
+    else target.timeoutMs = 2500;
   }
   return target;
 }
@@ -3899,7 +3900,7 @@ function forceRebuildProgramGuideFromCanonicalState(reason){
 }
 
 async function syncProgramGuideAfterAction(reason, target){
-  // v0.11.613 ProgramGuideActionCanonicalCellRebuildContract:
+  // release_contract ProgramGuideActionCanonicalCellRebuildContract:
   // The action button lifecycle has one owner.  It does not restore the old button
   // label after a successful POST and does not accept the first intermediate state
   // as final.  Record-now waits for Recording, stop/cancel waits for unreserved,
@@ -3934,7 +3935,7 @@ async function syncProgramGuideAfterAction(reason, target){
       handleGuideReservationFetchFailure(e);
       break;
     }
-    await programGuideActionSleep(poll<=2 ? 350 : 700);
+    await programGuideActionSleep(poll<=1 ? 200 : (poll===2 ? 300 : 500));
   }while(Date.now()<deadline);
 
   if(!applied){
@@ -3948,8 +3949,13 @@ async function syncProgramGuideAfterAction(reason, target){
   }
 
   if(!document.hidden){
-    setTimeout(()=>{ refreshGuideReservationsOnly({forceApply:true, fullRebuild:true, reason:actionReason+'-followup-1'}).then(()=>clearAllProgramGuideActionPending(actionReason+'-followup-1')).catch(()=>{}); }, 900);
-    setTimeout(()=>{ refreshGuideReservationsOnly({forceApply:true, fullRebuild:true, reason:actionReason+'-followup-2'}).then(()=>clearAllProgramGuideActionPending(actionReason+'-followup-2')).catch(()=>{}); }, 2500);
+    const followupDelays = Array.isArray(t.followupDelays)
+      ? t.followupDelays.filter(x=>Number.isFinite(Number(x)) && Number(x)>=0).map(x=>Number(x))
+      : [600];
+    followupDelays.forEach((delay, index)=>{
+      const label=actionReason+'-followup-'+(index+1);
+      setTimeout(()=>{ refreshGuideReservationsOnly({forceApply:true, fullRebuild:true, reason:label}).then(()=>clearAllProgramGuideActionPending(label)).catch(()=>{}); }, delay);
+    });
   }
   return applied;
 }
@@ -3966,7 +3972,7 @@ async function reserveNow(mouseEvt, btn){
     ev,
     busyText:"送信中...",
     reason:isImmediate ? 'program-guide-record-now' : 'program-guide-reserve',
-    target:makeProgramGuideActionTarget(isImmediate ? 'recording' : 'reserved', ev, ''),
+    target:makeProgramGuideActionTarget(isImmediate ? 'recording' : 'reserved', ev, '', isImmediate ? {timeoutMs:9000, followupDelays:[900,2500]} : {timeoutMs:2500, followupDelays:[600]}),
     errorPrefix:isImmediate ? '今すぐ録画失敗' : '予約失敗',
     beforeExecute:async function(){
       return true;
@@ -4019,7 +4025,7 @@ async function reserveChain(mouseEvt, btn){
     ev,
     busyText:PROGRAM_GUIDE_CELL_ACTION_LABELS.chain,
     reason:'program-guide-chain-reserve',
-    target:makeProgramGuideActionTarget('reserved', ev, '', {timeoutMs:5000}),
+    target:makeProgramGuideActionTarget('reserved', ev, '', {timeoutMs:2500, followupDelays:[600]}),
     fastAckAfterSuccess:true,
     fastAckGuardMs:PROGRAM_GUIDE_CHAIN_FAST_ACK_GUARD_MS,
     errorPrefix:'チェーン予約失敗',
@@ -4065,7 +4071,7 @@ async function stopRecording(rsvId, btn){
     ev,
     busyText:"停止中...",
     reason:'program-guide-stop-recording',
-    target:makeProgramGuideActionTarget('unreserved', ev, rsvId),
+    target:makeProgramGuideActionTarget('unreserved', ev, rsvId, {timeoutMs:9000, followupDelays:[900,2500]}),
     errorPrefix:'停止失敗',
     execute:async function(){
       const res=await fetch("/api/reservations/"+rsvId+"/stop",{method:"POST"});
@@ -4091,7 +4097,7 @@ async function toggleProgramReservationEnabled(rsvId, newVal, btn){
     ev,
     busyText:newVal ? "有効中..." : "無効中...",
     reason:newVal ? 'program-guide-enable-reservation' : 'program-guide-disable-reservation',
-    target:makeProgramGuideActionTarget(newVal ? 'enabled' : 'disabled', ev, rsvId),
+    target:makeProgramGuideActionTarget(newVal ? 'enabled' : 'disabled', ev, rsvId, {timeoutMs:2500, followupDelays:[600]}),
     errorPrefix:'有効/無効切替失敗',
     execute:async function(){
       const res=await fetch("/api/reservations/"+rsvId+"/enabled",{
@@ -4121,7 +4127,7 @@ async function cancelReservation(rsvId, evKey, btn){
     ev,
     busyText:"取消中...",
     reason:'program-guide-cancel-reservation',
-    target:makeProgramGuideActionTarget('unreserved', ev, rsvId),
+    target:makeProgramGuideActionTarget('unreserved', ev, rsvId, {timeoutMs:3000, followupDelays:[600]}),
     errorPrefix:'取消失敗',
     execute:async function(){
       const res=await fetch("/api/reservations/"+rsvId,{method:"DELETE"});
@@ -4133,7 +4139,7 @@ async function cancelReservation(rsvId, evKey, btn){
   });
 }
 
-// v0.5.65: 予約/録画状態は手動更新前提にしない。
+// release_contract: 予約/録画状態は手動更新前提にしない。
 // 番組表全体の再描画は抑え、通常は予約状態だけを短周期で差分同期する。
 // 録画開始/停止時の差分同期が重なると番組表がちらつくため、同時実行は禁止し、必要なら1回だけ後続実行する。
 async function refreshGuideReservationsOnly(options){
@@ -4301,7 +4307,7 @@ function hideCfgModal(){
   closeCfgDialog();
 }
 window.TvAIrSettingsModule = window.TvAIrSettingsModule || {
-  version:'0.11.314',
+  version:'1.0.4',
   open:()=>showCfgModal(),
   close:()=>hideCfgModal(),
   contract:'single-settings-module-web-modal-basis'
@@ -4313,7 +4319,7 @@ function switchCfgTab(name, btn){
   document.getElementById('cfg-panel-'+name).classList.add('active');
 }
 function showCfgDialog(message, onOk, cancelText){
-  // v0.11.178: OKだけの設定保存/失敗通知はTvAIr共通の無音通知へ集約する。
+  // release_contract: OKだけの設定保存/失敗通知はTvAIr共通の無音通知へ集約する。
   // キャンセル付き確認は従来の設定モーダル内確認ダイアログを維持する。
   if(!cancelText && window.TvAIrNotification && typeof window.TvAIrNotification.show === 'function'){
     window.TvAIrNotification.show({ title:'TvAIr', message:message, onOk:onOk });
@@ -4500,7 +4506,7 @@ function makeTunerRow(t, idx){
   const selRole=buildTunerRoleSelect(t.role || ''); tdRole.appendChild(selRole);
 
   selBd.addEventListener('change', ()=>{
-    // v0.11.678: ConfiguredBonDriverFileName変更時もLogicalTunerGroupを推測しない。
+    // release_contract: ConfiguredBonDriverFileName変更時もLogicalTunerGroupを推測しない。
     // 放送波はユーザーが明示選択した値だけを正とする。
     refreshTunerVirtualNames();
   });
@@ -4581,7 +4587,7 @@ function applyBonDriverListToTunerRows(){
     if(oldSelect) cell.replaceChild(nextSelect, oldSelect);
     else cell.appendChild(nextSelect);
     nextSelect.addEventListener('change', ()=>{
-      // v0.11.678: ConfiguredBonDriverFileName変更時もLogicalTunerGroupを推測しない。
+      // release_contract: ConfiguredBonDriverFileName変更時もLogicalTunerGroupを推測しない。
       refreshTunerVirtualNames();
     });
   });
@@ -4750,7 +4756,7 @@ async function applyThemeRuntimeAfterSettingsSave(dto, result, selectedTheme, re
 }
 
 async function applyRuntimeRecordingSettingsAfterSave(dto, settingsChanged, reason){
-  // v0.3.41: 設定変更後に再起動なしで番組表・チェーン候補・競合表示を同期する。
+  // release_contract: 設定変更後に再起動なしで番組表・チェーン候補・競合表示を同期する。
   // 特に LaterProgramPriority / PseudoContinuousRecording の変更はチェーンボタン表示条件に直結するため、
   // UIグローバル値を即時更新し、予約Map再取得→チェーン候補再構築→セル内差分更新を必ず走らせる。
   const oldSig=chainUiSettingsSignature();
@@ -4880,7 +4886,7 @@ document.querySelectorAll('input[name="cfg-system-theme"]').forEach(r=>r.addEven
 applySystemTheme(getSystemThemeSetting());
 
 
-// v0.8.38: 起動時/復帰時のEPG状態同期は tvair-epg-widget.js 側へ集約。
+// release_contract: 起動時/復帰時のEPG状態同期は tvair-epg-widget.js 側へ集約。
 
 // ── 初期化 ───────────────────────────────────────────────────────
 buildDateNav();
@@ -4921,7 +4927,7 @@ async function handleStartupOpenRequest(){
 
 bindGuideTopOperationUi();
 </script>
-<script src="/tvair-menu-spine.js?v=1.0.0"></script>
+<script src="/tvair-menu-spine.js?v=1.0.4"></script>
 <script>
 (function(){
   try{

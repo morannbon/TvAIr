@@ -1,4 +1,5 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
+using System.Collections.Concurrent;
 using System.Management;
 using System.Text.Json;
 using System.Runtime.InteropServices;
@@ -38,7 +39,7 @@ class ReservationScheduler : BackgroundService
 
 
             
-        // ===== v0.3.7 CHAIN_DIAGNOSTIC: チェーン録画のプロセス分断・タイトルなしTS発生経路を観測するためのログ強化。 =====
+        // ===== release_contract CHAIN_DIAGNOSTIC: チェーン録画のプロセス分断・タイトルなしTS発生経路を観測するためのログ強化。 =====
 
 
     private readonly ReservationStore _store;
@@ -66,19 +67,30 @@ class ReservationScheduler : BackgroundService
     private readonly object _sessionGate = new();
     // BonDriverのClose/Open衝突を避けるため、録画停止処理は必ず1本ずつ直列化する。
     private readonly SemaphoreSlim _stopGate = new(1, 1);
-    // v0.6.19: チェーン境界で旧来の通常停止経路へ落とさないための観測用ガード。
+    // release_contract: チェーン境界で旧来の通常停止経路へ落とさないための観測用ガード。
     // Bridge継続/ファイル切替が実装されるまでは、同じ境界での重複抑止にも使う。
     private readonly HashSet<int> _chainBoundaryNormalStopSuppressed = new();
     private readonly HashSet<string> _chainBoundaryExecutionKeys = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> _chainBoundaryLastWaitBucket = new(StringComparer.OrdinalIgnoreCase);
+    private readonly SemaphoreSlim _recordingDueGate = new(1, 1);
+    private readonly ConcurrentDictionary<int, byte> _activePreRecordEpgEntries = new();
+    private readonly ConcurrentDictionary<string, int> _activePreRecordEpgGroups = new(StringComparer.OrdinalIgnoreCase);
 
     private const int PollingIntervalMs = 10_000;
     // チェーン境界は通常10秒Tickを待たず、後続完全性のため高優先度で監視する。
     private const int ChainBoundaryMonitorIntervalMs = 500;
+    // 通常録画dueも録画前EPG確認や10秒Tickに待たせない。
+    private const int RecordingDueMonitorIntervalMs = 500;
+    private const int RecordingDueMonitorLookAheadSeconds = 60;
+    // 録画前EPG確認は完全直列でも完全並列でもなく、放送波別に時差投入する。
+    private const int PreRecordEpgLaunchStaggerMs = 2_000;
+    private const int PreRecordEpgStopBeforeRecordingDueSeconds = 30;
+    private const int PreRecordEpgProbeCeilingSeconds = 90;
+    private const int PreRecordEpgMinimumProbeSeconds = 8;
     private const int ViewingPreemptCountdownSec = 30;
-    private const int RecordingLaunchWaitForFreeTunerMs = 15000;
+    private const int RecordingLaunchWaitForFreeTunerMs = 5000;
     private const int RecordingLaunchWaitPollMs = 1000;
-    // v0.4.16: 本番録画の直前/停止中/停止直後は、同一放送波のEPG新規起動を共通ゲートで止める。
+    // release_contract: 本番録画の直前/停止中/停止直後は、同一放送波のEPG新規起動を共通ゲートで止める。
     private const int RecordingDueEpgSuppressBeforeAfterSec = 180;
     private const int RecordingTimelineEpgGateSafetySeconds = 320;
     private const int RecordingStopEpgSuppressAfterSec = 45;
@@ -100,7 +112,7 @@ class ReservationScheduler : BackgroundService
     private const int RecordingFileGrowthInitialGraceSec = 180;
     private const int RecordingFileGrowthStallSec = 120;
     private const int RecordingFileGrowthPlannedEndGuardSec = 30;
-    // v0.9.80: チェーン境界の同一SID・同一チューナー再取得だけは、通常の15秒直列化待ちを短縮する。
+    // release_contract: チェーン境界の同一SID・同一チューナー再取得だけは、通常の15秒直列化待ちを短縮する。
     // 前番組末尾欠損を許容するチェーン契約では、後続番組の開始完全性を優先するため最小settleに留める。
     private const int ChainRestartSameTunerSettleMs = 1_500;
     // チェーン後続は FinalConflictPlan/RoleBinding で確定済みの録画用チューナーを正本にする。
@@ -117,11 +129,11 @@ class ReservationScheduler : BackgroundService
     private int _reservationAuditCounter;
     private const int ReservationAuditIntervalTicks = 6; // 10秒×6 = 60秒
 
-    // v0.8.13: EPGプリエンプト対象フィルタは10秒Tickで毎回同じ結果を出さない。
+    // release_contract: EPGプリエンプト対象フィルタは10秒Tickで毎回同じ結果を出さない。
     // 有効予約/無効予約/システムEPG/グループ不明の状態が変わった時だけ監査ログを残す。
     private string? _lastEpgPreemptFilterSignature;
 
-    // チューナー再評価の間引き。v34.40: 10秒ごとの全件再評価をやめ、
+    // チューナー再評価の間引き。10秒ごとの全件再評価をやめ、
     // 「起動直後 / 予約接近時 / 状態変化時 / 1分ごと」に限定して負荷を下げる。
     private int _allocationReevaluateCounter;
     private const int AllocationReevaluateIntervalTicks = 6; // 10秒×6 = 60秒
@@ -186,7 +198,7 @@ class ReservationScheduler : BackgroundService
             $"LaterPriority={_ini.LaterProgramPriority} " +
             $"PreStart={_ini.PreStartMarginSeconds}s PostEnd={_ini.PostEndMarginSeconds}s");
 
-        // v0.11.85:
+        // release_contract:
         // 起動時に Recording のまま残った予約は「録画途中でTvAIr/PCが止まった残骸」として精査する。
         // Recording のまま予約一覧へ残すことは禁止。既存部分ファイルを保護し、終了前なら別予約として復旧録画を再投入する。
         // 復旧録画は同じTVTest命名規則を使い、既存ファイルと衝突した場合は MakeUniqueRecordingPath の (1)/(2) で別ファイル化する。
@@ -204,14 +216,14 @@ class ReservationScheduler : BackgroundService
                 if (!guard.ShouldRecover)
                 {
                     _log.Add("REC_STARTUP_RECOVERY_GUARD", $"R{r.Id}",
-                        $"result=SKIPPED reason={SafeValue(guard.Reason)} now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} file={SafeValue(interruptedFile)} workerPid={guard.WorkerPid?.ToString() ?? "-"} fileGrowing={guard.FileGrowing} completedResult={guard.CompletedResult} rule=v0.11.116_recovery_past_end_completion_guard");
+                        $"result=SKIPPED reason={SafeValue(guard.Reason)} now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} file={SafeValue(interruptedFile)} workerPid={guard.WorkerPid?.ToString() ?? "-"} fileGrowing={guard.FileGrowing} completedResult={guard.CompletedResult} rule=release_contract");
                     continue;
                 }
 
                 var recoverUntil = r.EndTime.AddSeconds(Math.Max(10, _ini.PostEndMarginSeconds + 30));
                 var recoverable = now <= recoverUntil && r.IsEnabled && !r.IsConflicted && r.Source != ReservationSource.Epg;
                 _log.Add("REC_INTERRUPTED_DETECTED", $"R{r.Id}",
-                    $"result=DETECTED recoverable={recoverable} guard=passed now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} recoverUntil={recoverUntil:MM/dd HH:mm:ss} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} file={SafeValue(interruptedFile)} rule=v0.11.90_startup_recovery_false_positive_guard");
+                    $"result=DETECTED recoverable={recoverable} guard=passed now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} recoverUntil={recoverUntil:MM/dd HH:mm:ss} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} file={SafeValue(interruptedFile)} rule=release_contract");
 
                 _store.FinalizeInterruptedRecordingAtStartup(r.Id, now, recoverable ? "recovery_requeued_as_new_reservation" : "outside_recoverable_window_or_not_recordable", interruptedFile);
 
@@ -219,17 +231,17 @@ class ReservationScheduler : BackgroundService
                 {
                     var recoveryId = _store.AddStartupRecoveryReservation(r, now);
                     _log.Add("REC_STARTUP_RECOVERY_REQUEUE", $"R{recoveryId}",
-                        $"result=REQUEUED_AS_NEW source=R{r.Id} recovery=R{recoveryId} reason=recording_window_still_recoverable_and_original_finalized now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} recoverUntil={recoverUntil:MM/dd HH:mm:ss} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} fileCollisionPolicy=append_number_suffix rule=v0.11.90_startup_recovery_false_positive_guard");
+                        $"result=REQUEUED_AS_NEW source=R{r.Id} recovery=R{recoveryId} reason=recording_window_still_recoverable_and_original_finalized now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} recoverUntil={recoverUntil:MM/dd HH:mm:ss} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} fileCollisionPolicy=append_number_suffix rule=release_contract");
                 }
                 else
                 {
                     _log.Add("REC_STARTUP_RECOVERY_REQUEUE", $"R{r.Id}",
-                        $"result=FINALIZED_ONLY reason={(now >= r.EndTime ? "program_already_finished" : "not_recordable_or_outside_recoverable_window")} now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} recoverUntil={recoverUntil:MM/dd HH:mm:ss} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} rule=v0.11.90_startup_recovery_false_positive_guard");
+                        $"result=FINALIZED_ONLY reason={(now >= r.EndTime ? "program_already_finished" : "not_recordable_or_outside_recoverable_window")} now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} recoverUntil={recoverUntil:MM/dd HH:mm:ss} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} rule=release_contract");
                 }
             }
         }
 
-        // v0.8.23: 起動時に終端予約へ残った競合フラグを整理する。
+        // release_contract: 起動時に終端予約へ残った競合フラグを整理する。
         // 共通割り当てルートの再評価前に、Completed/Cancelled を競合対象から外し、
         // 過去のCancelled行が予約一覧・監査ログで競合表示される残骸を消す。
         ClearTerminalConflictResiduesSafe("startup_before_allocation");
@@ -247,7 +259,7 @@ class ReservationScheduler : BackgroundService
             }
             else
             {
-                // v0.10.54: no-chain is the normal startup state; keep regular logs for actual chain configurations only.
+                // release_contract: no-chain is the normal startup state; keep regular logs for actual chain configurations only.
             }
         }
         catch (Exception ex)
@@ -260,6 +272,7 @@ class ReservationScheduler : BackgroundService
         _skipNextTickAllocationReevaluate = true;
 
         var chainBoundaryMonitorTask = Task.Run(() => ChainBoundaryMonitorLoopAsync(stoppingToken), stoppingToken);
+        var recordingDueMonitorTask = Task.Run(() => RecordingDueMonitorLoopAsync(stoppingToken), stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -281,10 +294,38 @@ class ReservationScheduler : BackgroundService
     }
 
 
+    private async Task RecordingDueMonitorLoopAsync(CancellationToken stoppingToken)
+    {
+        _log.Add("REC_DUE_SCHEDULER", "START",
+            $"result=STARTED intervalMs={RecordingDueMonitorIntervalMs} lookAheadSeconds={RecordingDueMonitorLookAheadSeconds} policy=high_priority_recording_due_monitor commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                var now = _broadcastClock.Now;
+                var hasNearDue = _store.GetByStatus(ReservationStatus.Scheduled)
+                    .Any(r => r.IsEnabled
+                        && r.Source != ReservationSource.Epg
+                        && r.StartTime.AddSeconds(-_ini.PreStartMarginSeconds) <= now.AddSeconds(RecordingDueMonitorLookAheadSeconds));
+                if (hasNearDue)
+                    await TryLaunchDueReservationsAsync(now, "RecordingDueMonitor", stoppingToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) { break; }
+            catch (Exception ex)
+            {
+                _log.Add("REC_DUE_SCHEDULER", "ERROR", $"result=ERROR message={SafeValue(ex.Message)} rule=release_contract");
+            }
+
+            await Task.Delay(RecordingDueMonitorIntervalMs, stoppingToken).ConfigureAwait(false);
+        }
+    }
+
+
     private async Task ChainBoundaryMonitorLoopAsync(CancellationToken stoppingToken)
     {
         _log.Add("CHAIN_BOUNDARY_SCHEDULER", "START",
-            $"result=STARTED intervalMs={ChainBoundaryMonitorIntervalMs} normalTickMs={PollingIntervalMs} policy=high_priority_chain_boundary_monitor commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+            $"result=STARTED intervalMs={ChainBoundaryMonitorIntervalMs} normalTickMs={PollingIntervalMs} policy=high_priority_chain_boundary_monitor commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -299,7 +340,7 @@ class ReservationScheduler : BackgroundService
             catch (Exception ex)
             {
                 _log.Add("CHAIN_BOUNDARY_SCHEDULER", "ERROR",
-                    $"result=ERROR message={TrimForLog(ex.Message, 180)} rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                    $"result=ERROR message={TrimForLog(ex.Message, 180)} rule=release_contract");
             }
 
             await Task.Delay(ChainBoundaryMonitorIntervalMs, stoppingToken).ConfigureAwait(false);
@@ -339,7 +380,7 @@ class ReservationScheduler : BackgroundService
             {
                 _forceAllocationReevaluate = true;
                 _log.Add("Scheduler", "TerminalConflictCleanup",
-                    $"terminal予約の競合残骸を整理: affected={affected} reason={reason} rule=v0.8.23_terminal_conflict_residue_cleanup");
+                    $"terminal予約の競合残骸を整理: affected={affected} reason={reason} rule=release_contract");
             }
         }
         catch (Exception ex)
@@ -396,7 +437,7 @@ class ReservationScheduler : BackgroundService
 
     private bool TryFinalizePastEndedRecordingAsCompletedAtStartup(Reservation r, string interruptedFile, DateTime now)
     {
-        // v0.11.116:
+        // release_contract:
         // Recoveryで作り直した録画や、TvAIr本体だけ再起動した後の録画が
         // 「Recordingのまま・予定終了を過ぎている」場合、まず完了証跡を確認する。
         // 終了済みのファイルを再び中断扱いにすると、ユーザー運用ログが
@@ -416,7 +457,7 @@ class ReservationScheduler : BackgroundService
         if (completedResult && !fileEvidence.LikelyCompleted)
         {
             _log.Add("REC_STARTUP_RECOVERY_COMPLETED_REJECTED", $"R{r.Id}",
-                $"result=REJECT reason=completed_result_but_file_not_complete now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} fileAudit={SafeValue(interruptedFile)} fileEvidence={SafeValue(fileEvidence.Summary)} action=finalize_as_interrupted_not_completed rule=v0.11.137_startup_partial_file_not_completed");
+                $"result=REJECT reason=completed_result_but_file_not_complete now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} fileAudit={SafeValue(interruptedFile)} fileEvidence={SafeValue(fileEvidence.Summary)} action=finalize_as_interrupted_not_completed rule=release_contract");
             return false;
         }
         if (!completedResult && !fileEvidence.LikelyCompleted)
@@ -428,7 +469,7 @@ class ReservationScheduler : BackgroundService
             $"result=COMPLETED_PAST_END reason={(completedResult ? "completed_record_result" : "recording_file_reached_program_end")} " +
             $"now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} " +
             $"service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} fileAudit={SafeValue(interruptedFile)} " +
-            $"fileEvidence={SafeValue(fileEvidence.Summary)} rule=v0.11.116_recovery_past_end_completion_guard");
+            $"fileEvidence={SafeValue(fileEvidence.Summary)} rule=release_contract");
         return true;
     }
 
@@ -500,7 +541,7 @@ class ReservationScheduler : BackgroundService
 
     private static long CalculateMinimumViableCompletedRecordingBytes(double expectedSeconds)
     {
-        // v0.11.138:
+        // release_contract:
         // 起動時復旧でのみ使う低すぎる録画ファイルの保険値。
         // 通常停止・TS検証OK・軽微WARNの録画を落とすための判定ではない。
         // 0.5Mbps相当を下限にし、TV録画として明らかに短い部分ファイルだけを弾く。
@@ -517,7 +558,7 @@ class ReservationScheduler : BackgroundService
 
     private StartupRecoveryGuardResult EvaluateStartupRecoveryGuard(Reservation r, string interruptedFile, DateTime now)
     {
-        // v0.11.90:
+        // release_contract:
         // 起動時復旧は「録画workerが消え、ファイルも伸びず、正常結果も無い」場合だけ許可する。
         // TvAIr本体だけを更新/再起動した直後は、TvAIrEpgRec worker が継続録画中でも DB は Recording のまま見える。
         // ここで復旧予約を作ると (1) ファイルを誤生成するため、安全側で復旧を止める。
@@ -537,7 +578,7 @@ class ReservationScheduler : BackgroundService
                 return StartupRecoveryGuardResult.Skip("completed_record_result_exists", null, false, true);
 
             _log.Add("REC_STARTUP_RECOVERY_GUARD", $"R{r.Id}",
-                $"result=CONTINUE reason=completed_result_ignored_due_partial_file file={SafeValue(interruptedFile)} action=finalize_as_interrupted_not_completed rule=v0.11.137_startup_partial_file_not_completed");
+                $"result=CONTINUE reason=completed_result_ignored_due_partial_file file={SafeValue(interruptedFile)} action=finalize_as_interrupted_not_completed rule=release_contract");
         }
 
         var fileGrowing = IsRecordingFileGrowing(interruptedFile);
@@ -654,11 +695,11 @@ class ReservationScheduler : BackgroundService
         var policyRawTitleBlank = ReservationTitleDisplayContract.RawBlankFlag(policyReservation?.Title);
         var detachedSuccessors = _store.DetachUserChainSuccessorsForManualStop(reservationId);
         _log.Add("CHAIN_STOP_POLICY", $"R{reservationId}",
-            $"operation=ManualStop service={policyService} title={policyTitle} rawTitleBlank={policyRawTitleBlank} policy=current_segment_only successorAction={(detachedSuccessors.Count > 0 ? "DetachKeepScheduled" : "None")} detachedSuccessors={detachedSuccessors.Count} cancelSuccessors=False normalReservationStopRouteUnchanged=True rule=v0.11.516_chain_stop_policy_title_metadata_contract");
+            $"operation=ManualStop service={policyService} title={policyTitle} rawTitleBlank={policyRawTitleBlank} policy=current_segment_only successorAction={(detachedSuccessors.Count > 0 ? "DetachKeepScheduled" : "None")} detachedSuccessors={detachedSuccessors.Count} cancelSuccessors=False normalReservationStopRouteUnchanged=True rule=release_contract");
         if (detachedSuccessors.Count > 0)
         {
             _log.Add("CHAIN_SESSION_DETACH", $"R{reservationId}",
-                $"operation=ManualStop result=SUCCESSORS_DETACHED count={detachedSuccessors.Count} targets=[{string.Join(",", detachedSuccessors.Select(x => $"R{x.Id}:{SafeValue(x.ServiceName)}:{ReservationDisplayTitle(x.Title, 40)}"))}] sessionReleaseDeferredUntilStop=True rule=v0.9.83_failed_direct_route_guard");
+                $"operation=ManualStop result=SUCCESSORS_DETACHED count={detachedSuccessors.Count} targets=[{string.Join(",", detachedSuccessors.Select(x => $"R{x.Id}:{SafeValue(x.ServiceName)}:{ReservationDisplayTitle(x.Title, 40)}"))}] sessionReleaseDeferredUntilStop=True rule=release_contract");
         }
 
         if (session is null)
@@ -690,7 +731,7 @@ class ReservationScheduler : BackgroundService
             return;
         }
 
-        // 0. v32.85: 放送終了時刻を過ぎたのに scheduled のまま残っている予約を Cancelled に移行
+        // 0. 放送終了時刻を過ぎたのに scheduled のまま残っている予約を Cancelled に移行
         //    (無効予約・競合予約・録画失敗残骸など。予約リストを自動掃除する。)
         try
         {
@@ -699,7 +740,7 @@ class ReservationScheduler : BackgroundService
             {
                 _log.Add("Scheduler", "Expire", $"放送終了予約を自動キャンセル: {expired}件");
 
-                // v0.8.23:
+                // release_contract:
                 // Expire処理後の保険としてだけ実行する。通常Tickごとには走らせない。
                 ClearTerminalConflictResiduesSafe("tick_after_expire");
             }
@@ -755,14 +796,44 @@ class ReservationScheduler : BackgroundService
         _tunerPool.PreemptEpgForUpcomingRecordings(upcoming);
 
         // 3. 開始すべき予約を取得して起動
-        // v34.40: 全件再評価は重いので、起動直後 / 状態変化時 / 開始接近時 / 1分ごとに限定する。
+        // 全件再評価は重いので、起動直後 / 状態変化時 / 開始接近時 / 1分ごとに限定する。
         RestoreActiveRecordingStatusesBeforeDecision(now, "tick_before_due_scan");
         MaybeReevaluateForTick(now);
 
-        // v0.6.29: source=Epg の直前EPG確認は通常録画ルートから除外したまま、
-        // 専用のDueルートで実行する。生成・Wake登録済みなのに消費だけされる退化を防ぐ。
-        await RunDuePreRecordEpgEntriesAsync(now, ct);
+        // 録画開始を最優先にし、録画前EPG確認はこの後の補助キューで処理する。
+        if (!await TryLaunchDueReservationsAsync(now, "TickDueScan", ct).ConfigureAwait(false))
+            return;
 
+        // source=Epg の録画前EPG確認は録画dueスキャン後に時差付きAdmissionで投入する。
+        await RunDuePreRecordEpgEntriesAsync(now, ct).ConfigureAwait(false);
+
+        // 4. Wakeタスク更新。
+        // release_contract: 自動検索予約更新などからのWake再構築要求は視聴中負荷を避けて遅延・差分化されるため、
+        // 毎Tickで期限到来分だけ処理する。通常の定期照合は従来どおり1分間隔。
+        if (_taskSvc.ApplyDeferredWakeTaskIfDue())
+        {
+            _wakeUpdateCounter = 0;
+        }
+        else
+        {
+            _wakeUpdateCounter++;
+            if (_wakeUpdateCounter >= WakeUpdateIntervalTicks)
+            {
+                _wakeUpdateCounter = 0;
+                UpdateWakeTasksForMaintenance();
+            }
+        }
+    }
+
+
+
+
+    private async Task<bool> TryLaunchDueReservationsAsync(DateTime now, string scanSource, CancellationToken ct)
+    {
+        if (!await _recordingDueGate.WaitAsync(0, ct).ConfigureAwait(false))
+            return true;
+        try
+        {
         var scheduled = OrderDueReservationsForTransportBatchLaunch(_store.GetByStatus(ReservationStatus.Scheduled)
             .Where(r => r.IsEnabled)
             // source=Epg は予約リスト表示・Wake計算用のシステムエントリであり、
@@ -784,15 +855,15 @@ class ReservationScheduler : BackgroundService
             AuditReservationsAroundNow(now, "DueForce", force: true);
 
             var hasChainContinuationDue = scheduled.Any(IsChainContinuation);
-            if (StopPhaseGate.TryDeferRecordingStart("TickDueScan", dueIds, msg => _log.Add("REC_DUE_SUPPRESS", "Due", msg), bypassPostStopQuiet: hasChainContinuationDue))
+            if (StopPhaseGate.TryDeferRecordingStart(scanSource, dueIds, msg => _log.Add("REC_DUE_SUPPRESS", "Due", msg), bypassPostStopQuiet: hasChainContinuationDue))
             {
                 foreach (var due in scheduled)
                 {
                     var chain = IsChainContinuation(due);
                     _log.Add("REC_DUE_SUPPRESS", $"R{due.Id}",
-                        $"result=DEFER reason=stop_or_post_stop_quiet chain={chain} nextTick=True " + FormatReservationForAudit(due, "deferred_due"));
+                        $"result=DEFER reason=stop_or_post_stop_quiet chain={chain} nextScan=True " + FormatReservationForAudit(due, "deferred_due"));
                 }
-                return;
+                return false;
             }
         }
 
@@ -808,7 +879,7 @@ class ReservationScheduler : BackgroundService
                 if (_activeSessions.ContainsKey(r.Id)) continue;
             }
 
-            // v0.11.135: 競合のままdue到達した予約は、録画開始内部へ入る前に
+            // release_contract: 競合のままdue到達した予約は、録画開始内部へ入る前に
             // ユーザー運用ログ正本へ1予約1回だけ落とす。REC_FAILEDとは分離する。
             // ここで扱うことで、同時刻に複数dueが並ぶ場合でも後続の正常録画開始に埋もれない。
             var startCandidate = r;
@@ -836,7 +907,7 @@ class ReservationScheduler : BackgroundService
                 startCandidate = latest;
                 _forceAllocationReevaluate = true;
                 _log.Add("Scheduler", SafeValue(latest.ServiceName),
-                    $"競合再評価: service=[{SafeValue(latest.ServiceName)}] title=[{ReservationDisplayTitle(latest.Title)}] id=R{latest.Id} 空きチューナーを確認・競合フラグをクリアして録画開始します。group={conflictGroup} rule=v0.11.135_conflict_due_terminal_state");
+                    $"競合再評価: service=[{SafeValue(latest.ServiceName)}] title=[{ReservationDisplayTitle(latest.Title)}] id=R{latest.Id} 空きチューナーを確認・競合フラグをクリアして録画開始します。group={conflictGroup} rule=release_contract");
             }
 
             if (launchedAtLeastOneThisTick && _ini.TunerSlotCooldownMs > 0)
@@ -846,7 +917,7 @@ class ReservationScheduler : BackgroundService
                     $"mode={waitPlan.Mode} waitMs={waitPlan.WaitMs} baseCooldownMs={_ini.TunerSlotCooldownMs} " +
                     $"previous={(previousLaunchedThisTick is null ? "-" : $"R{previousLaunchedThisTick.Id}")} sameTransport={waitPlan.SameTransport} sameStart={waitPlan.SameStart} " +
                     $"batchCount={transportBatchLaunchCount} currentKey={BuildTransportBatchKey(startCandidate)} previousKey={(previousLaunchedThisTick is null ? "-" : BuildTransportBatchKey(previousLaunchedThisTick))} " +
-                    $"reason={waitPlan.Reason} rule=v1.0.0_due_recording_batch_launch_contract");
+                    $"reason={waitPlan.Reason} rule=due_recording_batch_launch_contract");
                 if (waitPlan.WaitMs > 0)
                 {
                     await Task.Delay(waitPlan.WaitMs, ct);
@@ -865,26 +936,13 @@ class ReservationScheduler : BackgroundService
             }
         }
 
-        // 4. Wakeタスク更新。
-        // v0.5.66: 自動検索予約更新などからのWake再構築要求は視聴中負荷を避けて遅延・差分化されるため、
-        // 毎Tickで期限到来分だけ処理する。通常の定期照合は従来どおり1分間隔。
-        if (_taskSvc.ApplyDeferredWakeTaskIfDue())
-        {
-            _wakeUpdateCounter = 0;
+            return true;
         }
-        else
+        finally
         {
-            _wakeUpdateCounter++;
-            if (_wakeUpdateCounter >= WakeUpdateIntervalTicks)
-            {
-                _wakeUpdateCounter = 0;
-                UpdateWakeTasksForMaintenance();
-            }
+            _recordingDueGate.Release();
         }
     }
-
-
-
 
     private static string BuildPreRecordEpgRuntimeTitle(Reservation parent, string tunerName)
     {
@@ -904,7 +962,7 @@ class ReservationScheduler : BackgroundService
         if (r.Source != ReservationSource.Epg) return false;
         if (!r.SourceRuleId.HasValue) return false;
         if (string.Equals(r.SourceRuleName, "PreRecEpg", StringComparison.OrdinalIgnoreCase)) return true;
-        // Legacy compatibility: v0.11.175 and earlier stored internal purpose in title.
+        // Legacy compatibility: release_contract and earlier stored internal purpose in title.
         return r.Title.StartsWith("EPG確認", StringComparison.Ordinal);
     }
 
@@ -915,206 +973,397 @@ class ReservationScheduler : BackgroundService
             .Where(r => r.IsEnabled)
             .Where(IsPreRecordEpgEntry)
             .Where(r => r.StartTime <= now)
+            .Where(r => !_activePreRecordEpgEntries.ContainsKey(r.Id))
             .OrderBy(r => r.StartTime)
             .ThenBy(r => r.Id)
             .ToList();
 
         if (candidates.Count == 0) return;
 
+        var plans = new List<PreRecordEpgPlan>();
         foreach (var epg in candidates)
         {
             ct.ThrowIfCancellationRequested();
+            var plan = TryBuildPreRecordEpgPlan(epg, now);
+            if (plan is not null)
+                plans.Add(plan);
+        }
 
-            if (epg.EndTime <= now)
+        if (plans.Count == 0) return;
+
+        var pending = plans
+            .OrderBy(p => p.Epg.StartTime)
+            .ThenBy(p => p.Epg.Id)
+            .ToList();
+        var waveIndex = 0;
+
+        while (pending.Count > 0)
+        {
+            ct.ThrowIfCancellationRequested();
+            var wave = SelectPreRecordEpgAdmissionWave(pending);
+            if (wave.Count == 0)
             {
-                _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
-                    $"result=SKIP reason=window_expired epg=R{epg.Id} parent={(epg.SourceRuleId.HasValue ? $"R{epg.SourceRuleId.Value}" : "-")} start={epg.StartTime:MM/dd HH:mm:ss} end={epg.EndTime:MM/dd HH:mm:ss} now={now:MM/dd HH:mm:ss} rule=v0.6.37_prerec_cancelled_child_completion_guard");
-                TryCompletePreRecordEpgEntry(epg, "skip_before_probe");
+                _log.Add("EPG_SCHEDULER", "PreRecAdmission",
+                    $"admission=WAIT result=DEFER reason=all_candidate_groups_busy pending={pending.Count} activeGroups={FormatActivePreRecordEpgGroups()} tunerPoolEpgGroups={FormatTunerPoolPreRecordEpgGroups()} policy=single_active_prerec_per_broadcast_group rule=release_contract");
+                return;
+            }
+
+            foreach (var plan in wave)
+            {
+                if (IsPreRecordEpgAdmissionGroupBusy(plan.AdmissionGroup, out var busyReason, out var busyDetail))
+                {
+                    _log.Add("EPG_SCHEDULER", "PreRecAdmission",
+                        $"admission=R{plan.Epg.Id} result=DEFER reason={busyReason} detail={SafeValue(busyDetail)} epg=R{plan.Epg.Id} parent=R{plan.Parent.Id} admissionGroup={SafeValue(plan.AdmissionGroup)} group={SafeValue(plan.Group)} action=wait_next_admission activeGroups={FormatActivePreRecordEpgGroups()} tunerPoolEpgGroups={FormatTunerPoolPreRecordEpgGroups()} policy=single_active_prerec_per_broadcast_group rule=release_contract");
+                    continue;
+                }
+
+                if (!_activePreRecordEpgGroups.TryAdd(plan.AdmissionGroup, plan.Epg.Id))
+                {
+                    _log.Add("EPG_SCHEDULER", "PreRecAdmission",
+                        $"admission=R{plan.Epg.Id} result=DEFER reason=active_prerec_group_race epg=R{plan.Epg.Id} parent=R{plan.Parent.Id} admissionGroup={SafeValue(plan.AdmissionGroup)} activeGroups={FormatActivePreRecordEpgGroups()} tunerPoolEpgGroups={FormatTunerPoolPreRecordEpgGroups()} action=wait_next_admission policy=single_active_prerec_per_broadcast_group rule=release_contract");
+                    continue;
+                }
+
+                pending.Remove(plan);
+                if (!_activePreRecordEpgEntries.TryAdd(plan.Epg.Id, 0))
+                {
+                    _activePreRecordEpgGroups.TryRemove(plan.AdmissionGroup, out _);
+                    continue;
+                }
+
+                _log.Add("EPG_SCHEDULER", "PreRecAdmission",
+                    $"admission=R{plan.Epg.Id} result=START wave={waveIndex} reason=group_free epg=R{plan.Epg.Id} parent=R{plan.Parent.Id} admissionGroup={SafeValue(plan.AdmissionGroup)} group={SafeValue(plan.Group)} staggerMs={PreRecordEpgLaunchStaggerMs} dueStart={plan.DueStart:MM/dd HH:mm:ss} secondsUntilDueStart={plan.SecondsUntilDueStart} activeGroups={FormatActivePreRecordEpgGroups()} tunerPoolEpgGroups={FormatTunerPoolPreRecordEpgGroups()} policy=single_active_prerec_per_broadcast_group_staggered rule=release_contract");
+
+                _ = Task.Run(() => ExecutePreRecordEpgPlanAsync(plan, ct), CancellationToken.None);
+            }
+
+            waveIndex++;
+            if (pending.Count > 0)
+                await Task.Delay(PreRecordEpgLaunchStaggerMs, ct).ConfigureAwait(false);
+        }
+    }
+
+    private List<PreRecordEpgPlan> SelectPreRecordEpgAdmissionWave(List<PreRecordEpgPlan> pending)
+    {
+        var wave = new List<PreRecordEpgPlan>();
+        var selectedGroups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var groupName in new[] { "GR", "BSCS" })
+        {
+            if (IsPreRecordEpgAdmissionGroupBusy(groupName, out var reason, out var detail))
+            {
+                var deferred = pending.FirstOrDefault(p => string.Equals(p.AdmissionGroup, groupName, StringComparison.OrdinalIgnoreCase));
+                if (deferred is not null)
+                {
+                    _log.Add("EPG_SCHEDULER", "PreRecAdmission",
+                        $"admission=R{deferred.Epg.Id} result=DEFER reason={reason} detail={SafeValue(detail)} epg=R{deferred.Epg.Id} parent=R{deferred.Parent.Id} admissionGroup={groupName} action=wait_next_admission activeGroups={FormatActivePreRecordEpgGroups()} tunerPoolEpgGroups={FormatTunerPoolPreRecordEpgGroups()} policy=single_active_prerec_per_broadcast_group rule=release_contract");
+                }
                 continue;
             }
 
-            var parent = epg.SourceRuleId.HasValue ? _store.GetById(epg.SourceRuleId.Value) : null;
-            if (parent is null)
-            {
-                _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
-                    $"result=SKIP reason=parent_missing epg=R{epg.Id} parent={(epg.SourceRuleId.HasValue ? $"R{epg.SourceRuleId.Value}" : "-")} rule=v0.6.37_prerec_cancelled_child_completion_guard");
-                TryCompletePreRecordEpgEntry(epg, "skip_before_probe");
-                continue;
-            }
+            var plan = pending.FirstOrDefault(p => string.Equals(p.AdmissionGroup, groupName, StringComparison.OrdinalIgnoreCase));
+            if (plan is not null && selectedGroups.Add(plan.AdmissionGroup))
+                wave.Add(plan);
+        }
 
-            if (IsExpiredPreRecordEpgForParent(epg, parent, now))
+        if (wave.Count == 0)
+        {
+            foreach (var plan in pending)
             {
-                _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
-                    $"result=SKIP reason=deadline_already_passed epg=R{epg.Id} parent=R{parent.Id} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} epgStart={epg.StartTime:MM/dd HH:mm:ss} parentCreated={parent.CreatedAt:MM/dd HH:mm:ss} epgCreated={epg.CreatedAt:MM/dd HH:mm:ss} now={now:MM/dd HH:mm:ss} action=recording_priority rule=v0.11.141_prerec_deadline_epg_blocked_classification");
-                TryCompletePreRecordEpgEntry(epg, "skip_deadline_already_passed");
-                continue;
+                if (IsPreRecordEpgAdmissionGroupBusy(plan.AdmissionGroup, out _, out _))
+                    continue;
+                if (selectedGroups.Add(plan.AdmissionGroup))
+                {
+                    wave.Add(plan);
+                    break;
+                }
             }
+        }
 
-            if (parent.Status == ReservationStatus.Recording)
-            {
-                _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
-                    $"result=SKIP reason=parent_already_recording epg=R{epg.Id} parent=R{parent.Id} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=v0.6.37_prerec_cancelled_child_completion_guard");
-                TryCompletePreRecordEpgEntry(epg, "skip_before_probe");
-                continue;
-            }
+        return wave;
+    }
 
-            if (parent.Status != ReservationStatus.Scheduled || !parent.IsEnabled || parent.IsConflicted)
-            {
-                _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
-                    $"result=SKIP reason=parent_not_recordable epg=R{epg.Id} parent=R{parent.Id} status={parent.Status} enabled={parent.IsEnabled} conflicted={parent.IsConflicted} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=v0.6.37_prerec_cancelled_child_completion_guard");
-                TryCompletePreRecordEpgEntry(epg, "skip_before_probe");
-                continue;
-            }
+    private bool IsPreRecordEpgAdmissionGroupBusy(string admissionGroup, out string reason, out string detail)
+    {
+        var normalized = NormalizePreRecordAdmissionGroup(admissionGroup);
+        if (_activePreRecordEpgGroups.TryGetValue(normalized, out var activeEpgId))
+        {
+            reason = "active_prerec_group";
+            detail = $"activeEpg=R{activeEpgId}";
+            return true;
+        }
 
-            var group = ResolveGroup(parent);
-            if (string.IsNullOrWhiteSpace(group))
-            {
-                _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
-                    $"result=SKIP reason=group_unresolved epg=R{epg.Id} parent=R{parent.Id} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=v0.6.37_prerec_cancelled_child_completion_guard");
-                TryCompletePreRecordEpgEntry(epg, "skip_before_probe");
-                continue;
-            }
+        if (_tunerPool.HasActiveEpgInGroup(normalized, out var tunerSummary))
+        {
+            reason = "tunerpool_epg_active";
+            detail = tunerSummary;
+            return true;
+        }
+
+        reason = "-";
+        detail = "-";
+        return false;
+    }
+
+    private string FormatActivePreRecordEpgGroups()
+    {
+        var entries = _activePreRecordEpgGroups
+            .OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(kv => $"{kv.Key}:R{kv.Value}")
+            .ToList();
+        return entries.Count == 0 ? "-" : string.Join(",", entries);
+    }
+
+    private string FormatTunerPoolPreRecordEpgGroups()
+    {
+        var gr = _tunerPool.GetActiveEpgGroupSummary("GR");
+        var bscs = _tunerPool.GetActiveEpgGroupSummary("BSCS");
+        var entries = new List<string>();
+        if (!string.Equals(gr, "-", StringComparison.Ordinal)) entries.Add($"GR=[{gr}]");
+        if (!string.Equals(bscs, "-", StringComparison.Ordinal)) entries.Add($"BSCS=[{bscs}]");
+        return entries.Count == 0 ? "-" : string.Join(";", entries);
+    }
+
+    private PreRecordEpgPlan? TryBuildPreRecordEpgPlan(Reservation epg, DateTime now)
+    {
+        if (epg.EndTime <= now)
+        {
+            _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
+                $"result=SKIP reason=window_expired epg=R{epg.Id} parent={(epg.SourceRuleId.HasValue ? $"R{epg.SourceRuleId.Value}" : "-")} start={epg.StartTime:MM/dd HH:mm:ss} end={epg.EndTime:MM/dd HH:mm:ss} now={now:MM/dd HH:mm:ss} rule=release_contract");
+            TryCompletePreRecordEpgEntry(epg, "skip_before_probe");
+            return null;
+        }
+
+        var parent = epg.SourceRuleId.HasValue ? _store.GetById(epg.SourceRuleId.Value) : null;
+        if (parent is null)
+        {
+            _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
+                $"result=SKIP reason=parent_missing epg=R{epg.Id} parent={(epg.SourceRuleId.HasValue ? $"R{epg.SourceRuleId.Value}" : "-")} rule=release_contract");
+            TryCompletePreRecordEpgEntry(epg, "skip_before_probe");
+            return null;
+        }
+
+        if (IsExpiredPreRecordEpgForParent(epg, parent, now))
+        {
+            _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
+                $"result=SKIP reason=deadline_already_passed epg=R{epg.Id} parent=R{parent.Id} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} epgStart={epg.StartTime:MM/dd HH:mm:ss} parentCreated={parent.CreatedAt:MM/dd HH:mm:ss} epgCreated={epg.CreatedAt:MM/dd HH:mm:ss} now={now:MM/dd HH:mm:ss} action=recording_priority rule=release_contract");
+            TryCompletePreRecordEpgEntry(epg, "skip_deadline_already_passed");
+            return null;
+        }
+
+        if (parent.Status == ReservationStatus.Recording)
+        {
+            _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
+                $"result=SKIP reason=parent_already_recording epg=R{epg.Id} parent=R{parent.Id} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=release_contract");
+            TryCompletePreRecordEpgEntry(epg, "skip_before_probe");
+            return null;
+        }
+
+        if (parent.Status != ReservationStatus.Scheduled || !parent.IsEnabled || parent.IsConflicted)
+        {
+            _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
+                $"result=SKIP reason=parent_not_recordable epg=R{epg.Id} parent=R{parent.Id} status={parent.Status} enabled={parent.IsEnabled} conflicted={parent.IsConflicted} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=release_contract");
+            TryCompletePreRecordEpgEntry(epg, "skip_before_probe");
+            return null;
+        }
+
+        var group = ResolveGroup(parent);
+        if (string.IsNullOrWhiteSpace(group))
+        {
+            _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
+                $"result=SKIP reason=group_unresolved epg=R{epg.Id} parent=R{parent.Id} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=release_contract");
+            TryCompletePreRecordEpgEntry(epg, "skip_before_probe");
+            return null;
+        }
+
+        var dueStart = parent.StartTime.AddSeconds(-_ini.PreStartMarginSeconds);
+        var schedulerNow = _broadcastClock.Now;
+        var secondsUntilDueStart = (int)Math.Floor((dueStart - schedulerNow).TotalSeconds);
+        if (secondsUntilDueStart <= PreRecordEpgStopBeforeRecordingDueSeconds)
+        {
+            _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
+                $"result=SKIP reason=too_close_to_recording epg=R{epg.Id} parent=R{parent.Id} secondsUntilDueStart={secondsUntilDueStart} stopBeforeDueSeconds={PreRecordEpgStopBeforeRecordingDueSeconds} dueStart={dueStart:MM/dd HH:mm:ss} now={schedulerNow:MM/dd HH:mm:ss} action=recording_priority service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=release_contract");
+            TryCompletePreRecordEpgEntry(epg, "skip_before_probe");
+            return null;
+        }
+
+        var maxAllowedSeconds = secondsUntilDueStart - PreRecordEpgStopBeforeRecordingDueSeconds;
+        if (maxAllowedSeconds < PreRecordEpgMinimumProbeSeconds)
+        {
+            _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
+                $"result=SKIP reason=insufficient_probe_window epg=R{epg.Id} parent=R{parent.Id} secondsUntilDueStart={secondsUntilDueStart} maxAllowedSeconds={maxAllowedSeconds} minProbeSeconds={PreRecordEpgMinimumProbeSeconds} rule=release_contract");
+            TryCompletePreRecordEpgEntry(epg, "skip_before_probe");
+            return null;
+        }
+
+        var chainContext = BuildPreTuneChainContext(parent);
+        if (chainContext.SkipNewWorker)
+        {
+            _log.Add("PRE_REC_PRETUNE_PLAN", $"R{epg.Id}",
+                $"parent=R{parent.Id} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} group={group} chainPosition={chainContext.ChainPosition} action={chainContext.Action} preferredRecordingTuner={SafeValue(parent.TunerName)} predecessor=R{(parent.UserChainPreviousId.HasValue ? parent.UserChainPreviousId.Value.ToString() : "-")} reason={chainContext.Reason} policy=use_existing_recording_session_no_extra_window rule=release_contract");
+            TryCompletePreRecordEpgEntry(epg, "skip_successor_existing_session");
+            return null;
+        }
+
+        var displayTuner = string.IsNullOrWhiteSpace(chainContext.PreferredTunerName) ? parent.TunerName : chainContext.PreferredTunerName;
+        if (!string.IsNullOrWhiteSpace(displayTuner)
+            && !string.Equals(epg.TunerName, displayTuner, StringComparison.OrdinalIgnoreCase))
+        {
+            _store.RebindScheduledPreRecordEpgEntry(epg.Id, parent.Id, epg.StartTime, epg.EndTime, displayTuner);
+            _log.Add("PRE_REC_PRETUNE_META_REBIND", $"R{epg.Id}",
+                $"result=OK epg=R{epg.Id} parent=R{parent.Id} oldTuner={SafeValue(epg.TunerName)} displayTuner={SafeValue(displayTuner)} recordingTuner={SafeValue(parent.TunerName)} reason=align_prerec_child_metadata_with_actual_pretune_route rule=release_contract");
+            epg.TunerName = displayTuner;
+            epg.Title = BuildPreRecordEpgRuntimeTitle(parent, displayTuner);
+        }
+
+        var probeCeilingSeconds = Math.Max(PreRecordEpgMinimumProbeSeconds, Math.Min(PreRecordEpgProbeCeilingSeconds, maxAllowedSeconds));
+        return new PreRecordEpgPlan(
+            Epg: epg,
+            Parent: parent,
+            Group: group,
+            AdmissionGroup: NormalizePreRecordAdmissionGroup(group),
+            DueStart: dueStart,
+            SecondsUntilDueStart: secondsUntilDueStart,
+            ProbeCeilingSeconds: probeCeilingSeconds,
+            ChainContext: chainContext);
+    }
+
+    private async Task ExecutePreRecordEpgPlanAsync(PreRecordEpgPlan plan, CancellationToken schedulerToken)
+    {
+        var epg = plan.Epg;
+        var parent = plan.Parent;
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(schedulerToken);
+            var secondsUntilDueStart = (int)Math.Floor((plan.DueStart - _broadcastClock.Now).TotalSeconds);
+            var cancelAfterSeconds = Math.Max(PreRecordEpgMinimumProbeSeconds, secondsUntilDueStart - PreRecordEpgStopBeforeRecordingDueSeconds);
+            cts.CancelAfter(TimeSpan.FromSeconds(cancelAfterSeconds));
+            var ct = cts.Token;
 
             var status = _epgCapture.GetStatus();
             if (string.Equals(status.Phase, "running", StringComparison.OrdinalIgnoreCase))
             {
                 _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
-                    $"result=CONTINUE reason=pre_record_priority_over_normal_epg epg=R{epg.Id} parent=R{parent.Id} phase={status.Phase} runPurpose={SafeValue(status.RunPurpose)} targetScope={SafeValue(status.TargetScope)} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} action=preempt_normal_epg_and_run_prerec rule=v0.9.96_prerec_pretune_preempts_normal_epg");
+                    $"result=CONTINUE reason=pre_record_priority_over_normal_epg epg=R{epg.Id} parent=R{parent.Id} phase={status.Phase} runPurpose={SafeValue(status.RunPurpose)} targetScope={SafeValue(status.TargetScope)} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} action=preempt_normal_epg_and_run_prerec rule=release_contract");
                 try
                 {
-                    var preempted = await _epgCapture.PreemptNormalEpgWorkersForPreRecordAsync(group, $"pre_record_epg_R{epg.Id}_parent_R{parent.Id}", ct).ConfigureAwait(false);
+                    var preempted = await _epgCapture.PreemptNormalEpgWorkersForPreRecordAsync(plan.Group, $"pre_record_epg_R{epg.Id}_parent_R{parent.Id}", ct).ConfigureAwait(false);
                     _log.Add("PRE_REC_PRETUNE_PREEMPT_NORMAL_EPG", $"R{epg.Id}",
-                        $"result=REQUESTED parent=R{parent.Id} group={SafeValue(group)} preemptedWorkers={preempted} action=continue_pre_record_epg_without_defer service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=v0.9.96_prerec_pretune_preempts_normal_epg");
+                        $"result=REQUESTED parent=R{parent.Id} group={SafeValue(plan.Group)} preemptedWorkers={preempted} action=continue_pre_record_epg_without_defer service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=release_contract");
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     _log.Add("PRE_REC_PRETUNE_PREEMPT_NORMAL_EPG", $"R{epg.Id}",
-                        $"result=WARN parent=R{parent.Id} group={SafeValue(group)} error={ex.GetType().Name}:{SafeValue(ex.Message)} action=continue_pre_record_epg_without_defer rule=v0.9.96_prerec_pretune_preempts_normal_epg");
+                        $"result=WARN parent=R{parent.Id} group={SafeValue(plan.Group)} error={ex.GetType().Name}:{SafeValue(ex.Message)} action=continue_pre_record_epg_without_defer rule=release_contract");
                 }
-            }
-
-            var dueStart = parent.StartTime.AddSeconds(-_ini.PreStartMarginSeconds);
-            var schedulerNow = _broadcastClock.Now;
-            var secondsUntilDueStart = (int)Math.Floor((dueStart - schedulerNow).TotalSeconds);
-            // v0.10.07:
-            // SleepGuard は TvAIrEpgRec.exe を監視しているため、録画前EPG確認workerを
-            // 録画due直前まで維持し、PreRecEpg終了→Record起動のプロセス空白を最小化する。
-            // これはチューナー予備確保や待ち時間延長ではなく、既存TvAIrEpgRec監視前提のハンドオフ調整。
-            const int preRecSafetySeconds = 1;
-            const int preRecProbeCeilingSeconds = 90;
-            var maxAllowedSeconds = secondsUntilDueStart - preRecSafetySeconds;
-            if (maxAllowedSeconds < 8)
-            {
-                _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
-                    $"result=SKIP reason=too_close_to_recording epg=R{epg.Id} parent=R{parent.Id} secondsUntilDueStart={secondsUntilDueStart} safetySeconds={preRecSafetySeconds} minProbeSeconds=8 dueStart={dueStart:MM/dd HH:mm:ss} now={schedulerNow:MM/dd HH:mm:ss} action=recording_priority_and_follow_during_recording service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=v0.6.37_prerec_cancelled_child_completion_guard");
-                TryCompletePreRecordEpgEntry(epg, "skip_before_probe");
-                continue;
-            }
-            var preRecProbeSafetyCeilingSeconds = Math.Max(8, Math.Min(preRecProbeCeilingSeconds, maxAllowedSeconds));
-
-            var chainContext = BuildPreTuneChainContext(parent);
-            if (chainContext.SkipNewWorker)
-            {
-                _log.Add("PRE_REC_PRETUNE_PLAN", $"R{epg.Id}",
-                    $"parent=R{parent.Id} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} group={group} chainPosition={chainContext.ChainPosition} action={chainContext.Action} preferredRecordingTuner={SafeValue(parent.TunerName)} predecessor=R{(parent.UserChainPreviousId.HasValue ? parent.UserChainPreviousId.Value.ToString() : "-")} reason={chainContext.Reason} policy=use_existing_recording_session_no_extra_window rule=v0.9.94_chain_head_pretune_state_transition");
-                TryCompletePreRecordEpgEntry(epg, "skip_successor_existing_session");
-                continue;
-            }
-
-            var displayTuner = string.IsNullOrWhiteSpace(chainContext.PreferredTunerName) ? parent.TunerName : chainContext.PreferredTunerName;
-            if (!string.IsNullOrWhiteSpace(displayTuner)
-                && !string.Equals(epg.TunerName, displayTuner, StringComparison.OrdinalIgnoreCase))
-            {
-                _store.RebindScheduledPreRecordEpgEntry(epg.Id, parent.Id, epg.StartTime, epg.EndTime, displayTuner);
-                _log.Add("PRE_REC_PRETUNE_META_REBIND", $"R{epg.Id}",
-                    $"result=OK epg=R{epg.Id} parent=R{parent.Id} oldTuner={SafeValue(epg.TunerName)} displayTuner={SafeValue(displayTuner)} recordingTuner={SafeValue(parent.TunerName)} reason=align_prerec_child_metadata_with_actual_pretune_route rule=v0.10.10_prerec_child_tuner_metadata_align");
-                epg.TunerName = displayTuner;
-                epg.Title = BuildPreRecordEpgRuntimeTitle(parent, displayTuner);
             }
 
             _log.Add("PRE_REC_EPG_START", $"R{epg.Id}",
-                $"epg=R{epg.Id} parent=R{parent.Id} group={group} tuner={SafeValue(epg.TunerName)} recordingTuner={SafeValue(parent.TunerName)} chainPosition={chainContext.ChainPosition} preTuneAction={chainContext.Action} window={epg.StartTime:MM/dd HH:mm:ss}〜{epg.EndTime:MM/dd HH:mm:ss} probeSafetyCeilingSeconds={preRecProbeSafetyCeilingSeconds} dueStart={dueStart:MM/dd HH:mm:ss} safetySeconds={preRecSafetySeconds} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} nid={parent.NetworkId} tsid={parent.TransportStreamId} sid={parent.ServiceId} eventId={parent.EventId} policy=silent_time_follow_probe_and_record_pretune_same_tuner rule=v0.10.10_prerec_child_tuner_metadata_align");
+                $"epg=R{epg.Id} parent=R{parent.Id} group={plan.Group} admissionGroup={plan.AdmissionGroup} tuner={SafeValue(epg.TunerName)} recordingTuner={SafeValue(parent.TunerName)} chainPosition={plan.ChainContext.ChainPosition} preTuneAction={plan.ChainContext.Action} window={epg.StartTime:MM/dd HH:mm:ss}〜{epg.EndTime:MM/dd HH:mm:ss} probeSafetyCeilingSeconds={plan.ProbeCeilingSeconds} dueStart={plan.DueStart:MM/dd HH:mm:ss} stopBeforeDueSeconds={PreRecordEpgStopBeforeRecordingDueSeconds} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} nid={parent.NetworkId} tsid={parent.TransportStreamId} sid={parent.ServiceId} eventId={parent.EventId} policy=staggered_parallel_time_follow_probe rule=release_contract");
 
             _log.Add("PRE_REC_PRETUNE_PLAN", $"R{epg.Id}",
-                $"parent=R{parent.Id} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} group={group} chainPosition={chainContext.ChainPosition} action={chainContext.Action} preferredRecordingTuner={SafeValue(chainContext.PreferredTunerName)} expectedNid={parent.NetworkId} expectedTsid={parent.TransportStreamId} expectedSid={parent.ServiceId} expectedEventId={parent.EventId} keepWorkerUntilSafetyCeiling={chainContext.KeepWorkerUntilSafetyCeiling} taskbarIcon=setting_dependent policy=reduce_cross_tuner_record_start_failure rule=v0.9.94_chain_head_pretune_state_transition");
+                $"parent=R{parent.Id} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} group={plan.Group} chainPosition={plan.ChainContext.ChainPosition} action={plan.ChainContext.Action} preferredRecordingTuner={SafeValue(plan.ChainContext.PreferredTunerName)} expectedNid={parent.NetworkId} expectedTsid={parent.TransportStreamId} expectedSid={parent.ServiceId} expectedEventId={parent.EventId} keepWorkerUntilSafetyCeiling={plan.ChainContext.KeepWorkerUntilSafetyCeiling} taskbarIcon=setting_dependent policy=staggered_parallel_prerec_no_recording_worker_hold rule=release_contract");
 
-            try
-            {
-                _broadcastClock.LogPreRecordClockState($"R{epg.Id}", parent.ServiceName, parent.Title);
+            _broadcastClock.LogPreRecordClockState($"R{epg.Id}", parent.ServiceName, parent.Title);
 
-                var result = await _epgCapture.RunAsync(
-                    ct: ct,
-                    targetScope: group,
-                    runDepth: null,
-                    expectedNetworkId: parent.NetworkId,
-                    expectedTransportStreamId: parent.TransportStreamId,
-                    expectedServiceId: parent.ServiceId,
-                    expectedServiceName: parent.ServiceName,
-                    expectedEventId: parent.EventId,
-                    expectedStartTime: parent.StartTime,
-                    expectedEndTime: parent.EndTime,
-                    isPreRecordCheck: true,
-                    maxCaptureSeconds: preRecProbeSafetyCeilingSeconds,
-                    showProgress: false,
-                    preferredRecordingTunerName: chainContext.PreferredTunerName,
-                    preTuneChainPosition: chainContext.ChainPosition,
-                    preTuneAction: chainContext.Action,
-                    preTuneKeepWorkerUntilSafetyCeiling: chainContext.KeepWorkerUntilSafetyCeiling);
+            var result = await _epgCapture.RunAsync(
+                ct: ct,
+                targetScope: plan.Group,
+                runDepth: null,
+                expectedNetworkId: parent.NetworkId,
+                expectedTransportStreamId: parent.TransportStreamId,
+                expectedServiceId: parent.ServiceId,
+                expectedServiceName: parent.ServiceName,
+                expectedEventId: parent.EventId,
+                expectedStartTime: parent.StartTime,
+                expectedEndTime: parent.EndTime,
+                isPreRecordCheck: true,
+                maxCaptureSeconds: plan.ProbeCeilingSeconds,
+                showProgress: false,
+                preferredRecordingTunerName: plan.ChainContext.PreferredTunerName,
+                preTuneChainPosition: plan.ChainContext.ChainPosition,
+                preTuneAction: plan.ChainContext.Action,
+                preTuneKeepWorkerUntilSafetyCeiling: plan.ChainContext.KeepWorkerUntilSafetyCeiling).ConfigureAwait(false);
 
-                var completed = TryCompletePreRecordEpgEntry(epg, "probe_finished");
-                var latestParent = _store.GetById(parent.Id) ?? parent;
-                if (!completed || !IsRecordableForPreRecordFollow(latestParent))
-                {
-                    _log.Add("PRE_REC_EPG_RESULT", $"R{epg.Id}",
-                        $"result=SKIP_AFTER_PROBE epg=R{epg.Id} parent=R{parent.Id} probe=completed reason={(completed ? "parent_not_recordable_after_probe" : "epg_cancelled_during_probe")} parentStatus={latestParent.Status} parentEnabled={latestParent.IsEnabled} parentConflicted={latestParent.IsConflicted} action=do_not_apply_time_follow service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=v0.6.37_prerec_cancelled_child_completion_guard");
-                    continue;
-                }
-
-                var followResults = _store.ApplyTimeFollowingDetailed(new[] { latestParent }, _epgStore);
-                LogPreRecordTimeFollow(epg, latestParent, followResults);
-
-                if (followResults.Any(x => x.Updated))
-                {
-                    _allocationRoute.Run(new ReservationAllocationRouteRequest(
-                        Source: "ReservationScheduler",
-                        Action: "Reevaluate:PreRecTimeFollow",
-                        RunKeywordMatcher: false,
-                        SyncProgramRuleReservations: true,
-                        ReevaluateAllocations: true,
-                        RefreshPreRecordEpgEntries: false,
-                        RefreshWakeTask: true,
-                        EmitConflictLogs: true,
-                        ConflictLogCategory: "PRE_REC_EPG",
-                        ConflictLogTitle: "Conflict(PreRecTimeFollow)"));
-                }
-
-                var followUpdated = followResults.Count(x => x.Updated);
-                var followOutcome = followUpdated > 0 ? "UPDATED" : "NO_CHANGE_OR_NOT_FOUND";
-                _log.Add("PRE_REC_EPG_RESULT", $"R{epg.Id}",
-                    $"result={(result.Success ? "OK" : "FAIL")} epg=R{epg.Id} parent=R{parent.Id} probe=completed followOutcome={followOutcome} timeFollowUpdated={followUpdated} action=keep_or_update_parent_by_time_follow service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=v0.6.37_prerec_cancelled_child_completion_guard");
-                if (!result.Success)
-                    _userEvents.AddPreRecordEpgFailed(latestParent, "probe_failed");
-            }
-            catch (OperationCanceledException)
+            var completed = TryCompletePreRecordEpgEntry(epg, "probe_finished");
+            var latestParent = _store.GetById(parent.Id) ?? parent;
+            if (!completed || !IsRecordableForPreRecordFollow(latestParent))
             {
                 _log.Add("PRE_REC_EPG_RESULT", $"R{epg.Id}",
-                    $"result=CANCELLED epg=R{epg.Id} parent=R{parent.Id} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=v0.6.37_prerec_cancelled_child_completion_guard");
-                throw;
+                    $"result=SKIP_AFTER_PROBE epg=R{epg.Id} parent=R{parent.Id} probe=completed reason={(completed ? "parent_not_recordable_after_probe" : "epg_cancelled_during_probe")} parentStatus={latestParent.Status} parentEnabled={latestParent.IsEnabled} parentConflicted={latestParent.IsConflicted} action=do_not_apply_time_follow service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=release_contract");
+                return;
             }
-            catch (Exception ex)
+
+            var followResults = _store.ApplyTimeFollowingDetailed(new[] { latestParent }, _epgStore);
+            LogPreRecordTimeFollow(epg, latestParent, followResults);
+
+            if (followResults.Any(x => x.Updated))
             {
-                _log.Add("PRE_REC_EPG_RESULT", $"R{epg.Id}",
-                    $"result=ERROR epg=R{epg.Id} parent=R{parent.Id} error={ex.GetType().Name}:{SafeValue(ex.Message)} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=v0.6.37_prerec_cancelled_child_completion_guard");
-                _userEvents.AddPreRecordEpgFailed(parent, $"{ex.GetType().Name}: {ex.Message}");
-                _store.UpdateStatus(epg.Id, ReservationStatus.Failed, force: true);
+                _allocationRoute.Run(new ReservationAllocationRouteRequest(
+                    Source: "ReservationScheduler",
+                    Action: "Reevaluate:PreRecTimeFollow",
+                    RunKeywordMatcher: false,
+                    SyncProgramRuleReservations: true,
+                    ReevaluateAllocations: true,
+                    RefreshPreRecordEpgEntries: false,
+                    RefreshWakeTask: true,
+                    EmitConflictLogs: true,
+                    ConflictLogCategory: "PRE_REC_EPG",
+                    ConflictLogTitle: "Conflict(PreRecTimeFollow)"));
             }
+
+            var followUpdated = followResults.Count(x => x.Updated);
+            var followOutcome = followUpdated > 0 ? "UPDATED" : "NO_CHANGE_OR_NOT_FOUND";
+            _log.Add("PRE_REC_EPG_RESULT", $"R{epg.Id}",
+                $"result={(result.Success ? "OK" : "FAIL")} epg=R{epg.Id} parent=R{parent.Id} probe=completed followOutcome={followOutcome} timeFollowUpdated={followUpdated} action=keep_or_update_parent_by_time_follow service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=release_contract");
+            if (!result.Success)
+                _userEvents.AddPreRecordEpgFailed(latestParent, "probe_failed");
+        }
+        catch (OperationCanceledException) when (!schedulerToken.IsCancellationRequested)
+        {
+            _log.Add("PRE_REC_EPG_RESULT", $"R{epg.Id}",
+                $"result=CANCELLED epg=R{epg.Id} parent=R{parent.Id} reason=recording_due_priority service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=release_contract");
+            TryCompletePreRecordEpgEntry(epg, "cancelled_recording_due_priority");
+        }
+        catch (OperationCanceledException)
+        {
+            _log.Add("PRE_REC_EPG_RESULT", $"R{epg.Id}",
+                $"result=CANCELLED epg=R{epg.Id} parent=R{parent.Id} reason=scheduler_stop service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=release_contract");
+        }
+        catch (Exception ex)
+        {
+            _log.Add("PRE_REC_EPG_RESULT", $"R{epg.Id}",
+                $"result=ERROR epg=R{epg.Id} parent=R{parent.Id} error={ex.GetType().Name}:{SafeValue(ex.Message)} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=release_contract");
+            _userEvents.AddPreRecordEpgFailed(parent, $"{ex.GetType().Name}: {ex.Message}");
+            _store.UpdateStatus(epg.Id, ReservationStatus.Failed, force: true);
+        }
+        finally
+        {
+            _activePreRecordEpgEntries.TryRemove(epg.Id, out _);
+            _activePreRecordEpgGroups.TryRemove(plan.AdmissionGroup, out _);
         }
     }
 
+    private static string NormalizePreRecordAdmissionGroup(string group)
+    {
+        if (string.Equals(group, "GR", StringComparison.OrdinalIgnoreCase)) return "GR";
+        if (group.Contains("BS", StringComparison.OrdinalIgnoreCase) || group.Contains("CS", StringComparison.OrdinalIgnoreCase)) return "BSCS";
+        return group.Trim();
+    }
+
+    private sealed record PreRecordEpgPlan(
+        Reservation Epg,
+        Reservation Parent,
+        string Group,
+        string AdmissionGroup,
+        DateTime DueStart,
+        int SecondsUntilDueStart,
+        int ProbeCeilingSeconds,
+        PreTuneChainContext ChainContext);
 
     private static bool IsExpiredPreRecordEpgForParent(Reservation epgEntry, Reservation parent, DateTime now)
     {
-        // v0.11.141: 予約作成・再構築より前に予定されていた録画前EPG確認を後追い実行しない。
+        // release_contract: 予約作成・再構築より前に予定されていた録画前EPG確認を後追い実行しない。
         // 通常のスケジューラtick遅延では parent.CreatedAt <= epgEntry.StartTime なので実行を許可する。
         var parentCreated = parent.CreatedAt == default ? DateTime.MinValue : parent.CreatedAt;
         var epgCreated = epgEntry.CreatedAt == default ? DateTime.MinValue : epgEntry.CreatedAt;
@@ -1128,11 +1377,11 @@ class ReservationScheduler : BackgroundService
         if (current is not null && current.Status == ReservationStatus.Cancelled)
         {
             _log.Add("PRE_REC_EPG_RESULT", $"R{epgEntry.Id}",
-                $"result=SKIP_STATUS_UPDATE epg=R{epgEntry.Id} reason={reason} currentStatus=Cancelled action=keep_cancelled_state rule=v0.6.37_prerec_cancelled_child_completion_guard");
+                $"result=SKIP_STATUS_UPDATE epg=R{epgEntry.Id} reason={reason} currentStatus=Cancelled action=keep_cancelled_state rule=release_contract");
             return false;
         }
 
-        // v0.10.11:
+        // release_contract:
         // 録画前EPG確認の実行中に親予約の暫定チューナーが再評価で揺れると、
         // 子予約タイトルだけ古い「EPG確認（S1）」等へ戻ることがあった。
         // 完了直前に、実際にこのPreRecEpgが使った表示チューナーへ再同期してからCompletedへ進める。
@@ -1143,7 +1392,7 @@ class ReservationScheduler : BackgroundService
             {
                 _store.RebindScheduledPreRecordEpgEntry(epgEntry.Id, parentId, epgEntry.StartTime, epgEntry.EndTime, epgEntry.TunerName);
                 _log.Add("PRE_REC_EPG_DISPLAY_TUNER_FINALIZE", $"R{epgEntry.Id}",
-                    $"result=OK epg=R{epgEntry.Id} parent=R{parentId} displayTuner={SafeValue(epgEntry.TunerName)} reason=finalize_child_display_tuner_before_completed rule=v0.10.11_wake_plan_generation_slot_guard");
+                    $"result=OK epg=R{epgEntry.Id} parent=R{parentId} displayTuner={SafeValue(epgEntry.TunerName)} reason=finalize_child_display_tuner_before_completed rule=release_contract");
             }
         }
 
@@ -1162,12 +1411,12 @@ class ReservationScheduler : BackgroundService
     {
         var updated = results.Count(x => x.Updated);
         _log.Add("EPG_SCHEDULER", "TimeFollowSummary",
-            $"source=PreRecEpg target=R{parent.Id} epg=R{epgEntry.Id} inspected={results.Count} updated={updated} rule=v0.6.37_prerec_cancelled_child_completion_guard");
+            $"source=PreRecEpg target=R{parent.Id} epg=R{epgEntry.Id} inspected={results.Count} updated={updated} rule=release_contract");
 
         foreach (var r in results)
         {
             _log.Add("EPG_SCHEDULER", r.Updated ? "TimeFollowUpdated" : "TimeFollowNoChange",
-                $"source=PreRecEpg parent=R{r.ReservationId} epg=R{epgEntry.Id} result={(r.Updated ? "UPDATED" : "NO_CHANGE")} reason={r.Reason} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} old={r.OldStart:MM/dd HH:mm:ss}〜{r.OldEnd:MM/dd HH:mm:ss} new={(r.NewStart.HasValue ? r.NewStart.Value.ToString("MM/dd HH:mm:ss") : "-")}〜{(r.NewEnd.HasValue ? r.NewEnd.Value.ToString("MM/dd HH:mm:ss") : "-")} rule=v0.6.37_prerec_cancelled_child_completion_guard");
+                $"source=PreRecEpg parent=R{r.ReservationId} epg=R{epgEntry.Id} result={(r.Updated ? "UPDATED" : "NO_CHANGE")} reason={r.Reason} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} old={r.OldStart:MM/dd HH:mm:ss}〜{r.OldEnd:MM/dd HH:mm:ss} new={(r.NewStart.HasValue ? r.NewStart.Value.ToString("MM/dd HH:mm:ss") : "-")}〜{(r.NewEnd.HasValue ? r.NewEnd.Value.ToString("MM/dd HH:mm:ss") : "-")} rule=release_contract");
             if (r.Updated && r.NewStart.HasValue && r.NewEnd.HasValue)
             {
                 var latest = _store.GetById(r.ReservationId);
@@ -1217,7 +1466,7 @@ class ReservationScheduler : BackgroundService
         }
         _log.Add("REC_START_DECISION", $"R{r.Id}", $"stage=group_resolved group={group} tuner={SafeValue(EffectiveTunerName(r))} ch={SafeValue(r.ChannelArgument)} " + FormatReservationForAudit(r, "group_resolved"));
 
-        // v0.9.81: 競合予約は録画開始系の前処理（REC_PREEMPT_GROUP_LOCK / EPG preempt）に入れない。
+        // release_contract: 競合予約は録画開始系の前処理（REC_PREEMPT_GROUP_LOCK / EPG preempt）に入れない。
         // 先に共通割り当てルートで再評価し、まだ競合なら静かにスキップする。
         // これにより、競合表示は維持しつつ、毎Tickの録画前抑止ログ増殖を止める。
         if (r.IsConflicted)
@@ -1242,7 +1491,7 @@ class ReservationScheduler : BackgroundService
             r.IsConflicted = false;
             _forceAllocationReevaluate = true;
             _log.Add("Scheduler", SafeValue(r.ServiceName),
-                $"競合再評価: service=[{SafeValue(r.ServiceName)}] title=[{ReservationDisplayTitle(r.Title)}] id=R{r.Id} 空きチューナーを確認・競合フラグをクリアして録画開始します。group={group} rule=v0.9.83_failed_direct_route_guard");
+                $"競合再評価: service=[{SafeValue(r.ServiceName)}] title=[{ReservationDisplayTitle(r.Title)}] id=R{r.Id} 空きチューナーを確認・競合フラグをクリアして録画開始します。group={group} rule=release_contract");
         }
 
         var recDueSuppressUntil = DateTime.Now.AddSeconds(RecordingDueEpgSuppressBeforeAfterSec);
@@ -1256,7 +1505,7 @@ class ReservationScheduler : BackgroundService
             $"group={group} until={recDueSuppressUntil:MM/dd HH:mm:ss} reason=recording_due_or_launching " +
             FormatReservationForAudit(r, "epg_suppressed_before_recording"));
 
-        // v0.3.98: 予約録画は手動/定時EPG取得より常に上位。
+        // release_contract: 予約録画は手動/定時EPG取得より常に上位。
         // TunerPoolだけを先にFree化すると、TVTest/BonDriver実体がまだ終了していないDIDを録画が踏むため、
         // ここで同一グループのTvAIr管理EPGプロセスを停止し、終了確認とクールダウンを済ませてから録画判断へ進む。
         await PreemptManagedEpgBeforeRecordingAsync(group, r, ct);
@@ -1380,14 +1629,14 @@ class ReservationScheduler : BackgroundService
             return false;
         }
 
-        // v0.9.76: チェーン後続は既存TvAIrEpgRecセッションへ接続しない。
+        // release_contract: チェーン後続は既存TvAIrEpgRecセッションへ接続しない。
         // 前番組を後番組開始前マージンで明示停止し、同じ実チューナーを通常録画起動で再取得する。
         // これにより「1番組=1TSファイル」を維持し、前番組末尾欠損を契約上の許容範囲に閉じ込める。
         if (IsChainContinuation(r))
         {
             _log.Add("CHAIN_RESTART_ROUTE", $"R{r.Id}",
                 $"stage=before_record_start result=USE_ASSIGNED_TUNER_PREARM reason=program_file_per_reservation successor=R{r.Id} " +
-                $"assignedTuner={SafeValue(r.TunerName)} plannedEnd={plannedEnd:MM/dd HH:mm:ss} activeAttachDisabled=True commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                $"assignedTuner={SafeValue(r.TunerName)} plannedEnd={plannedEnd:MM/dd HH:mm:ss} activeAttachDisabled=True commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
         }
 
         var pt3StartLockWaitAt = DateTime.Now;
@@ -1422,19 +1671,19 @@ class ReservationScheduler : BackgroundService
         _log.Add("TUNER_EXTERNAL_GUARD", $"R{r.Id}",
             $"enabled={unknownExternalLiveGuard} chain={chainContinuation} unknownLiveDid={preAcquireViewingAudit.UnknownLiveDid} " +
             $"liveViewingCount={preAcquireViewingAudit.Processes.Count(p => p.IsLiveViewing)} group={group} requestedTuner={SafeValue(r.TunerName)} " +
-            "rule=v0.4.8_unknown_external_live_reserve_one_recording_slot");
+            "rule=release_contract");
 
         TunerLease? lease = null;
         var predIdForActualChain = chainContinuation ? TryResolveChainPredecessorId(r, out _) : null;
         var activePredSession = predIdForActualChain.HasValue ? TryGetActiveSession(predIdForActualChain.Value) : null;
 
-        // v0.4.12: チェーン後続は「通常のT/S優先順位で再解決」してはいけない。
+        // release_contract: チェーン後続は「通常のT/S優先順位で再解決」してはいけない。
         // 前番組が録画中なら実Lease.Name、停止済みなら予約に引き継がれたTunerNameをチェーン継承候補として扱い、
         // その同一仮想チューナーを最優先で再取得する。これにより TSS「サバ缶、宇宙へ行く」→「TSSニュースナイト」
         // のように前番組が T2 実録画だったのに後続が T1 へ戻る不整合を防ぐ。
         if (chainContinuation)
         {
-            // v0.11.678: チェーン後続のチューナー正本は FinalConflictPlan が予約へ永続化した TunerName。
+            // release_contract: チェーン後続のチューナー正本は FinalConflictPlan が予約へ永続化した TunerName。
             // active predecessor の実チューナーで上書き・継承しない。ここを崩すと ALLOC_ROUTE/TUNER_ALLOC の横串が切れる。
             var chainPreferredTuner = r.TunerName;
             var chainPreferredSource = "final_plan_assigned_tuner";
@@ -1444,7 +1693,7 @@ class ReservationScheduler : BackgroundService
                 _log.Add("CHAIN_ASSIGNED_TUNER_CONTRACT", $"R{r.Id}",
                     $"result=FAIL reason=missing_final_plan_assigned_tuner successor=R{r.Id} predecessor={(predIdForActualChain.HasValue ? $"R{predIdForActualChain.Value}" : "-")} " +
                     $"activePred={(activePredSession is not null)} activePredTuner={(activePredSession is null ? "-" : SafeValue(activePredSession.Lease.Name))} status={_tunerPool.GetStatusSummary()} " +
-                    $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC action=fail_no_fallback rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                    $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC action=fail_no_fallback rule=release_contract");
                 Fail(r, "チェーン後続予約の割当チューナーが未確定のため録画を開始できませんでした。");
                 return false;
             }
@@ -1457,7 +1706,7 @@ class ReservationScheduler : BackgroundService
                 $"result=OK successor=R{r.Id} predecessor={(predIdForActualChain.HasValue ? $"R{predIdForActualChain.Value}" : "-")} " +
                 $"assignedTuner={SafeValue(chainPreferredTuner)} source={chainPreferredSource} activePred={(activePredSession is not null)} " +
                 $"activePredTuner={(activePredSession is null ? "-" : SafeValue(activePredSession.Lease.Name))} sameAsActivePredecessor={sameAsActivePredecessor} " +
-                $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC action=use_assigned_tuner_no_inherit_override rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC action=use_assigned_tuner_no_inherit_override rule=release_contract");
 
             var plannedActualMismatchBeforeAcquire = false;
             _log.Add("CHAIN_RECORDING_RUNTIME_AUDIT", $"R{r.Id}",
@@ -1466,7 +1715,7 @@ class ReservationScheduler : BackgroundService
                 $"plannedTuner={SafeValue(r.TunerName)} actualTuner=- plannedActualMismatch={plannedActualMismatchBeforeAcquire} inheritMatchedActual=- reservationTuner={SafeValue(r.TunerName)} " +
                 $"activePred={(activePredSession is not null)} activePredPid={(activePredSession?.ProcessId.ToString() ?? "-")} " +
                 $"activePredTuner={(activePredSession is null ? "-" : SafeValue(activePredSession.Lease.Name))} activePredDid={(activePredSession is null ? "-" : SafeValue(activePredSession.Lease.Did))} " +
-                $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC stopRestart=False assignedTunerRequired=True behaviorChanged=True rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC stopRestart=False assignedTunerRequired=True behaviorChanged=True rule=release_contract");
 
             var waitedMs = 0;
             while (waitedMs < ChainRequestedTunerWaitMs && !_tunerPool.HasFreeSlotByName(chainPreferredTuner))
@@ -1475,7 +1724,7 @@ class ReservationScheduler : BackgroundService
                 _log.Add("REC_CHAIN_TUNER_WAIT", $"R{r.Id}",
                     $"waiting_for_assigned_chain_tuner assignedTuner={SafeValue(chainPreferredTuner)} source={chainPreferredSource} " +
                     $"pred={(predIdForActualChain.HasValue ? $"R{predIdForActualChain.Value}" : "-")} sameAsActivePredecessor={sameAsActivePredecessor} " +
-                    $"waitedMs={waitedMs} nextWaitMs={waitStepMs} limitMs={ChainRequestedTunerWaitMs} status={_tunerPool.GetStatusSummary()} rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                    $"waitedMs={waitedMs} nextWaitMs={waitStepMs} limitMs={ChainRequestedTunerWaitMs} status={_tunerPool.GetStatusSummary()} rule=release_contract");
                 await Task.Delay(waitStepMs);
                 waitedMs += waitStepMs;
             }
@@ -1492,7 +1741,7 @@ class ReservationScheduler : BackgroundService
 
             _log.Add("REC_CHAIN_TUNER_INHERIT", $"R{r.Id}",
                 $"result=OK assignedTuner={SafeValue(chainPreferredTuner)} lease={lease.Name} did={lease.Did} " +
-                $"source={chainPreferredSource} waitedMs={waitedMs} rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                $"source={chainPreferredSource} waitedMs={waitedMs} rule=release_contract");
             var inheritedTunerMatched = string.Equals(chainPreferredTuner, lease.Name, StringComparison.OrdinalIgnoreCase);
             var plannedActualMismatchAfterAcquire = !string.IsNullOrWhiteSpace(r.TunerName)
                 && !string.Equals(r.TunerName, lease.Name, StringComparison.OrdinalIgnoreCase);
@@ -1500,19 +1749,19 @@ class ReservationScheduler : BackgroundService
                 $"result=ASSIGNED_TUNER_ACQUIRED stage=after_tuner_acquire successor=R{r.Id} predecessor={(predIdForActualChain.HasValue ? $"R{predIdForActualChain.Value}" : "-")} " +
                 $"expectedTuner={SafeValue(chainPreferredTuner)} expectedSource={chainPreferredSource} handoffSource=final_plan_assigned_tuner sourceTransition=common_route_assigned_tuner_preserved sourceDecision=do_not_inherit_predecessor_actual_tuner " +
                 $"plannedTuner={SafeValue(r.TunerName)} actualTuner={SafeValue(lease.Name)} did={SafeValue(lease.Did)} matched={inheritedTunerMatched} inheritMatchedActual={inheritedTunerMatched} plannedActualMismatch={plannedActualMismatchAfterAcquire} " +
-                $"waitedMs={waitedMs} source={chainPreferredSource} commonRoute=ALLOC_ROUTE/TUNER_ALLOC stopRestart=False assignedTunerRequired=True behaviorChanged=True rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                $"waitedMs={waitedMs} source={chainPreferredSource} commonRoute=ALLOC_ROUTE/TUNER_ALLOC stopRestart=False assignedTunerRequired=True behaviorChanged=True rule=release_contract");
         }
         else
         {
             if (!string.IsNullOrWhiteSpace(r.TunerName))
             {
                 _log.Add("REC_TUNER_VIRTUAL_POLICY", $"R{r.Id}",
-                    $"virtualTuner={SafeValue(r.TunerName)} group={group} chain={chainContinuation} action=prefer_reserved_or_pretuned_tuner_at_launch reason=v0.9.98_active_recording_did_guard_compile_fix");
+                    $"virtualTuner={SafeValue(r.TunerName)} group={group} chain={chainContinuation} action=prefer_reserved_or_pretuned_tuner_at_launch reason=release_contract");
                 lease = _tunerPool.AcquireForRecordingByNameWithExternalGuard(r.TunerName, r.Id, plannedEnd, unknownExternalLiveGuard, "pretune_or_allocation_locked_recording_tuner");
                 if (lease is null)
                 {
                     _log.Add("PRETUNE_LOCK_MISMATCH", $"R{r.Id}",
-                        $"result=REQUESTED_TUNER_UNAVAILABLE requestedTuner={SafeValue(r.TunerName)} group={group} chain={chainContinuation} action=fallback_to_common_allocation_if_safe reason=pretuned_or_allocated_tuner_not_free status={_tunerPool.GetStatusSummary()} rule=v0.9.98_active_recording_did_guard_compile_fix");
+                        $"result=REQUESTED_TUNER_UNAVAILABLE requestedTuner={SafeValue(r.TunerName)} group={group} chain={chainContinuation} action=fallback_to_common_allocation_if_safe reason=pretuned_or_allocated_tuner_not_free status={_tunerPool.GetStatusSummary()} rule=release_contract");
                 }
             }
             lease ??= _tunerPool.AcquireForRecordingWithExternalGuard(group, r.Id, plannedEnd, unknownExternalLiveGuard, "external_live_did_unknown_virtual_tuner_group_resolve");
@@ -1527,7 +1776,7 @@ class ReservationScheduler : BackgroundService
         if (IsActiveRecordingDidOccupiedByOtherReservation(group, lease.Did, r.Id, out var activeDidOwner))
         {
             _log.Add("ACTIVE_RECORDING_DID_GUARD", $"R{r.Id}",
-                $"result=DENY group={group} candidateTuner={lease.Name} did={lease.Did} owner={activeDidOwner} requestedTuner={SafeValue(r.TunerName)} action=release_candidate_and_fail_this_start reason=active_recording_did_is_source_of_truth rule=v0.9.98_active_recording_did_guard_compile_fix");
+                $"result=DENY group={group} candidateTuner={lease.Name} did={lease.Did} owner={activeDidOwner} requestedTuner={SafeValue(r.TunerName)} action=release_and_fail_this_start reason=active_recording_did_is_source_of_truth rule=release_contract");
             lease.Dispose();
             Fail(r, $"録画中の実チューナーを保護したため録画開始を中止しました。did={lease.Did} owner={activeDidOwner}");
             return false;
@@ -1537,7 +1786,7 @@ class ReservationScheduler : BackgroundService
         {
             var locked = string.Equals(r.TunerName, lease.Name, StringComparison.OrdinalIgnoreCase);
             _log.Add(locked ? "PRETUNE_LOCK_MATCH" : "PRETUNE_LOCK_MISMATCH", $"R{r.Id}",
-                $"result={(locked ? "OK" : "WARN")} requestedOrPretunedTuner={SafeValue(r.TunerName)} actualTuner={lease.Name} did={lease.Did} group={group} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} rule=v0.9.98_active_recording_did_guard_compile_fix");
+                $"result={(locked ? "OK" : "WARN")} requestedOrPretunedTuner={SafeValue(r.TunerName)} actualTuner={lease.Name} did={lease.Did} group={group} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} rule=release_contract");
         }
 
         _log.Add("REC_TUNER_ACQUIRE", $"R{r.Id}",
@@ -1564,7 +1813,7 @@ class ReservationScheduler : BackgroundService
             return false;
         }
 
-        // ─── 同一物理チューナースロット直列化ゲート（v32.69） ───
+        // ─── 同一物理チューナースロット直列化ゲート（） ───
         // 直前まで同じ物理チューナーが使われていた場合、BonDriver 側で
         // CmdCloseTuner → CmdOpenTuner が背中合わせで走り、ストリーム断裂・カクつきを誘発する。
         // lease.ElapsedSinceReleaseMs が設定クールダウンを下回っていれば、差分だけ待つ。
@@ -1580,7 +1829,7 @@ class ReservationScheduler : BackgroundService
                     $"result={(waitMs > 0 ? "SHORT_WAIT" : "SKIP_WAIT")} predecessor={(chainCooldownPredId.HasValue ? $"R{chainCooldownPredId.Value}" : "-")} " +
                     $"slot={lease.Name} did={lease.Did} configuredCooldownMs={cooldownMs} effectiveCooldownMs={effectiveCooldownMs} " +
                     $"elapsedSinceReleaseMs={elapsed:F0} waitMs={waitMs} reason={chainCooldownReason} " +
-                    $"rule=v0.9.83_failed_direct_route_guard");
+                    $"rule=release_contract");
                 if (waitMs > 0)
                 {
                     try
@@ -1611,14 +1860,14 @@ class ReservationScheduler : BackgroundService
 
         var channelArg = r.ChannelArgument ?? "";
         var recordFolderForDiscovery = ResolveReservationRecordFolder(r);
-        // v0.5.65: 旧nativeRecProbe/TVTest録画ルートへは戻さず、DirectRecorder本線の入力だけをログ化する。
+        // release_contract: 旧nativeRecProbe/TVTest録画ルートへは戻さず、DirectRecorder本線の入力だけをログ化する。
         // EDCB/EpgDataCap_Bonと同じく、局名ではなく .ch2 由来の NID/TSID/SID と chspace/chi を主キーにする。
         _log.Add("REC_OPERATIONAL_MODE", $"R{r.Id}",
-            $"mode=TvAIrEpgRecProduction legacyTvTestRecording=False nativeRecProbe=False retiredLegacyDirectRecorderBridgeReference=none service={SafeValue(r.ServiceName)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} channelArg={SafeValue(channelArg)} rule=v0.8.01_epg_transport_stream_import_restore");
+            $"mode=TvAIrEpgRecProduction legacyTvTestRecording=False nativeRecProbe=False retiredLegacyDirectRecorderBridgeReference=none service={SafeValue(r.ServiceName)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} channelArg={SafeValue(channelArg)} rule=release_contract");
 
         TvTestActivityHandle? activityHandle = null;
         _log.Add("RECORDER_ACTIVITY", "RECORD_KEEPER_DISABLED",
-            $"reservation=R{r.Id} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title, 80)} reason=recording_process_monitor_migrated_to_tvairepgrec action=no_activitykeeper_tvtest_started rule=v0.8.01_epg_transport_stream_import_restore");
+            $"reservation=R{r.Id} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title, 80)} reason=recording_process_monitor_migrated_to_tvairepgrec action=no_activitykeeper_tvtest_started rule=release_contract");
         var directStart = await TryStartDirectRecorderRecordingAsync(r, group, lease, resolvedChannel, plannedEnd, recordFolderForDiscovery, ct).ConfigureAwait(false);
         if (!directStart.Success)
         {
@@ -1631,7 +1880,7 @@ class ReservationScheduler : BackgroundService
         var session = new RecordingSession(r.Id, directStart.ProcessId, plannedEnd, lease, directStart.OutputPath, directStart.ResponsePath, directStart.StopSignalPath, directStart.ProgressPath, directStart.RuntimeStatsPath, directStart.JobPath, directStart.SegmentPlanPath, activityHandle);
         lock (_sessionGate) _activeSessions[r.Id] = session;
 
-        // v0.8.22: 共通割り当てルートの事前評価で一時的に競合化された予約でも、
+        // release_contract: 共通割り当てルートの事前評価で一時的に競合化された予約でも、
         // 実行時に実チューナーを確保して TvAIrEpgRec 起動まで成功した場合は
         // 「Recording + conflicted=True」という矛盾状態を残さない。
         // 外部視聴の明示DID衝突評価と、実行時の空きチューナー確保結果がズレるケースで、
@@ -1643,7 +1892,7 @@ class ReservationScheduler : BackgroundService
             _log.Add("REC_CONFLICT_RECONCILE", $"R{r.Id}",
                 $"result=CLEARED reason=recording_started_with_actual_tuner actualTuner={lease.Name} did={lease.Did} " +
                 $"group={group} statusBefore={latestBeforeRecordingStatus.Status} previousConflict=True " +
-                "rule=v0.8.22_recording_start_clears_stale_conflict_flag");
+                "rule=release_contract");
         }
 
         _store.UpdateStatus(r.Id, ReservationStatus.Recording);
@@ -1652,11 +1901,11 @@ class ReservationScheduler : BackgroundService
         var stableEpgAllowanceUntil = plannedEnd < DateTime.Now.AddMinutes(10) ? plannedEnd : DateTime.Now.AddMinutes(10);
         RecordingLifecycleGate.AllowStableRecordingEpg(group, stableEpgWarmupUntil, stableEpgAllowanceUntil, $"R{r.Id}", FormatReservationForLifecycleLog(r));
         _log.Add("REC_LIFECYCLE_EPG_GATE", $"R{r.Id}",
-            $"state=RecordingWarmup group={group} stableEpgAfter={stableEpgWarmupUntil:MM/dd HH:mm:ss} allowanceUntil={stableEpgAllowanceUntil:MM/dd HH:mm:ss} action=allow_normal_epg_on_free_recording_tuner_after_warmup rule=v0.11.150_recording_timeline_epg_gate_effective_worker_block");
+            $"state=RecordingWarmup group={group} stableEpgAfter={stableEpgWarmupUntil:MM/dd HH:mm:ss} allowanceUntil={stableEpgAllowanceUntil:MM/dd HH:mm:ss} action=allow_normal_epg_on_free_recording_tuner_after_warmup rule=release_contract");
         BindChainDirectRecorderSessionScaffold(r, session, null, "recording_started");
         TvAirManagedProcessRegistry.RegisterRecording(directStart.ProcessId, r.Id, lease.Did, lease.BonDriverFileName, directStart.OutputPath);
         _log.Add("REC_START_MODE", $"R{r.Id}",
-            $"mode=TvAIrEpgRecProcessStarted pid={directStart.ProcessId} service={SafeValue(r.ServiceName)} sid={r.ServiceId} tuner={lease.Name} did={lease.Did} path={SafeValue(directStart.OutputPath)} seconds={directStart.Seconds} rule=v0.8.01_epg_transport_stream_import_restore");
+            $"mode=TvAIrEpgRecProcessStarted pid={directStart.ProcessId} service={SafeValue(r.ServiceName)} sid={r.ServiceId} tuner={lease.Name} did={lease.Did} path={SafeValue(directStart.OutputPath)} seconds={directStart.Seconds} rule=release_contract");
         if (chainContinuation)
         {
             var plannedActualMismatchAtStart = !string.IsNullOrWhiteSpace(r.TunerName)
@@ -1665,7 +1914,7 @@ class ReservationScheduler : BackgroundService
                 $"result=RECORDING_STARTED stage=recording_started successor=R{r.Id} predecessor={(predIdForActualChain.HasValue ? $"R{predIdForActualChain.Value}" : "-")} " +
                 $"plannedTuner={SafeValue(r.TunerName)} actualTuner={SafeValue(lease.Name)} did={SafeValue(lease.Did)} pid={directStart.ProcessId} path={SafeValue(directStart.OutputPath)} " +
                 $"handoffSource=actual_recording_session expectedSource={(predIdForActualChain.HasValue ? "active_predecessor_actual_tuner" : "final_plan_persisted_tuner")} sourceTransition=recording_started_uses_acquired_actual_tuner sourceDecision=actual_tuner_is_output_truth plannedActualMismatch={plannedActualMismatchAtStart} inheritMatchedActual=True " +
-                $"plannedEnd={plannedEnd:MM/dd HH:mm:ss} seconds={directStart.Seconds} separateTsFile=True commonRoute=ALLOC_ROUTE/TUNER_ALLOC assignedTunerPreArm=True behaviorChanged=True rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                $"plannedEnd={plannedEnd:MM/dd HH:mm:ss} seconds={directStart.Seconds} separateTsFile=True commonRoute=ALLOC_ROUTE/TUNER_ALLOC assignedTunerPreArm=True behaviorChanged=True rule=release_contract");
         }
         _log.Add("RESERVATION_EXECUTION_CONTRACT", $"R{r.Id}",
             BuildReservationPipelineAudit(r, "recording_started", group: group, plannedTuner: r.TunerName, actualTuner: lease.Name, lease: lease, plannedEnd: plannedEnd, outputPath: directStart.OutputPath, finalGuardApplied: true, note: $"pid={directStart.ProcessId};seconds={directStart.Seconds};commonRoute=ALLOC_ROUTE/TUNER_ALLOC"));
@@ -1708,7 +1957,7 @@ class ReservationScheduler : BackgroundService
 
         _log.Add("TVAIREPGREC_RECORD_ROUTE", $"R{r.Id}",
             $"result=SELECTED exe={SafeValue(epgRecExe)} previousProductionRoute=retired currentProductionRoute=TvAIrEpgRec mode=record " +
-            $"retiredLegacyDirectRecorderBridgeTouched=false chainDecisionOwner=TvAIrCommonAllocationRoute filenameOwner=TvAIrCurrentPolicy rule=v0.8.01_epg_transport_stream_import_restore");
+            $"retiredLegacyDirectRecorderBridgeTouched=false chainDecisionOwner=TvAIrCommonAllocationRoute filenameOwner=TvAIrCurrentPolicy rule=release_contract");
 
         var now = _broadcastClock.Now;
         var seconds = Math.Max(5, (int)Math.Ceiling((plannedEnd - now).TotalSeconds));
@@ -1718,15 +1967,15 @@ class ReservationScheduler : BackgroundService
         var fileNameBuild = BuildDirectRecorderFileName(r, namingPolicy.BaseTime);
         var outputPath = MakeUniqueRecordingPath(Path.Combine(recordFolder, fileNameBuild.FileName));
         _log.Add("RECORD_FILE_NAME_TIME_POLICY", $"R{r.Id}",
-            $"mode={namingPolicy.Mode} base={namingPolicy.Base} source={r.Source} reservationStart={r.StartTime:yyyy-MM-dd HH:mm:ss} actualStart={now:yyyy-MM-dd HH:mm:ss} fileBaseTime={namingPolicy.BaseTime:yyyy-MM-dd HH:mm:ss} rule=v0.5.65_recording_kind_filename_time");
+            $"mode={namingPolicy.Mode} base={namingPolicy.Base} source={r.Source} reservationStart={r.StartTime:yyyy-MM-dd HH:mm:ss} actualStart={now:yyyy-MM-dd HH:mm:ss} fileBaseTime={namingPolicy.BaseTime:yyyy-MM-dd HH:mm:ss} rule=release_contract");
         _log.Add("RECORD_FILENAME_TITLE_GUARD", $"R{r.Id}",
-            $"result={fileNameBuild.TitleGuardResult} source={fileNameBuild.TitleSource} persisted={fileNameBuild.TitlePersisted} originalTitle={SafeValue(fileNameBuild.OriginalReservationTitle)} resolvedTitle={SafeValue(fileNameBuild.RawTitle)} service={SafeValue(r.ServiceName)} event={r.NetworkId}/{r.TransportStreamId}/{r.ServiceId}/{r.EventId} chainPrev={(r.UserChainPreviousId.HasValue ? $"R{r.UserChainPreviousId.Value}" : "-")} chainRoot={(r.UserChainRootId.HasValue ? $"R{r.UserChainRootId.Value}" : "-")} rule=v0.11.448_recording_filename_title_guard");
+            $"result={fileNameBuild.TitleGuardResult} source={fileNameBuild.TitleSource} persisted={fileNameBuild.TitlePersisted} originalTitle={SafeValue(fileNameBuild.OriginalReservationTitle)} resolvedTitle={SafeValue(fileNameBuild.RawTitle)} service={SafeValue(r.ServiceName)} event={r.NetworkId}/{r.TransportStreamId}/{r.ServiceId}/{r.EventId} chainPrev={(r.UserChainPreviousId.HasValue ? $"R{r.UserChainPreviousId.Value}" : "-")} chainRoot={(r.UserChainRootId.HasValue ? $"R{r.UserChainRootId.Value}" : "-")} rule=release_contract");
         var fileNameNormalizedChanged = !string.Equals(fileNameBuild.RawTitle, fileNameBuild.NormalizedEventName, StringComparison.Ordinal);
         var fileNameDetail = fileNameNormalizedChanged
             ? $" rawTitle={SafeValue(fileNameBuild.RawTitle)} normalizedEventName={SafeValue(fileNameBuild.NormalizedEventName)} sanitizedEventName={SafeValue(fileNameBuild.SanitizedEventName)}"
             : string.Empty;
         _log.Add("RECORD_FILENAME_NORMALIZE", $"R{r.Id}",
-            $"result=OK changed={fileNameNormalizedChanged} fileName={SafeValue(fileNameBuild.FileName)} outputPath={SafeValue(outputPath)} unsupportedTokens={SafeValue(fileNameBuild.UnsupportedTokens)}{fileNameDetail} rule=v0.10.45_cleanup_log_contract_polish");
+            $"result=OK changed={fileNameNormalizedChanged} fileName={SafeValue(fileNameBuild.FileName)} outputPath={SafeValue(outputPath)} unsupportedTokens={SafeValue(fileNameBuild.UnsupportedTokens)}{fileNameDetail} rule=release_contract");
         _log.Add("RECORD_FILENAME_PIPELINE_AUDIT", $"R{r.Id}",
             BuildReservationPipelineAudit(r, "filename_finalized", group: group, plannedTuner: r.TunerName, actualTuner: lease.Name, lease: lease, resolvedChannel: resolvedChannel, fileNameBuild: fileNameBuild, outputPath: outputPath, plannedEnd: plannedEnd, finalGuardApplied: true, note: $"namingMode={namingPolicy.Mode};timeBase={namingPolicy.Base};changed={fileNameNormalizedChanged}"));
         var workDir = Path.Combine(AppContext.BaseDirectory, "runtime", "tvairepgrec-production-recording");
@@ -1753,7 +2002,7 @@ class ReservationScheduler : BackgroundService
         await WriteChainRecordSegmentPlanAsync(segmentPlanPath, recordSegments, ct).ConfigureAwait(false);
         _log.Add("CHAIN_RECORD_SEGMENT_PLAN", $"R{r.Id}",
             $"result=WRITTEN path={SafeValue(segmentPlanPath)} count={recordSegments.Count} first=R{recordSegments.FirstOrDefault()?.ReservationId ?? 0} last=R{recordSegments.LastOrDefault()?.ReservationId ?? 0} " +
-            $"execution=single_record_stop_restart rule=v0.9.83_failed_direct_route_guard");
+            $"execution=single_record_stop_restart rule=release_contract");
 
         var tvairEpgRecJob = new
         {
@@ -1789,7 +2038,7 @@ class ReservationScheduler : BackgroundService
             metadata = new Dictionary<string, string>
             {
                 ["caller"] = "TvAIr",
-                ["tvairVersion"] = "0.8.01",
+                ["tvairVersion"] = TvAIrVersionContract.ProductVersion,
                 ["purpose"] = "production_record_route_tvairepgrec",
                 ["recordRuntime"] = "true",
                 ["reservationId"] = r.Id.ToString(),
@@ -1822,7 +2071,7 @@ class ReservationScheduler : BackgroundService
                 ["taskbarIconVisible"] = _ini.ShowTvAIrEpgRecTaskbarIcon ? "true" : "false",
                 ["directSetChannelIndex"] = directRecorderChannelIndex.ToString(),
                 ["directSetChannelRule"] = directRecorderChannelReason,
-                ["rule"] = "v0.8.01_epg_transport_stream_import_restore"
+                ["rule"] = "release_contract"
             }
         };
 
@@ -1873,7 +2122,7 @@ class ReservationScheduler : BackgroundService
             $"pid={process.Id} exe={SafeValue(epgRecExe)} job={SafeValue(requestPath)} result={SafeValue(responsePath)} progress={SafeValue(progressPath)} stopSignal={SafeValue(stopSignalPath)} " +
             $"service={SafeValue(r.ServiceName)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} " +
             $"space={resolvedChannel.ResolvedSpace} ch={directRecorderChannelIndex} tvtestArgCh={resolvedChannel.ResolvedChannelIndex} bonCh={resolvedChannel.BonDriverChannel} channelReason={SafeValue(directRecorderChannelReason)} tuner={lease.Name} did={lease.Did} " +
-            $"seconds={seconds} path={SafeValue(outputPath)} segmentPlan={SafeValue(segmentPlanPath)} segmentCount={recordSegments.Count} tvTestRecordCurServiceOnly={_ini.TvTestRecordCurServiceOnly} tvTestRecordSubtitle={_ini.TvTestRecordSubtitle} tvTestRecordDataCarrousel={_ini.TvTestRecordDataCarrousel} launchKind={launchKind} taskbarIconVisible={showWorkerTaskbarIcon} windowPolicy={windowPolicy} titleBarLogoPath={SafeValue(displayLogoPath)} centerLogoPath={SafeValue(centerLogoPath)} logoTarget=worker_titlebar_center_only productionRoute=TvAIrEpgRec previousRoute=retired retiredLegacyDirectRecorderBridgeTouched=false rule=v0.9.85_logo_worker_display_inventory_route");
+            $"seconds={seconds} path={SafeValue(outputPath)} segmentPlan={SafeValue(segmentPlanPath)} segmentCount={recordSegments.Count} tvTestRecordCurServiceOnly={_ini.TvTestRecordCurServiceOnly} tvTestRecordSubtitle={_ini.TvTestRecordSubtitle} tvTestRecordDataCarrousel={_ini.TvTestRecordDataCarrousel} launchKind={launchKind} taskbarIconVisible={showWorkerTaskbarIcon} windowPolicy={windowPolicy} titleBarLogoPath={SafeValue(displayLogoPath)} centerLogoPath={SafeValue(centerLogoPath)} logoTarget=worker_titlebar_center_only productionRoute=TvAIrEpgRec previousRoute=retired retiredLegacyDirectRecorderBridgeTouched=false rule=release_contract");
 
         return new DirectRecorderStartResult(true, process.Id, outputPath, seconds, responsePath, stopSignalPath, progressPath, runtimeStatsPath, requestPath, segmentPlanPath, "TvAIrEpgRec started");
     }
@@ -1890,7 +2139,7 @@ class ReservationScheduler : BackgroundService
 
     private List<ChainRecordSegmentPlanItem> BuildChainRecordSegments(Reservation root, string recordFolder, string rootOutputPath, DateTime actualStartTime)
     {
-        // v0.9.76: 実行本線ではTvAIrEpgRec内ファイル切替を使わない。
+        // release_contract: 実行本線ではTvAIrEpgRec内ファイル切替を使わない。
         // チェーン後続は境界で前番組を停止し、後続予約を新しいTvAIrEpgRec録画として起動する。
         // recordSegmentsはTvAIrEpgRec互換の単一セグメント情報に限定する。
         return new List<ChainRecordSegmentPlanItem>
@@ -1911,7 +2160,7 @@ class ReservationScheduler : BackgroundService
         var options = new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true };
         var payload = new
         {
-            version = "v0.9.83_failed_direct_route_guard",
+            version = "release_contract",
             createdAt = DateTime.Now,
             segments
         };
@@ -1920,7 +2169,7 @@ class ReservationScheduler : BackgroundService
 
     private string PrepareDirectRecorderWinscardLocalCopy(string bridgeExe)
     {
-        // v0.7.68: keep the old method name for source compatibility only.
+        // release_contract: keep the old method name for source compatibility only.
         // Do not copy winscard.dll / winscard.ini into TvAIr or bridge folders.
         // Card-reader access is resolved by passing TVTest.exe to TvAIrEpgRec and preloading TVTest\winscard.dll there.
         try
@@ -1932,11 +2181,11 @@ class ReservationScheduler : BackgroundService
             var result = !string.IsNullOrWhiteSpace(tvTestDir) && Directory.Exists(tvTestDir) && File.Exists(winscardDll)
                 ? "OK_REFERENCE_ONLY"
                 : "SKIP_TVTEST_WINSCARD_MISSING";
-            return $"result={result} tvTestDir={SafeValue(tvTestDir)} winscardDll={(File.Exists(winscardDll) ? "exists" : "missing")} winscardIni={(File.Exists(winscardIni) ? "exists" : "missing")} bridgeDir={SafeValue(Path.GetDirectoryName(bridgeExe) ?? AppContext.BaseDirectory)} copied=none rule=v0.7.68_no_app_local_winscard_copy_card_reader_reference_tvtest_dir";
+            return $"result={result} tvTestDir={SafeValue(tvTestDir)} winscardDll={(File.Exists(winscardDll) ? "exists" : "missing")} winscardIni={(File.Exists(winscardIni) ? "exists" : "missing")} bridgeDir={SafeValue(Path.GetDirectoryName(bridgeExe) ?? AppContext.BaseDirectory)} copied=none rule=release_contract";
         }
         catch (Exception ex)
         {
-            return $"result=NG error={ex.GetType().Name}:{SafeValue(ex.Message)} copied=none rule=v0.7.68_no_app_local_winscard_copy_card_reader_reference_tvtest_dir";
+            return $"result=NG error={ex.GetType().Name}:{SafeValue(ex.Message)} copied=none rule=release_contract";
         }
     }
 
@@ -2003,12 +2252,12 @@ class ReservationScheduler : BackgroundService
 
     private DirectRecorderFileNameBuildResult BuildDirectRecorderFileName(Reservation r, DateTime baseTime)
     {
-        // v0.6.17 cleanup note (based on v0.6.10):
+        // release_contract cleanup note (based on release_contract):
         // DirectRecorderはTVTest本体の最終命名処理を通らないため、TVTest.ini の
         // RecordFileName 書式をTvAIr側で最低限解釈する。
         // ただし半角化/禁止文字処理は %event-name% 相当だけに限定し、
         // EPGタイトル・番組表・自動検索・REC_FOLLOW_CHECK には一切触らない。
-        // v0.11.448: TimeFollow/chain再評価で予約DB上のTitleが空になっても、
+        // release_contract: TimeFollow/chain再評価で予約DB上のTitleが空になっても、
         // 録画開始直前のファイル名生成で DB/EPG/ChainGroup から番組名を復元し、
         // %event-name% が空のまま TvAIr.ts へ落ちることを防ぐ。
         var titleGuard = ResolveRecordingFileNameTitle(r);
@@ -2021,7 +2270,7 @@ class ReservationScheduler : BackgroundService
         if (!TvTestRecordFileNameTemplateResolver.TryResolve(_ini.TvTestExecutablePath, out template, out evidence))
         {
             template = "%year2%年%month2%月%day2%日%hour2%時%minute2%分-%event-name%.ts";
-            evidence = $"{evidence} fallback=tvair_legacy_compatible_template";
+            evidence = $"{evidence} fallback=tvair_compat_template";
         }
 
         var rendered = RenderTvTestRecordFileNameTemplate(template, baseTime, sanitizedTitle, r, out var unsupportedTokens);
@@ -2137,7 +2386,7 @@ class ReservationScheduler : BackgroundService
             ? "%year2%年%month2%月%day2%日%hour2%時%minute2%分-%event-name%.ts"
             : template;
 
-        // v0.6.17 cleanup note (based on v0.6.10):
+        // release_contract cleanup note (based on release_contract):
         // DirectRecorder側でTVTest本体の命名処理を完全再実装しない。
         // ただし、現在のTVTest RecordFileName運用で使われやすく、かつ副作用なく評価できる
         // 日時・番組名・サービス名系トークンだけを明示対応する。
@@ -2204,13 +2453,13 @@ class ReservationScheduler : BackgroundService
 
     private DateTime ResolveChainPlannedEndForLaunch(Reservation r, DateTime basePlannedEnd)
     {
-        // v0.11.678: チェーン録画は番組単位ファイルを維持するため、rootプロセスをチェーン末尾まで延命しない。
+        // release_contract: チェーン録画は番組単位ファイルを維持するため、rootプロセスをチェーン末尾まで延命しない。
         // 後続番組はFinalConflictPlanのAssignedTunerを正本に、別チューナーなら並行開始、同一チューナーなら境界pre-armで起動する。
         if (HasEnabledChainSuccessor(r))
         {
             _log.Add("CHAIN_RECORDING_WINDOW_POLICY", $"R{r.Id}",
                 $"result=BASE_ONLY basePlannedEnd={basePlannedEnd:MM/dd HH:mm:ss} " +
-                $"reason=assigned_tuner_prearm_program_file_per_reservation commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                $"reason=assigned_tuner_prearm_program_file_per_reservation commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
         }
         return basePlannedEnd;
     }
@@ -2218,13 +2467,13 @@ class ReservationScheduler : BackgroundService
 
     private DateTime ResolveChainPlannedEndForRecordingFollow(Reservation r, DateTime singleProgramPlannedEnd, DateTime currentSessionPlannedEnd)
     {
-        // v0.11.678: RecordingFollowもチェーン末尾延長を行わない。
+        // release_contract: RecordingFollowもチェーン末尾延長を行わない。
         // 後続は共通割当済みAssignedTunerを使う別録画として開始し、root延命で割当ルートを迂回しない。
         if (HasEnabledChainSuccessor(r))
         {
             _log.Add("REC_FOLLOW_CHAIN_PLANNED_END", $"R{r.Id}",
                 $"result=BASE_ONLY singleProgramPlannedEnd={singleProgramPlannedEnd:MM/dd HH:mm:ss} currentSessionPlannedEnd={currentSessionPlannedEnd:MM/dd HH:mm:ss} " +
-                $"reason=assigned_tuner_prearm_does_not_extend_root_session commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                $"reason=assigned_tuner_prearm_does_not_extend_root_session commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
         }
         return singleProgramPlannedEnd;
     }
@@ -2264,7 +2513,7 @@ class ReservationScheduler : BackgroundService
         }
     }
 
-    // v0.9.76: 既存TvAIrEpgRecセッションへ後続予約を付け替える旧ファイル切替方式は廃止。
+    // release_contract: 既存TvAIrEpgRecセッションへ後続予約を付け替える旧ファイル切替方式は廃止。
     // チェーン境界では StopSessionAsync → StartRecordingAsync で後続を別録画ファイルとして起動する。
 
     private static bool IsSameServiceIdentity(Reservation a, Reservation b)
@@ -2315,7 +2564,7 @@ class ReservationScheduler : BackgroundService
 
         _log.Add("CHAIN_SESSION_BIND", $"R{current.Id}",
             $"result={(isNew ? "BOUND" : "UPDATED")} {scaffold.ToLogFields(stage)} " +
-            $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC actualTunerIsCurrentSessionOnly=True successorAssignedTunerSource=FinalConflictPlan auditVisible=True normalExecutorFrozen=True rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+            $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC actualTunerIsCurrentSessionOnly=True successorAssignedTunerSource=FinalConflictPlan auditVisible=True normalExecutorFrozen=True rule=release_contract");
     }
 
     private void RemoveChainDirectRecorderSessionScaffold(int reservationId, string stage, string reason)
@@ -2325,7 +2574,7 @@ class ReservationScheduler : BackgroundService
         if (removed is not null)
         {
             _log.Add("CHAIN_SESSION_RELEASE", $"R{reservationId}",
-                $"result=REMOVED stage={stage} reason={reason} {removed.ToLogFields("release")} rule=v0.9.83_failed_direct_route_guard");
+                $"result=REMOVED stage={stage} reason={reason} {removed.ToLogFields("release")} rule=release_contract");
         }
     }
 
@@ -2398,7 +2647,7 @@ class ReservationScheduler : BackgroundService
             if (predecessorForBind is not null)
                 BindChainDirectRecorderSessionScaffold(predecessorForBind, session, successor, "handoff_scan");
 
-            // v0.11.678: チェーン境界は「前番組実チューナー継承」ではなく、
+            // release_contract: チェーン境界は「前番組実チューナー継承」ではなく、
             // FinalConflictPlan/RoleBinding で予約へ永続化された後続AssignedTunerを正本にする。
             // 後続が別チューナーに割り当て済みなら前番組を止めずに後続を開始する。
             // 同一チューナーだけ、後続due直前に前番組を切って後続開始完全性を優先する。
@@ -2423,12 +2672,12 @@ class ReservationScheduler : BackgroundService
                 $"result={(assignedTunerMissing ? "MISSING_ASSIGNED_TUNER" : "OK")} predecessor=R{session.ReservationId} successor=R{successorId} " +
                 $"assignedTuner={SafeValue(assignedSuccessorTuner)} activePredecessorTuner={SafeValue(activePredecessorTuner)} activePredecessorDid={SafeValue(activePredecessorDid)} " +
                 $"sameAssignedTunerAsPredecessor={sameAssignedTunerAsPredecessor} successorDue={successorDueTime:MM/dd HH:mm:ss} successorStart={successor.StartTime:MM/dd HH:mm:ss} " +
-                $"boundaryActionAt={boundaryActionAt:MM/dd HH:mm:ss} preArmLeadSeconds={preArmLeadSeconds} scheduler=high_priority intervalMs={ChainBoundaryMonitorIntervalMs} normalTickMs={PollingIntervalMs} commonRoute=ALLOC_ROUTE/TUNER_ALLOC source=FinalConflictPlan.AssignedTuner rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                $"boundaryActionAt={boundaryActionAt:MM/dd HH:mm:ss} preArmLeadSeconds={preArmLeadSeconds} scheduler=high_priority intervalMs={ChainBoundaryMonitorIntervalMs} normalTickMs={PollingIntervalMs} commonRoute=ALLOC_ROUTE/TUNER_ALLOC source=FinalConflictPlan.AssignedTuner rule=release_contract");
 
             if (assignedTunerMissing)
             {
                 _log.Add("CHAIN_SUCCESSOR_PREARM", $"R{session.ReservationId}",
-                    $"result=SKIP reason=missing_final_plan_assigned_tuner predecessor=R{session.ReservationId} successor=R{successorId} action=no_tuner_inheritance_fallback commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                    $"result=SKIP reason=missing_final_plan_assigned_tuner predecessor=R{session.ReservationId} successor=R{successorId} action=no_tuner_inheritance_fallback commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
                 continue;
             }
 
@@ -2439,7 +2688,7 @@ class ReservationScheduler : BackgroundService
                     _log.Add("CHAIN_SUCCESSOR_PREARM", $"R{session.ReservationId}",
                         $"result=WAIT predecessor=R{session.ReservationId} successor=R{successorId} assignedTuner={SafeValue(assignedSuccessorTuner)} " +
                         $"sameAssignedTunerAsPredecessor={sameAssignedTunerAsPredecessor} boundaryActionAt={boundaryActionAt:HH:mm:ss} remainingSec={timeToBoundaryAction.TotalSeconds:F0} " +
-                        $"scheduler=high_priority intervalMs={ChainBoundaryMonitorIntervalMs} normalTickMs={PollingIntervalMs} commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                        $"scheduler=high_priority intervalMs={ChainBoundaryMonitorIntervalMs} normalTickMs={PollingIntervalMs} commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
                 }
                 continue;
             }
@@ -2448,7 +2697,7 @@ class ReservationScheduler : BackgroundService
             {
                 _log.Add("CHAIN_SUCCESSOR_PREARM", $"R{session.ReservationId}",
                     $"result=SKIP reason=boundary_execution_already_in_progress predecessor=R{session.ReservationId} successor=R{successorId} key={boundaryExecutionKey} " +
-                    $"scheduler=high_priority commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                    $"scheduler=high_priority commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
                 continue;
             }
 
@@ -2459,14 +2708,14 @@ class ReservationScheduler : BackgroundService
                 _log.Add("CHAIN_SUCCESSOR_PREARM", $"R{session.ReservationId}",
                     $"result=START_WITH_ASSIGNED_TUNER predecessor=R{session.ReservationId} successor=R{successorId} assignedTuner={SafeValue(assignedSuccessorTuner)} " +
                     $"activePredecessorTuner={SafeValue(activePredecessorTuner)} action=keep_predecessor_running successorDue={successorDueTime:MM/dd HH:mm:ss} late={successorLateAtBoundary} " +
-                    $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                    $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
 
                 var latestSuccessorForPreArm = _store.GetById(successorId);
                 if (latestSuccessorForPreArm is null || !latestSuccessorForPreArm.IsEnabled || latestSuccessorForPreArm.Status != ReservationStatus.Scheduled)
                 {
                     _log.Add("CHAIN_SUCCESSOR_PREARM", $"R{session.ReservationId}",
                         $"result=SKIP_START reason=successor_not_recordable predecessor=R{session.ReservationId} successor=R{successorId} " +
-                        $"exists={latestSuccessorForPreArm is not null} enabled={latestSuccessorForPreArm?.IsEnabled.ToString() ?? "-"} status={latestSuccessorForPreArm?.Status.ToString() ?? "-"} rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                        $"exists={latestSuccessorForPreArm is not null} enabled={latestSuccessorForPreArm?.IsEnabled.ToString() ?? "-"} status={latestSuccessorForPreArm?.Status.ToString() ?? "-"} rule=release_contract");
                     continue;
                 }
 
@@ -2474,7 +2723,7 @@ class ReservationScheduler : BackgroundService
                 _log.Add(startedDifferentTuner && successorLateAtBoundary ? "CHAIN_SUCCESSOR_LATE" : "CHAIN_SUCCESSOR_START_RESULT", $"R{session.ReservationId}",
                     $"result={(startedDifferentTuner ? "SUCCESS" : "START_FAILED")} predecessor=R{session.ReservationId} successor=R{successorId} assignedTuner={SafeValue(assignedSuccessorTuner)} " +
                     $"activePredecessorTuner={SafeValue(activePredecessorTuner)} sameAssignedTunerAsPredecessor=False separateTsFile=True predecessorKeptRunning=True late={successorLateAtBoundary} " +
-                    $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                    $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
                 _userEvents.AddChainSwitched(predecessor, latestSuccessorForPreArm, startedDifferentTuner);
                 continue;
             }
@@ -2482,13 +2731,13 @@ class ReservationScheduler : BackgroundService
             _log.Add("CHAIN_FRONT_CUT", $"R{session.ReservationId}",
                 $"result=BEGIN predecessor=R{session.ReservationId} successor=R{successorId} assignedTuner={SafeValue(assignedSuccessorTuner)} did={SafeValue(activePredecessorDid)} pid={session.ProcessId} " +
                 $"successorDue={successorDueTime:MM/dd HH:mm:ss} boundaryActionAt={boundaryActionAt:MM/dd HH:mm:ss} preArmLeadSeconds={preArmLeadSeconds} frontTailMayBeCut=True " +
-                $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC reason=same_assigned_tuner_boundary rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC reason=same_assigned_tuner_boundary rule=release_contract");
 
             _log.Add("CHAIN_RECORDING_RUNTIME_AUDIT", $"R{session.ReservationId}",
                 $"result=BOUNDARY_STOP_BEGIN stage=front_cut predecessor=R{session.ReservationId} successor=R{successorId} " +
                 $"plannedTuner={SafeValue(assignedSuccessorTuner)} actualPredecessorTuner={SafeValue(activePredecessorTuner)} did={SafeValue(activePredecessorDid)} pid={session.ProcessId} boundaryActionAt={boundaryActionAt:MM/dd HH:mm:ss} " +
                 $"handoffSource=final_plan_assigned_tuner expectedSource=FinalConflictPlan.AssignedTuner sourceTransition=common_route_assigned_tuner_preserved sourceDecision=cut_front_only_when_same_assigned_tuner plannedActualMismatch=False inheritMatchedActual=True " +
-                $"successorDue={successorDueTime:MM/dd HH:mm:ss} separateTsFile=True commonRoute=ALLOC_ROUTE/TUNER_ALLOC stopRestart=True behaviorChanged=True rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                $"successorDue={successorDueTime:MM/dd HH:mm:ss} separateTsFile=True commonRoute=ALLOC_ROUTE/TUNER_ALLOC stopRestart=True behaviorChanged=True rule=release_contract");
 
             await StopSessionAsync(session, ReservationStatus.Completed, suppressNormalStopForBoundary: false).ConfigureAwait(false);
 
@@ -2497,7 +2746,7 @@ class ReservationScheduler : BackgroundService
             {
                 _log.Add("CHAIN_SUCCESSOR_PREARM", $"R{session.ReservationId}",
                     $"result=SKIP_START reason=successor_not_recordable predecessor=R{session.ReservationId} successor=R{successorId} " +
-                    $"exists={latestSuccessor is not null} enabled={latestSuccessor?.IsEnabled.ToString() ?? "-"} status={latestSuccessor?.Status.ToString() ?? "-"} rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                    $"exists={latestSuccessor is not null} enabled={latestSuccessor?.IsEnabled.ToString() ?? "-"} status={latestSuccessor?.Status.ToString() ?? "-"} rule=release_contract");
                 continue;
             }
 
@@ -2507,12 +2756,12 @@ class ReservationScheduler : BackgroundService
             _log.Add(resultEvent, $"R{session.ReservationId}",
                 $"result={(started ? "SUCCESS" : "START_FAILED")} predecessor=R{session.ReservationId} successor=R{successorId} assignedTuner={SafeValue(assignedSuccessorTuner)} did={SafeValue(activePredecessorDid)} " +
                 $"sameAssignedTunerAsPredecessor=True separateTsFile=True stopRestart=True frontTailMayBeCut=True preArmLeadSeconds={preArmLeadSeconds} late={successorLateAfterStart} " +
-                $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
             _log.Add("CHAIN_RECORDING_RUNTIME_AUDIT", $"R{session.ReservationId}",
                 $"result={(started ? "SUCCESS" : "START_FAILED")} stage=successor_start_result predecessor=R{session.ReservationId} successor=R{successorId} " +
                 $"expectedTuner={SafeValue(assignedSuccessorTuner)} expectedSource=FinalConflictPlan.AssignedTuner actualTuner={SafeValue(assignedSuccessorTuner)} " +
                 $"handoffSource=final_plan_assigned_tuner sourceTransition=common_route_assigned_tuner_preserved sourceDecision=do_not_inherit_predecessor_actual_tuner inheritMatchedActual={started} started={started} " +
-                $"separateTsFile=True commonRoute=ALLOC_ROUTE/TUNER_ALLOC stopRestart=True frontTailMayBeCut=True behaviorChanged=True rule=v0.11.678_chain_boundary_high_priority_scheduler_contract");
+                $"separateTsFile=True commonRoute=ALLOC_ROUTE/TUNER_ALLOC stopRestart=True frontTailMayBeCut=True behaviorChanged=True rule=release_contract");
             _userEvents.AddChainSwitched(predecessor, latestSuccessor, started);
             continue;
         }
@@ -2536,7 +2785,7 @@ class ReservationScheduler : BackgroundService
 
             _store.UpdateStatus(r.Id, ReservationStatus.Recording);
             _log.Add("REC_STATUS_GUARD_ACTIVE_SESSION", $"R{r.Id}",
-                $"result=RESTORED_BEFORE_DECISION stage={stage} reason=active_tvairepgrec_session_is_source_of_truth pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} previousStatus=Failed rule=v0.9.83_failed_direct_route_guard");
+                $"result=RESTORED_BEFORE_DECISION stage={stage} reason=active_tvairepgrec_session_is_source_of_truth pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} previousStatus=Failed rule=release_contract");
         }
     }
 
@@ -2559,13 +2808,13 @@ class ReservationScheduler : BackgroundService
             if (r is null)
             {
                 _log.Add("REC_INTERRUPTED_DETECTED", $"R{session.ReservationId}",
-                    $"result=DETECTED reason=reservation_missing_worker_process_gone pid={session.ProcessId} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} tuner={SafeValue(session.Lease.Name)} action=release_session_only rule=v0.11.138_recording_interruption_recovery_common");
+                    $"result=DETECTED reason=reservation_missing_worker_process_gone pid={session.ProcessId} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} tuner={SafeValue(session.Lease.Name)} action=release_session_only rule=release_contract");
             }
             else
             {
                 var fileEvidence = ProbeInterruptedRecordingFile(r);
                 _log.Add("REC_INTERRUPTED_DETECTED", $"R{session.ReservationId}",
-                    $"result=DETECTED reason=worker_process_missing_before_planned_end pid={session.ProcessId} now={now:MM/dd HH:mm:ss} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} file={SafeValue(fileEvidence)} rule=v0.11.138_recording_interruption_recovery_common");
+                    $"result=DETECTED reason=worker_process_missing_before_planned_end pid={session.ProcessId} now={now:MM/dd HH:mm:ss} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} file={SafeValue(fileEvidence)} rule=release_contract");
                 _store.FinalizeInterruptedRecordingAtStartup(r.Id, now, "worker_process_missing_before_planned_end", fileEvidence, "RecordingPipeline");
             }
 
@@ -2585,7 +2834,7 @@ class ReservationScheduler : BackgroundService
 
     private static bool IsUserRuntimeStartRewindGuardTarget(Reservation r, RecordingSession session)
     {
-        // v0.11.582: Immediate/manual user recordings can be registered after the EPG event has already started.
+        // release_contract: Immediate/manual user recordings can be registered after the EPG event has already started.
         // Once TvAIrEpgRec is running, the reservation/session start is the runtime truth; REC_FOLLOW may still extend the end,
         // but must not move StartTime/occupancy/segmentStart backwards to the EPG event start.
         if (session.ProcessId <= 0) return false;
@@ -2617,7 +2866,7 @@ class ReservationScheduler : BackgroundService
                 $"monitorStarted={session.RecordingFileGrowthWatchStartedAt:MM/dd HH:mm:ss} lastGrowth={session.LastRecordingFileGrowthAt:MM/dd HH:mm:ss} " +
                 $"elapsedSinceStartSec={(int)Math.Max(0, (now - session.RecordingFileGrowthWatchStartedAt).TotalSeconds)} elapsedSinceGrowthSec={(int)Math.Max(0, (now - session.LastRecordingFileGrowthAt).TotalSeconds)} " +
                 $"initialGraceSec={RecordingFileGrowthInitialGraceSec} stallSec={RecordingFileGrowthStallSec} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} " +
-                $"pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} action=stop_and_fail rule=v0.11.678_recording_file_growth_watchdog");
+                $"pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} action=stop_and_fail rule=release_contract");
 
             await StopSessionAsync(session, ReservationStatus.Failed).ConfigureAwait(false);
         }
@@ -2649,7 +2898,7 @@ class ReservationScheduler : BackgroundService
             if (previousBytes <= 0 && bytes > 0)
             {
                 _log.Add("REC_FILE_GROWTH_WATCH", $"R{session.ReservationId}",
-                    $"result=OBSERVED path={SafeValue(session.RecordingFilePath)} bytes={bytes} previousBytes={previousBytes} pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} rule=v0.11.678_recording_file_growth_watchdog");
+                    $"result=OBSERVED path={SafeValue(session.RecordingFilePath)} bytes={bytes} previousBytes={previousBytes} pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} rule=release_contract");
             }
             return RecordingFileGrowthObservation.Continue(bytes, previousBytes);
         }
@@ -2668,7 +2917,7 @@ class ReservationScheduler : BackgroundService
         {
             session.MarkRecordingFileGrowth(now, bytes);
             _log.Add("REC_FILE_GROWTH_WATCH", $"R{session.ReservationId}",
-                $"result=RESET reason=file_size_decreased path={SafeValue(session.RecordingFilePath)} bytes={bytes} previousBytes={previousBytes} pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} rule=v0.11.678_recording_file_growth_watchdog");
+                $"result=RESET reason=file_size_decreased path={SafeValue(session.RecordingFilePath)} bytes={bytes} previousBytes={previousBytes} pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} rule=release_contract");
             return RecordingFileGrowthObservation.Continue(bytes, previousBytes);
         }
 
@@ -2706,7 +2955,7 @@ class ReservationScheduler : BackgroundService
                 _store.UpdateStatus(r.Id, ReservationStatus.Recording);
                 r = _store.GetById(session.ReservationId) ?? r;
                 _log.Add("REC_STATUS_RECONCILE", $"R{session.ReservationId}",
-                    $"result=RESTORED_TO_RECORDING reason=active_tvairepgrec_session_is_source_of_truth pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} previousStatus=Failed rule=v0.9.83_failed_direct_route_guard");
+                    $"result=RESTORED_TO_RECORDING reason=active_tvairepgrec_session_is_source_of_truth pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} previousStatus=Failed rule=release_contract");
             }
 
             if (r.Status != ReservationStatus.Recording)
@@ -2748,14 +2997,14 @@ class ReservationScheduler : BackgroundService
                 $"dbStart={r.StartTime:MM/dd HH:mm:ss} epgStart={ev.Start:MM/dd HH:mm:ss} effectiveNewStart={effectiveNewStart:MM/dd HH:mm:ss} dbEnd={r.EndTime:MM/dd HH:mm:ss} epgEnd={ev.End:MM/dd HH:mm:ss} " +
                 $"sessionPlannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} singleProgramPlannedEnd={singleProgramFollowedEnd:MM/dd HH:mm:ss} " +
                 $"followedPlannedEnd={followedEnd:MM/dd HH:mm:ss} chainPlannedEndPreserved={chainPlannedEndPreserved} startRewindSuppressed={suppressStartRewind} changed={startChanged || endChanged || plannedChanged} " +
-                $"rule=v0.11.582_rec_follow_user_start_rewind_guard");
+                $"rule=release_contract");
 
             if (suppressStartRewind)
             {
                 _log.Add("REC_FOLLOW_START_REWIND_GUARD", $"R{r.Id}",
                     $"result=SUPPRESSED source={r.Source} reason=user_runtime_recording_start_is_source_of_truth oldStart={r.StartTime:MM/dd HH:mm:ss} epgStart={ev.Start:MM/dd HH:mm:ss} keptStart={effectiveNewStart:MM/dd HH:mm:ss} " +
                     $"epgEnd={ev.End:MM/dd HH:mm:ss} plannedEnd={followedEnd:MM/dd HH:mm:ss} tuner={SafeValue(session.Lease.Name)} actualTuner={SafeValue(r.ActualTunerName)} pid={session.ProcessId} userChain={r.IsUserChain} chainPrev=R{(r.UserChainPreviousId.HasValue ? r.UserChainPreviousId.Value.ToString() : "-")} chainRoot=R{(r.UserChainRootId.HasValue ? r.UserChainRootId.Value.ToString() : "-")} " +
-                    $"rule=v0.11.582_rec_follow_user_start_rewind_guard");
+                    $"rule=release_contract");
             }
 
             if (!startChanged && !endChanged && !plannedChanged)
@@ -2771,7 +3020,7 @@ class ReservationScheduler : BackgroundService
             _log.Add("REC_FOLLOW_UPDATE", $"R{r.Id}",
                 $"source=active_recording_session_no_extra_tuner route=ALLOC_ROUTE oldStart={r.StartTime:MM/dd HH:mm:ss} newStart={effectiveNewStart:MM/dd HH:mm:ss} epgStart={ev.Start:MM/dd HH:mm:ss} startRewindSuppressed={suppressStartRewind} " +
                 $"oldEnd={r.EndTime:MM/dd HH:mm:ss} newEnd={ev.End:MM/dd HH:mm:ss} newPlannedEnd={followedEnd:MM/dd HH:mm:ss} " +
-                $"tuner={SafeValue(session.Lease.Name)} pid={session.ProcessId} now={now:MM/dd HH:mm:ss} rule=v0.11.582_rec_follow_user_start_rewind_guard");
+                $"tuner={SafeValue(session.Lease.Name)} pid={session.ProcessId} now={now:MM/dd HH:mm:ss} rule=release_contract");
 
             try
             {
@@ -2826,7 +3075,7 @@ class ReservationScheduler : BackgroundService
                         _log.Add("CHAIN_HANDOFF_GUARD", $"R{session.ReservationId}",
                             $"stage=planned_end_stop_guard result=NORMAL_STOP_STILL_SUPPRESSED predecessor=R{session.ReservationId} successor=R{successorId} " +
                             $"actualTuner={SafeValue(session.Lease.Name)} did={SafeValue(session.Lease.Did)} pid={session.ProcessId} " +
-                            $"stopSignalSuppressed=True leaseReleaseSuppressed=True reason=boundary_handoff_waiting_for_bridge_file_switch rule=v0.9.83_failed_direct_route_guard");
+                            $"stopSignalSuppressed=True leaseReleaseSuppressed=True reason=boundary_handoff_waiting_for_bridge_file_switch rule=release_contract");
                         continue;
                     }
                 }
@@ -2878,7 +3127,7 @@ class ReservationScheduler : BackgroundService
                 _log.Add("CHAIN_HANDOFF_GUARD", $"R{rid}",
                     $"stage=stop_route_guard result=BOUNDARY_HANDOFF_DETECTED predecessor=R{rid} successor=R{pendingChainSuccessorId} " +
                     $"suppressNormalStopForBoundary={suppressNormalStopForBoundary} protectedObservation=True recordingMode=stop_restart separateTsFile=True " +
-                    $"normalManualStopRouteUnchanged=True rule=v0.9.83_failed_direct_route_guard");
+                    $"normalManualStopRouteUnchanged=True rule=release_contract");
 
                 if (suppressNormalStopForBoundary)
                 {
@@ -2888,12 +3137,12 @@ class ReservationScheduler : BackgroundService
                     _log.Add("REC_STOP_COMMON_ENTER", $"R{rid}",
                         $"mode=SuppressedByChainBoundaryHandoff group={SafeValue(boundaryGroup)} pid={pid} route=TvAIrEpgRecOnly " +
                         $"recorderStopTarget=False chainHandoff=True boundaryHandoff=True stopSignalSuppressed=True leaseReleaseSuppressed=True " +
-                        $"successor=R{pendingChainSuccessorId} rule=v0.9.83_failed_direct_route_guard");
+                        $"successor=R{pendingChainSuccessorId} rule=release_contract");
                     _log.Add("CHAIN_HANDOFF_GUARD", $"R{rid}",
                         $"stage=stop_route_guard result=NORMAL_STOP_SUPPRESSED predecessor=R{rid} successor=R{pendingChainSuccessorId} " +
                         $"actualTuner={SafeValue(session.Lease.Name)} did={SafeValue(session.Lease.Did)} pid={pid} " +
                         $"stopSignalSuppressed=True leaseReleaseSuppressed=True statusUpdateSuppressed=True activeSessionKept=True " +
-                        $"reason=stop_restart_route_never_suppresses_normal_boundary_stop rule=v0.9.83_failed_direct_route_guard");
+                        $"reason=stop_restart_route_never_suppresses_normal_boundary_stop rule=release_contract");
                     return;
                 }
             }
@@ -2939,20 +3188,20 @@ class ReservationScheduler : BackgroundService
             var recorderStopTarget = stopReservation is not null && pid > 0;
             var stopMode = recorderStopTarget ? "TvAIrEpgRecStopSignalThenWait" : "SinglePidExitOnly";
             _log.Add("REC_STOP_COMMON_ENTER", $"R{rid}",
-                $"mode={stopMode} group={SafeValue(stopGroup)} pid={pid} route={("TvAIrEpgRecOnly")} recorderStopTarget={recorderStopTarget} chainHandoff={hasPendingChainSuccessor} boundaryHandoff={isChainBoundaryHandoff} rule=v0.9.83_failed_direct_route_guard");
+                $"mode={stopMode} group={SafeValue(stopGroup)} pid={pid} route={("TvAIrEpgRecOnly")} recorderStopTarget={recorderStopTarget} chainHandoff={hasPendingChainSuccessor} boundaryHandoff={isChainBoundaryHandoff} rule=release_contract");
             _log.Add("REC_STOP_MODE", $"R{rid}",
-                $"mode={stopMode} reason=v0.5.65_stop_signal_then_graceful_exit group={SafeValue(stopGroup)} pid={pid} stopTarget={recorderStopTarget} legacyTvTestRoute=False chainHandoff={hasPendingChainSuccessor} pt3LockDuringStopWait=False timeoutMs={TvAIrEpgRecStopTimeoutMs}");
+                $"mode={stopMode} reason=release_contract group={SafeValue(stopGroup)} pid={pid} stopTarget={recorderStopTarget} legacyTvTestRoute=False chainHandoff={hasPendingChainSuccessor} pt3LockDuringStopWait=False timeoutMs={TvAIrEpgRecStopTimeoutMs}");
 
-            // v0.5.65: TvAIrEpgRec は旧TVTest停止ブリッジではなく、stop signalで自前停止させる。
+            // release_contract: TvAIrEpgRec は旧TVTest停止ブリッジではなく、stop signalで自前停止させる。
             var recorderStopSucceeded = await TryStopTvAIrEpgRecProcessAsync(session, rid, TvAIrEpgRecStopTimeoutMs).ConfigureAwait(false);
             var processExitedWithoutKill = recorderStopSucceeded;
 
             if (!processExitedWithoutKill)
             {
-                // v0.4.14: Bridge RecordStop が失敗・無応答、または通常終了待ちで残存した場合だけ、
+                // release_contract: Bridge RecordStop が失敗・無応答、または通常終了待ちで残存した場合だけ、
                 // TvAIr所有PID単体終了へフォールバックする。成功時は Kill を避ける。
                 _log.Add("REC_STOP_SINGLE_PID_EXIT", $"R{rid}",
-                    $"stage=tuner_device_stop_lock_skipped_for_single_pid_fallback pid={pid} lease={session.Lease.Name} reason=do_not_expand_internal_tuner_device_lock_on_timeout_kill status={_tunerPool.GetStatusSummary()} rule=v0.8.21_stop_root_trace_no_wait_extension");
+                    $"stage=tuner_device_stop_lock_skipped_for_single_pid_fallback pid={pid} lease={session.Lease.Name} reason=do_not_expand_internal_tuner_device_lock_on_timeout_kill status={_tunerPool.GetStatusSummary()} rule=release_contract");
                 _log.Add("REC_STOP_SINGLE_PID_EXIT", $"R{rid}",
                     $"stage=before_single_pid_exit pid={pid} route={("TvAIrEpgRecOnly")} stopSignalTried={recorderStopTarget} stopSignalSucceeded={recorderStopSucceeded} gracefulExitSucceeded=False treeKillForbidden=True fallback=True");
                 await KillProcessTreeAsync(pid, rid);
@@ -2973,7 +3222,7 @@ class ReservationScheduler : BackgroundService
             if (postKillWaitMs > 0)
             {
                 _log.Add("REC_STOP_DEVICE_SETTLE", $"R{rid}",
-                    $"stage=begin waitMs={postKillWaitMs} chainHandoff={hasPendingChainSuccessor} tunerStatus={_tunerPool.GetStatusSummary()} rule=v0.5.65_wait_before_tunerpool_release");
+                    $"stage=begin waitMs={postKillWaitMs} chainHandoff={hasPendingChainSuccessor} tunerStatus={_tunerPool.GetStatusSummary()} rule=release_contract");
                 _log.Add("Scheduler", $"R{rid}",
                     $"録画停止後デバイス解放待機開始: waitMs={postKillWaitMs} chainHandoff={hasPendingChainSuccessor} tunerStatus={_tunerPool.GetStatusSummary()}");
                 await Task.Delay(postKillWaitMs);
@@ -3007,7 +3256,7 @@ class ReservationScheduler : BackgroundService
                 $"inputRawDrops={SafeValue(recorderOutcome.RawContinuityDrops)} inputRawCcErrors={SafeValue(recorderOutcome.RawContinuityErrors)} inputRawSyncErrors={SafeValue(recorderOutcome.RawSyncErrors)} inputRawScrambled={SafeValue(recorderOutcome.RawScrambledPackets)} " +
                 $"outputDrops={SafeValue(recorderOutcome.OutputContinuityDrops)} outputCcErrors={SafeValue(recorderOutcome.OutputContinuityErrors)} outputSyncErrors={SafeValue(recorderOutcome.OutputSyncErrors)} outputScrambled={SafeValue(recorderOutcome.OutputScrambledPackets)} " +
                 $"rawLayerMeaning=pre_write_input_observation outputLayerMeaning=recorded_file_integrity runtimeStatsEmitted={SafeValue(recorderOutcome.RuntimeStatsEmitted)} runtimeStatsPath={SafeValue(recorderOutcome.RuntimeStatsPath)} " +
-                $"rule=v0.6.41_drop_quality_correlation_summary");
+                $"rule=release_contract");
             LogDirectRecorderQualityCorrelation(rid, qualityService, qualityTitle, qualityClassification, recorderOutcome, qualityContext, session.Lease.Name, session.Lease.Did);
             LogDirectRecorderRuntimeTimeline(rid, qualityService, qualityTitle, qualityGroup ?? "-", recorderOutcome);
             if (finalStatus == ReservationStatus.Completed && recorderOutcome.ResponseExists && !recorderOutcome.Success)
@@ -3020,7 +3269,7 @@ class ReservationScheduler : BackgroundService
                         $"result=OVERRIDDEN_BY_REC_TS_VERIFY service={SafeValue(service)} title={TrimForLog(title, 80)} responseSuccess=False finalStatus=Completed " + terminalFailureReasonPart + " " +
                         $"verifyResult={SafeValue(tsVerification?.Result)} verifyVerdict={SafeValue(tsVerification?.Verdict)} verifyReadable={SafeValue(tsVerification?.ReadableJudgement)} " +
                         $"bytesWritten={recorderOutcome.BytesWritten} packetsWritten={recorderOutcome.PacketsWritten} outputScrambled={SafeValue(recorderOutcome.OutputScrambledPackets)} outputSyncErrors={SafeValue(recorderOutcome.OutputSyncErrors)} response={recorderOutcome.Summary} " +
-                        $"rule=v0.10.14_wake_credential_context_record_verdict_crosscheck");
+                        $"rule=release_contract");
                 }
                 else
                 {
@@ -3028,7 +3277,7 @@ class ReservationScheduler : BackgroundService
                         $"result=FAILED_BY_TVAIREPGREC service={SafeValue(service)} title={TrimForLog(title, 80)} responseSuccess=False " + terminalFailureReasonPart + " " +
                         $"verifyResult={SafeValue(tsVerification?.Result)} verifyVerdict={SafeValue(tsVerification?.Verdict)} verifyReadable={SafeValue(tsVerification?.ReadableJudgement)} " +
                         $"bytesWritten={recorderOutcome.BytesWritten} packetsWritten={recorderOutcome.PacketsWritten} response={recorderOutcome.Summary} " +
-                        $"rule=v0.10.14_wake_credential_context_record_verdict_crosscheck");
+                        $"rule=release_contract");
                     finalStatus = ReservationStatus.Failed;
                 }
             }
@@ -3042,7 +3291,7 @@ class ReservationScheduler : BackgroundService
                 _log.Add("TVAIREPGREC_FINAL_STATUS", $"R{rid}",
                     $"result={finalResultKind} service={SafeValue(service)} title={TrimForLog(title, 80)} finalStatus={finalStatus} " + terminalFailureReasonPart + " " +
                     $"verifyResult={SafeValue(tsVerification?.Result)} verifyVerdict={SafeValue(tsVerification?.Verdict)} verifyReadable={SafeValue(tsVerification?.ReadableJudgement)} " +
-                    $"response={recorderOutcome.Summary} rule=v0.9.92_result_response_stabilize");
+                    $"response={recorderOutcome.Summary} rule=release_contract");
             }
 
             CleanupTvAIrEpgRecRecordingRuntimeFiles(session, recorderOutcome, rid, finalStatus, tsVerification);
@@ -3061,7 +3310,7 @@ class ReservationScheduler : BackgroundService
             TvAirManagedProcessRegistry.Unregister(pid);
             session.ActivityHandle?.Dispose();
             _log.Add("PROCESS_OWNERSHIP", $"R{rid}",
-                $"unregisterManagedPid=True pid={pid} reason=recording_session_finished rule=v0.5.65_route_classification_directrecorder");
+                $"unregisterManagedPid=True pid={pid} reason=recording_session_finished rule=release_contract");
 
             _log.Add("REC_STOP_COMMON_EXIT", $"R{rid}",
                 $"status={finalStatus} pid={pid} tuner={SafeValue(session.Lease.Name)} route={("TvAIrEpgRecOnly")} tunerStatus={_tunerPool.GetStatusSummary()}");
@@ -3129,7 +3378,7 @@ class ReservationScheduler : BackgroundService
 
         var delayMinutes = IniSettingsService.NormalizeRecordingAfterActionDelayMinutes(_ini.RecordingAfterActionDelayMinutes);
         var delayMs = (int)TimeSpan.FromMinutes(delayMinutes).TotalMilliseconds;
-        _log.Add("RECORDING_AFTER_ACTION", $"R{reservationId}", $"result=ARMED action={action} reason=last_completed_recording service={SafeValue(service)} title={TrimForLog(title, 80)} delayMinutes={delayMinutes} delayMs={delayMs} basis=after_recording_process_end rule=v0.6.36_macro_cleanup_after_action_delay");
+        _log.Add("RECORDING_AFTER_ACTION", $"R{reservationId}", $"result=ARMED action={action} reason=last_completed_recording service={SafeValue(service)} title={TrimForLog(title, 80)} delayMinutes={delayMinutes} delayMs={delayMs} basis=after_recording_process_end rule=release_contract");
         Task.Run(async () =>
         {
             try
@@ -3147,7 +3396,7 @@ class ReservationScheduler : BackgroundService
                 var currentDelayMinutes = IniSettingsService.NormalizeRecordingAfterActionDelayMinutes(_ini.RecordingAfterActionDelayMinutes);
                 if (currentAction != action || currentDelayMinutes != delayMinutes)
                 {
-                    _log.Add("RECORDING_AFTER_ACTION", $"R{reservationId}", $"result=CANCEL action={action} reason=setting_changed currentAction={currentAction} armedDelayMinutes={delayMinutes} currentDelayMinutes={currentDelayMinutes} rule=v0.6.36_macro_cleanup_after_action_delay");
+                    _log.Add("RECORDING_AFTER_ACTION", $"R{reservationId}", $"result=CANCEL action={action} reason=setting_changed currentAction={currentAction} armedDelayMinutes={delayMinutes} currentDelayMinutes={currentDelayMinutes} rule=release_contract");
                     return;
                 }
 
@@ -3155,7 +3404,7 @@ class ReservationScheduler : BackgroundService
                 {
                     var ok = SetSuspendState(false, true, false);
                     var err = ok ? 0 : Marshal.GetLastWin32Error();
-                    _log.Add("RECORDING_AFTER_ACTION", $"R{reservationId}", $"result={(ok ? "EXECUTED" : "FAILED")} action=sleep win32={err} delayMinutes={delayMinutes} service={SafeValue(service)} title={TrimForLog(title, 80)} rule=v0.6.36_macro_cleanup_after_action_delay");
+                    _log.Add("RECORDING_AFTER_ACTION", $"R{reservationId}", $"result={(ok ? "EXECUTED" : "FAILED")} action=sleep win32={err} delayMinutes={delayMinutes} service={SafeValue(service)} title={TrimForLog(title, 80)} rule=release_contract");
                 }
                 else if (action == "shutdown")
                 {
@@ -3166,7 +3415,7 @@ class ReservationScheduler : BackgroundService
                         UseShellExecute = false,
                         CreateNoWindow = true,
                     });
-                    _log.Add("RECORDING_AFTER_ACTION", $"R{reservationId}", $"result=EXECUTED action=shutdown pid={(p?.Id.ToString() ?? "-")} windowsTimeoutSec=0 delayMinutes={delayMinutes} service={SafeValue(service)} title={TrimForLog(title, 80)} rule=v0.6.36_macro_cleanup_after_action_delay");
+                    _log.Add("RECORDING_AFTER_ACTION", $"R{reservationId}", $"result=EXECUTED action=shutdown pid={(p?.Id.ToString() ?? "-")} windowsTimeoutSec=0 delayMinutes={delayMinutes} service={SafeValue(service)} title={TrimForLog(title, 80)} rule=release_contract");
                 }
             }
             catch (Exception ex)
@@ -3199,7 +3448,7 @@ class ReservationScheduler : BackgroundService
         if (shouldKeep)
         {
             _log.Add("TVAIREPGREC_RECORD_RUNTIME_CLEANUP", $"R{reservationId}",
-                $"result=KEPT reason=recording_failed_worker_reported_ng_or_unverified_response_missing status={finalStatus} files={targets.Count} job={SafeValue(session.JobPath)} result={SafeValue(session.ResponsePath)} progress={SafeValue(session.ProgressPath)} runtime={SafeValue(session.RuntimeStatsPath)} stopSignal={SafeValue(session.StopSignalPath)} rule=v0.8.01_epg_transport_stream_import_restore");
+                $"result=KEPT reason=recording_failed_worker_reported_ng_or_unverified_response_missing status={finalStatus} files={targets.Count} job={SafeValue(session.JobPath)} result={SafeValue(session.ResponsePath)} progress={SafeValue(session.ProgressPath)} runtime={SafeValue(session.RuntimeStatsPath)} stopSignal={SafeValue(session.StopSignalPath)} rule=release_contract");
             return;
         }
 
@@ -3222,7 +3471,7 @@ class ReservationScheduler : BackgroundService
         }
 
         _log.Add("TVAIREPGREC_RECORD_RUNTIME_CLEANUP", $"R{reservationId}",
-            $"result=OK status={finalStatus} deleted={deleted} failed={failed} targetFiles={targets.Count} reason=completed_recording_runtime_files_are_internal_artifacts rule=v0.8.01_epg_transport_stream_import_restore");
+            $"result=OK status={finalStatus} deleted={deleted} failed={failed} targetFiles={targets.Count} reason=completed_recording_runtime_files_are_internal_artifacts rule=release_contract");
     }
 
     private async Task<string> WaitForTvAIrEpgRecResultFileAsync(RecordingSession session, int reservationId, int pid, int waitMs)
@@ -3241,13 +3490,13 @@ class ReservationScheduler : BackgroundService
             {
                 var elapsed = (int)(DateTime.UtcNow - started).TotalMilliseconds;
                 _log.Add("TVAIREPGREC_RESULT_WAIT", $"R{reservationId}",
-                    $"result=FOUND pid={pid} elapsedMs={elapsed} polls={polls} response={SafeValue(session.ResponsePath)} rule=v0.9.92_result_response_stabilize");
+                    $"result=FOUND pid={pid} elapsedMs={elapsed} polls={polls} response={SafeValue(session.ResponsePath)} rule=release_contract");
                 return $"found_after_{elapsed}ms";
             }
             await Task.Delay(200).ConfigureAwait(false);
         }
 
-        // v0.10.00:
+        // release_contract:
         // 結果JSONのflush/ファイル検出がTS検証より遅れる場合、ここで即 missing と断定すると
         // 後段のTS clear判定と矛盾したログになる。録画ファイルが実体を持つ場合は
         // 「結果JSON遅延/欠落だが録画実体あり」として扱い、録画成否はTS検証と最終判定へ委ねる。
@@ -3258,12 +3507,12 @@ class ReservationScheduler : BackgroundService
             _log.Add("TVAIREPGREC_RESULT_WAIT", $"R{reservationId}",
                 $"result=DEFERRED_RESPONSE_FILE_PRESENT pid={pid} processAlive={processAlive} waitMs={waitMs} polls={polls} fileSize={fileSize} " +
                 $"response={SafeValue(session.ResponsePath)} progress={ReadTvAIrEpgRecStopProgressSummary(session.ProgressPath)} " +
-                $"action=use_ts_verify_and_final_status rule=v0.10.00_result_response_wait_stabilize");
+                $"action=use_ts_verify_and_final_status rule=release_contract");
             return $"deferred_response_file_present_{waitMs}ms";
         }
 
         _log.Add("TVAIREPGREC_RESULT_WAIT", $"R{reservationId}",
-            $"result=MISSING_AFTER_WAIT pid={pid} waitMs={waitMs} polls={polls} response={SafeValue(session.ResponsePath)} progress={ReadTvAIrEpgRecStopProgressSummary(session.ProgressPath)} rule=v0.10.00_result_response_wait_stabilize");
+            $"result=MISSING_AFTER_WAIT pid={pid} waitMs={waitMs} polls={polls} response={SafeValue(session.ResponsePath)} progress={ReadTvAIrEpgRecStopProgressSummary(session.ProgressPath)} rule=release_contract");
         return $"missing_after_{waitMs}ms";
     }
 
@@ -3310,14 +3559,14 @@ class ReservationScheduler : BackgroundService
             if (string.IsNullOrWhiteSpace(session.StopSignalPath))
             {
                 _log.Add("TVAIREPGREC_STOP_SIGNAL", $"R{reservationId}",
-                    $"result=NG reason=stop_signal_path_empty pid={pid} rule=v0.5.65_no_kill_before_flush");
+                    $"result=NG reason=stop_signal_path_empty pid={pid} rule=release_contract");
                 return false;
             }
 
             Directory.CreateDirectory(Path.GetDirectoryName(session.StopSignalPath) ?? AppContext.BaseDirectory);
             await File.WriteAllTextAsync(session.StopSignalPath, DateTime.Now.ToString("O")).ConfigureAwait(false);
             _log.Add("TVAIREPGREC_STOP_SIGNAL", $"R{reservationId}",
-                $"result=SENT pid={pid} stopSignal={SafeValue(session.StopSignalPath)} response={SafeValue(session.ResponsePath)} timeoutMs={timeoutMs} rule=v0.5.65_stop_file_graceful_flush");
+                $"result=SENT pid={pid} stopSignal={SafeValue(session.StopSignalPath)} response={SafeValue(session.ResponsePath)} timeoutMs={timeoutMs} rule=release_contract");
 
             var started = DateTime.UtcNow;
             while ((DateTime.UtcNow - started).TotalMilliseconds < timeoutMs)
@@ -3342,7 +3591,7 @@ class ReservationScheduler : BackgroundService
                     var fileSize = File.Exists(session.RecordingFilePath) ? new FileInfo(session.RecordingFilePath).Length : -1;
                     var bridgeResponse = ReadDirectRecorderResponseSummary(session.ResponsePath);
                     _log.Add("TVAIREPGREC_STOP_RESULT", $"R{reservationId}",
-                        $"result=OK pid={pid} elapsedMs={elapsed} responseExists={responseExists} responseWait={responseWait} fileSize={fileSize} path={SafeValue(session.RecordingFilePath)} response={bridgeResponse} rule=v0.9.92_result_response_stabilize");
+                        $"result=OK pid={pid} elapsedMs={elapsed} responseExists={responseExists} responseWait={responseWait} fileSize={fileSize} path={SafeValue(session.RecordingFilePath)} response={bridgeResponse} rule=release_contract");
                     return true;
                 }
                 await Task.Delay(250).ConfigureAwait(false);
@@ -3351,14 +3600,14 @@ class ReservationScheduler : BackgroundService
             var timeoutResponse = ReadDirectRecorderResponseSummary(session.ResponsePath);
             var stopProgress = ReadTvAIrEpgRecStopProgressSummary(session.ProgressPath);
             _log.Add("TVAIREPGREC_STOP_RESULT", $"R{reservationId}",
-                $"result=TIMEOUT pid={pid} timeoutMs={timeoutMs} response={timeoutResponse} progress={stopProgress} fallback=single_pid_exit rule=v0.8.21_stop_root_trace_no_wait_extension");
+                $"result=TIMEOUT pid={pid} timeoutMs={timeoutMs} response={timeoutResponse} progress={stopProgress} fallback=single_pid_exit rule=release_contract");
             return false;
         }
         catch (Exception ex)
         {
             var exceptionResponse = ReadDirectRecorderResponseSummary(session.ResponsePath);
             _log.Add("TVAIREPGREC_STOP_RESULT", $"R{reservationId}",
-                $"result=NG pid={pid} error={TrimForLog(ex.Message, 240)} response={exceptionResponse} fallback=single_pid_exit rule=v0.5.65_bridge_stop_exception");
+                $"result=NG pid={pid} error={TrimForLog(ex.Message, 240)} response={exceptionResponse} fallback=single_pid_exit rule=release_contract");
             return false;
         }
     }
@@ -3376,14 +3625,14 @@ class ReservationScheduler : BackgroundService
             if (target.HasExited)
             {
                 _log.Add("REC_STOP_GRACEFUL_EXIT", $"R{reservationId}",
-                    $"result=OK stage=already_exited pid={pid} route={route} waitMs=0 killIssued=False rule=v0.4.14_no_kill_after_recordstop_ok");
+                    $"result=OK stage=already_exited pid={pid} route={route} waitMs=0 killIssued=False rule=release_contract");
                 return true;
             }
         }
         catch (ArgumentException)
         {
             _log.Add("REC_STOP_GRACEFUL_EXIT", $"R{reservationId}",
-                $"result=OK stage=process_not_found pid={pid} route={route} waitMs=0 killIssued=False rule=v0.4.14_no_kill_after_recordstop_ok");
+                $"result=OK stage=process_not_found pid={pid} route={route} waitMs=0 killIssued=False rule=release_contract");
             return true;
         }
         catch (Exception ex)
@@ -3399,7 +3648,7 @@ class ReservationScheduler : BackgroundService
             target.Refresh();
             closeIssued = target.CloseMainWindow();
             _log.Add("REC_STOP_GRACEFUL_EXIT", $"R{reservationId}",
-                $"stage=close_main_window pid={pid} route={route} issued={closeIssued} waitMs={waitMs} killIssued=False rule=v0.4.15_recordstop_ok_then_graceful_exit");
+                $"stage=close_main_window pid={pid} route={route} issued={closeIssued} waitMs={waitMs} killIssued=False rule=release_contract");
         }
         catch (Exception ex)
         {
@@ -3445,7 +3694,7 @@ class ReservationScheduler : BackgroundService
 
     /// <summary>
     /// TvAIr が起動・所有している録画用 TVTest の PID 単体だけを終了する。
-    /// v0.3.53: taskkill /T と子プロセス kill は禁止。視聴用 TVTest/LIVETest を巻き込まない。
+    /// release_contract: taskkill /T と子プロセス kill は禁止。視聴用 TVTest/LIVETest を巻き込まない。
     /// </summary>
     private async Task KillProcessTreeAsync(int pid, int reservationId)
     {
@@ -3533,9 +3782,9 @@ class ReservationScheduler : BackgroundService
 
     private async Task PreemptManagedEpgBeforeRecordingAsync(string group, Reservation r, CancellationToken ct)
     {
-        const int processExitTimeoutMs = 12000;
-        const int releaseWaitTimeoutMs = 20000;
-        const int releasePollMs = 500;
+        const int processExitTimeoutMs = 1500;
+        const int releaseWaitTimeoutMs = 1000;
+        const int releasePollMs = 250;
         var phase = $"EPG_PREEMPT_BEFORE_REC:R{r.Id}";
         var suppressUntil = DateTime.Now.AddSeconds(RecordingDueEpgSuppressBeforeAfterSec);
         RecordingLifecycleGate.SuppressEpg(group, suppressUntil, "recording_preempt_existing_epg", $"R{r.Id}", FormatReservationForLifecycleLog(r));
@@ -3599,7 +3848,7 @@ class ReservationScheduler : BackgroundService
             if (released) forceReleaseOk++; else forceReleaseMiss++;
         }
 
-        // v0.8.15: PID付与のタイミング競争で初回収集から漏れたEPG slotを、
+        // release_contract: PID付与のタイミング競争で初回収集から漏れたEPG slotを、
         // 録画開始直前にもう一度PID付き停止対象として処理する。
         var lateTargets = _tunerPool.GetStatus()
             .Where(s => string.Equals(s.Group, group, StringComparison.OrdinalIgnoreCase)
@@ -3627,7 +3876,7 @@ class ReservationScheduler : BackgroundService
             if (released) forceReleaseOk++; else forceReleaseMiss++;
         }
 
-        // v0.8.15: 残ったPIDなしEPG leaseは、起動直前/終了直後/PID未反映の一時状態として
+        // release_contract: 残ったPIDなしEPG leaseは、起動直前/終了直後/PID未反映の一時状態として
         // プロセス停止ではなくTunerPool上の録画優先解放として扱う。
         var pidlessForceReleaseOk = _tunerPool.ForceReleasePidlessEpgSlots(group, $"R{r.Id}", FormatReservationForLifecycleLog(r));
 
@@ -3680,7 +3929,7 @@ class ReservationScheduler : BackgroundService
         {
             // 録画開始前に既存EPG workerを止めた直後の最小再利用保護。
             // 旧15秒待機は録画開始を遅らせるため使用しない。
-            const int EpgPreemptWorkerExitSettleMs = 2000;
+            const int EpgPreemptWorkerExitSettleMs = 1000;
             var cooldownMs = EpgPreemptWorkerExitSettleMs;
             _log.Add("EPG_PREEMPT_COOLDOWN_BEGIN", $"R{r.Id}",
                 $"group={group} waitedMs={waitedMs} cooldownMs={cooldownMs} reason=TvAIrEpgRec_epg_process_exit_settle_only rule=epg_preempt_release_semantics");
@@ -3878,7 +4127,7 @@ class ReservationScheduler : BackgroundService
             if (_taskSvc.HasPendingDeferredWakeTask())
             {
                 _log.Add("Scheduler", "Wake(Maintenance)",
-                    "定期Wakeタスク更新を省略: reason=deferred-wake-pending rule=v0.5.66_viewing_safe_wake");
+                    "定期Wakeタスク更新を省略: reason=deferred-wake-pending rule=release_contract");
                 return;
             }
 
@@ -3907,11 +4156,11 @@ class ReservationScheduler : BackgroundService
 
     private void PublishRecordingTimelineEpgGate(IReadOnlyList<UpcomingRecording> upcoming, DateTime now)
     {
-        // v0.11.147: 録画安定中EPGの復帰は維持しつつ、次の録画タイムラインへ食い込む
+        // release_contract: 録画安定中EPGの復帰は維持しつつ、次の録画タイムラインへ食い込む
         // 通常EPG workerの新規投入を止める。チェーンだけでなく、異局重複・通常予約・即時予約も同じ境界として扱う。
         if (upcoming.Count == 0) return;
 
-        // v0.11.148: 147の未定義CurrentWaitSec参照を撤去。
+        // release_contract: 147の未定義CurrentWaitSec参照を撤去。
         // ここは特定の待機ループ状態ではなく、通常EPG workerの最大実行見込み＋終了余裕を
         // 録画タイムライン境界登録の固定安全幅として扱う。
         var safetySeconds = RecordingTimelineEpgGateSafetySeconds;
@@ -3947,7 +4196,7 @@ class ReservationScheduler : BackgroundService
             _log.Add("EPG_RECORDING_TIMELINE_GATE", "EPG",
                 $"result=REGISTERED count={targets.Count} safetySec={safetySeconds} horizon={horizon:MM/dd HH:mm:ss} " +
                 $"targets=[{string.Join(",", targets.Select(x => $"{x.Group}/R{x.ReservationId}/due={x.StartTime.AddSeconds(-_ini.PreStartMarginSeconds):HH:mm:ss}/start={x.StartTime:HH:mm:ss}"))}] " +
-                "scope=all_recording_timeline_events action=block_new_normal_epg_worker_if_worker_end_overlaps_next_recording rule=v0.11.150_recording_timeline_epg_gate_effective_worker_block");
+                "scope=all_recording_timeline_events action=block_new_normal_epg_worker_if_worker_end_overlaps_next_recording rule=release_contract");
             _lastRecordingTimelineGateSignature = signature;
         }
     }
@@ -4120,8 +4369,8 @@ class ReservationScheduler : BackgroundService
 
     private int GetEffectiveRecordingDelaySeconds()
     {
-        // v0.5.59 build fix:
-        // 0.5.58 の安全クリーニングで旧TVTest録画ルート用ファイルを外したが、
+        // release_contract build fix:
+        // 1.0.0 の安全クリーニングで旧TVTest録画ルート用ファイルを外したが、
         // チェーン/停止監査ログは現在も共通の録画開始遅延値を参照する。
         // DirectRecorder 本線の制御値として IniSettingsService.RecDelaySeconds を使い、
         // 不正値だけログ用に安全範囲へ丸める。
@@ -4250,7 +4499,7 @@ class ReservationScheduler : BackgroundService
         if (!string.Equals(before, after, StringComparison.OrdinalIgnoreCase))
         {
             _log.Add("REC_MULTI_START_BATCH", "Order",
-                $"result=REORDERED count={ordered.Count} before={before} after={after} rule=v1.0.0_due_recording_batch_launch_contract");
+                $"result=REORDERED count={ordered.Count} before={before} after={after} rule=due_recording_batch_launch_contract");
         }
 
         return ordered;
@@ -4317,7 +4566,7 @@ class ReservationScheduler : BackgroundService
             _log.Add("REC_FAIL_SUPPRESSED_ACTIVE_SESSION", $"R{r.Id}",
                 $"result=KEEP_RECORDING reason=active_tvairepgrec_session_is_source_of_truth pid={activeSession!.ProcessId} " +
                 $"tuner={SafeValue(activeSession.Lease.Name)} plannedEnd={activeSession.PlannedEndTime:MM/dd HH:mm:ss} originalReason={TrimForLog(reason, 180)} " +
-                $"rule=v0.9.83_failed_direct_route_guard " + FormatReservationForAudit(r, "fail_suppressed_active_session"));
+                $"rule=release_contract " + FormatReservationForAudit(r, "fail_suppressed_active_session"));
             return;
         }
 
@@ -4329,7 +4578,7 @@ class ReservationScheduler : BackgroundService
                 $"result=KEEP_EXISTING_STATE reason=recording_started_without_finished_at originalReason={TrimForLog(reason, 180)} " +
                 $"status={latest!.Status} start={latest.StartTime:MM/dd HH:mm:ss} end={latest.EndTime:MM/dd HH:mm:ss} " +
                 $"recordingStartedAt={latest.RecordingStartedAt:MM/dd HH:mm:ss} tuner={SafeValue(EffectiveReservationTuner(latest))} " +
-                $"rule=v0.9.83_failed_direct_route_guard " + FormatReservationForAudit(latest, "fail_suppressed_recording_window"));
+                $"rule=release_contract " + FormatReservationForAudit(latest, "fail_suppressed_recording_window"));
             return;
         }
 
@@ -4399,7 +4648,7 @@ class ReservationScheduler : BackgroundService
             }
 
             _log.Add("RESERVATION_AUDIT", context,
-                $"window={from:MM/dd HH:mm:ss}〜{to:MM/dd HH:mm:ss} count={reservations.Count} visible={activeReservations.Count} suppressedPastTerminal={terminalPastReservations.Count} now={now:MM/dd HH:mm:ss} note=non_epg_reservations_only rule=v0.5.86_dueforce_terminal_audit_quiet");
+                $"window={from:MM/dd HH:mm:ss}〜{to:MM/dd HH:mm:ss} count={reservations.Count} visible={activeReservations.Count} suppressedPastTerminal={terminalPastReservations.Count} now={now:MM/dd HH:mm:ss} note=non_epg_reservations_only rule=release_contract");
 
             foreach (var item in activeReservations)
             {
@@ -4425,7 +4674,7 @@ class ReservationScheduler : BackgroundService
                     _lastPastTerminalAuditSignature = signature;
                     _lastPastTerminalAuditLogUtc = nowUtc;
                     _log.Add("RESERVATION_AUDIT", $"{context}_PAST_TERMINAL_SUMMARY",
-                        $"suppressed={terminalPastReservations.Count} completed={completed} cancelled={cancelled} failed={failed} sample=diagnostic_only rule=reservation_audit_terminal_summary_release_candidate_trim");
+                        $"suppressed={terminalPastReservations.Count} completed={completed} cancelled={cancelled} failed={failed} sample=diagnostic_only rule=reservation_audit_terminal_summary_release_trim");
                 }
             }
         }
@@ -4449,7 +4698,7 @@ class ReservationScheduler : BackgroundService
     private string FormatReservationForAudit(Reservation r, string state)
     {
         var dueStart = r.StartTime.AddSeconds(-_ini.PreStartMarginSeconds);
-        return $"service={TrimForLog(r.ServiceName, 40)} title={ReservationDisplayTitle(r.Title, 60)} state={state} id=R{r.Id} status={r.Status} source={r.Source} enabled={r.IsEnabled} conflicted={r.IsConflicted} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} dueStart={dueStart:MM/dd HH:mm:ss} svcId={r.ServiceId} group={ResolveGroup(r) ?? "-"} tuner={SafeValue(EffectiveTunerName(r))} ch={SafeValue(r.ChannelArgument)} userChain={r.IsUserChain} chainPrev={(r.UserChainPreviousId.HasValue ? $"R{r.UserChainPreviousId.Value}" : "-")} chainRoot={(r.UserChainRootId.HasValue ? $"R{r.UserChainRootId.Value}" : "-")} created={r.CreatedAt:MM/dd HH:mm:ss} updated={r.UpdatedAt:MM/dd HH:mm:ss} rule=v0.5.78_service_title_first_audit";
+        return $"service={TrimForLog(r.ServiceName, 40)} title={ReservationDisplayTitle(r.Title, 60)} state={state} id=R{r.Id} status={r.Status} source={r.Source} enabled={r.IsEnabled} conflicted={r.IsConflicted} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} dueStart={dueStart:MM/dd HH:mm:ss} svcId={r.ServiceId} group={ResolveGroup(r) ?? "-"} tuner={SafeValue(EffectiveTunerName(r))} ch={SafeValue(r.ChannelArgument)} userChain={r.IsUserChain} chainPrev={(r.UserChainPreviousId.HasValue ? $"R{r.UserChainPreviousId.Value}" : "-")} chainRoot={(r.UserChainRootId.HasValue ? $"R{r.UserChainRootId.Value}" : "-")} created={r.CreatedAt:MM/dd HH:mm:ss} updated={r.UpdatedAt:MM/dd HH:mm:ss} rule=release_contract";
     }
 
 
@@ -4492,7 +4741,7 @@ class ReservationScheduler : BackgroundService
         try
         {
             if (!TvTestRecordingDirectoryResolver.TryResolve(_ini.TvTestExecutablePath, out var directory, out var evidence))
-                return $"result=folder_unresolved evidence={TrimForLog(evidence, 420)} rule=v0.5.67_interrupted_file_audit";
+                return $"result=folder_unresolved evidence={TrimForLog(evidence, 420)} rule=release_contract";
 
             var expectedName = BuildDirectRecorderFileName(r, r.Source is ReservationSource.Immediate or ReservationSource.Program
                 ? (r.RecordingStartedAt ?? r.StartTime)
@@ -4512,7 +4761,7 @@ class ReservationScheduler : BackgroundService
             }
 
             if (candidates.Count == 0)
-                return $"result=no_file folder={SafeValue(directory)} expected={SafeValue(expectedName)} start={r.StartTime:yyyy-MM-dd HH:mm:ss} end={r.EndTime:yyyy-MM-dd HH:mm:ss} rule=v0.5.67_interrupted_file_audit";
+                return $"result=no_file folder={SafeValue(directory)} expected={SafeValue(expectedName)} start={r.StartTime:yyyy-MM-dd HH:mm:ss} end={r.EndTime:yyyy-MM-dd HH:mm:ss} rule=release_contract";
 
             var details = candidates.Select(path =>
             {
@@ -4527,17 +4776,17 @@ class ReservationScheduler : BackgroundService
                 }
             });
 
-            return $"result=partial_file_detected folder={SafeValue(directory)} expected={SafeValue(expectedName)} {string.Join(" | ", details)} reservation={r.StartTime:yyyy-MM-dd HH:mm:ss}〜{r.EndTime:yyyy-MM-dd HH:mm:ss} rule=v0.5.67_interrupted_file_audit";
+            return $"result=partial_file_detected folder={SafeValue(directory)} expected={SafeValue(expectedName)} {string.Join(" | ", details)} reservation={r.StartTime:yyyy-MM-dd HH:mm:ss}〜{r.EndTime:yyyy-MM-dd HH:mm:ss} rule=release_contract";
         }
         catch (Exception ex)
         {
-            return $"result=audit_error type={ex.GetType().Name} message={TrimForLog(ex.Message, 240)} rule=v0.5.67_interrupted_file_audit";
+            return $"result=audit_error type={ex.GetType().Name} message={TrimForLog(ex.Message, 240)} rule=release_contract";
         }
     }
 
     private string ResolveReservationRecordFolder(Reservation r)
     {
-        // v0.4.8: BS/CSはBridgeでTVTest内部currentSid確定後にTVTest標準録画を開始する。
+        // release_contract: BS/CSはBridgeでTVTest内部currentSid確定後にTVTest標準録画を開始する。
         // 停止時はBridge RecordStop待ちを行わず、STOP_PHASE/TUNER_DEVICE_LOCKを詰まらせないTvAIr所有PID単体終了へ戻す。
         // 通常予約録画ではTvAIrが録画ファイル名を生成せず、TVTest.ini の RecordFolder/RecordFileName に準拠する。
         // TVTest.ini の RecordFolder だけを起動時確定済み値として確認し、RecordFileName はTVTestへ委譲する。
@@ -4549,7 +4798,7 @@ class ReservationScheduler : BackgroundService
         }
 
         _log.Add("RECORD_FOLDER_RESOLVE", $"R{r.Id}", $"result=OK folder={directory} evidence={TrimForLog(evidence, 420)}");
-        _log.Add("RECORD_FILE_PATH_BUILD", $"R{r.Id}", "result=OK reason=tvairepgrec_uses_tvtest_recordfilename_template_with_normalized_event_name source=TVTest.RecordFileName route=TvAIrEpgRecTemplateBuild rule=v0.9.83_failed_direct_route_guard");
+        _log.Add("RECORD_FILE_PATH_BUILD", $"R{r.Id}", "result=OK reason=tvairepgrec_uses_tvtest_recordfilename_template_with_normalized_event_name source=TVTest.RecordFileName route=TvAIrEpgRecTemplateBuild rule=release_contract");
         return directory;
     }
 
@@ -4593,7 +4842,7 @@ class ReservationScheduler : BackgroundService
                 $"service={SafeValue(service)} title={TrimForLog(title, 80)} verdict={SafeValue(outcome.QualityVerdict)} " +
                 $"samples=0 reason=runtime_stats_missing_or_empty path={SafeValue(outcome.RuntimeStatsPath)} " +
                 $"group={SafeValue(context.Group)} groupRecordingCount={context.Count} groupTuners={SafeValue(context.Names)} groupDids={SafeValue(context.Dids)} " +
-                $"rule=v0.5.91_drop_timeline_summary_with_startup_same_did_relock");
+                $"rule=release_contract");
             return;
         }
 
@@ -4618,7 +4867,7 @@ class ReservationScheduler : BackgroundService
             $"finalInputRawDrops={final.RawContinuityDrops} finalInputRawCcErrors={final.RawContinuityErrors} finalInputRawSyncErrors={final.RawSyncErrors} finalInputRawScrambled={final.RawScrambledPackets} " +
             $"finalOutputDrops={final.OutputContinuityDrops} finalOutputCcErrors={final.OutputContinuityErrors} finalOutputSyncErrors={final.OutputSyncErrors} finalOutputScrambled={final.OutputScrambledPackets} finalBytesWritten={final.BytesWritten} " +
             $"rawLayerMeaning=pre_write_input_observation outputLayerMeaning=recorded_file_integrity group={SafeValue(context.Group)} groupRecordingCount={context.Count} groupTuners={SafeValue(context.Names)} groupDids={SafeValue(context.Dids)} runtimeStatsPath={SafeValue(outcome.RuntimeStatsPath)} " +
-            $"rule=v0.6.41_drop_quality_correlation_summary");
+            $"rule=release_contract");
 
         var selected = new List<(string Label, RuntimeStatsDelta Delta)>();
         selected.Add(("first", deltas.First()));
@@ -4640,7 +4889,7 @@ class ReservationScheduler : BackgroundService
                 $"inputRawPackets={x.RawPackets} inputRawDrops={x.RawContinuityDrops} inputRawDropDelta={d.RawDropDelta} inputRawCcErrors={x.RawContinuityErrors} inputRawCcDelta={d.RawCcDelta} inputRawSyncErrors={x.RawSyncErrors} inputRawScrambled={x.RawScrambledPackets} " +
                 $"outputPackets={x.OutputPackets} outputDrops={x.OutputContinuityDrops} outputDropDelta={d.OutputDropDelta} outputCcErrors={x.OutputContinuityErrors} outputCcDelta={d.OutputCcDelta} outputSyncErrors={x.OutputSyncErrors} outputSyncDelta={d.OutputSyncDelta} outputScrambled={x.OutputScrambledPackets} " +
                 $"bytesWritten={x.BytesWritten} bytesDelta={d.BytesDelta} rawLayerMeaning=pre_write_input_observation outputLayerMeaning=recorded_file_integrity group={SafeValue(context.Group)} groupRecordingCount={context.Count} groupTuners={SafeValue(context.Names)} groupDids={SafeValue(context.Dids)} " +
-                $"rule=v0.6.41_runtime_stats_quality_correlation_summary");
+                $"rule=release_contract");
         }
     }
 
@@ -4686,7 +4935,7 @@ class ReservationScheduler : BackgroundService
             $"qualityClass={quality.ClassName} qualitySeverity={quality.Severity} group={SafeValue(context.Group)} tuner={SafeValue(tunerName)} did={SafeValue(did)} concurrentSameGroupRecordings={context.Count} concurrentSameGroupTuners={SafeValue(context.Names)} concurrentSameGroupDids={SafeValue(context.Dids)} " +
             $"outputDamageScore={outputDamage} outputDrops={SafeValue(outcome.OutputContinuityDrops)} outputCcErrors={SafeValue(outcome.OutputContinuityErrors)} outputSyncErrors={SafeValue(outcome.OutputSyncErrors)} outputScrambled={SafeValue(outcome.OutputScrambledPackets)} " +
             $"rawNoiseScore={rawNoise} inputRawDrops={SafeValue(outcome.RawContinuityDrops)} inputRawCcErrors={SafeValue(outcome.RawContinuityErrors)} inputRawSyncErrors={SafeValue(outcome.RawSyncErrors)} inputRawScrambled={SafeValue(outcome.RawScrambledPackets)} " +
-            $"rule=v0.6.41_drop_quality_correlation_summary");
+            $"rule=release_contract");
     }
 
     private static DropCorrelationClassification ClassifyDropCorrelation(
@@ -5155,8 +5404,8 @@ class ReservationScheduler : BackgroundService
                 Action: hasSuccessor ? "pretune_same_recording_tuner_chain_head" : "pretune_same_recording_tuner",
                 PreferredTunerName: parent.TunerName,
                 SkipNewWorker: false,
-                KeepWorkerUntilSafetyCeiling: true,
-                Reason: hasSuccessor ? "chain_head_may_enter_from_another_tuner" : "normal_recording_start_stability");
+                KeepWorkerUntilSafetyCeiling: false,
+                Reason: hasSuccessor ? "chain_head_probe_releases_before_recording_due" : "normal_recording_probe_releases_before_recording_due");
         }
 
         var predecessor = _store.GetById(parent.UserChainPreviousId!.Value);
@@ -5180,8 +5429,8 @@ class ReservationScheduler : BackgroundService
             Action: "pretune_required_predecessor_not_reusable",
             PreferredTunerName: parent.TunerName,
             SkipNewWorker: false,
-            KeepWorkerUntilSafetyCeiling: true,
-            Reason: $"predecessorRecording={predecessorRecording};sameSid={sameSid};sameTuner={sameTuner}");
+            KeepWorkerUntilSafetyCeiling: false,
+            Reason: $"predecessorRecording={predecessorRecording};sameSid={sameSid};sameTuner={sameTuner};probeReleasesBeforeRecordingDue=True");
     }
 
 
@@ -5217,7 +5466,7 @@ class ReservationScheduler : BackgroundService
             : $"plannedTuner={SafeValue(plannedTuner)} actualTuner={SafeValue(actualTuner ?? lease.Name)} did={SafeValue(lease.Did)} bonDriver={SafeValue(lease.BonDriverFileName)} leaseKind=Recording elapsedSinceReleaseMs={(lease.ElapsedSinceReleaseMs.HasValue ? lease.ElapsedSinceReleaseMs.Value.ToString("F0") : "-")}";
         var chainPart = $"userChain={r.IsUserChain} chainPrev={(r.UserChainPreviousId.HasValue ? $"R{r.UserChainPreviousId.Value}" : "-")} chainRoot={(r.UserChainRootId.HasValue ? $"R{r.UserChainRootId.Value}" : "-")} chainContinuation={IsChainContinuation(r)}";
         var timePart = $"start={r.StartTime:yyyy-MM-dd HH:mm:ss} end={r.EndTime:yyyy-MM-dd HH:mm:ss} scheduledStart={scheduledStart} plannedEnd={(plannedEnd.HasValue ? plannedEnd.Value.ToString("yyyy-MM-dd HH:mm:ss") : "-")} created={created} updated={updated} ageMin={ageMin}";
-        return $"result=OK stage={stage} reservation=R{r.Id} kind={reservationKind} source={r.Source} route={route} status={r.Status} enabled={r.IsEnabled} conflicted={r.IsConflicted} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title, 80)} group={SafeValue(group ?? ResolveGroup(r))} {leasePart} {channelIdentity} {fileNamePart} finalGuardApplied={finalGuardApplied} commonAllocationRoute=True wakeCoupled=True preRecordEpgCoupled=True {chainPart} {timePart} sourceRule={(r.SourceRuleId.HasValue ? r.SourceRuleId.Value.ToString() : "-")} sourceRuleName={SafeValue(r.SourceRuleName)} note={SafeValue(note)} rule=reservation_tuner_filename_pipeline_audit_v0.10.57";
+        return $"result=OK stage={stage} reservation=R{r.Id} kind={reservationKind} source={r.Source} route={route} status={r.Status} enabled={r.IsEnabled} conflicted={r.IsConflicted} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title, 80)} group={SafeValue(group ?? ResolveGroup(r))} {leasePart} {channelIdentity} {fileNamePart} finalGuardApplied={finalGuardApplied} commonAllocationRoute=True wakeCoupled=True preRecordEpgCoupled=True {chainPart} {timePart} sourceRule={(r.SourceRuleId.HasValue ? r.SourceRuleId.Value.ToString() : "-")} sourceRuleName={SafeValue(r.SourceRuleName)} note={SafeValue(note)} rule=reservation_tuner_filename_pipeline_audit_release_contract";
     }
 
     private static string ResolveReservationKindForPipelineAudit(Reservation r)
@@ -5227,7 +5476,7 @@ class ReservationScheduler : BackgroundService
         {
             ReservationSource.Immediate => "Immediate",
             ReservationSource.Program => "Program",
-            // v0.11.101: KeywordSearch is a program-guide search result/manual action.
+            // release_contract: KeywordSearch is a program-guide search result/manual action.
             // Keyword is the KeywordMatcher / auto-search generated reservation.
             ReservationSource.KeywordSearch => "ManualOrProgramGuide",
             ReservationSource.Keyword => "AutoSearch",
@@ -5321,7 +5570,7 @@ internal sealed class RecordingSession
         RecordingFileStallStopRequested = true;
     }
 
-// v0.2.34: 停止フェーズ中の再評価侵入を抑止するための共通判定。
+// release_contract: 停止フェーズ中の再評価侵入を抑止するための共通判定。
 private static bool ShouldDeferBecauseStopping(string source, string action)
 {
     return StopPhaseGate.TryDeferAllocRoute(source, action, null);

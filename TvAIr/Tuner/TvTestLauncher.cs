@@ -1,4 +1,4 @@
-﻿/* v0.5.32: 旧TVTest録画起動APIは撤去。TvTestLauncherはEPG取得・プロセス維持用途に限定。 */
+/* release_contract: 旧TVTest録画起動APIは撤去。TvTestLauncherはEPG取得・プロセス維持用途に限定。 */
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -23,7 +23,7 @@ namespace TvAIr.Tuner;
 ///   /min           : 最小化状態で起動（設定で ON/OFF 可能）
 ///   /nodshow       : DirectShow無効化・CPU負荷軽減（EPG取得側のみ設定で ON/OFF 可能。録画起動では付けない）
 ///
-/// v0.2.46: TVTest/LIVETest巻き込み確認性を優先し、Windows側の非表示化は行わない。
+/// release_contract: TVTest/LIVETest巻き込み確認性を優先し、Windows側の非表示化は行わない。
 /// /min により最小化起動し、タスクバー上でTVTestの活動状態を確認できるようにする。
 /// </summary>
 
@@ -55,7 +55,7 @@ public sealed class TvTestLauncher
         _log = log;
     }
 
-    // v0.5.77: TVTest起動はEPG取得・活動維持用途に限定。予約録画本線はDirectRecorder側で扱う。
+    // release_contract: TVTest起動はEPG取得・活動維持用途に限定。予約録画本線はDirectRecorder側で扱う。
     // このクラスはTVTestプロセス維持・EPG取得用途に限定し、本番録画はDirectRecorderへ集約する。
 
 
@@ -72,7 +72,7 @@ public sealed class TvTestLauncher
         var workingDirectory = Path.GetDirectoryName(exe) ?? string.Empty;
 
         _log.Add("VIEWER_TVTEST_ARGUMENT", "Viewer",
-            $"selected=chspaceChiSid exeName={SafeLog(Path.GetFileName(exe))} workingDirectory=omitted bonDriver={SafeLog(bonDriverFileName)} bonDriverPath=omitted did={SafeLog(did)} finalArguments={SafeLog(CompactViewerCommandLineForAudit(args))} sourceChannelArgument={SafeLog(channelArgument)} silent=False sidInInitialLaunch={(!string.IsNullOrWhiteSpace(GetCommandTokenValue(viewerChannelArgument, "/sid"))).ToString()} identityArgsInInitialLaunch=sid_only copyCommand=omitted preserveViewerWindowState={preserveViewerWindowState} viewerActivation={SafeLog(viewerActivation)} restoreWindowStateRequested={(restoreWindowState?.Captured == true)} rule=v0.11.36_viewer_retune_first_keepalive_contract");
+            $"selected=chspaceChiSid exeName={SafeLog(Path.GetFileName(exe))} workingDirectory=omitted bonDriver={SafeLog(bonDriverFileName)} bonDriverPath=omitted did={SafeLog(did)} finalArguments={SafeLog(CompactViewerCommandLineForAudit(args))} sourceChannelArgument={SafeLog(channelArgument)} silent=False sidInInitialLaunch={(!string.IsNullOrWhiteSpace(GetCommandTokenValue(viewerChannelArgument, "/sid"))).ToString()} identityArgsInInitialLaunch=sid_only copyCommand=omitted preserveViewerWindowState={preserveViewerWindowState} viewerActivation={SafeLog(viewerActivation)} restoreWindowStateRequested={(restoreWindowState?.Captured == true)} rule=release_contract");
 
         var result = LaunchViewerCore(exe, args, preserveViewerWindowState, viewerActivation, restoreWindowState);
         if (result.Success && result.ProcessId > 0)
@@ -94,13 +94,13 @@ public sealed class TvTestLauncher
             using var existing = Process.GetProcessById(existingProcessId);
             if (existing.HasExited)
             {
-                _log.Add("VIEWER_RETUNE_EXISTING", "Viewer", $"result=FAILED method=tvtest_single_instance_commandline pid={existingProcessId} reason=existing_process_exited rule=v0.11.36_viewer_retune_first_keepalive_contract");
+                _log.Add("VIEWER_RETUNE_EXISTING", "Viewer", $"result=FAILED method=tvtest_single_instance_commandline pid={existingProcessId} reason=existing_process_exited rule=release_contract");
                 return new LaunchResult(false, existingProcessId, "existing viewer process exited");
             }
         }
         catch (Exception ex)
         {
-            _log.Add("VIEWER_RETUNE_EXISTING", "Viewer", $"result=FAILED method=tvtest_single_instance_commandline pid={existingProcessId} reason=existing_process_not_found message={SafeLog(ex.Message)} rule=v0.11.36_viewer_retune_first_keepalive_contract");
+            _log.Add("VIEWER_RETUNE_EXISTING", "Viewer", $"result=FAILED method=tvtest_single_instance_commandline pid={existingProcessId} reason=existing_process_not_found message={SafeLog(ex.Message)} rule=release_contract");
             return new LaunchResult(false, existingProcessId, "existing viewer process not found");
         }
 
@@ -116,16 +116,16 @@ public sealed class TvTestLauncher
         var workingDirectory = Path.GetDirectoryName(exe) ?? string.Empty;
 
         _log.Add("VIEWER_RETUNE_EXISTING_COMMAND", "Viewer",
-            $"method=tvtest_single_instance_commandline existingPid={existingProcessId} exeName={SafeLog(Path.GetFileName(exe))} workingDirectory=omitted bonDriver={SafeLog(bonDriverFileName)} bonDriverPath=omitted did={SafeLog(did)} arguments={SafeLog(CompactViewerCommandLineForAudit(args))} sourceChannelArgument={SafeLog(channelArgument)} sidInRetuneCommand={(!string.IsNullOrWhiteSpace(GetCommandTokenValue(viewerChannelArgument, "/sid"))).ToString()} preserveViewerWindowState={preserveViewerWindowState} viewerActivation={SafeLog(viewerActivation)} auditNote=paths_omitted_current_state_is_registry_session rule=v0.11.36_viewer_retune_first_keepalive_contract");
+            $"method=tvtest_single_instance_commandline existingPid={existingProcessId} exeName={SafeLog(Path.GetFileName(exe))} workingDirectory=omitted bonDriver={SafeLog(bonDriverFileName)} bonDriverPath=omitted did={SafeLog(did)} arguments={SafeLog(CompactViewerCommandLineForAudit(args))} sourceChannelArgument={SafeLog(channelArgument)} sidInRetuneCommand={(!string.IsNullOrWhiteSpace(GetCommandTokenValue(viewerChannelArgument, "/sid"))).ToString()} preserveViewerWindowState={preserveViewerWindowState} viewerActivation={SafeLog(viewerActivation)} auditNote=paths_omitted_current_state_is_registry_session rule=release_contract");
 
         if (_dryRun)
         {
-            _log.Add("VIEWER_RETUNE_EXISTING", "DryRun", $"result=OK method=tvtest_single_instance_commandline existingPid={existingProcessId} helperPid=0 dryRun=True rule=v0.11.36_viewer_retune_first_keepalive_contract");
+            _log.Add("VIEWER_RETUNE_EXISTING", "DryRun", $"result=OK method=tvtest_single_instance_commandline existingPid={existingProcessId} helperPid=0 dryRun=True rule=release_contract");
             return new LaunchResult(true, existingProcessId, $"DryRun retune existing PID={existingProcessId}: {exe} {args}");
         }
         if (string.IsNullOrWhiteSpace(exe) || !File.Exists(exe))
         {
-            _log.Add("VIEWER_RETUNE_EXISTING", "Viewer", $"result=FAILED method=tvtest_single_instance_commandline existingPid={existingProcessId} reason=exe_not_found exe={SafeLog(exe)} rule=v0.11.36_viewer_retune_first_keepalive_contract");
+            _log.Add("VIEWER_RETUNE_EXISTING", "Viewer", $"result=FAILED method=tvtest_single_instance_commandline existingPid={existingProcessId} reason=exe_not_found exe={SafeLog(exe)} rule=release_contract");
             return new LaunchResult(false, existingProcessId, $"Viewer executable not found: {exe}");
         }
 
@@ -162,7 +162,7 @@ public sealed class TvTestLauncher
                 {
                     duplicateGuard = "cleanup_error_" + cleanupEx.GetType().Name;
                 }
-                _log.Add("VIEWER_RETUNE_EXISTING", "Viewer", $"result=FAILED method=tvtest_single_instance_commandline existingPid={existingProcessId} helperPid={helperPid} helperExited=False reason=helper_process_did_not_exit duplicateGuard={SafeLog(duplicateGuard)} action=deny_without_restart preserveViewerWindowState={preserveViewerWindowState} normalWindowActivationSuppressed=True rule=v0.11.36_viewer_retune_first_keepalive_contract");
+                _log.Add("VIEWER_RETUNE_EXISTING", "Viewer", $"result=FAILED method=tvtest_single_instance_commandline existingPid={existingProcessId} helperPid={helperPid} helperExited=False reason=helper_process_did_not_exit duplicateGuard={SafeLog(duplicateGuard)} action=deny_without_restart preserveViewerWindowState={preserveViewerWindowState} normalWindowActivationSuppressed=True rule=release_contract");
                 return new LaunchResult(false, existingProcessId, "Retune helper process did not exit; TvAIr prevented duplicate TVTest and kept the existing viewer alive.");
             }
 
@@ -175,7 +175,7 @@ public sealed class TvTestLauncher
             catch { existingAliveAfter = false; }
             if (!existingAliveAfter)
             {
-                _log.Add("VIEWER_RETUNE_EXISTING", "Viewer", $"result=FAILED method=tvtest_single_instance_commandline existingPid={existingProcessId} helperPid={helperPid} helperExited=True reason=existing_process_lost_after_command action=stale_release_then_restart_recovery preserveViewerWindowState={preserveViewerWindowState} normalWindowActivationSuppressed=True rule=v0.11.36_viewer_retune_first_keepalive_contract");
+                _log.Add("VIEWER_RETUNE_EXISTING", "Viewer", $"result=FAILED method=tvtest_single_instance_commandline existingPid={existingProcessId} helperPid={helperPid} helperExited=True reason=existing_process_lost_after_command action=stale_release_then_restart_recovery preserveViewerWindowState={preserveViewerWindowState} normalWindowActivationSuppressed=True rule=release_contract");
                 return new LaunchResult(false, existingProcessId, "Existing viewer process disappeared after retune command.");
             }
 
@@ -202,18 +202,18 @@ public sealed class TvTestLauncher
             }
             if (!survivalOk)
             {
-                _log.Add("VIEWER_RETUNE_SURVIVAL", "Viewer", $"result=FAILED existingPid={existingProcessId} monitorMs={survivalMonitorMs} reason=existing_process_lost_after_retune action=stale_release_then_restart_recovery rule=v0.11.36_viewer_retune_first_keepalive_contract");
+                _log.Add("VIEWER_RETUNE_SURVIVAL", "Viewer", $"result=FAILED existingPid={existingProcessId} monitorMs={survivalMonitorMs} reason=existing_process_lost_after_retune action=stale_release_then_restart_recovery rule=release_contract");
                 return new LaunchResult(false, existingProcessId, "Existing viewer process disappeared during retune survival monitor.");
             }
 
             TvAirManagedProcessRegistry.RegisterViewer(existingProcessId, did, bonDriverFileName);
-            _log.Add("VIEWER_RETUNE_SURVIVAL", "Viewer", $"result=OK existingPid={existingProcessId} monitorMs={survivalMonitorMs} rule=v0.11.36_viewer_retune_first_keepalive_contract");
-            _log.Add("VIEWER_RETUNE_EXISTING", "Viewer", $"result=OK method=tvtest_single_instance_commandline existingPid={existingProcessId} helperPid={helperPid} helperExited=True existingAliveAfter=True duplicateGuard=not_needed preserveViewerWindowState={preserveViewerWindowState} normalWindowActivationSuppressed=True rule=v0.11.36_viewer_retune_first_keepalive_contract");
+            _log.Add("VIEWER_RETUNE_SURVIVAL", "Viewer", $"result=OK existingPid={existingProcessId} monitorMs={survivalMonitorMs} rule=release_contract");
+            _log.Add("VIEWER_RETUNE_EXISTING", "Viewer", $"result=OK method=tvtest_single_instance_commandline existingPid={existingProcessId} helperPid={helperPid} helperExited=True existingAliveAfter=True duplicateGuard=not_needed preserveViewerWindowState={preserveViewerWindowState} normalWindowActivationSuppressed=True rule=release_contract");
             return new LaunchResult(true, existingProcessId, $"Retune command sent to existing viewer PID={existingProcessId}: {exe} {args}");
         }
         catch (Exception ex)
         {
-            _log.Add("VIEWER_RETUNE_EXISTING", "Viewer", $"result=FAILED method=tvtest_single_instance_commandline existingPid={existingProcessId} reason=process_start_exception message={SafeLog(ex.Message)} exe={SafeLog(exe)} arguments={SafeLog(args)} rule=v0.11.36_viewer_retune_first_keepalive_contract");
+            _log.Add("VIEWER_RETUNE_EXISTING", "Viewer", $"result=FAILED method=tvtest_single_instance_commandline existingPid={existingProcessId} reason=process_start_exception message={SafeLog(ex.Message)} exe={SafeLog(exe)} arguments={SafeLog(args)} rule=release_contract");
             return new LaunchResult(false, existingProcessId, $"Retune command exception: {ex.Message} / {exe} {args}");
         }
     }
@@ -302,7 +302,7 @@ public sealed class TvTestLauncher
 
 
     /// <summary>
-    /// v0.11.80: TVTest の単一インスタンス受け口が「現在アクティブなTVTest」へ吸われる環境向けに、
+    /// release_contract: TVTest の単一インスタンス受け口が「現在アクティブなTVTest」へ吸われる環境向けに、
     /// viewerProfile に紐付いた既存PIDを一時的に前面化してから /s コマンドを投げる。
     /// ここでは exe 名を変えず、ini 複製も作らない。
     /// </summary>
@@ -310,7 +310,7 @@ public sealed class TvTestLauncher
     {
         if (processId <= 0)
         {
-            _log.Add("VIEWER_PROFILE_PID_BIND", "Viewer", $"result=FAILED action=prepare_target pid={processId} viewerProfile={SafeLog(viewerProfileId)} reason=empty_pid policy=foreground_target_before_unscoped_command rule=v0.11.80_viewer_profile_pid_binding");
+            _log.Add("VIEWER_PROFILE_PID_BIND", "Viewer", $"result=FAILED action=prepare_target pid={processId} viewerProfile={SafeLog(viewerProfileId)} reason=empty_pid policy=foreground_target_before_unscoped_command rule=release_contract");
             return false;
         }
 
@@ -319,7 +319,7 @@ public sealed class TvTestLauncher
             using var process = Process.GetProcessById(processId);
             if (process.HasExited)
             {
-                _log.Add("VIEWER_PROFILE_PID_BIND", "Viewer", $"result=FAILED action=prepare_target pid={processId} viewerProfile={SafeLog(viewerProfileId)} reason=process_exited policy=foreground_target_before_unscoped_command rule=v0.11.80_viewer_profile_pid_binding");
+                _log.Add("VIEWER_PROFILE_PID_BIND", "Viewer", $"result=FAILED action=prepare_target pid={processId} viewerProfile={SafeLog(viewerProfileId)} reason=process_exited policy=foreground_target_before_unscoped_command rule=release_contract");
                 return false;
             }
 
@@ -331,17 +331,17 @@ public sealed class TvTestLauncher
             }
             if (hwnd == IntPtr.Zero)
             {
-                _log.Add("VIEWER_PROFILE_PID_BIND", "Viewer", $"result=FAILED action=prepare_target pid={processId} viewerProfile={SafeLog(viewerProfileId)} reason=main_window_handle_unavailable policy=foreground_target_before_unscoped_command rule=v0.11.80_viewer_profile_pid_binding");
+                _log.Add("VIEWER_PROFILE_PID_BIND", "Viewer", $"result=FAILED action=prepare_target pid={processId} viewerProfile={SafeLog(viewerProfileId)} reason=main_window_handle_unavailable policy=foreground_target_before_unscoped_command rule=release_contract");
                 return false;
             }
 
             var foregroundApplied = SetForegroundWindow(hwnd);
-            _log.Add("VIEWER_PROFILE_PID_BIND", "Viewer", $"result={(foregroundApplied ? "OK" : "WARN")} action=prepare_target pid={processId} viewerProfile={SafeLog(viewerProfileId)} reason={SafeLog(reason)} foregroundApplied={foregroundApplied} policy=foreground_target_before_unscoped_command noExeRename=True noIniClone=True rule=v0.11.80_viewer_profile_pid_binding");
+            _log.Add("VIEWER_PROFILE_PID_BIND", "Viewer", $"result={(foregroundApplied ? "OK" : "WARN")} action=prepare_target pid={processId} viewerProfile={SafeLog(viewerProfileId)} reason={SafeLog(reason)} foregroundApplied={foregroundApplied} policy=foreground_target_before_unscoped_command noExeRename=True noIniClone=True rule=release_contract");
             return true;
         }
         catch (Exception ex)
         {
-            _log.Add("VIEWER_PROFILE_PID_BIND", "Viewer", $"result=FAILED action=prepare_target pid={processId} viewerProfile={SafeLog(viewerProfileId)} reason={SafeLog(ex.GetType().Name)} message={SafeLog(ex.Message)} policy=foreground_target_before_unscoped_command rule=v0.11.80_viewer_profile_pid_binding");
+            _log.Add("VIEWER_PROFILE_PID_BIND", "Viewer", $"result=FAILED action=prepare_target pid={processId} viewerProfile={SafeLog(viewerProfileId)} reason={SafeLog(ex.GetType().Name)} message={SafeLog(ex.Message)} policy=foreground_target_before_unscoped_command rule=release_contract");
             return false;
         }
     }
@@ -350,7 +350,7 @@ public sealed class TvTestLauncher
     {
         if (processId <= 0)
         {
-            _log.Add("VIEWER_WINDOW_STATE_CAPTURE", "Viewer", $"result=SKIPPED pid={processId} reason={SafeLog(reason)} detail=empty_pid rule=v0.11.36_viewer_retune_first_keepalive_contract");
+            _log.Add("VIEWER_WINDOW_STATE_CAPTURE", "Viewer", $"result=SKIPPED pid={processId} reason={SafeLog(reason)} detail=empty_pid rule=release_contract");
             return ViewerWindowStateSnapshot.Skipped(processId, reason, "empty_pid");
         }
         try
@@ -358,7 +358,7 @@ public sealed class TvTestLauncher
             using var process = Process.GetProcessById(processId);
             if (process.HasExited)
             {
-                _log.Add("VIEWER_WINDOW_STATE_CAPTURE", "Viewer", $"result=SKIPPED pid={processId} reason={SafeLog(reason)} detail=process_exited rule=v0.11.36_viewer_retune_first_keepalive_contract");
+                _log.Add("VIEWER_WINDOW_STATE_CAPTURE", "Viewer", $"result=SKIPPED pid={processId} reason={SafeLog(reason)} detail=process_exited rule=release_contract");
                 return ViewerWindowStateSnapshot.Skipped(processId, reason, "process_exited");
             }
 
@@ -370,7 +370,7 @@ public sealed class TvTestLauncher
             }
             if (hwnd == IntPtr.Zero)
             {
-                _log.Add("VIEWER_WINDOW_STATE_CAPTURE", "Viewer", $"result=FAILED pid={processId} reason={SafeLog(reason)} detail=main_window_handle_unavailable rule=v0.11.36_viewer_retune_first_keepalive_contract");
+                _log.Add("VIEWER_WINDOW_STATE_CAPTURE", "Viewer", $"result=FAILED pid={processId} reason={SafeLog(reason)} detail=main_window_handle_unavailable rule=release_contract");
                 return ViewerWindowStateSnapshot.Skipped(processId, reason, "main_window_handle_unavailable");
             }
 
@@ -405,12 +405,12 @@ public sealed class TvTestLauncher
                 }
             }
 
-            _log.Add("VIEWER_WINDOW_STATE_CAPTURE", "Viewer", $"result=OK pid={processId} reason={SafeLog(reason)} windowState={SafeLog(state)} bounds={left},{top},{width}x{height} source=before_restart_fallback rule=v0.11.36_viewer_retune_first_keepalive_contract");
+            _log.Add("VIEWER_WINDOW_STATE_CAPTURE", "Viewer", $"result=OK pid={processId} reason={SafeLog(reason)} windowState={SafeLog(state)} bounds={left},{top},{width}x{height} source=before_restart_fallback rule=release_contract");
             return new ViewerWindowStateSnapshot(true, processId, state, left, top, width, height, reason, "OK");
         }
         catch (Exception ex)
         {
-            _log.Add("VIEWER_WINDOW_STATE_CAPTURE", "Viewer", $"result=FAILED pid={processId} reason={SafeLog(reason)} detail={SafeLog(ex.GetType().Name)} message={SafeLog(ex.Message)} rule=v0.11.36_viewer_retune_first_keepalive_contract");
+            _log.Add("VIEWER_WINDOW_STATE_CAPTURE", "Viewer", $"result=FAILED pid={processId} reason={SafeLog(reason)} detail={SafeLog(ex.GetType().Name)} message={SafeLog(ex.Message)} rule=release_contract");
             return ViewerWindowStateSnapshot.Skipped(processId, reason, ex.GetType().Name);
         }
     }
@@ -419,12 +419,12 @@ public sealed class TvTestLauncher
     {
         if (!restoreRequested)
         {
-            _log.Add("VIEWER_WINDOW_STATE_RESTORE", "Viewer", $"result=SKIPPED pid={processId} reason=no_restore_snapshot_requested preserveViewerWindowState=True-or-launch_without_previous_snapshot rule=v0.11.95_tuner_projection_diagnostics_no_behavior_change");
+            _log.Add("VIEWER_WINDOW_STATE_RESTORE", "Viewer", $"result=SKIPPED pid={processId} reason=no_restore_snapshot_requested preserveViewerWindowState=True-or-launch_without_previous_snapshot rule=release_contract");
             return;
         }
         if (snapshot is null || !snapshot.Captured)
         {
-            _log.Add("VIEWER_WINDOW_STATE_RESTORE", "Viewer", $"result=SKIPPED pid={processId} requestedState=unknown reason=no_captured_state sourcePid={(snapshot?.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "-")} rule=v0.11.36_viewer_retune_first_keepalive_contract");
+            _log.Add("VIEWER_WINDOW_STATE_RESTORE", "Viewer", $"result=SKIPPED pid={processId} requestedState=unknown reason=no_captured_state sourcePid={(snapshot?.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "-")} rule=release_contract");
             return;
         }
         try
@@ -441,7 +441,7 @@ public sealed class TvTestLauncher
             }
             if (hwnd == IntPtr.Zero || process.HasExited)
             {
-                _log.Add("VIEWER_WINDOW_STATE_RESTORE", "Viewer", $"result=FAILED pid={processId} requestedState={SafeLog(snapshot.State)} sourcePid={snapshot.ProcessId} reason=main_window_handle_unavailable_after_launch rule=v0.11.36_viewer_retune_first_keepalive_contract");
+                _log.Add("VIEWER_WINDOW_STATE_RESTORE", "Viewer", $"result=FAILED pid={processId} requestedState={SafeLog(snapshot.State)} sourcePid={snapshot.ProcessId} reason=main_window_handle_unavailable_after_launch rule=release_contract");
                 return;
             }
 
@@ -472,11 +472,11 @@ public sealed class TvTestLauncher
                     SetWindowPos(hwnd, IntPtr.Zero, snapshot.Left, snapshot.Top, snapshot.Width, snapshot.Height, SWP_NOZORDER | SWP_NOACTIVATE);
                 method = "showwindow_normal_bounds";
             }
-            _log.Add("VIEWER_WINDOW_STATE_RESTORE", "Viewer", $"result=OK pid={processId} requestedState={SafeLog(snapshot.State)} sourcePid={snapshot.ProcessId} method={SafeLog(method)} bounds={snapshot.Left},{snapshot.Top},{snapshot.Width}x{snapshot.Height} rule=v0.11.36_viewer_retune_first_keepalive_contract");
+            _log.Add("VIEWER_WINDOW_STATE_RESTORE", "Viewer", $"result=OK pid={processId} requestedState={SafeLog(snapshot.State)} sourcePid={snapshot.ProcessId} method={SafeLog(method)} bounds={snapshot.Left},{snapshot.Top},{snapshot.Width}x{snapshot.Height} rule=release_contract");
         }
         catch (Exception ex)
         {
-            _log.Add("VIEWER_WINDOW_STATE_RESTORE", "Viewer", $"result=FAILED pid={processId} requestedState={SafeLog(snapshot.State)} sourcePid={snapshot.ProcessId} reason={SafeLog(ex.GetType().Name)} message={SafeLog(ex.Message)} rule=v0.11.36_viewer_retune_first_keepalive_contract");
+            _log.Add("VIEWER_WINDOW_STATE_RESTORE", "Viewer", $"result=FAILED pid={processId} requestedState={SafeLog(snapshot.State)} sourcePid={snapshot.ProcessId} reason={SafeLog(ex.GetType().Name)} message={SafeLog(ex.Message)} rule=release_contract");
         }
     }
 
@@ -497,7 +497,7 @@ public sealed class TvTestLauncher
             using var process = Process.GetProcessById(processId);
             if (process.HasExited)
             {
-                _log.Add("VIEWER_PROCESS_STOP", "Viewer", $"result=ALREADY_EXITED previousPid={processId} reason={reason} rule=v0.10.92_plugin_viewer_api_cleanup");
+                _log.Add("VIEWER_PROCESS_STOP", "Viewer", $"result=ALREADY_EXITED previousPid={processId} reason={reason} rule=release_contract");
                 return new LaunchResult(true, processId, "already exited");
             }
 
@@ -515,7 +515,7 @@ public sealed class TvTestLauncher
                     if (process.WaitForExit(3000))
                     {
                         TvAirManagedProcessRegistry.Unregister(processId);
-                        _log.Add("VIEWER_PROCESS_STOP", "Viewer", $"result=CLOSED previousPid={processId} closeMainWindow=True reason={reason} rule=v0.10.92_plugin_viewer_api_cleanup");
+                        _log.Add("VIEWER_PROCESS_STOP", "Viewer", $"result=CLOSED previousPid={processId} closeMainWindow=True reason={reason} rule=release_contract");
                         return new LaunchResult(true, processId, "closed");
                     }
                 }
@@ -527,19 +527,19 @@ public sealed class TvTestLauncher
                 process.Kill(entireProcessTree: false);
                 try { process.WaitForExit(3000); } catch { }
                 TvAirManagedProcessRegistry.Unregister(processId);
-                _log.Add("VIEWER_PROCESS_STOP", "Viewer", $"result=KILLED_SINGLE_PID previousPid={processId} closeMainWindow={closeIssued} treeKill=False reason={reason} rule=v0.10.92_plugin_viewer_api_cleanup");
+                _log.Add("VIEWER_PROCESS_STOP", "Viewer", $"result=KILLED_SINGLE_PID previousPid={processId} closeMainWindow={closeIssued} treeKill=False reason={reason} rule=release_contract");
                 return new LaunchResult(true, processId, "killed single pid");
             }
             catch (Exception killEx)
             {
-                _log.Add("VIEWER_PROCESS_STOP", "Viewer", $"result=FAILED previousPid={processId} closeMainWindow={closeIssued} treeKill=False reason={reason} message={killEx.Message} rule=v0.10.92_plugin_viewer_api_cleanup");
+                _log.Add("VIEWER_PROCESS_STOP", "Viewer", $"result=FAILED previousPid={processId} closeMainWindow={closeIssued} treeKill=False reason={reason} message={killEx.Message} rule=release_contract");
                 return new LaunchResult(false, processId, killEx.Message);
             }
         }
         catch (Exception ex)
         {
             TvAirManagedProcessRegistry.Unregister(processId);
-            _log.Add("VIEWER_PROCESS_STOP", "Viewer", $"result=NOT_FOUND previousPid={processId} reason={reason} message={ex.Message} rule=v0.10.92_plugin_viewer_api_cleanup");
+            _log.Add("VIEWER_PROCESS_STOP", "Viewer", $"result=NOT_FOUND previousPid={processId} reason={reason} message={ex.Message} rule=release_contract");
             return new LaunchResult(true, processId, "not found");
         }
     }
@@ -549,13 +549,13 @@ public sealed class TvTestLauncher
         var workingDirectory = Path.GetDirectoryName(exe) ?? string.Empty;
         if (_dryRun)
         {
-            _log.Add("VIEWER_PROCESS_START_COMMAND", "DryRun", $"exeName={SafeLog(Path.GetFileName(exe))} workingDirectory=omitted arguments={SafeLog(CompactViewerCommandLineForAudit(args))} useShellExecute=False windowStyle=Normal verb=- runAs=False createNoWindow=False environmentDiff=- copyCommand=omitted preserveViewerWindowState={preserveViewerWindowState} viewerActivation={SafeLog(viewerActivation)} restoreWindowStateRequested={(restoreWindowState?.Captured == true)} rule=v0.11.36_viewer_retune_first_keepalive_contract");
-            _log.Add("VIEWER_PROCESS_START", "DryRun", $"result=OK pid=0 exe={exe} args={args} rule=v0.10.92_plugin_viewer_api_cleanup");
+            _log.Add("VIEWER_PROCESS_START_COMMAND", "DryRun", $"exeName={SafeLog(Path.GetFileName(exe))} workingDirectory=omitted arguments={SafeLog(CompactViewerCommandLineForAudit(args))} useShellExecute=False windowStyle=Normal verb=- runAs=False createNoWindow=False environmentDiff=- copyCommand=omitted preserveViewerWindowState={preserveViewerWindowState} viewerActivation={SafeLog(viewerActivation)} restoreWindowStateRequested={(restoreWindowState?.Captured == true)} rule=release_contract");
+            _log.Add("VIEWER_PROCESS_START", "DryRun", $"result=OK pid=0 exe={exe} args={args} rule=release_contract");
             return new LaunchResult(true, 0, $"DryRun: {exe} {args}");
         }
         if (string.IsNullOrWhiteSpace(exe) || !File.Exists(exe))
         {
-            _log.Add("VIEWER_PROCESS_START_FAILED", "Viewer", $"reason=exe_not_found exe={SafeLog(exe)} workingDirectory={SafeLog(workingDirectory)} rule=v0.10.92_plugin_viewer_api_cleanup");
+            _log.Add("VIEWER_PROCESS_START_FAILED", "Viewer", $"reason=exe_not_found exe={SafeLog(exe)} workingDirectory={SafeLog(workingDirectory)} rule=release_contract");
             return new LaunchResult(false, 0, $"Viewer executable not found: {exe}");
         }
         try
@@ -569,28 +569,28 @@ public sealed class TvTestLauncher
                 CreateNoWindow = false,
                 WindowStyle = ProcessWindowStyle.Normal
             };
-            _log.Add("VIEWER_PROCESS_START_COMMAND", "Viewer", $"exeName={SafeLog(Path.GetFileName(psi.FileName))} workingDirectory=omitted arguments={SafeLog(CompactViewerCommandLineForAudit(psi.Arguments))} useShellExecute={psi.UseShellExecute} windowStyle={psi.WindowStyle} verb={SafeLog(psi.Verb)} runAs={string.Equals(psi.Verb, "runas", StringComparison.OrdinalIgnoreCase)} createNoWindow={psi.CreateNoWindow} copyCommand=omitted preserveViewerWindowState={preserveViewerWindowState} viewerActivation={SafeLog(viewerActivation)} restoreWindowStateRequested={(restoreWindowState?.Captured == true)} rule=v0.11.75_viewer_retune_scope_guard");
+            _log.Add("VIEWER_PROCESS_START_COMMAND", "Viewer", $"exeName={SafeLog(Path.GetFileName(psi.FileName))} workingDirectory=omitted arguments={SafeLog(CompactViewerCommandLineForAudit(psi.Arguments))} useShellExecute={psi.UseShellExecute} windowStyle={psi.WindowStyle} verb={SafeLog(psi.Verb)} runAs={string.Equals(psi.Verb, "runas", StringComparison.OrdinalIgnoreCase)} createNoWindow={psi.CreateNoWindow} copyCommand=omitted preserveViewerWindowState={preserveViewerWindowState} viewerActivation={SafeLog(viewerActivation)} restoreWindowStateRequested={(restoreWindowState?.Captured == true)} rule=release_contract");
             using var tunerDeviceAccess = TunerDeviceAccessGate.Enter("VIEWER_START", msg => _log.Add("TUNER_DEVICE_LOCK", "Viewer", msg));
             var process = Process.Start(psi);
             if (process == null)
             {
-                _log.Add("VIEWER_PROCESS_START_FAILED", "Viewer", "reason=process_start_null rule=v0.10.92_plugin_viewer_api_cleanup");
+                _log.Add("VIEWER_PROCESS_START_FAILED", "Viewer", "reason=process_start_null rule=release_contract");
                 return new LaunchResult(false, 0, "Process.Start returned null.");
             }
 
             var pid = process.Id;
             try { process.WaitForInputIdle(3000); } catch { }
-            _log.Add("VIEWER_PROCESS_START", "Viewer", $"result=OK pid={pid} exe={SafeLog(exe)} state=launched rule=v0.10.92_plugin_viewer_api_cleanup");
+            _log.Add("VIEWER_PROCESS_START", "Viewer", $"result=OK pid={pid} exe={SafeLog(exe)} state=launched rule=release_contract");
             var activationMethod = preserveViewerWindowState ? "preserve_existing_no_normal_activate" : "normal_window_start";
-            _log.Add("VIEWER_WINDOW_ACTIVATE", "Viewer", $"result=REQUESTED pid={pid} method={activationMethod} preserveViewerWindowState={preserveViewerWindowState} viewerActivation={SafeLog(viewerActivation)} normalWindowActivationSuppressed={preserveViewerWindowState} rule=v0.11.75_viewer_retune_scope_guard");
-            // v0.11.75: BonDriver/DID変更時のprofile枠再起動では、既存TVTestへのunscoped再選局を避けつつ、
+            _log.Add("VIEWER_WINDOW_ACTIVATE", "Viewer", $"result=REQUESTED pid={pid} method={activationMethod} preserveViewerWindowState={preserveViewerWindowState} viewerActivation={SafeLog(viewerActivation)} normalWindowActivationSuppressed={preserveViewerWindowState} rule=release_contract");
+            // release_contract: BonDriver/DID変更時のprofile枠再起動では、既存TVTestへのunscoped再選局を避けつつ、
             // 既存viewerの全画面・最大化・通常位置を可能な範囲で引き継ぐ。
             RestoreViewerWindowStateAfterLaunch(pid, restoreWindowState, preserveViewerWindowState && restoreWindowState is not null);
             return new LaunchResult(true, pid, $"Started PID={pid}: {exe} {args}");
         }
         catch (Exception ex)
         {
-            _log.Add("VIEWER_PROCESS_START_FAILED", "Viewer", $"reason=process_start_exception message={SafeLog(ex.Message)} exe={SafeLog(exe)} workingDirectory={SafeLog(workingDirectory)} arguments={SafeLog(args)} rule=v0.10.92_plugin_viewer_api_cleanup");
+            _log.Add("VIEWER_PROCESS_START_FAILED", "Viewer", $"reason=process_start_exception message={SafeLog(ex.Message)} exe={SafeLog(exe)} workingDirectory={SafeLog(workingDirectory)} arguments={SafeLog(args)} rule=release_contract");
             return new LaunchResult(false, 0, $"Process.Start exception: {ex.Message} / {exe} {args}");
         }
     }
@@ -719,7 +719,7 @@ public sealed class TvTestLauncher
                    $" /recdelay 8 /recexit /noview /silent /noplugin{opts}";
         var result = Launch(args);
 
-        // ─── v32.83(項目6): EPG取得用TVTestプロセスの優先度を BelowNormal に下げる ───
+        // ─── EPG取得用TVTestプロセスの優先度を BelowNormal に下げる ───
         // LIVE視聴TVTestと同優先度で競合するとカクつきの原因になるため、
         // 起動直後にBelowNormalへ降格してCPUリソースをLIVE側に譲る。
         if (result.Success && result.ProcessId > 0 && _ini.EpgUseBelowNormalPriority)
@@ -789,7 +789,7 @@ public sealed class TvTestLauncher
             UseShellExecute  = false,
             WorkingDirectory = workingDirectory,
 
-            // v0.2.46: 非表示起動はやめる。/min はTVTest側オプションとして維持し、
+            // release_contract: 非表示起動はやめる。/min はTVTest側オプションとして維持し、
             // タスクバー上でTVTestが活動中であることを確認できるようにする。
             CreateNoWindow   = false,
             WindowStyle = ProcessWindowStyle.Minimized

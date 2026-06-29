@@ -1,13 +1,13 @@
-﻿using TvAIr.Core;
+using TvAIr.Core;
 
 namespace TvAIr.Schedule;
 
 /// <summary>
-/// v0.6.17: チェーン録画本体に入る前のセッション土台。
+/// release_contract: チェーン録画本体に入る前のセッション土台。
 /// この型はまだDirectRecorderBridgeの継続やファイル切替を実行しない。
 /// 共通割り当てルートで成立したチェーンについて、実録画で掴んだ
 /// actualTuner / DID / pid / outputPath を後続セグメントへ渡せる形で観測・保持する。
-/// v0.9.81: 実行方式は worker 内ファイル切替ではなく、境界で停止→同一チューナー再取得→別TS起動。ログ上も stop-restart 方針を主語にする。
+/// release_contract: 実行方式は worker 内ファイル切替ではなく、境界で停止→同一チューナー再取得→別TS起動。ログ上も stop-restart 方針を主語にする。
 /// </summary>
 public sealed class ChainDirectRecorderSession
 {

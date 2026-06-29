@@ -1,4 +1,4 @@
-﻿using TvAIr.Core;
+using TvAIr.Core;
 
 namespace TvAIr.Tuner;
 
@@ -33,7 +33,7 @@ public sealed class TunerPool : IDisposable
         /// <summary>直近の Release が実行された時刻。Acquire 時のクールダウン計算用。</summary>
         public DateTime?      LastReleasedAt{ get; private set; }
         public bool IsFree => UsageKind == TunerUsageKind.Free;
-        // v0.3.39: 視聴不可侵判定は設定Roleを正とする。
+        // release_contract: 視聴不可侵判定は設定Roleを正とする。
         // BonDriver名だけでは判定しない。
         public bool IsViewingReserved => string.Equals(Role, "Viewing", StringComparison.OrdinalIgnoreCase);
 
@@ -239,7 +239,7 @@ public sealed class TunerPool : IDisposable
             if (requested is null && occupiedRequested is not null)
             {
                 _log.Add("ACTIVE_RECORDING_DID_GUARD", occupiedRequested.Group,
-                    $"result=REQUESTED_BUSY tuner={tunerName} did={occupiedRequested.Did} usage={occupiedRequested.UsageKind} owner={(occupiedRequested.ReservationId.HasValue ? "R" + occupiedRequested.ReservationId.Value : "-")} pid={(occupiedRequested.ProcessId.HasValue ? occupiedRequested.ProcessId.Value.ToString() : "-")} requester=R{reservationId} action=do_not_reuse_busy_did rule=v0.9.97_active_recording_did_guard_pretune_lock");
+                    $"result=REQUESTED_BUSY tuner={tunerName} did={occupiedRequested.Did} usage={occupiedRequested.UsageKind} owner={(occupiedRequested.ReservationId.HasValue ? "R" + occupiedRequested.ReservationId.Value : "-")} pid={(occupiedRequested.ProcessId.HasValue ? occupiedRequested.ProcessId.Value.ToString() : "-")} requester=R{reservationId} action=do_not_reuse_busy_did rule=release_contract");
             }
             Slot? slot = requested;
             if (requested is not null && reserveUnknownExternalBuffer)
@@ -316,7 +316,7 @@ public sealed class TunerPool : IDisposable
 
     /// <summary>
     /// EPG 用にチューナーを確保する。空きがなければ null を返す。
-    /// v32.83(項目3): excludeTunerKeys を渡すと、(BonDriverFileName, Did) が一致するスロットを
+    /// excludeTunerKeys を渡すと、(BonDriverFileName, Did) が一致するスロットを
     /// 候補から除外する。LIVE視聴中の TVTest が使っている物理チューナーを避ける用途。
     /// </summary>
     public TunerLease? AcquireForEpg(
@@ -400,7 +400,7 @@ public sealed class TunerPool : IDisposable
                     _log.Add("TunerPool", group,
                         $"Viewing 確保失敗: viewerProfileFrame={viewerProfileFrameIndex} reason=tvtest_frame_slot_unavailable pid={processId} " +
                         $"exactCandidates={string.Join(",", exactGroupSlots.Select(s => $"#{s.SlotIndex}:{s.Name}/{s.Did}/{s.UsageKind}"))} " +
-                        $"hybridCandidates={string.Join(",", hybridSlots.Select(s => $"#{s.SlotIndex}:{s.Name}/{s.Did}/{s.UsageKind}"))} rule=v0.11.72_viewer_profile_contract_cleanup");
+                        $"hybridCandidates={string.Join(",", hybridSlots.Select(s => $"#{s.SlotIndex}:{s.Name}/{s.Did}/{s.UsageKind}"))} rule=release_contract");
                     return null;
                 }
             }
@@ -418,7 +418,7 @@ public sealed class TunerPool : IDisposable
             _snapshotVersion++;
             _log.Add("TunerPool", group,
                 $"Viewing 確保: slot={slot.SlotIndex} did={slot.Did} pid={processId} viewerProfileFrame={(viewerProfileFrameIndex > 0 ? viewerProfileFrameIndex.ToString() : "auto")} " +
-                $"elapsedSinceRelease={FormatElapsed(elapsedMs)} rule=v0.11.72_viewer_profile_contract_cleanup");
+                $"elapsedSinceRelease={FormatElapsed(elapsedMs)} rule=release_contract");
             return new TunerLease(slot, this, elapsedMs);
         }
     }
@@ -444,7 +444,7 @@ public sealed class TunerPool : IDisposable
                 _log.Add("EPG_PREEMPT_NOTICE", rec.Group,
                     $"reservationId={rec.ReservationId} service={TrimForLog(rec.ServiceName, 32)} title={ReservationTitleDisplayContract.ForLog(rec.Title, 48)} start={rec.StartTime:HH:mm:ss} epgSlots={targets.Count} " +
                     $"targets={string.Join(",", targets.Select(s => $"#{s.SlotIndex}:{s.Name}/{s.Did}/pid={(s.ProcessId.HasValue ? s.ProcessId.Value.ToString() : "-")}"))} " +
-                    "rule=v0.8.15_epg_preempt_release_semantics action=recording_scheduler_preempt_by_tuner_pool_pid");
+                    "rule=release_contract action=recording_scheduler_preempt_by_tuner_pool_pid");
             }
         }
     }
@@ -491,7 +491,7 @@ public sealed class TunerPool : IDisposable
             slot.Release();
             _snapshotVersion++;
             _log.Add("REC_TUNER_FORCE_RELEASE", group,
-                $"result=OK pid={processId} did={SafeValue(did)} bonDriver={SafeValue(bonDriverFileName)} released={before} owner={SafeValue(owner)} label={SafeValue(label)} version={_snapshotVersion} status={GetStatusSummaryUnsafe()} rule=v0.4.16_recording_preempt_owns_epg_release");
+                $"result=OK pid={processId} did={SafeValue(did)} bonDriver={SafeValue(bonDriverFileName)} released={before} owner={SafeValue(owner)} label={SafeValue(label)} version={_snapshotVersion} status={GetStatusSummaryUnsafe()} rule=release_contract");
             return true;
         }
     }
@@ -520,7 +520,7 @@ public sealed class TunerPool : IDisposable
             }
 
             _log.Add("REC_TUNER_FORCE_RELEASE", group,
-                $"result=OK_PIDLESS count={targets.Count} released={released} owner={SafeValue(owner)} label={SafeValue(label)} version={_snapshotVersion} status={GetStatusSummaryUnsafe()} rule=v0.8.15_epg_preempt_release_semantics");
+                $"result=OK_PIDLESS count={targets.Count} released={released} owner={SafeValue(owner)} label={SafeValue(label)} version={_snapshotVersion} status={GetStatusSummaryUnsafe()} rule=release_contract");
             return targets.Count;
         }
     }
@@ -604,7 +604,7 @@ public sealed class TunerPool : IDisposable
             return $"requestedGroup={group} totalSlots={_slots.Count} matching={matching.Count} exactGroup={exact.Count} hybridMatching={hybrid.Count} " +
                    $"recordableMatching={recordable.Count} recordableFree={recordableFree.Count} viewingReservedMatching={viewingReserved.Count} busyMatching={busy.Count} unsupported={unsupported.Count} " +
                    $"matchingSlots=[{ListSlots(matching)}] recordableFreeSlots=[{ListSlots(recordableFree)}] viewingReservedSlots=[{ListSlots(viewingReserved)}] busySlots=[{ListSlots(busy)}] " +
-                   $"rule=v0.11.95_tuner_projection_diagnostics_no_behavior_change";
+                   $"rule=release_contract";
         }
     }
 
@@ -624,7 +624,7 @@ public sealed class TunerPool : IDisposable
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
             var slots = string.Join(",", viewing.Select(s => $"#{s.SlotIndex}:{s.Name}/{s.Did}/{s.Group}/{s.Role}/{s.UsageKind}"));
-            return $"viewerReserved={viewing.Count} viewerGroups=[{groups}] viewerSlots=[{slots}] rule=v0.11.95_tuner_projection_diagnostics_no_behavior_change";
+            return $"viewerReserved={viewing.Count} viewerGroups=[{groups}] viewerSlots=[{slots}] rule=release_contract";
         }
     }
 
@@ -646,6 +646,27 @@ public sealed class TunerPool : IDisposable
     {
         lock (_gate)
             return _slots.Select(ToStatusUnsafe).ToList();
+    }
+
+    /// <summary>指定放送波でEPG使用中の管理下スロットがあるかを返す。PreRecordEpgAdmissionの実状態正本。</summary>
+    public bool HasActiveEpgInGroup(string group, out string summary)
+    {
+        lock (_gate)
+        {
+            var active = _slots
+                .Where(s => MatchGroup(s, group) && s.UsageKind == TunerUsageKind.Epg)
+                .OrderBy(s => s.SlotIndex)
+                .ToList();
+            summary = active.Count == 0
+                ? "-"
+                : string.Join(",", active.Select(s => $"#{s.SlotIndex}:{s.Name}/{s.Did}/pid={(s.ProcessId.HasValue ? s.ProcessId.Value.ToString() : "-")}/plannedEnd={(s.PlannedEndTime.HasValue ? s.PlannedEndTime.Value.ToString("MM/dd HH:mm:ss") : "-")}"));
+            return active.Count > 0;
+        }
+    }
+
+    public string GetActiveEpgGroupSummary(string group)
+    {
+        return HasActiveEpgInGroup(group, out var summary) ? summary : "-";
     }
 
     /// <summary>Viewing ロールとして予約されている DID 一覧。録画/EPG直前の保護監査ログ用。</summary>

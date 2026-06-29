@@ -1,9 +1,9 @@
-﻿namespace TvAIr.Core;
+namespace TvAIr.Core;
 
 /// <summary>
 /// TVTest の録画関連設定を TvAIr 起動時に1回だけ監査する。
 ///
-/// v0.3.76 方針:
+/// release_contract 方針:
 /// - 録画直前の推測・設定探索は行わない。
 /// - TVTest.exe と同階層の TVTest.ini を起動時に読み、録画に影響しそうな設定だけログへ明示する。
 /// - 特に「現在のサービスのみ保存する」に相当するキーが実際に ini 上でどうなっているかを確認できるようにする。
@@ -123,7 +123,7 @@ public static class TvTestRecordingOptionsInspector
             : "recording_related_keys=" + matches.Count;
 
         var truncated = matches.Count > 30 ? $" truncated=True truncatedCount={matches.Count - 30}" : " truncated=False";
-        return $"result=OK tvTestIni=OK {currentServiceText}{effectiveCurrentServiceText} {optionText}{truncated} rule=startup_record_options_release_candidate_trim";
+        return $"result=OK tvTestIni=OK {currentServiceText}{effectiveCurrentServiceText} {optionText}{truncated} rule=startup_record_options_release_trim";
     }
 
     private static bool IsRecordingOptionKey(string key)
@@ -149,8 +149,8 @@ public static class TvTestRecordingOptionsInspector
     {
         if (string.IsNullOrWhiteSpace(key)) return false;
         var lower = key.Trim().ToLowerInvariant();
-        // v0.4.3: TVTest.ini の実キーは RecordCurServiceOnly。
-        // v0.4.2ではログ候補としては拾えていたが、厳密判定キーに
+        // release_contract: TVTest.ini の実キーは RecordCurServiceOnly。
+        // release_contractではログ候補としては拾えていたが、厳密判定キーに
         // recordcurserviceonly が無かったため effective_record_cur_service_only=no になっていた。
         return lower == "recordcurserviceonly"
             || lower == "recordcurservice"

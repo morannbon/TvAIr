@@ -1,7 +1,7 @@
-﻿namespace TvAIr.Schedule;
+namespace TvAIr.Schedule;
 
 /// <summary>
-/// v0.6.17: チェーン実行セッションの読み取り用レジストリ。
+/// release_contract: チェーン実行セッションの読み取り用レジストリ。
 /// CHAIN_AUDIT が共通割り当てスナップショットだけでは録画中の前番組を
 /// 評価対象外として見失う場合、実行中セッションの actualTuner / DID / pid を参照する。
 /// 録画実行・停止・Bridge継続・ファイル切替には介入しない。

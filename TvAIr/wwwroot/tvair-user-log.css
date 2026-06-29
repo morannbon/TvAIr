@@ -1,5 +1,5 @@
-﻿/*
- * TvAIr user operational log module - v0.11.112
+/*
+ * TvAIr user operational log module - release_contract
  *
  * Scope:
  * - Reservation page log tab only (#rsv-table.log-mode).
@@ -7,7 +7,7 @@
  *   or generic reservation-list truncate helpers.
  */
 
-/* v0.11.502 ReservationSubtabThemeTokenContract: this file is the only owner for user-operation log action host, log column schema, message clipping, datetime/code formatting and severity text. */
+/* release_contract ReservationSubtabThemeTokenContract: this file is the only owner for user-operation log action host, log column schema, message clipping, datetime/code formatting and severity text. */
 :root{
   --reservation-log-col-result: 108px;
   --rsv-log-datetime-w:150px;
@@ -16,7 +16,7 @@
   --rsv-log-target-w:180px;
 }
 
-/* v0.11.502 UserLogActionAndTableBoundary
+/* release_contract UserLogActionAndTableBoundary
    Log-tab operation controls and log-table text/severity layout are user-log operations.
    This file owns the log report/clear host, legacy log action ids, message clipping,
    datetime/code formatting and severity colors. Reservation row-state/genre guards
@@ -60,7 +60,7 @@
 #filter-tabs[data-list-role="log"] #clear-log-btn{display:inline-block}
 
 
-/* v0.11.502 UserLogSchemaOwner
+/* release_contract UserLogSchemaOwner
    Log-table grid columns are log-tab schema, not generic reservation row state.
    reservations.html loads this module after tvair-list-module.css so the log
    schema is resolved by module order. */
@@ -118,7 +118,7 @@ body.tvair-reservation-page #rsv-table[data-table-schema="log"] tr{
 
 
 
-/* v0.11.502 UserLogTableOwner
+/* release_contract UserLogTableOwner
    Loaded after the shared list module on reservations.html so these log-tab selectors
    win by module order instead of borrowing reservation-list !important guards. */
 body.tvair-reservation-page #rsv-table.log-mode .col-main,

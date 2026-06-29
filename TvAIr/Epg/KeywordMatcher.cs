@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using System.Globalization;
 using System.Text.RegularExpressions;
 using TvAIr.Channel;
@@ -152,7 +152,7 @@ public sealed class KeywordMatcher
         var events = _epgStore.GetByRange(now, now.AddDays(14))
             .Where(e => EpgTitleProjectionGuard.IsSafeForAutoReservation(e, out _))
             .ToList();
-        // v32.66: ServiceId単独をキーにすると地上波とBS/CSでServiceIdが衝突した際に
+        // ServiceId単独をキーにすると地上波とBS/CSでServiceIdが衝突した際に
         // ToDictionaryが重複キー例外を投げる(Key: 161等で発生確認済み)。
         // また ChannelArgument は (NetworkId, TSID, ServiceId) で一意に決まる設計上、
         // ServiceId だけで引くのは本来不正確。EpgEventのキー(NetworkId,TSID,ServiceId)と
@@ -163,7 +163,7 @@ public sealed class KeywordMatcher
             .ToDictionary(g => g.Key, g => g.First().ChannelArgument);
         var serviceNameMap = BuildServiceNameMap(channelTargets);
 
-        // v32.68: existing セットに cancelled / completed / failed も含める。
+        // existing セットに cancelled / completed / failed も含める。
         // これにより以下の問題を防ぐ:
         //   ・録画停止ボタンを押した番組が数秒後に再マッチして再録画開始(無限ループ)
         //   ・ユーザーが解除した番組が意思に反して再び予約リストに現れる
@@ -206,7 +206,7 @@ public sealed class KeywordMatcher
 
                 if (_rsvStore.IsKeywordCancelOnceSuppressed(rule.Id, ev))
                 {
-                    // v0.10.54: user-suppressed keyword hits are expected persisted state.
+                    // release_contract: user-suppressed keyword hits are expected persisted state.
                     // Keep the per-program details out of the regular log and emit a summary after matching.
                     suppressedByUserCount++;
                     continue;
@@ -251,7 +251,7 @@ public sealed class KeywordMatcher
         }
 
         if (suppressedByUserCount > 0)
-            _log.Add("KEYWORD_MATCH", "SuppressedSummary", $"result=OK suppressedByUser={suppressedByUserCount} rule=v0.11.408_epg_db_cache_cleanup");
+            _log.Add("KEYWORD_MATCH", "SuppressedSummary", $"result=OK suppressedByUser={suppressedByUserCount} rule=release_contract");
 
         if (totalAdded > 0)
             _log.Add("KEYWORD_MATCH_DONE", "KeywordMatcher", $"自動検索予約完了: {totalAdded}件追加");

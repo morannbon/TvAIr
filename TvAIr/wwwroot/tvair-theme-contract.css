@@ -1,4 +1,4 @@
-﻿/* TvAIr Theme Contract v0.11.590
+/* TvAIr Theme Contract release_contract
    Final lightweight cascade layer.
    Goal: keep theme source in one file, use Windows/WinUI-style semantic brush aliases,
    map those aliases to TvAIr roles, then bind host modules once at the end of the cascade.
@@ -12,7 +12,7 @@ body.tvair-theme-light,
 html[data-theme="light"],
 body[data-theme="light"]{
   /* WinUI-style semantic brush aliases */
-  /* v0.11.358 LightThemeActionButtonLuminanceTuning
+  /* release_contract LightThemeActionButtonLuminanceTuning
      Match the dark-theme button tuning: keep primary action readable, but reduce the high-luminance stock blue. */
   --winui-system-accent-color:#2563A8;
   --winui-system-accent-color-hover:#1D5594;
@@ -115,7 +115,7 @@ body[data-theme="dark"],
 body.theme-dark,
 body[data-tvair-effective-theme="dark"]{
   /* WinUI-style semantic brush aliases */
-  /* v0.11.356 DarkThemeActionButtonLuminanceTuning
+  /* release_contract DarkThemeActionButtonLuminanceTuning
      Keep dark-theme controls readable without the high-luminance neon accent used by generic WinUI dark samples. */
   --winui-system-accent-color:#2F7DB2;
   --winui-system-accent-color-hover:#3D91C9;
@@ -283,7 +283,7 @@ body[data-tvair-effective-theme="dark"]{
   --tvair-settings-slider-rest:var(--tvair-settings-border-soft,#d7dde5);
   --tvair-settings-slider-thumb:var(--tvair-settings-panel-bg,#ffffff);
 
-  /* v0.11.582 SettingsThemeCommonChoiceDisabledTokenAuditContract
+  /* release_contract SettingsThemeCommonChoiceDisabledTokenAuditContract
      Settings modal input/select/field semantic tokens are owned by the theme contract so field chrome follows
      the same settings-wide token contract as panels, buttons, sliders, and display-tab surfaces. */
   --tvair-settings-field-label-fg:var(--tvair-settings-text-muted);
@@ -294,7 +294,7 @@ body[data-tvair-effective-theme="dark"]{
   --tvair-settings-input-disabled-bg:var(--tvair-input-disabled-bg,var(--tvair-role-control-disabled-bg));
   --tvair-settings-input-disabled-fg:var(--tvair-input-disabled-fg,var(--tvair-role-control-disabled-fg));
 
-  /* v0.11.582 SettingsThemeCommonChoiceDisabledTokenAuditContract
+  /* release_contract SettingsThemeCommonChoiceDisabledTokenAuditContract
      Checkbox/radio accent and disabled-control semantics are settings common tokens so control state chrome
      stays on the same settings-wide token contract as inputs, buttons, sliders, and field labels. */
   --tvair-settings-disabled-bg:var(--tvair-settings-input-disabled-bg);
@@ -303,7 +303,7 @@ body[data-tvair-effective-theme="dark"]{
   --tvair-settings-choice-accent:var(--tvair-settings-accent);
   --tvair-settings-choice-disabled-accent:var(--tvair-settings-disabled-fg);
 
-  /* v0.11.582 SettingsThemeCommonChoiceDisabledTokenAuditContract
+  /* release_contract SettingsThemeCommonChoiceDisabledTokenAuditContract
      The appearance-tab container/options/card/button/sample/editor/palette surface tokens, including legacy card,
      sample-meaning, sample, palette aliases, and sample geometry aliases, are owned by the theme contract.
      Settings modules consume display aliases; they do not define local paints or sample geometry aliases. */
@@ -589,7 +589,7 @@ body.theme-light{
 }
 
 /* Link/action text: keep accent links visible on dark backgrounds.
-   v0.11.365 ProgramCellTitleAccentPaletteFinalize: ProgramGuide title anchors are titles first,
+   release_contract ProgramCellTitleAccentPaletteFinalize: ProgramGuide title anchors are titles first,
    so they are excluded from the generic link/accent owner. */
 a:not(.program-cell-title-link),
 .tvair-link,
@@ -627,9 +627,9 @@ html::before{
 }
 
 
-/* v0.11.314: reservation-list geometry and row paint are excluded here and owned by tvair-list-module.css. */
+/* release_contract: reservation-list geometry and row paint are excluded here and owned by tvair-list-module.css. */
 
-/* v0.11.442 reservation/input crosscut components.
+/* release_contract reservation/input crosscut components.
  * Scope: non-program form pages. These classes are semantic UI attributes shared by
  * keyword search, auto-search rules, program reservations, and settings-style forms.
  * They intentionally live after generic button rules so selectable chips keep state. */
@@ -726,7 +726,7 @@ body:not(.tvair-guide-page) .tvair-mini-action:hover{
 }
 
 
-/* v0.11.502 ReservationSubtabThemeTokenContract
+/* release_contract ReservationSubtabThemeTokenContract
    Reservation-list child tabs are a separate surface from the global top nav.
    Keep the active state visible through reservation subtab tokens across light/dark themes. */
 body.tvair-reservation-page #filter-tabs{
@@ -752,7 +752,7 @@ body.tvair-reservation-page #filter-tabs .ftab.active{
 }
 
 
-/* v0.11.741 ReleaseSurfaceTokenSpineRootRepair
+/* release_contract ReleaseSurfaceTokenSpineRootRepair
    Owner: theme token macro layer.
    Scope: date weekday semantic colors and record-now action color spine only.
    Non-scope: reservation-list disabled row tokens are unchanged. */

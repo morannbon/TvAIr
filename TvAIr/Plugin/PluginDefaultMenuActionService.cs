@@ -1,16 +1,16 @@
-﻿namespace TvAIr.Plugin;
+namespace TvAIr.Plugin;
 
 using TvAIr.Core;
 using TvAIrPlugin;
 
 /// <summary>
-/// v0.11.225: Plugin Menu Action Contract spine.
+/// release_contract: Plugin Menu Action Contract spine.
 /// TvAIr本体はプラグイン名・プラグインkind・現在存在する3プラグインから挙動を推測しない。
 /// manifest / descriptor の宣言を正規化し、未宣言互換だけを LegacyPluginMenuAdapter 相当の source として隔離する。
 /// </summary>
 public sealed class PluginDefaultMenuActionService
 {
-    public const string ContractVersion = "v0.11.230_programguide_wave_color_contract";
+    public static string ContractVersion => TvAIrVersionContract.PublicContractName;
 
     private readonly PluginRegistry _registry;
     private readonly LogRepository _log;
@@ -29,12 +29,12 @@ public sealed class PluginDefaultMenuActionService
             var action = ResolveAction(plugin);
             if (action.Kind.Equals(PluginMenuActionKinds.None, StringComparison.OrdinalIgnoreCase))
             {
-                _log.Add("PLUGIN_MENU_ACTION_RESOLVE", action.Name, $"result=SKIPPED kind=none source={Safe(source)} declaredSource={Safe(action.Source)} route={Safe(action.RouteSegment)} reason={Safe(action.Reason)} contract={ContractVersion} rule=v0.11.230_programguide_wave_color_contract");
+                _log.Add("PLUGIN_MENU_ACTION_RESOLVE", action.Name, $"result=SKIPPED kind=none source={Safe(source)} declaredSource={Safe(action.Source)} route={Safe(action.RouteSegment)} reason={Safe(action.Reason)} contract={ContractVersion} rule={TvAIrVersionContract.PublicContractName}");
                 continue;
             }
 
             actions.Add(action);
-            _log.Add("PLUGIN_MENU_ACTION_RESOLVE", action.Name, $"result=OK kind={Safe(action.Kind)} source={Safe(action.Source)} caller={Safe(source)} route={Safe(action.RouteSegment)} label={Safe(action.Label)} showInTaskbar={action.ShowInTaskbar} legacyCompat={action.LegacyCompat} declared={action.Declared} contract={ContractVersion} rule=v0.11.230_programguide_wave_color_contract");
+            _log.Add("PLUGIN_MENU_ACTION_RESOLVE", action.Name, $"result=OK kind={Safe(action.Kind)} source={Safe(action.Source)} caller={Safe(source)} route={Safe(action.RouteSegment)} label={Safe(action.Label)} showInTaskbar={action.ShowInTaskbar} compatAlias={action.CompatibilityAlias} declared={action.Declared} contract={ContractVersion} rule={TvAIrVersionContract.PublicContractName}");
         }
 
         return actions
@@ -67,7 +67,7 @@ public sealed class PluginDefaultMenuActionService
         var kind = NormalizeKind(declaredKindRaw);
         var source = "manifest.defaultMenuAction";
         var declared = !string.IsNullOrWhiteSpace(kind);
-        var legacyCompat = false;
+        var compatibilityAlias = false;
         var priority = manifest?.DefaultMenuActionPriority ?? ui?.DefaultMenuActionPriority ?? 1000;
         var showInTaskbar = manifest?.ToolWindowShowInTaskbar ?? ui?.ToolWindowShowInTaskbar ?? false;
 
@@ -76,18 +76,18 @@ public sealed class PluginDefaultMenuActionService
             kind = NormalizeKind(preferredRaw);
             if (!string.IsNullOrWhiteSpace(kind))
             {
-                source = "legacy_compat_preferredOpenMode";
-                legacyCompat = true;
+                source = "compat_alias_preferredOpenMode";
+                compatibilityAlias = true;
             }
         }
 
         if (string.IsNullOrWhiteSpace(kind))
         {
             // LegacyPluginMenuAdapter: 旧SDKプラグインの移行補助だけをここに閉じ込める。
-            // これは正式なプラグイン意思決定ではないため、ログ/APIに legacyCompat=True として出す。
+            // これは正式なプラグイン意思決定ではないため、ログ/APIに互換aliasとして出す。
             kind = plugin is IUiPlugin ? PluginMenuActionKinds.Page : PluginMenuActionKinds.VersionDialog;
-            source = plugin is IUiPlugin ? "legacy_compat_ui_page" : "legacy_compat_non_ui_versionDialog";
-            legacyCompat = true;
+            source = plugin is IUiPlugin ? "compat_alias_ui_page" : "compat_alias_non_ui_versionDialog";
+            compatibilityAlias = true;
         }
 
         if (string.IsNullOrWhiteSpace(label))
@@ -109,7 +109,7 @@ public sealed class PluginDefaultMenuActionService
             Source = source,
             Reason = kind.Equals(PluginMenuActionKinds.None, StringComparison.OrdinalIgnoreCase) ? source : string.Empty,
             Declared = declared,
-            LegacyCompat = legacyCompat,
+            CompatibilityAlias = compatibilityAlias,
             ContractVersion = ContractVersion
         };
     }
@@ -158,6 +158,6 @@ public sealed class PluginDefaultMenuActionInfo
     public string Source { get; set; } = string.Empty;
     public string Reason { get; set; } = string.Empty;
     public bool Declared { get; set; }
-    public bool LegacyCompat { get; set; }
+    public bool CompatibilityAlias { get; set; }
     public string ContractVersion { get; set; } = string.Empty;
 }

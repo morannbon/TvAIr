@@ -1,10 +1,10 @@
-﻿/* v0.11.358 epg-progress-panel-theme-role-rebuild-and-light-button-luminance-tuning: no Program.cs behavior changed; WAKE/EPG contracts remain unchanged. */
-﻿/* v0.9.43 gr-cdt-data-module-logo-save-bscs-no-deep: Wakeタスク起動時は --wake-task を単一インスタンス合流シグナルとして扱い、既存TvAIrがいる場合は本体二重起動せず signal ファイルを書いて終了する。 */
-/* v0.8.80 recording-options-cleanup-worker-launch-policy: 録画オプションUIの説明文を撤去し、TvAIrEpgRec表示ON/OFFの起動ポリシーを共通ヘルパーへ集約。 */
-/* v0.8.40 ai-rhythm-core-migration: AI-rhythm正式名・新旧URL/ID互換・旧設定移行を本体側に追加。 */
-/* v0.2.52 wake-plan-hash-trigger-limit: limit Wake task rebuild triggers by in-process plan hash and periodic validation. */
-/* v0.2.51 wake-task-nochange-skip: skip full Wake task delete/register when the desired plan is unchanged and existing managed tasks match. */
-/* v0.2.50 program-guide-reservation-diff-render: reservation state refresh updates existing program cells only, avoiding full guide rerender when EPG is unchanged. */
+/* release_contract epg-progress-panel-theme-role-rebuild-and-light-button-luminance-tuning: no Program.cs behavior changed; WAKE/EPG contracts remain unchanged. */
+﻿/* release_contract gr-cdt-data-module-logo-save-bscs-no-deep: Wakeタスク起動時は --wake-task を単一インスタンス合流シグナルとして扱い、既存TvAIrがいる場合は本体二重起動せず signal ファイルを書いて終了する。 */
+/* release_contract recording-options-cleanup-worker-launch-policy: 録画オプションUIの説明文を撤去し、TvAIrEpgRec表示ON/OFFの起動ポリシーを共通ヘルパーへ集約。 */
+/* release_contract ai-rhythm-core-migration: AI-rhythm正式名・新旧URL/ID互換・旧設定移行を本体側に追加。 */
+/* release_contract wake-plan-hash-trigger-limit: limit Wake task rebuild triggers by in-process plan hash and periodic validation. */
+/* release_contract wake-task-nochange-skip: skip full Wake task delete/register when the desired plan is unchanged and existing managed tasks match. */
+/* release_contract program-guide-reservation-diff-render: reservation state refresh updates existing program cells only, avoiding full guide rerender when EPG is unchanged. */
 using System.Globalization;
 using System.Linq;
 using System.Text.Encodings.Web;
@@ -143,7 +143,7 @@ static void WriteWakeTaskSignalForExistingInstance((bool IsWakeTask, string Kind
             createdUtc = DateTime.UtcNow.ToString("O"),
             sourcePid = Environment.ProcessId,
             action = "signal_existing_instance_and_exit",
-            rule = "v0.10.11_wake_plan_generation_slot_guard"
+            rule = "release_contract"
         };
         File.WriteAllText(file, JsonSerializer.Serialize(payload), Encoding.UTF8);
     }
@@ -170,7 +170,7 @@ static void WriteStartupSignalForExistingInstance(string reason)
             action = "signal_existing_instance_and_exit",
             requestTrayRecovery = true,
             requestOpenBrowser = true,
-            rule = "v0.11.122_process_lifecycle_tray_recovery_complete"
+            rule = "release_contract"
         };
         File.WriteAllText(file, JsonSerializer.Serialize(payload), Encoding.UTF8);
     }
@@ -208,14 +208,14 @@ if (!IsCurrentWakeInvocation(wakeInvocation))
 {
     return;
 }
-// ─── 単一インスタンス保証（v0.3.5）────────────────────────────
+// ─── 単一インスタンス保証（release_contract）────────────────────────────
 // TvAIr が二重起動すると、予約スケジューラ・チューナー割り当て・Wakeタスク再構築が
 // 別プロセスで同時に動き、録画開始要求だけ出て TVTest 起動が成立しない危険がある。
 // Web常駐coreアプリとして、同一ユーザーセッション内では必ず1プロセスに固定する。
 var singleInstanceMutex = new Mutex(initiallyOwned: true, name: @"TvAIr.SingleInstance.v1", createdNew: out var singleInstanceCreated);
 if (!singleInstanceCreated)
 {
-    // v0.11.122: Wakeだけでなく手動/更新後の同一インスタンス再起動も既存プロセスへ合流させる。
+    // release_contract: Wakeだけでなく手動/更新後の同一インスタンス再起動も既存プロセスへ合流させる。
     // 新規プロセスは常駐しない。既存側にはsignalを残し、トレイが見えない場合の復帰導線としてUIを開く。
     if (wakeInvocation.IsWakeTask)
         WriteWakeTaskSignalForExistingInstance(wakeInvocation);
@@ -270,7 +270,7 @@ builder.Services.Configure<EpgSettings>(opt =>
     opt.DailyRefreshMinute       = iniSettings.IsFirstRun ? base_.DailyRefreshMinute       : iniSettings.EpgMinute;
     opt.EpgDepth                 = iniSettings.IsFirstRun ? base_.EpgDepth                 : iniSettings.EpgDepth;
     opt.EpgPreRecordMinutes      = iniSettings.IsFirstRun ? base_.EpgPreRecordMinutes      : iniSettings.EpgPreRecordMinutes;
-    // v0.8.25: DiagnosticMode は ini 管理外のため、常に appsettings.json の値をそのまま使う。
+    // release_contract: DiagnosticMode は ini 管理外のため、常に appsettings.json の値をそのまま使う。
     opt.DiagnosticMode           = base_.DiagnosticMode;
 });
 
@@ -298,7 +298,7 @@ if (!iniSettings.IsFirstRun && iniSettings.Tuners.Count > 0)
 else
 {
     // 初回起動またはiniにチューナー設定なし。
-    // v0.11.622: 配布時の物理BonDriver/DID既定値を実行前提にしない。
+    // release_contract: 配布時の物理BonDriver/DID既定値を実行前提にしない。
     // appsettings.json に明示された行があっても、BonDriver未設定行は論理リソース未解決として除外する。
     tunerProfiles = (builder.Configuration.GetSection("Tuners").Get<List<TunerProfile>>() ?? new())
         .Select(t =>
@@ -318,7 +318,7 @@ else
         .Where(t => !string.IsNullOrWhiteSpace(t.BonDriverFileName))
         .ToList();
 }
-// v0.11.622: 視聴/録画/EPGの隔離はBonDriver名ではなくRoleと論理リソース解決で行う。
+// release_contract: 視聴/録画/EPGの隔離はBonDriver名ではなくRoleと論理リソース解決で行う。
 // BonDriver未設定行は環境固有fallbackせず、実行候補から外す。
 builder.Services.AddSingleton<IReadOnlyList<TunerProfile>>(tunerProfiles.AsReadOnly());
 
@@ -364,7 +364,7 @@ builder.Services.AddSingleton<BroadcastClockService>();
 builder.Services.AddSingleton<EpgStore>();
 builder.Services.AddSingleton<ServiceLogoStore>();
 builder.Services.AddSingleton<EpgLogoExtractor>();
-// EpgCapture: IOptionsMonitor<EpgSettings>を渡し、DiagnosticMode等を再起動後も確実に反映させる（v0.8.26）
+// EpgCapture: IOptionsMonitor<EpgSettings>を渡し、DiagnosticMode等を再起動後も確実に反映させる（release_contract）
 builder.Services.AddSingleton<EpgCapture>(sp =>
     new EpgCapture(
         sp.GetRequiredService<IOptionsMonitor<EpgSettings>>(),
@@ -473,14 +473,14 @@ if (wakeInvocation.IsWakeTask)
     try
     {
         app.Services.GetRequiredService<LogRepository>().Add("WAKE_TASK_INVOCATION", "PRIMARY",
-            $"result=PRIMARY_INSTANCE kind={wakeInvocation.Kind} at={wakeInvocation.At} pid={Environment.ProcessId} action=continue_startup_sync rule=v0.9.43_gr_cdt_data_module_logo_save_bscs_no_deep");
+            $"result=PRIMARY_INSTANCE kind={wakeInvocation.Kind} at={wakeInvocation.At} pid={Environment.ProcessId} action=continue_startup_sync rule=release_contract");
     }
     catch { }
 }
 
 MigrateAirrhythmLocalSettings(app.Services.GetRequiredService<LogRepository>());
 
-// TvAIr v0.3.41 cache guard:
+// TvAIr release_contract cache guard:
 // UI差分更新高速化を維持しつつ、ブラウザが旧index.html/旧JS状態を掴んで
 // チェーン候補判定だけ遅れて復帰する問題を避ける。
 app.Use(async (context, next) =>
@@ -508,7 +508,7 @@ app.Use(async (context, next) =>
 // ─── 起動/終了・TVTest干渉監査 ────────────────────────────────
 var lifecycleLog = app.Services.GetRequiredService<LogRepository>();
 var userOperationLog = app.Services.GetRequiredService<UserEventLogService>();
-// v0.11.108: ユーザー運用ログの起動履歴は、手動/更新後/PC起動後の実起動だけに限定する。
+// release_contract: ユーザー運用ログの起動履歴は、手動/更新後/PC起動後の実起動だけに限定する。
 // Wakeタスク・録画前EPG・録画開始・Recovery 由来の --wake-task 起動は、既存/起動確認シグナルであり
 // ユーザーが日常確認する「TvAIrを起動しました」にはしない。詳細監査は /api/log にだけ残す。
 if (!wakeInvocation.IsWakeTask)
@@ -518,7 +518,7 @@ if (!wakeInvocation.IsWakeTask)
 else
 {
     lifecycleLog.Add("USER_OPERATION_APP_START_SUPPRESSED", "WAKE_TASK",
-        $"result=SUPPRESSED kind={wakeInvocation.Kind} at={wakeInvocation.At} reservationId={wakeInvocation.ReservationId} reason=wake_task_startup_signal_not_user_visible rule=v0.11.108_userlog_sameversion_wake_suppression");
+        $"result=SUPPRESSED kind={wakeInvocation.Kind} at={wakeInvocation.At} reservationId={wakeInvocation.ReservationId} reason=wake_task_startup_signal_not_user_visible rule=release_contract");
 }
 var effectiveTvTestSettings = app.Services.GetRequiredService<IOptions<TvTestSettings>>().Value;
 TvTestRecordingDirectoryResolver.Initialize(effectiveTvTestSettings.ExecutablePath, lifecycleLog);
@@ -529,7 +529,7 @@ lifecycleLog.Add("APP_LIFECYCLE", "START",
 EmitTvAIrRuntimeIdentityAudit(lifecycleLog);
 EmitTvAIrEpgRecRuntimePrerequisiteAudit(lifecycleLog, effectiveTvTestSettings);
 var startupTvTestSnapshot = TvTestProcessAuditor.Capture(lifecycleLog, "APP_START", emitLegacyEvents: true);
-// v0.10.96: External TVTest occupancy is checked lightly at viewerStart time only; do not persist it in TunerPool at startup.
+// release_contract: External TVTest occupancy is checked lightly at viewerStart time only; do not persist it in TunerPool at startup.
 RunTvAIrEpgRecStartupOrphanSafety(lifecycleLog);
 app.Lifetime.ApplicationStopping.Register(() =>
 {
@@ -574,7 +574,7 @@ app.UseStaticFiles(new StaticFileOptions
     }
 });
 
-// v0.11.03: プラグイン同梱小型画像等の正式asset URL契約。
+// release_contract: プラグイン同梱小型画像等の正式asset URL契約。
 // Plugins/{route}/Assets または Plugins/{route}/wwwroot/assets 配下のPNGのみを、同一オリジンURLで返す。
 // UIの小型アイコン用途に限定し、file://・外部URL・data URI依存を避ける。
 app.MapGet("/plugin-assets/{routeSegment}/{assetName}", (string routeSegment, string assetName, HttpRequest http, PluginRegistry registry, LogRepository log) =>
@@ -583,7 +583,7 @@ app.MapGet("/api/plugins/{pluginId}/assets/{assetName}", (string pluginId, strin
     ResolvePluginAssetResult(pluginId, assetName, registry, log, "pluginId"));
 
 // ─── プラグインUI/API ──────────────────────────────────────────
-// TvAIr 0.2.6: AI-rhythm等が本体非依存で作り始められるよう、
+// TvAIr 1.0.0: AI-rhythm等が本体非依存で作り始められるよう、
 // UIルート・Manifest・権限宣言・Context API導線を本体側の正式入口として用意する。
 app.MapGet("/api/plugins", (PluginRegistry registry) =>
 {
@@ -676,7 +676,7 @@ app.MapGet("/api/plugins/manifests", (PluginRegistry registry) =>
 app.MapGet("/api/plugins/menu-actions", (PluginDefaultMenuActionService menuActions) =>
 {
     var actions = menuActions.ResolveActions("api");
-    return Results.Ok(new { actions, contract = PluginDefaultMenuActionService.ContractVersion, projection = "menu_model_hamburger_context_page", legacyCompatIsAdapterOnly = true });
+    return Results.Ok(new { actions, contract = PluginDefaultMenuActionService.ContractVersion, projection = "menu_model_hamburger_context_page", compatAliasIsAdapterOnly = true });
 });
 
 app.MapGet("/plugin-menu/{routeSegment}", (string routeSegment, string? source, HttpRequest http, PluginRegistry registry, PluginDefaultMenuActionService menuActions, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, LogRepository log) =>
@@ -772,11 +772,11 @@ static void MigrateAirrhythmLocalSettings(LogRepository log)
 
         Directory.CreateDirectory(newDir);
         File.Copy(oldFile, newFile, overwrite: false);
-        log.Add("AI_RHYTHM_SETTINGS_MIGRATED", "OK", "old=AIrithm.BasicPlugin/airithm-settings.json new=AIrhythm.BasicPlugin/airhythm-settings.json action=copy_only_keep_legacy rule=v0.8.40_ai_rhythm_core_migration");
+        log.Add("AI_RHYTHM_SETTINGS_MIGRATED", "OK", "old=AIrithm.BasicPlugin/airithm-settings.json new=AIrhythm.BasicPlugin/airhythm-settings.json action=copy_only_keep_legacy rule=release_contract");
     }
     catch (Exception ex)
     {
-        log.Add("AI_RHYTHM_SETTINGS_MIGRATED", "WARN", $"result=FAILED message={ex.Message} rule=v0.8.40_ai_rhythm_core_migration");
+        log.Add("AI_RHYTHM_SETTINGS_MIGRATED", "WARN", $"result=FAILED message={ex.Message} rule=release_contract");
     }
 }
 
@@ -861,7 +861,7 @@ static void ApplyManifestToolWindowSizeContract(PluginWindowRequest request, ITv
     var explicitContractMinWidth = Math.Max(manifestMinWidth, uiMinWidth);
     var explicitContractMinHeight = Math.Max(manifestMinHeight, uiMinHeight);
 
-    // v0.11.65: Treat a declared tool-window contract size as the generic lower bound when
+    // release_contract: Treat a declared tool-window contract size as the generic lower bound when
     // no explicit min-size is exported by older plugins/descriptors. This is not plugin-name
     // specific: hamburger, tray, openWindow, existing-window reuse, and saved-state restore all
     // consume the same resolved request.MinWidth/MinHeight below.
@@ -904,8 +904,22 @@ static void ApplyManifestToolWindowSizeContract(PluginWindowRequest request, ITv
 
     if (log is not null && (request.Width != oldWidth || request.Height != oldHeight || request.MinWidth != oldMinWidth || request.MinHeight != oldMinHeight))
     {
-        log.Add("PLUGIN_TOOL_WINDOW_CONTRACT_RESOLVE", plugin.Name, $"result=APPLIED source={SafePluginActionValue(source)} entryKind={SafePluginActionValue(entryKind)} manifestSize={manifestWidth}x{manifestHeight} manifestMinSize={manifestMinWidth}x{manifestMinHeight} uiSize={uiWidth}x{uiHeight} uiMinSize={uiMinWidth}x{uiMinHeight} oldSize={oldWidth}x{oldHeight} oldMinSize={oldMinWidth}x{oldMinHeight} newSize={request.Width}x{request.Height} newMinSize={request.MinWidth}x{request.MinHeight} rule=v0.11.65_plugin_toolwindow_contract_merge");
+        log.Add("PLUGIN_TOOL_WINDOW_CONTRACT_RESOLVE", plugin.Name, $"result=APPLIED source={SafePluginActionValue(source)} entryKind={SafePluginActionValue(entryKind)} manifestSize={manifestWidth}x{manifestHeight} manifestMinSize={manifestMinWidth}x{manifestMinHeight} uiSize={uiWidth}x{uiHeight} uiMinSize={uiMinWidth}x{uiMinHeight} oldSize={oldWidth}x{oldHeight} oldMinSize={oldMinWidth}x{oldMinHeight} newSize={request.Width}x{request.Height} newMinSize={request.MinWidth}x{request.MinHeight} rule=release_contract");
     }
+}
+
+static string ResolvePluginToolWindowTitle(ITvAIrPlugin plugin, string fallbackTitle)
+{
+    static string Clean(string? value) => string.IsNullOrWhiteSpace(value) ? string.Empty : value.Trim();
+
+    var uiTitle = plugin is IUiPlugin up ? Clean(up.Ui.ToolWindowTitle) : string.Empty;
+    if (!string.IsNullOrWhiteSpace(uiTitle)) return uiTitle;
+
+    var manifestTitle = plugin is IManifestPlugin mp ? Clean(mp.Manifest.ToolWindowTitle) : string.Empty;
+    if (!string.IsNullOrWhiteSpace(manifestTitle)) return manifestTitle;
+
+    var fallback = Clean(fallbackTitle);
+    return string.IsNullOrWhiteSpace(fallback) ? plugin.Name : fallback;
 }
 
 static PluginWindowRequest ResolvePluginToolWindowContract(ITvAIrPlugin plugin, string pluginActionId, string route, PluginWindowRequest request, string source, string entryKind, LogRepository log)
@@ -914,7 +928,7 @@ static PluginWindowRequest ResolvePluginToolWindowContract(ITvAIrPlugin plugin, 
     request.Action = string.IsNullOrWhiteSpace(request.Action) ? "openWindow" : request.Action.Trim();
     request.PluginId = string.IsNullOrWhiteSpace(request.PluginId) ? pluginActionId : request.PluginId.Trim();
     request.RouteSegment = string.IsNullOrWhiteSpace(request.RouteSegment) ? route : request.RouteSegment.Trim().Trim('/');
-    request.Title = string.IsNullOrWhiteSpace(request.Title) ? plugin.Name : request.Title.Trim();
+    request.Title = ResolvePluginToolWindowTitle(plugin, string.IsNullOrWhiteSpace(request.Title) ? plugin.Name : request.Title.Trim());
     request.ContentRoute = string.IsNullOrWhiteSpace(request.ContentRoute) ? $"/plugin/{Uri.EscapeDataString(route)}" : request.ContentRoute.Trim();
     request.ReuseExisting = true;
     request.ActivateExisting = true;
@@ -928,7 +942,7 @@ static PluginWindowRequest ResolvePluginToolWindowContract(ITvAIrPlugin plugin, 
     request.MinHeight = Math.Clamp(request.MinHeight <= 0 ? 240 : request.MinHeight, 160, 1600);
     request.Width = Math.Max(request.MinWidth, Math.Clamp(request.Width <= 0 ? 620 : request.Width, 240, 2400));
     request.Height = Math.Max(request.MinHeight, Math.Clamp(request.Height <= 0 ? 760 : request.Height, 240, 1600));
-    log.Add("PLUGIN_TOOL_WINDOW_ENTRY", plugin.Name, $"result=RESOLVED source={SafePluginActionValue(source)} entryKind={SafePluginActionValue(entryKind)} pluginId={SafePluginActionValue(pluginActionId)} routeSegment={SafePluginActionValue(route)} requestRoute={SafePluginActionValue(request.RouteSegment)} size={request.Width}x{request.Height} minSize={request.MinWidth}x{request.MinHeight} contentRoute={SafePluginActionValue(request.ContentRoute)} reuseExisting={request.ReuseExisting} activateExisting={request.ActivateExisting} rule=v0.11.65_plugin_toolwindow_contract_merge");
+    log.Add("PLUGIN_TOOL_WINDOW_ENTRY", plugin.Name, $"result=RESOLVED source={SafePluginActionValue(source)} entryKind={SafePluginActionValue(entryKind)} pluginId={SafePluginActionValue(pluginActionId)} routeSegment={SafePluginActionValue(route)} requestRoute={SafePluginActionValue(request.RouteSegment)} size={request.Width}x{request.Height} minSize={request.MinWidth}x{request.MinHeight} contentRoute={SafePluginActionValue(request.ContentRoute)} reuseExisting={request.ReuseExisting} activateExisting={request.ActivateExisting} rule=release_contract");
     return request;
 }
 
@@ -955,7 +969,7 @@ static (PluginWindowSession Session, PluginToolWindowOpenResult HostResult, stri
     var absoluteWindowUrl = BuildAbsoluteLocalUrl(http, navigationUrl);
     var iconSpec = ResolvePluginToolWindowIcon(plugin, route, pluginActionId, log);
     var hostResult = toolWindows.OpenOrActivate(session, absoluteWindowUrl, iconSpec);
-    log.Add("PLUGIN_TOOL_WINDOW_ENTRY", plugin.Name, $"result=OPEN_OR_ACTIVATE source={SafePluginActionValue(source)} entryKind={SafePluginActionValue(entryKind)} windowId={SafePluginActionValue(session.WindowId)} reusedSession={reusedWindowSession} hostResult={SafePluginActionValue(hostResult.Result)} hostReused={hostResult.Reused} activated={hostResult.Activated} hostKind={SafePluginActionValue(hostResult.HostKind)} size={session.Width}x{session.Height} minSize={session.MinWidth}x{session.MinHeight} contentRoute={SafePluginActionValue(contentRoute)} rule=v0.11.65_plugin_toolwindow_contract_merge");
+    log.Add("PLUGIN_TOOL_WINDOW_ENTRY", plugin.Name, $"result=OPEN_OR_ACTIVATE source={SafePluginActionValue(source)} entryKind={SafePluginActionValue(entryKind)} windowId={SafePluginActionValue(session.WindowId)} reusedSession={reusedWindowSession} hostResult={SafePluginActionValue(hostResult.Result)} hostReused={hostResult.Reused} activated={hostResult.Activated} hostKind={SafePluginActionValue(hostResult.HostKind)} size={session.Width}x{session.Height} minSize={session.MinWidth}x{session.MinHeight} contentRoute={SafePluginActionValue(contentRoute)} rule=release_contract");
     return (session, hostResult, windowUrl, contentRoute, absoluteWindowUrl, iconSpec, reusedWindowSession);
 }
 
@@ -975,14 +989,14 @@ static async Task<IResult> HandlePluginWindowDispatchAsync(HttpRequest http, Plu
 
     if (plugin is null)
     {
-        log.Add("PLUGIN_WINDOW", "DENY", $"plugin={SafePluginActionValue(pluginId)} action={SafePluginActionValue(action)} result=DENIED reason=plugin_not_found endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.10.96_plugin_viewer_api_cleanup");
+        log.Add("PLUGIN_WINDOW", "DENY", $"plugin={SafePluginActionValue(pluginId)} action={SafePluginActionValue(action)} result=DENIED reason=plugin_not_found endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
         return BuildPluginWindowDispatchError(new PluginWindowResult { Success = false, Message = "Plugin not found.", Diagnostics = "plugin_not_found" }, responseMode, StatusCodes.Status404NotFound);
     }
 
     var hasUiPermission = plugin is IManifestPlugin mp && mp.Manifest.Permissions.Contains(PluginPermission.ShowUi);
     if (!hasUiPermission)
     {
-        log.Add("PLUGIN_WINDOW", pluginName, $"action={SafePluginActionValue(action)} result=DENIED reason=missing_ShowUi_permission endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.10.96_plugin_viewer_api_cleanup");
+        log.Add("PLUGIN_WINDOW", pluginName, $"action={SafePluginActionValue(action)} result=DENIED reason=missing_ShowUi_permission endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
         return BuildPluginWindowDispatchError(new PluginWindowResult { Success = false, Message = "ShowUi permission is required.", Diagnostics = "missing_ShowUi_permission" }, responseMode, StatusCodes.Status403Forbidden);
     }
 
@@ -993,7 +1007,7 @@ static async Task<IResult> HandlePluginWindowDispatchAsync(HttpRequest http, Plu
     var requestedWindowIdForToken = NormalizePluginWindowId(!string.IsNullOrWhiteSpace(request.WindowId) ? request.WindowId : ReadPayload(request.Payload, "windowId", "WindowId", "currentWindowId", "CurrentWindowId"));
     if (!ValidatePluginActionTokenOrRecoverHostWindow(actionTokens, windows, token, pluginActionIdForWindowToken, route, pluginName, action, requestedWindowIdForToken, null, http.Path.Value ?? string.Empty, "window_dispatch", log, out var tokenReason))
     {
-        log.Add("PLUGIN_WINDOW", pluginName, $"action={SafePluginActionValue(action)} result=DENIED reason={tokenReason} windowId={SafePluginActionValue(requestedWindowIdForToken)} endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.11.34_toolwindow_token_recovery_guard");
+        log.Add("PLUGIN_WINDOW", pluginName, $"action={SafePluginActionValue(action)} result=DENIED reason={tokenReason} windowId={SafePluginActionValue(requestedWindowIdForToken)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
         return BuildPluginWindowDispatchError(new PluginWindowResult { Success = false, Message = "Invalid plugin window token.", Diagnostics = tokenReason }, responseMode, StatusCodes.Status400BadRequest);
     }
 
@@ -1009,7 +1023,7 @@ static async Task<IResult> HandlePluginWindowDispatchAsync(HttpRequest http, Plu
         var reusedWindowSession = unifiedOpen.ReusedSession;
         var windowUrl = unifiedOpen.WindowUrl;
         var selfContentRoute = unifiedOpen.ContentRoute;
-        log.Add("PLUGIN_WINDOW", pluginName, $"action=openWindow result={(reusedWindowSession ? "REUSED" : "ISSUED")} windowId={SafePluginActionValue(session.WindowId)} routeSegment={SafePluginActionValue(route)} title={SafePluginActionValue(session.Title)} size={session.Width}x{session.Height} minSize={session.MinWidth}x{session.MinHeight} resizable={session.Resizable} movable={session.Movable} alwaysOnTop={session.AlwaysOnTop} hostManaged=True reuseExisting={reuseExisting} activateExisting={activateExisting} windowUrl={SafePluginActionValue(windowUrl)} contentRoute={SafePluginActionValue(selfContentRoute)} endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.11.65_plugin_toolwindow_contract_merge");
+        log.Add("PLUGIN_WINDOW", pluginName, $"action=openWindow result={(reusedWindowSession ? "REUSED" : "ISSUED")} windowId={SafePluginActionValue(session.WindowId)} routeSegment={SafePluginActionValue(route)} title={SafePluginActionValue(session.Title)} size={session.Width}x{session.Height} minSize={session.MinWidth}x{session.MinHeight} resizable={session.Resizable} movable={session.Movable} alwaysOnTop={session.AlwaysOnTop} hostManaged=True reuseExisting={reuseExisting} activateExisting={activateExisting} windowUrl={SafePluginActionValue(windowUrl)} contentRoute={SafePluginActionValue(selfContentRoute)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
         var result = new PluginWindowResult
         {
             Success = true,
@@ -1033,11 +1047,11 @@ static async Task<IResult> HandlePluginWindowDispatchAsync(HttpRequest http, Plu
             var absoluteWindowUrl = unifiedOpen.AbsoluteUrl;
             var iconSpec = unifiedOpen.IconSpec;
             var hostResult = unifiedOpen.HostResult;
-            log.Add("PLUGIN_TOOL_WINDOW_ICON", pluginName, $"action=openWindow windowId={SafePluginActionValue(session.WindowId)} pluginId={SafePluginActionValue(pluginActionId)} routeSegment={SafePluginActionValue(route)} manifestIcon={SafePluginActionValue(iconSpec.ManifestIcon)} source={SafePluginActionValue(hostResult.IconSource)} result={(hostResult.IconApplied ? "OK" : "FALLBACK_OR_NOT_APPLIED")} formIconApplied={hostResult.IconApplied} diagnostics={SafePluginActionValue(hostResult.IconDiagnostics)} priority=EmbeddedResource>plugin_file>default_TvAIr_icon rule=v0.11.28_viewer_retune_guard_light_stability");
+            log.Add("PLUGIN_TOOL_WINDOW_ICON", pluginName, $"action=openWindow windowId={SafePluginActionValue(session.WindowId)} pluginId={SafePluginActionValue(pluginActionId)} routeSegment={SafePluginActionValue(route)} manifestIcon={SafePluginActionValue(iconSpec.ManifestIcon)} source={SafePluginActionValue(hostResult.IconSource)} result={(hostResult.IconApplied ? "OK" : "FALLBACK_OR_NOT_APPLIED")} formIconApplied={hostResult.IconApplied} diagnostics={SafePluginActionValue(hostResult.IconDiagnostics)} priority=EmbeddedResource>plugin_file>default_TvAIr_icon rule=release_contract");
             var logLeft = session.Left?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "-";
             var logTop = session.Top?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "-";
             var returnUrl = ResolvePluginToolWindowReturnUrl(http, request, route);
-            log.Add("PLUGIN_TOOL_WINDOW", pluginName, $"action=openWindow result={hostResult.Result} windowId={SafePluginActionValue(session.WindowId)} routeSegment={SafePluginActionValue(session.RouteSegment)} mode=toolWindow hostKind={hostResult.HostKind} webView2Runtime={hostResult.WebView2RuntimeAvailable} toolWindowSupported={hostCaps.ToolWindowSupported} fallbackHostKind={SafePluginActionValue(hostCaps.FallbackHostKind)} jsonScreenSuppressed={hostCaps.JsonScreenSuppressed} reuseKey={SafePluginActionValue(hostCaps.ReuseKey)} sessionReused={reusedWindowSession} reuseExisting={reuseExisting} activateExisting={activateExisting} hostReused={hostResult.Reused} activated={hostResult.Activated} stateRestored={hostResult.StateRestored} diagnostics={SafePluginActionValue(hostResult.Diagnostics)} url={SafePluginActionValue(absoluteWindowUrl)} navigationMode={SafePluginActionValue(toolWindowNavigationMode)} contentRoute={SafePluginActionValue(selfContentRoute)} size={session.Width}x{session.Height} minSize={session.MinWidth}x{session.MinHeight} left={logLeft} top={logTop} alwaysOnTop={session.AlwaysOnTop} iconManifest={SafePluginActionValue(iconSpec.ManifestIcon)} iconSource={SafePluginActionValue(hostResult.IconSource)} iconApplied={hostResult.IconApplied} iconDiagnostics={SafePluginActionValue(hostResult.IconDiagnostics)} formIconContract=v0.11.42_plugin_declared_icon_only positionPersistence={hostCaps.SupportsPositionPersistence} statePersistence={hostCaps.SupportsStatePersistence} jsonScreenSuppressed={hostCaps.JsonScreenSuppressed} formResponse=redirectBack status=303 returnUrl={SafePluginActionValue(returnUrl)} sourcePreserved=True currentPageNavigationSuppressed=True rule=v0.11.28_viewer_retune_guard_light_stability");
+            log.Add("PLUGIN_TOOL_WINDOW", pluginName, $"action=openWindow result={hostResult.Result} windowId={SafePluginActionValue(session.WindowId)} routeSegment={SafePluginActionValue(session.RouteSegment)} mode=toolWindow hostKind={hostResult.HostKind} webView2Runtime={hostResult.WebView2RuntimeAvailable} toolWindowSupported={hostCaps.ToolWindowSupported} fallbackHostKind={SafePluginActionValue(hostCaps.FallbackHostKind)} jsonScreenSuppressed={hostCaps.JsonScreenSuppressed} reuseKey={SafePluginActionValue(hostCaps.ReuseKey)} sessionReused={reusedWindowSession} reuseExisting={reuseExisting} activateExisting={activateExisting} hostReused={hostResult.Reused} activated={hostResult.Activated} stateRestored={hostResult.StateRestored} diagnostics={SafePluginActionValue(hostResult.Diagnostics)} url={SafePluginActionValue(absoluteWindowUrl)} navigationMode={SafePluginActionValue(toolWindowNavigationMode)} contentRoute={SafePluginActionValue(selfContentRoute)} size={session.Width}x{session.Height} minSize={session.MinWidth}x{session.MinHeight} left={logLeft} top={logTop} alwaysOnTop={session.AlwaysOnTop} iconManifest={SafePluginActionValue(iconSpec.ManifestIcon)} iconSource={SafePluginActionValue(hostResult.IconSource)} iconApplied={hostResult.IconApplied} iconDiagnostics={SafePluginActionValue(hostResult.IconDiagnostics)} formIconContract=release_contract positionPersistence={hostCaps.SupportsPositionPersistence} statePersistence={hostCaps.SupportsStatePersistence} jsonScreenSuppressed={hostCaps.JsonScreenSuppressed} formResponse=redirectBack status=303 returnUrl={SafePluginActionValue(returnUrl)} sourcePreserved=True currentPageNavigationSuppressed=True rule=release_contract");
             return PluginSeeOther(returnUrl);
         }
         return BuildPluginWindowDispatchResponse(result, responseMode, windowUrl);
@@ -1048,7 +1062,7 @@ static async Task<IResult> HandlePluginWindowDispatchAsync(HttpRequest http, Plu
         var closedSession = windows.DeleteClosed(request.WindowId, GetPluginActionIdentity(plugin, route));
         var ok = closedSession is not null;
         var toolWindowClosed = toolWindows.Close(request.WindowId);
-        log.Add("PLUGIN_WINDOW", pluginName, $"action=closeWindow result={(ok ? "OK" : "NOT_FOUND")} windowId={SafePluginActionValue(request.WindowId)} toolWindowCloseRequested={toolWindowClosed} responseMode={SafePluginActionValue(responseMode)} endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.11.03_window_action_response_contract");
+        log.Add("PLUGIN_WINDOW", pluginName, $"action=closeWindow result={(ok ? "OK" : "NOT_FOUND")} windowId={SafePluginActionValue(request.WindowId)} toolWindowCloseRequested={toolWindowClosed} responseMode={SafePluginActionValue(responseMode)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
         return ok
             ? BuildPluginWindowDispatchResponse(new PluginWindowResult { Success = true, Message = "Plugin window closed.", Diagnostics = "closed", WindowId = request.WindowId }, responseMode, ResolvePluginToolWindowReturnUrl(http, request, route))
             : BuildPluginWindowDispatchError(new PluginWindowResult { Success = false, Message = "Plugin window not found.", Diagnostics = "window_not_found", WindowId = request.WindowId }, responseMode, StatusCodes.Status404NotFound);
@@ -1087,7 +1101,7 @@ static async Task<IResult> HandlePluginWindowDispatchAsync(HttpRequest http, Plu
                 hostRefreshResult = hostResult.Result;
                 refreshIssued = true;
                 if (!string.IsNullOrWhiteSpace(request.RefreshScrollTarget))
-                    log.Add("PLUGIN_WINDOW_REFRESH_SCROLL", pluginName, $"result=REQUESTED action=updateWindow windowId={SafePluginActionValue(session.WindowId)} target={SafePluginActionValue(request.RefreshScrollTarget)} mode={SafePluginActionValue(request.RefreshScrollMode)} hostKind={SafePluginActionValue(hostResult.HostKind)} refreshTarget={SafePluginActionValue(refreshTarget)} reason=refresh_after_host_content_rerender rule=v0.11.28_viewer_retune_guard_light_stability");
+                    log.Add("PLUGIN_WINDOW_REFRESH_SCROLL", pluginName, $"result=REQUESTED action=updateWindow windowId={SafePluginActionValue(session.WindowId)} target={SafePluginActionValue(request.RefreshScrollTarget)} mode={SafePluginActionValue(request.RefreshScrollMode)} hostKind={SafePluginActionValue(hostResult.HostKind)} refreshTarget={SafePluginActionValue(refreshTarget)} reason=refresh_after_host_content_rerender rule=release_contract");
             }
             else
             {
@@ -1095,7 +1109,7 @@ static async Task<IResult> HandlePluginWindowDispatchAsync(HttpRequest http, Plu
             }
         }
 
-        log.Add("PLUGIN_WINDOW", pluginName, $"action=updateWindow result={(ok ? "OK" : "NOT_FOUND")} windowId={SafePluginActionValue(request.WindowId)} revision={session?.Revision ?? 0} payloadAlwaysOnTopPresent={requestedAlwaysOnTopPresent} payloadAlwaysOnTop={request.AlwaysOnTop} sessionAlwaysOnTop={session?.AlwaysOnTop.ToString() ?? "-"} hostUpdated={hostApply.HostAccepted} hostApplied={hostApply.Applied} hostBeforeTopMost={hostApply.BeforeTopMost?.ToString() ?? "-"} hostAfterTopMost={hostApply.AfterTopMost?.ToString() ?? "-"} hostBeforeSize={FormatPluginHostSize(hostApply.BeforeWidth, hostApply.BeforeHeight)} hostAfterSize={FormatPluginHostSize(hostApply.AfterWidth, hostApply.AfterHeight)} hostDiagnostics={SafePluginActionValue(hostApply.Diagnostics)} refreshAfter={refreshAfter} refreshTarget={SafePluginActionValue(refreshTarget)} refreshScrollTarget={SafePluginActionValue(request.RefreshScrollTarget)} refreshScrollMode={SafePluginActionValue(request.RefreshScrollMode)} refreshIssued={refreshIssued} hostRefresh={SafePluginActionValue(hostRefreshResult)} responseMode={SafePluginActionValue(responseMode)} endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.11.80_viewer_profile_pid_binding");
+        log.Add("PLUGIN_WINDOW", pluginName, $"action=updateWindow result={(ok ? "OK" : "NOT_FOUND")} windowId={SafePluginActionValue(request.WindowId)} revision={session?.Revision ?? 0} payloadAlwaysOnTopPresent={requestedAlwaysOnTopPresent} payloadAlwaysOnTop={request.AlwaysOnTop} sessionAlwaysOnTop={session?.AlwaysOnTop.ToString() ?? "-"} hostUpdated={hostApply.HostAccepted} hostApplied={hostApply.Applied} hostBeforeTopMost={hostApply.BeforeTopMost?.ToString() ?? "-"} hostAfterTopMost={hostApply.AfterTopMost?.ToString() ?? "-"} hostBeforeSize={FormatPluginHostSize(hostApply.BeforeWidth, hostApply.BeforeHeight)} hostAfterSize={FormatPluginHostSize(hostApply.AfterWidth, hostApply.AfterHeight)} hostDiagnostics={SafePluginActionValue(hostApply.Diagnostics)} refreshAfter={refreshAfter} refreshTarget={SafePluginActionValue(refreshTarget)} refreshScrollTarget={SafePluginActionValue(request.RefreshScrollTarget)} refreshScrollMode={SafePluginActionValue(request.RefreshScrollMode)} refreshIssued={refreshIssued} hostRefresh={SafePluginActionValue(hostRefreshResult)} responseMode={SafePluginActionValue(responseMode)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
         return ok
             ? BuildPluginWindowDispatchResponse(new PluginWindowResult { Success = true, Message = "Plugin window updated.", Diagnostics = (hostApply.Applied ? "updated;hostApplied" : $"updated;{hostApply.Diagnostics}") + (refreshIssued ? ";refreshIssued" : string.Empty), WindowId = session!.WindowId, WindowUrl = $"/plugin-window/{Uri.EscapeDataString(session.WindowId)}", ContentRoute = responseContentRoute ?? BuildHostManagedPluginContentRoute(session.ContentRoute, session.WindowId, session.Revision), RefreshRequested = refreshIssued, RefreshTarget = refreshTarget, PreserveScroll = request.PreserveScroll, RefreshScrollTarget = request.RefreshScrollTarget, RefreshScrollMode = request.RefreshScrollMode, Revision = session.Revision }, responseMode, responseContentRoute ?? BuildHostManagedPluginContentRoute(session!.ContentRoute, session.WindowId, session.Revision))
             : BuildPluginWindowDispatchError(new PluginWindowResult { Success = false, Message = "Plugin window not found.", Diagnostics = "window_not_found", WindowId = request.WindowId }, responseMode, StatusCodes.Status404NotFound);
@@ -1123,9 +1137,9 @@ static async Task<IResult> HandlePluginWindowDispatchAsync(HttpRequest http, Plu
             var hostResult = toolWindows.OpenOrActivate(session, absoluteNavigationUrl);
             hostRefreshResult = hostResult.Result;
             if (!string.IsNullOrWhiteSpace(request.RefreshScrollTarget))
-                log.Add("PLUGIN_WINDOW_REFRESH_SCROLL", pluginName, $"result=REQUESTED action=refreshWindow windowId={SafePluginActionValue(session.WindowId)} target={SafePluginActionValue(request.RefreshScrollTarget)} mode={SafePluginActionValue(request.RefreshScrollMode)} hostKind={SafePluginActionValue(hostResult.HostKind)} refreshTarget={SafePluginActionValue(refreshTarget)} reason=refresh_window_host_content_rerender rule=v0.11.28_viewer_retune_guard_light_stability");
+                log.Add("PLUGIN_WINDOW_REFRESH_SCROLL", pluginName, $"result=REQUESTED action=refreshWindow windowId={SafePluginActionValue(session.WindowId)} target={SafePluginActionValue(request.RefreshScrollTarget)} mode={SafePluginActionValue(request.RefreshScrollMode)} hostKind={SafePluginActionValue(hostResult.HostKind)} refreshTarget={SafePluginActionValue(refreshTarget)} reason=refresh_window_host_content_rerender rule=release_contract");
         }
-        log.Add("PLUGIN_WINDOW", pluginName, $"action=refreshWindow result={(ok ? "ISSUED" : "NOT_FOUND")} windowId={SafePluginActionValue(resolvedWindowId)} target={SafePluginActionValue(refreshTarget)} preserveScroll={request.PreserveScroll} refreshScrollTarget={SafePluginActionValue(request.RefreshScrollTarget)} refreshScrollMode={SafePluginActionValue(request.RefreshScrollMode)} revision={session?.Revision ?? 0} contentRoute={SafePluginActionValue(session?.ContentRoute)} hostRefresh={SafePluginActionValue(hostRefreshResult)} responseMode={SafePluginActionValue(responseMode)} endpoint={SafePluginActionValue(http.Path.Value)} reloadScope=toolwindow-content-document_or_iframe-content-only rule=v0.11.03_window_action_response_contract");
+        log.Add("PLUGIN_WINDOW", pluginName, $"action=refreshWindow result={(ok ? "ISSUED" : "NOT_FOUND")} windowId={SafePluginActionValue(resolvedWindowId)} target={SafePluginActionValue(refreshTarget)} preserveScroll={request.PreserveScroll} refreshScrollTarget={SafePluginActionValue(request.RefreshScrollTarget)} refreshScrollMode={SafePluginActionValue(request.RefreshScrollMode)} revision={session?.Revision ?? 0} contentRoute={SafePluginActionValue(session?.ContentRoute)} hostRefresh={SafePluginActionValue(hostRefreshResult)} responseMode={SafePluginActionValue(responseMode)} endpoint={SafePluginActionValue(http.Path.Value)} reloadScope=toolwindow-content-document_or_iframe-content-only rule=release_contract");
         if (ok)
         {
             var result = new PluginWindowResult { Success = true, Message = "Plugin window refresh requested.", Diagnostics = "refresh_requested", WindowId = session!.WindowId, WindowUrl = $"/plugin-window/{Uri.EscapeDataString(session.WindowId)}", ContentRoute = refreshedContentRoute ?? BuildHostManagedPluginContentRoute(session.ContentRoute, session.WindowId, session.Revision), RefreshRequested = true, RefreshTarget = refreshTarget, PreserveScroll = request.PreserveScroll, RefreshScrollTarget = request.RefreshScrollTarget, RefreshScrollMode = request.RefreshScrollMode, Revision = session.Revision };
@@ -1134,7 +1148,7 @@ static async Task<IResult> HandlePluginWindowDispatchAsync(HttpRequest http, Plu
         return BuildPluginWindowDispatchError(new PluginWindowResult { Success = false, Message = "Plugin window not found.", Diagnostics = "window_not_found", WindowId = resolvedWindowId, RefreshTarget = refreshTarget, PreserveScroll = request.PreserveScroll, RefreshScrollTarget = request.RefreshScrollTarget, RefreshScrollMode = request.RefreshScrollMode }, responseMode, StatusCodes.Status404NotFound);
     }
 
-    log.Add("PLUGIN_WINDOW", pluginName, $"action={SafePluginActionValue(action)} result=DENIED reason=unsupported_window_action responseMode={SafePluginActionValue(responseMode)} endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.11.03_window_action_response_contract");
+    log.Add("PLUGIN_WINDOW", pluginName, $"action={SafePluginActionValue(action)} result=DENIED reason=unsupported_window_action responseMode={SafePluginActionValue(responseMode)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
     return BuildPluginWindowDispatchError(new PluginWindowResult { Success = false, Message = "Unsupported plugin window action.", Diagnostics = "unsupported_window_action" }, responseMode, StatusCodes.Status400BadRequest);
 }
 
@@ -1143,18 +1157,18 @@ static IResult RenderPluginWindowState(string windowId, PluginWindowSessionStore
     var session = windows.Get(windowId);
     if (session is null)
     {
-        log.Add("PLUGIN_WINDOW", "Host", $"action=state result=STALE_WINDOW_SESSION windowId={SafePluginActionValue(windowId)} reason=window_session_not_found_after_host_restart_or_closed_window action=client_should_reopen_window rule=v0.10.96_plugin_viewer_api_cleanup");
+        log.Add("PLUGIN_WINDOW", "Host", $"action=state result=STALE_WINDOW_SESSION windowId={SafePluginActionValue(windowId)} reason=window_session_not_found_after_host_restart_or_closed_window action=client_should_reopen_window rule=release_contract");
         return Results.NotFound(new { success = false, diagnostics = "stale_window_session", windowId });
     }
 
     var caps = toolWindows.GetCapabilities();
     var hostState = toolWindows.GetHostState(session.WindowId);
     var hostAlive = hostState?.HostAlive ?? toolWindows.IsHostAlive(session.WindowId);
-    log.Add("PLUGIN_WINDOW", "State", $"action=state result=OK windowId={SafePluginActionValue(windowId)} revision={session.Revision} hostAlive={hostAlive} alwaysOnTop={hostState?.AlwaysOnTop ?? session.AlwaysOnTop} windowState={SafePluginActionValue(hostState?.WindowState ?? "unknown")} isMinimized={hostState?.IsMinimized ?? false} source=authoritative endpoint=/plugin-window/{{windowId}}/state rule=v0.11.48_toolwindow_minimized_state_guard");
+    log.Add("PLUGIN_WINDOW", "State", $"action=state result=OK windowId={SafePluginActionValue(windowId)} revision={session.Revision} hostAlive={hostAlive} alwaysOnTop={hostState?.AlwaysOnTop ?? session.AlwaysOnTop} windowState={SafePluginActionValue(hostState?.WindowState ?? "unknown")} isMinimized={hostState?.IsMinimized ?? false} source=authoritative endpoint=/plugin-window/{{windowId}}/state rule=release_contract");
     return Results.Ok(new
     {
         success = true,
-        contractVersion = "0.11.28",
+        contractVersion = TvAIrVersionContract.PluginHostContractVersion,
         stateSource = "authoritative",
         windowId = session.WindowId,
         pluginId = session.PluginId,
@@ -1224,7 +1238,7 @@ static bool IsTruthy(string? value)
 static IResult RenderPluginWindowHostCapabilities(PluginToolWindowHostService toolWindows, LogRepository log)
 {
     var caps = toolWindows.GetCapabilities();
-    log.Add("PLUGIN_TOOL_WINDOW", "Capabilities", $"action=capabilities result=OK toolWindowSupported={caps.ToolWindowSupported} webView2Runtime={caps.WebView2RuntimeAvailable} hostKind={SafePluginActionValue(caps.HostKind)} fallbackHostKind={SafePluginActionValue(caps.FallbackHostKind)} jsonScreenSuppressed={caps.JsonScreenSuppressed} reuseKey={SafePluginActionValue(caps.ReuseKey)} positionPersistence={caps.SupportsPositionPersistence} statePersistence={caps.SupportsStatePersistence} rule=v0.10.96_plugin_viewer_api_cleanup");
+    log.Add("PLUGIN_TOOL_WINDOW", "Capabilities", $"action=capabilities result=OK toolWindowSupported={caps.ToolWindowSupported} webView2Runtime={caps.WebView2RuntimeAvailable} hostKind={SafePluginActionValue(caps.HostKind)} fallbackHostKind={SafePluginActionValue(caps.FallbackHostKind)} jsonScreenSuppressed={caps.JsonScreenSuppressed} reuseKey={SafePluginActionValue(caps.ReuseKey)} positionPersistence={caps.SupportsPositionPersistence} statePersistence={caps.SupportsStatePersistence} rule=release_contract");
     return Results.Ok(new
     {
         success = true,
@@ -1357,12 +1371,12 @@ static IResult RenderPluginViewerProfiles(IOptions<TvTestSettings> tvTestOptions
     var projection = BuildViewerProfileProjection(tvTestOptions.Value, ini, tunerProfiles);
 
     log.Add("VIEWER_PROFILE_PROJECTION", "API",
-        $"result=OK source=api viewingTuners={projection.ViewingTunerCount} profiles={projection.Profiles.Count} selectable={projection.SelectableProfiles.Count} enabledReal={projection.EnabledRealProfileCount} selectorVisibleRecommended={projection.SelectorVisibleRecommended} profileIds={SafePluginActionValue(projection.ProfileIds)} selectableIds={SafePluginActionValue(projection.SelectableProfileIds)} default={SafePluginActionValue(projection.DefaultViewerProfile)} endpoint=/api/plugins/viewer-profiles rule=v0.11.73_viewer_profile_safe_event_selector_capture");
+        $"result=OK source=api viewingTuners={projection.ViewingTunerCount} profiles={projection.Profiles.Count} selectable={projection.SelectableProfiles.Count} enabledReal={projection.EnabledRealProfileCount} selectorVisibleRecommended={projection.SelectorVisibleRecommended} profileIds={SafePluginActionValue(projection.ProfileIds)} selectableIds={SafePluginActionValue(projection.SelectableProfileIds)} default={SafePluginActionValue(projection.DefaultViewerProfile)} endpoint=/api/plugins/viewer-profiles rule=release_contract");
 
     return Results.Ok(new
     {
         success = true,
-        contractVersion = "0.11.73",
+        contractVersion = TvAIrVersionContract.PluginHostContractVersion,
         endpoint = "/api/plugins/viewer-profiles",
         displayRule = "select_tvtest_frame_only_no_auto; viewerProfile_is_tvtest_frame_not_single_tuner; keep_min_width_invariant_even_when_selector_hidden",
         payloadField = "viewerProfile",
@@ -1418,8 +1432,8 @@ static IResult RenderPluginViewerTuners(TunerPool tuners, ExternalTunerLeaseServ
             };
         })
         .ToList();
-    log.Add("PLUGIN_VIEWER_TUNERS", "API", $"result=OK count={items.Count} source=TunerPool.GetStatus role=Viewing lastViewerActionState={SafePluginActionValue(lastViewerActionResult?.State)} lastViewerActionError={SafePluginActionValue(lastViewerActionResult?.ErrorCode)} rule=v0.10.96_plugin_viewer_api_cleanup");
-    return Results.Ok(new { success = true, contractVersion = "0.10.96", source = "TunerPool.GetStatus", lastViewerActionResult, items });
+    log.Add("PLUGIN_VIEWER_TUNERS", "API", $"result=OK count={items.Count} source=TunerPool.GetStatus role=Viewing lastViewerActionState={SafePluginActionValue(lastViewerActionResult?.State)} lastViewerActionError={SafePluginActionValue(lastViewerActionResult?.ErrorCode)} rule=release_contract");
+    return Results.Ok(new { success = true, contractVersion = TvAIrVersionContract.PluginHostContractVersion, source = "TunerPool.GetStatus", lastViewerActionResult, items });
 }
 
 static IResult RenderPluginViewerControlChannels(ChannelFileLoader channels, LogRepository log)
@@ -1428,16 +1442,16 @@ static IResult RenderPluginViewerControlChannels(ChannelFileLoader channels, Log
         .Select((c, index) => ToPluginViewerControlChannelInfo(c, index))
         .ToList();
     var missing = items.Count(x => !x.ViewerStartIdentityReady);
-    log.Add("PLUGIN_VIEWER_CONTROL_IDENTITY", "API", $"result=OK count={items.Count} missingTriplet={missing} identitySource=ProgramGuideProjection identityFields=networkId|transportStreamId|serviceId endpoint=/api/plugins/viewer-control/channels rule=v0.10.96_plugin_viewer_api_cleanup");
+    log.Add("PLUGIN_VIEWER_CONTROL_IDENTITY", "API", $"result=OK count={items.Count} missingTriplet={missing} identitySource=ProgramGuideProjection identityFields=networkId|transportStreamId|serviceId endpoint=/api/plugins/viewer-control/channels rule=release_contract");
     if (missing > 0)
     {
         var sample = string.Join(";", items.Where(x => !x.ViewerStartIdentityReady).Take(5).Select(x => $"{SafePluginActionValue(x.ServiceName)}:{x.NetworkId}/{x.TransportStreamId}/{x.ServiceId}"));
-        log.Add("VIEWER_CONTROL_IDENTITY_PROJECTION_WARN", "API", $"result=WARN missingTriplet={missing} sample={sample} action=disable_viewerStart_for_missing_identity rule=v0.10.96_plugin_viewer_api_cleanup");
+        log.Add("VIEWER_CONTROL_IDENTITY_PROJECTION_WARN", "API", $"result=WARN missingTriplet={missing} sample={sample} action=disable_viewerStart_for_missing_identity rule=release_contract");
     }
     return Results.Ok(new
     {
         success = true,
-        contractVersion = "0.10.96",
+        contractVersion = TvAIrVersionContract.PluginHostContractVersion,
         source = "ProgramGuideProjection",
         identitySource = "ProgramGuideProjection",
         identityFields = "networkId|transportStreamId|serviceId",
@@ -1454,14 +1468,14 @@ static IResult RenderPluginViewerControlChannels(ChannelFileLoader channels, Log
 static IResult RenderPluginProgramGuideWaveFilters(LogRepository log)
 {
     var filters = BuildPluginProgramGuideWaveFilters();
-    log.Add("PLUGIN_PROGRAM_GUIDE_FILTER", "API", $"result=OK count={filters.Count} source=program_guide_wave_filter_module rule=v0.10.96_plugin_viewer_api_cleanup");
-    return Results.Ok(new { success = true, contractVersion = "0.10.96", source = "program_guide_wave_filter_module", field = "programGuideFilterGroup", items = filters });
+    log.Add("PLUGIN_PROGRAM_GUIDE_FILTER", "API", $"result=OK count={filters.Count} source=program_guide_wave_filter_module rule=release_contract");
+    return Results.Ok(new { success = true, contractVersion = TvAIrVersionContract.PluginHostContractVersion, source = "program_guide_wave_filter_module", field = "programGuideFilterGroup", items = filters });
 }
 
 static IResult RenderPluginViewerControlContract(LogRepository log)
 {
     var contract = BuildPluginViewerControlHostContract();
-    log.Add("PLUGIN_VIEWER_CONTROL_CONTRACT", "API", $"result=OK safeEvents=dblclick|click scriptAllowed=False viewerTunersEndpoint=/api/plugins/viewer-tuners viewerControlChannelsEndpoint=/api/plugins/viewer-control/channels identitySource=ProgramGuideProjection identityFields=networkId|transportStreamId|serviceId rule=v0.10.96_plugin_viewer_api_cleanup");
+    log.Add("PLUGIN_VIEWER_CONTROL_CONTRACT", "API", $"result=OK safeEvents=dblclick|click scriptAllowed=False viewerTunersEndpoint=/api/plugins/viewer-tuners viewerControlChannelsEndpoint=/api/plugins/viewer-control/channels identitySource=ProgramGuideProjection identityFields=networkId|transportStreamId|serviceId rule=release_contract");
     return Results.Ok(contract);
 }
 
@@ -1471,12 +1485,12 @@ static IResult RenderPluginHostContract(LogRepository log)
     var contract = new
     {
         success = true,
-        contractVersion = "0.11.315",
+        contractVersion = TvAIrVersionContract.PluginHostContractVersion,
         source = "TvAIrPluginHostContract",
         purpose = "generic_plugin_host_contract_foundation",
         compatibilityPolicy = new
         {
-            currentContract = "0.11.315",
+            currentContract = TvAIrVersionContract.PluginHostContractVersion,
             newPluginsUseDeclaredManifest = true,
             legacyAdaptersRemainIsolated = true,
             preferredOpenModeIsCompatibilityAlias = true,
@@ -1696,7 +1710,7 @@ static IResult RenderPluginHostContract(LogRepository log)
             "safe plugin command/status item projection"
         }
     };
-    log.Add("PLUGIN_HOST_CONTRACT", "API", "result=OK contractVersion=0.11.315 source=TvAIrPluginHostContract purpose=generic_plugin_host_contract_foundation manifest=id|name|version|route|kind|permissions capabilities=kind_separated permissions=capability_scoped uiModes=page|toolWindow|headless legacy=adapter_isolated remoteReady=True rule=v0.11.315_plugin_host_contract_foundation");
+    log.Add("PLUGIN_HOST_CONTRACT", "API", $"result=OK contractVersion={TvAIrVersionContract.PluginHostContractVersion} source=TvAIrPluginHostContract purpose=generic_plugin_host_contract_foundation manifest=id|name|version|route|kind|permissions capabilities=kind_separated permissions=capability_scoped uiModes=page|toolWindow|headless legacy=adapter_isolated remoteReady=True rule=release_contract");
     return Results.Ok(contract);
 }
 
@@ -1718,7 +1732,7 @@ static IResult RenderPluginSafeEventClientLog(HttpRequest http, LogRepository lo
     var networkId = Q(http, "networkId");
     var transportStreamId = Q(http, "transportStreamId");
     var serviceId = Q(http, "serviceId");
-    var message = $"phase={SafePluginActionValue(phase)} event={SafePluginActionValue(eventName)} action={SafePluginActionValue(action)} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(route)} windowId={SafePluginActionValue(windowId)} mode={SafePluginActionValue(mode)} hostKind={SafePluginActionValue(hostKind)} tag={SafePluginActionValue(tag)} hasAction={SafePluginActionValue(hasAction)} hasToken={SafePluginActionValue(hasToken)} hasTriplet={SafePluginActionValue(hasTriplet)} networkId={SafePluginActionValue(networkId)} transportStreamId={SafePluginActionValue(transportStreamId)} serviceId={SafePluginActionValue(serviceId)} source=client_beacon_no_plugin_js rule=v0.11.38_toolwindow_keepalive_recovery_tray_silent";
+    var message = $"phase={SafePluginActionValue(phase)} event={SafePluginActionValue(eventName)} action={SafePluginActionValue(action)} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(route)} windowId={SafePluginActionValue(windowId)} mode={SafePluginActionValue(mode)} hostKind={SafePluginActionValue(hostKind)} tag={SafePluginActionValue(tag)} hasAction={SafePluginActionValue(hasAction)} hasToken={SafePluginActionValue(hasToken)} hasTriplet={SafePluginActionValue(hasTriplet)} networkId={SafePluginActionValue(networkId)} transportStreamId={SafePluginActionValue(transportStreamId)} serviceId={SafePluginActionValue(serviceId)} source=client_beacon_no_plugin_js rule=release_contract";
     log.Add("PLUGIN_SAFE_EVENT_BIND", string.IsNullOrWhiteSpace(route) ? "Client" : route, message);
     return Results.Content("", "image/gif");
 }
@@ -1737,7 +1751,7 @@ static IResult RenderPluginSafeEventKeepAlive(HttpRequest http, PluginActionToke
     if (session is null || session.IsClosed || !session.HostAlive)
     {
         var reason = session is null ? "window_not_found" : (session.IsClosed ? "window_closed" : "host_not_alive");
-        log.Add("PLUGIN_SAFE_EVENT_KEEPALIVE", string.IsNullOrWhiteSpace(requestRouteSegment) ? "Host" : requestRouteSegment, $"result=SKIPPED reason={SafePluginActionValue(reason)} windowId={SafePluginActionValue(windowId)} requestPlugin={SafePluginActionValue(requestPluginId)} requestRoute={SafePluginActionValue(requestRouteSegment)} mode={SafePluginActionValue(mode)} rule=v0.11.38_toolwindow_keepalive_recovery_tray_silent");
+        log.Add("PLUGIN_SAFE_EVENT_KEEPALIVE", string.IsNullOrWhiteSpace(requestRouteSegment) ? "Host" : requestRouteSegment, $"result=SKIPPED reason={SafePluginActionValue(reason)} windowId={SafePluginActionValue(windowId)} requestPlugin={SafePluginActionValue(requestPluginId)} requestRoute={SafePluginActionValue(requestRouteSegment)} mode={SafePluginActionValue(mode)} rule=release_contract");
         return Results.NoContent();
     }
 
@@ -1747,7 +1761,7 @@ static IResult RenderPluginSafeEventKeepAlive(HttpRequest http, PluginActionToke
     if (!string.Equals(session.PluginId, effectivePluginId, StringComparison.OrdinalIgnoreCase)
         || !string.Equals(session.RouteSegment, effectiveRouteSegment, StringComparison.OrdinalIgnoreCase))
     {
-        log.Add("PLUGIN_SAFE_EVENT_KEEPALIVE", string.IsNullOrWhiteSpace(effectiveRouteSegment) ? "Host" : effectiveRouteSegment, $"result=DENIED reason=window_identity_mismatch windowId={SafePluginActionValue(windowId)} sessionPlugin={SafePluginActionValue(session.PluginId)} requestPlugin={SafePluginActionValue(requestPluginId)} effectivePlugin={SafePluginActionValue(effectivePluginId)} sessionRoute={SafePluginActionValue(session.RouteSegment)} requestRoute={SafePluginActionValue(requestRouteSegment)} effectiveRoute={SafePluginActionValue(effectiveRouteSegment)} mode={SafePluginActionValue(mode)} rule=v0.11.38_toolwindow_keepalive_recovery_tray_silent");
+        log.Add("PLUGIN_SAFE_EVENT_KEEPALIVE", string.IsNullOrWhiteSpace(effectiveRouteSegment) ? "Host" : effectiveRouteSegment, $"result=DENIED reason=window_identity_mismatch windowId={SafePluginActionValue(windowId)} sessionPlugin={SafePluginActionValue(session.PluginId)} requestPlugin={SafePluginActionValue(requestPluginId)} effectivePlugin={SafePluginActionValue(effectivePluginId)} sessionRoute={SafePluginActionValue(session.RouteSegment)} requestRoute={SafePluginActionValue(requestRouteSegment)} effectiveRoute={SafePluginActionValue(effectiveRouteSegment)} mode={SafePluginActionValue(mode)} rule=release_contract");
         return Results.NoContent();
     }
 
@@ -1766,7 +1780,7 @@ static IResult RenderPluginSafeEventKeepAlive(HttpRequest http, PluginActionToke
         reason2 = "token_recovered_from_live_host_window";
     }
 
-    log.Add("PLUGIN_SAFE_EVENT_KEEPALIVE", string.IsNullOrWhiteSpace(effectiveRouteSegment) ? "Host" : effectiveRouteSegment, $"result={(ok ? (recovered ? "RECOVERED" : "OK") : "DENIED")} reason={SafePluginActionValue(reason2)} windowId={SafePluginActionValue(windowId)} requestPlugin={SafePluginActionValue(requestPluginId)} effectivePlugin={SafePluginActionValue(effectivePluginId)} requestRoute={SafePluginActionValue(requestRouteSegment)} effectiveRoute={SafePluginActionValue(effectiveRouteSegment)} tokenRenewed={ok} tokenRecovered={recovered} tokenReturned={!string.IsNullOrWhiteSpace(issuedToken)} tokenExpiresAt={(ok ? expiresAt.ToString("O") : "-")} mode={SafePluginActionValue(mode)} rule=v0.11.38_toolwindow_keepalive_recovery_tray_silent");
+    log.Add("PLUGIN_SAFE_EVENT_KEEPALIVE", string.IsNullOrWhiteSpace(effectiveRouteSegment) ? "Host" : effectiveRouteSegment, $"result={(ok ? (recovered ? "RECOVERED" : "OK") : "DENIED")} reason={SafePluginActionValue(reason2)} windowId={SafePluginActionValue(windowId)} requestPlugin={SafePluginActionValue(requestPluginId)} effectivePlugin={SafePluginActionValue(effectivePluginId)} requestRoute={SafePluginActionValue(requestRouteSegment)} effectiveRoute={SafePluginActionValue(effectiveRouteSegment)} tokenRenewed={ok} tokenRecovered={recovered} tokenReturned={!string.IsNullOrWhiteSpace(issuedToken)} tokenExpiresAt={(ok ? expiresAt.ToString("O") : "-")} mode={SafePluginActionValue(mode)} rule=release_contract");
     return Results.Json(new
     {
         ok,
@@ -1783,7 +1797,7 @@ static IResult RenderPluginSafeEventHostScript(HttpRequest http, LogRepository l
     static string Q(HttpRequest request, string key) => request.Query.TryGetValue(key, out var v) ? (v.FirstOrDefault() ?? string.Empty) : string.Empty;
     var mode = Q(http, "mode");
     var route = Q(http, "route");
-    log.Add("PLUGIN_SAFE_EVENT_SCRIPT", string.IsNullOrWhiteSpace(route) ? "Host" : route, $"result=REQUESTED mode={SafePluginActionValue(mode)} routeSegment={SafePluginActionValue(route)} source=external_host_script endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.11.38_toolwindow_keepalive_recovery_tray_silent");
+    log.Add("PLUGIN_SAFE_EVENT_SCRIPT", string.IsNullOrWhiteSpace(route) ? "Host" : route, $"result=REQUESTED mode={SafePluginActionValue(mode)} routeSegment={SafePluginActionValue(route)} source=external_host_script endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
     const string script = """
 (function(){
 function g(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(e){return '';} }
@@ -1860,7 +1874,7 @@ static IReadOnlyList<PluginProgramGuideWaveFilterInfo> BuildPluginProgramGuideWa
 
 static PluginViewerControlHostContract BuildPluginViewerControlHostContract() => new()
 {
-    ContractVersion = "0.11.28",
+    ContractVersion = TvAIrVersionContract.PluginHostContractVersion,
     ToolWindowOnlySafeEvents = true,
     PluginScriptAllowed = false,
     SupportedEvents = new[] { "dblclick", "click" },
@@ -1956,20 +1970,20 @@ static bool ValidatePluginActionTokenOrRecoverHostWindow(
 
     if (!canRecoverReason)
     {
-        log.Add("PLUGIN_SAFE_EVENT_TOKEN_REFRESH", pluginName, $"result=SKIPPED action={SafePluginActionValue(action)} reason={SafePluginActionValue(initialReason)} windowId={SafePluginActionValue(normalizedWindowId)} endpoint={SafePluginActionValue(endpoint)} rule=v0.11.34_toolwindow_token_recovery_guard");
+        log.Add("PLUGIN_SAFE_EVENT_TOKEN_REFRESH", pluginName, $"result=SKIPPED action={SafePluginActionValue(action)} reason={SafePluginActionValue(initialReason)} windowId={SafePluginActionValue(normalizedWindowId)} endpoint={SafePluginActionValue(endpoint)} rule=release_contract");
         return false;
     }
     if (string.IsNullOrWhiteSpace(normalizedWindowId))
     {
         reason = $"{initialReason}_no_window";
-        log.Add("PLUGIN_SAFE_EVENT_TOKEN_REFRESH", pluginName, $"result=DENIED action={SafePluginActionValue(action)} reason={SafePluginActionValue(reason)} endpoint={SafePluginActionValue(endpoint)} rule=v0.11.34_toolwindow_token_recovery_guard");
+        log.Add("PLUGIN_SAFE_EVENT_TOKEN_REFRESH", pluginName, $"result=DENIED action={SafePluginActionValue(action)} reason={SafePluginActionValue(reason)} endpoint={SafePluginActionValue(endpoint)} rule=release_contract");
         return false;
     }
     if (!string.IsNullOrWhiteSpace(normalizedSafeEventWindowId)
         && !string.Equals(normalizedWindowId, normalizedSafeEventWindowId, StringComparison.OrdinalIgnoreCase))
     {
         reason = $"{initialReason}_safe_event_window_mismatch";
-        log.Add("PLUGIN_SAFE_EVENT_TOKEN_REFRESH", pluginName, $"result=DENIED action={SafePluginActionValue(action)} reason={SafePluginActionValue(reason)} windowId={SafePluginActionValue(normalizedWindowId)} safeEventWindowId={SafePluginActionValue(normalizedSafeEventWindowId)} endpoint={SafePluginActionValue(endpoint)} rule=v0.11.34_toolwindow_token_recovery_guard");
+        log.Add("PLUGIN_SAFE_EVENT_TOKEN_REFRESH", pluginName, $"result=DENIED action={SafePluginActionValue(action)} reason={SafePluginActionValue(reason)} windowId={SafePluginActionValue(normalizedWindowId)} safeEventWindowId={SafePluginActionValue(normalizedSafeEventWindowId)} endpoint={SafePluginActionValue(endpoint)} rule=release_contract");
         return false;
     }
 
@@ -1977,13 +1991,13 @@ static bool ValidatePluginActionTokenOrRecoverHostWindow(
     if (session is null)
     {
         reason = $"{initialReason}_window_not_found";
-        log.Add("PLUGIN_SAFE_EVENT_TOKEN_REFRESH", pluginName, $"result=DENIED action={SafePluginActionValue(action)} reason={SafePluginActionValue(reason)} windowId={SafePluginActionValue(normalizedWindowId)} endpoint={SafePluginActionValue(endpoint)} rule=v0.11.34_toolwindow_token_recovery_guard");
+        log.Add("PLUGIN_SAFE_EVENT_TOKEN_REFRESH", pluginName, $"result=DENIED action={SafePluginActionValue(action)} reason={SafePluginActionValue(reason)} windowId={SafePluginActionValue(normalizedWindowId)} endpoint={SafePluginActionValue(endpoint)} rule=release_contract");
         return false;
     }
     if (session.IsClosed || !session.HostAlive)
     {
         reason = session.IsClosed ? $"{initialReason}_window_closed" : $"{initialReason}_host_not_alive";
-        log.Add("PLUGIN_SAFE_EVENT_TOKEN_REFRESH", pluginName, $"result=DENIED action={SafePluginActionValue(action)} reason={SafePluginActionValue(reason)} windowId={SafePluginActionValue(normalizedWindowId)} hostAlive={session.HostAlive} isClosed={session.IsClosed} endpoint={SafePluginActionValue(endpoint)} rule=v0.11.34_toolwindow_token_recovery_guard");
+        log.Add("PLUGIN_SAFE_EVENT_TOKEN_REFRESH", pluginName, $"result=DENIED action={SafePluginActionValue(action)} reason={SafePluginActionValue(reason)} windowId={SafePluginActionValue(normalizedWindowId)} hostAlive={session.HostAlive} isClosed={session.IsClosed} endpoint={SafePluginActionValue(endpoint)} rule=release_contract");
         return false;
     }
     var normalizedRequestRouteSegment = (routeSegment ?? string.Empty).Trim().Trim('/');
@@ -1991,13 +2005,13 @@ static bool ValidatePluginActionTokenOrRecoverHostWindow(
         || !string.Equals(session.RouteSegment, normalizedRequestRouteSegment, StringComparison.OrdinalIgnoreCase))
     {
         reason = $"{initialReason}_window_identity_mismatch";
-        log.Add("PLUGIN_SAFE_EVENT_TOKEN_REFRESH", pluginName, $"result=DENIED action={SafePluginActionValue(action)} reason={SafePluginActionValue(reason)} windowId={SafePluginActionValue(normalizedWindowId)} sessionPlugin={SafePluginActionValue(session.PluginId)} requestPlugin={SafePluginActionValue(pluginActionId)} sessionRoute={SafePluginActionValue(session.RouteSegment)} requestRoute={SafePluginActionValue(normalizedRequestRouteSegment)} endpoint={SafePluginActionValue(endpoint)} rule=v0.11.34_toolwindow_token_recovery_guard");
+        log.Add("PLUGIN_SAFE_EVENT_TOKEN_REFRESH", pluginName, $"result=DENIED action={SafePluginActionValue(action)} reason={SafePluginActionValue(reason)} windowId={SafePluginActionValue(normalizedWindowId)} sessionPlugin={SafePluginActionValue(session.PluginId)} requestPlugin={SafePluginActionValue(pluginActionId)} sessionRoute={SafePluginActionValue(session.RouteSegment)} requestRoute={SafePluginActionValue(normalizedRequestRouteSegment)} endpoint={SafePluginActionValue(endpoint)} rule=release_contract");
         return false;
     }
 
     var refreshed = actionTokens.Issue(pluginActionId, normalizedRequestRouteSegment);
     reason = "OK_RECOVERED";
-    log.Add("PLUGIN_SAFE_EVENT_TOKEN_REFRESH", pluginName, $"result=OK action={SafePluginActionValue(action)} reason={SafePluginActionValue(initialReason)} windowId={SafePluginActionValue(normalizedWindowId)} routeSegment={SafePluginActionValue(routeSegment)} newTokenIssued=True tokenExpiresAt={refreshed.ExpiresAt:O} followup=next_directcontent_render_injects_latest_token logEvent={SafePluginActionValue(logEvent)} endpoint={SafePluginActionValue(endpoint)} rule=v0.11.34_toolwindow_token_recovery_guard");
+    log.Add("PLUGIN_SAFE_EVENT_TOKEN_REFRESH", pluginName, $"result=OK action={SafePluginActionValue(action)} reason={SafePluginActionValue(initialReason)} windowId={SafePluginActionValue(normalizedWindowId)} routeSegment={SafePluginActionValue(routeSegment)} newTokenIssued=True tokenExpiresAt={refreshed.ExpiresAt:O} followup=next_directcontent_render_injects_latest_token logEvent={SafePluginActionValue(logEvent)} endpoint={SafePluginActionValue(endpoint)} rule=release_contract");
     return true;
 }
 
@@ -2121,7 +2135,7 @@ static PluginToolWindowIconSpec ResolvePluginToolWindowIcon(ITvAIrPlugin? plugin
     }
     catch (Exception ex)
     {
-        log.Add("PLUGIN_TOOL_WINDOW_ICON", pluginName, $"phase=resolve source=embedded_resource result=ERROR manifestIcon={SafePluginActionValue(normalizedIcon)} error={SafePluginActionValue(ex.GetType().Name)} rule=v0.11.28_viewer_retune_guard_light_stability");
+        log.Add("PLUGIN_TOOL_WINDOW_ICON", pluginName, $"phase=resolve source=embedded_resource result=ERROR manifestIcon={SafePluginActionValue(normalizedIcon)} error={SafePluginActionValue(ex.GetType().Name)} rule=release_contract");
     }
 
     try
@@ -2150,7 +2164,7 @@ static PluginToolWindowIconSpec ResolvePluginToolWindowIcon(ITvAIrPlugin? plugin
     }
     catch (Exception ex)
     {
-        log.Add("PLUGIN_TOOL_WINDOW_ICON", pluginName, $"phase=resolve source=plugin_file result=ERROR manifestIcon={SafePluginActionValue(normalizedIcon)} error={SafePluginActionValue(ex.GetType().Name)} rule=v0.11.28_viewer_retune_guard_light_stability");
+        log.Add("PLUGIN_TOOL_WINDOW_ICON", pluginName, $"phase=resolve source=plugin_file result=ERROR manifestIcon={SafePluginActionValue(normalizedIcon)} error={SafePluginActionValue(ex.GetType().Name)} rule=release_contract");
     }
 
     return ResolveDefaultToolWindowIcon(normalizedIcon, "default_TvAIr_icon", "plugin_icon_not_found");
@@ -2181,14 +2195,14 @@ static IResult ResolvePluginAssetResult(string pluginOrRoute, string assetName, 
     var name = NormalizePluginAssetName(assetName);
     if (string.IsNullOrWhiteSpace(route) || string.IsNullOrWhiteSpace(name))
     {
-        log.Add("PLUGIN_ASSET", "DENY", $"result=BAD_REQUEST source={SafePluginActionValue(source)} pluginOrRoute={SafePluginActionValue(pluginOrRoute)} asset={SafePluginActionValue(assetName)} reason=invalid_route_or_asset rule=v0.11.03_window_canonical_state_preservation_fix");
+        log.Add("PLUGIN_ASSET", "DENY", $"result=BAD_REQUEST source={SafePluginActionValue(source)} pluginOrRoute={SafePluginActionValue(pluginOrRoute)} asset={SafePluginActionValue(assetName)} reason=invalid_route_or_asset rule=release_contract");
         return Results.BadRequest("Invalid plugin asset request.");
     }
 
     var ext = Path.GetExtension(name).ToLowerInvariant();
     if (ext != ".png")
     {
-        log.Add("PLUGIN_ASSET", route, $"result=DENIED asset={SafePluginActionValue(name)} reason=unsupported_extension allowed=png rule=v0.11.03_window_canonical_state_preservation_fix");
+        log.Add("PLUGIN_ASSET", route, $"result=DENIED asset={SafePluginActionValue(name)} reason=unsupported_extension allowed=png rule=release_contract");
         return Results.NotFound();
     }
 
@@ -2206,11 +2220,11 @@ static IResult ResolvePluginAssetResult(string pluginOrRoute, string assetName, 
         var full = Path.GetFullPath(candidate);
         if (!full.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase)) continue;
         if (!File.Exists(full)) continue;
-        log.Add("PLUGIN_ASSET", route, $"result=OK asset={SafePluginActionValue(name)} pathKind=plugin_assets contentType=image/png cache=no-cache source={SafePluginActionValue(source)} rule=v0.11.03_window_canonical_state_preservation_fix");
+        log.Add("PLUGIN_ASSET", route, $"result=OK asset={SafePluginActionValue(name)} pathKind=plugin_assets contentType=image/png cache=no-cache source={SafePluginActionValue(source)} rule=release_contract");
         return Results.File(full, "image/png", enableRangeProcessing: false);
     }
 
-    log.Add("PLUGIN_ASSET", route, $"result=NOT_FOUND asset={SafePluginActionValue(name)} searched=Assets|assets|wwwroot/assets|wwwroot rule=v0.11.03_window_canonical_state_preservation_fix");
+    log.Add("PLUGIN_ASSET", route, $"result=NOT_FOUND asset={SafePluginActionValue(name)} searched=Assets|assets|wwwroot/assets|wwwroot rule=release_contract");
     return Results.NotFound();
 }
 
@@ -2219,12 +2233,12 @@ static IResult RenderPluginWindowHost(string windowId, HttpRequest http, PluginW
     var session = windows.Get(windowId);
     if (session is null)
     {
-        log.Add("PLUGIN_WINDOW", "Host", $"action=render result=NOT_FOUND windowId={SafePluginActionValue(windowId)} rule=v0.10.96_plugin_viewer_api_cleanup");
+        log.Add("PLUGIN_WINDOW", "Host", $"action=render result=NOT_FOUND windowId={SafePluginActionValue(windowId)} rule=release_contract");
         return Results.NotFound("Plugin window not found.");
     }
     if (session.IsClosed)
     {
-        log.Add("PLUGIN_WINDOW", session.PluginName, $"action=render result=CLOSED windowId={SafePluginActionValue(windowId)} routeSegment={SafePluginActionValue(session.RouteSegment)} rule=v0.10.96_plugin_viewer_api_cleanup");
+        log.Add("PLUGIN_WINDOW", session.PluginName, $"action=render result=CLOSED windowId={SafePluginActionValue(windowId)} routeSegment={SafePluginActionValue(session.RouteSegment)} rule=release_contract");
         return PluginHtmlMessage("Plugin window closed", "このプラグインウィンドウは閉じられています。もう一度プラグイン画面から開いてください。", StatusCodes.Status410Gone, $"/plugin/{Uri.EscapeDataString(session.RouteSegment)}", "プラグインへ戻る");
     }
 
@@ -2312,7 +2326,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;min-width:0;min-height:0;ove
 </body>
 </html>
 """;
-    log.Add("PLUGIN_WINDOW", session.PluginName, $"action=render result=OK windowId={SafePluginActionValue(session.WindowId)} routeSegment={SafePluginActionValue(session.RouteSegment)} revision={session.Revision} toolHost={toolHost} contentRoute={SafePluginActionValue(BuildHostManagedPluginContentRoute(contentRoute, session.WindowId, session.Revision))} shellMode=toolWindowContentOnly rule=v0.10.96_tool_window_chrome_contract_fix");
+    log.Add("PLUGIN_WINDOW", session.PluginName, $"action=render result=OK windowId={SafePluginActionValue(session.WindowId)} routeSegment={SafePluginActionValue(session.RouteSegment)} revision={session.Revision} toolHost={toolHost} contentRoute={SafePluginActionValue(BuildHostManagedPluginContentRoute(contentRoute, session.WindowId, session.Revision))} shellMode=toolWindowContentOnly rule=release_contract");
     return Results.Content(html, "text/html; charset=utf-8");
 }
 
@@ -2375,7 +2389,7 @@ static string BuildToolWindowHostUrl(string windowUrl)
 
 static string BuildToolWindowNavigationUrl(string windowUrl, string contentRoute, TvAIr.Plugin.PluginToolWindowHostCapabilities hostCaps)
 {
-    // v0.10.68: WinForms WebBrowser fallback can render the shell itself but may fail to display the iframe content reliably.
+    // release_contract: WinForms WebBrowser fallback can render the shell itself but may fail to display the iframe content reliably.
     // In fallback mode, navigate the native ToolWindow directly to the plugin content route with the host-window context.
     // WebView2-capable environments keep the shell+iframe route so refresh polling remains available.
     if (hostCaps is not null && !hostCaps.WebView2RuntimeAvailable)
@@ -2451,7 +2465,7 @@ static IResult DispatchPluginDefaultMenuAction(string routeSegment, string sourc
     var actionInfo = menuActions.ResolveActionByRoute(routeSegment);
     if (actionInfo is null)
     {
-        log.Add("PLUGIN_MENU_ACTION_DISPATCH", "DENY", $"result=NOT_FOUND route={SafePluginActionValue(routeSegment)} source={SafePluginActionValue(source)} rule=v0.11.235_programguide_wave_source_final");
+        log.Add("PLUGIN_MENU_ACTION_DISPATCH", "DENY", $"result=NOT_FOUND route={SafePluginActionValue(routeSegment)} source={SafePluginActionValue(source)} rule=release_contract");
         return PluginHtmlMessage("プラグイン操作", "指定されたプラグイン既定アクションが見つかりません。", StatusCodes.Status404NotFound, "/", "番組表へ戻る");
     }
 
@@ -2459,7 +2473,7 @@ static IResult DispatchPluginDefaultMenuAction(string routeSegment, string sourc
     var plugin = FindPluginForDefaultMenuAction(registry, actionInfo.PluginId, route);
     if (plugin is null)
     {
-        log.Add("PLUGIN_MENU_ACTION_DISPATCH", actionInfo.Name, $"result=PLUGIN_NOT_FOUND kind={SafePluginActionValue(actionInfo.Kind)} route={SafePluginActionValue(route)} source={SafePluginActionValue(source)} rule=v0.11.235_programguide_wave_source_final");
+        log.Add("PLUGIN_MENU_ACTION_DISPATCH", actionInfo.Name, $"result=PLUGIN_NOT_FOUND kind={SafePluginActionValue(actionInfo.Kind)} route={SafePluginActionValue(route)} source={SafePluginActionValue(source)} rule=release_contract");
         return PluginHtmlMessage("プラグイン操作", "対象プラグインが読み込まれていません。", StatusCodes.Status404NotFound, "/", "番組表へ戻る");
     }
 
@@ -2467,7 +2481,7 @@ static IResult DispatchPluginDefaultMenuAction(string routeSegment, string sourc
     {
         if (plugin is not IUiPlugin uiPlugin)
         {
-            log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Name, $"result=DENIED kind=toolWindow reason=not_ui_plugin route={SafePluginActionValue(route)} source={SafePluginActionValue(source)} rule=v0.11.235_programguide_wave_source_final");
+            log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Name, $"result=DENIED kind=toolWindow reason=not_ui_plugin route={SafePluginActionValue(route)} source={SafePluginActionValue(source)} rule=release_contract");
             return PluginHtmlMessage("プラグイン操作", "このプラグインはツールウィンドウを持っていません。", StatusCodes.Status400BadRequest, "/", "番組表へ戻る");
         }
 
@@ -2504,8 +2518,8 @@ static IResult DispatchPluginDefaultMenuAction(string routeSegment, string sourc
 
         var returnUrl = ResolvePluginMenuReturnUrl(http);
         var browserNavigation = isTraySource ? "none" : "redirectBack";
-        log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Name, $"result=OK kind=toolWindow source={SafePluginActionValue(source)} route={SafePluginActionValue(route)} windowId={SafePluginActionValue(session.WindowId)} reusedSession={reusedWindowSession} hostResult={SafePluginActionValue(hostResult.Result)} hostReused={hostResult.Reused} activated={hostResult.Activated} size={session.Width}x{session.Height} minSize={session.MinWidth}x{session.MinHeight} showInTaskbar={actionInfo.ShowInTaskbar} browserNavigation={browserNavigation} mainBrowserOpened=False programGuideOpened=False redirectBack={!isTraySource} returnUrl={(isTraySource ? "-" : SafePluginActionValue(returnUrl))} rule=v0.11.38_toolwindow_keepalive_recovery_tray_silent");
-        log.Add("PLUGIN_TOOL_WINDOW_ACTIVATE", plugin.Name, $"result={SafePluginActionValue(hostResult.Result)} source={SafePluginActionValue(source)} windowId={SafePluginActionValue(session.WindowId)} reused={hostResult.Reused} activated={hostResult.Activated} showInTaskbar={actionInfo.ShowInTaskbar} reason=default_menu_action browserNavigationSuppressed=True rule=v0.11.38_toolwindow_keepalive_recovery_tray_silent");
+        log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Name, $"result=OK kind=toolWindow source={SafePluginActionValue(source)} route={SafePluginActionValue(route)} windowId={SafePluginActionValue(session.WindowId)} reusedSession={reusedWindowSession} hostResult={SafePluginActionValue(hostResult.Result)} hostReused={hostResult.Reused} activated={hostResult.Activated} size={session.Width}x{session.Height} minSize={session.MinWidth}x{session.MinHeight} showInTaskbar={actionInfo.ShowInTaskbar} browserNavigation={browserNavigation} mainBrowserOpened=False programGuideOpened=False redirectBack={!isTraySource} returnUrl={(isTraySource ? "-" : SafePluginActionValue(returnUrl))} rule=release_contract");
+        log.Add("PLUGIN_TOOL_WINDOW_ACTIVATE", plugin.Name, $"result={SafePluginActionValue(hostResult.Result)} source={SafePluginActionValue(source)} windowId={SafePluginActionValue(session.WindowId)} reused={hostResult.Reused} activated={hostResult.Activated} showInTaskbar={actionInfo.ShowInTaskbar} reason=default_menu_action browserNavigationSuppressed=True rule=release_contract");
         return isTraySource ? Results.NoContent() : PluginSeeOther(returnUrl);
     }
 
@@ -2515,24 +2529,24 @@ static IResult DispatchPluginDefaultMenuAction(string routeSegment, string sourc
     if (kind.Equals(PluginMenuActionKinds.Page, StringComparison.OrdinalIgnoreCase))
     {
         var target = $"/plugin/{Uri.EscapeDataString(route)}";
-        log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Name, $"result=REDIRECT kind=page source={SafePluginActionValue(source)} route={SafePluginActionValue(route)} target={SafePluginActionValue(target)} browserNavigation={(isTraySource ? "none" : "plugin_page")} mainBrowserOpened={!isTraySource} programGuideOpened=False redirectBack=False returnUrl={(isTraySource ? "-" : SafePluginActionValue(returnUrlForLog))} rule=v0.11.235_programguide_wave_source_final");
+        log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Name, $"result=REDIRECT kind=page source={SafePluginActionValue(source)} route={SafePluginActionValue(route)} target={SafePluginActionValue(target)} browserNavigation={(isTraySource ? "none" : "plugin_page")} mainBrowserOpened={!isTraySource} programGuideOpened=False redirectBack=False returnUrl={(isTraySource ? "-" : SafePluginActionValue(returnUrlForLog))} rule=release_contract");
         return isTraySource ? Results.NoContent() : PluginSeeOther(target);
     }
 
     if (kind.Equals(PluginMenuActionKinds.Settings, StringComparison.OrdinalIgnoreCase))
     {
         var target = $"/plugin/{Uri.EscapeDataString(route)}?mode=settings";
-        log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Name, $"result=REDIRECT kind=settings source={SafePluginActionValue(source)} route={SafePluginActionValue(route)} target={SafePluginActionValue(target)} browserNavigation={(isTraySource ? "none" : "plugin_settings")} mainBrowserOpened={!isTraySource} programGuideOpened=False redirectBack=False returnUrl={(isTraySource ? "-" : SafePluginActionValue(returnUrlForLog))} rule=v0.11.235_programguide_wave_source_final");
+        log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Name, $"result=REDIRECT kind=settings source={SafePluginActionValue(source)} route={SafePluginActionValue(route)} target={SafePluginActionValue(target)} browserNavigation={(isTraySource ? "none" : "plugin_settings")} mainBrowserOpened={!isTraySource} programGuideOpened=False redirectBack=False returnUrl={(isTraySource ? "-" : SafePluginActionValue(returnUrlForLog))} rule=release_contract");
         return isTraySource ? Results.NoContent() : PluginSeeOther(target);
     }
 
     if (kind.Equals(PluginMenuActionKinds.VersionDialog, StringComparison.OrdinalIgnoreCase) || kind.Equals(PluginMenuActionKinds.StatusDialog, StringComparison.OrdinalIgnoreCase))
     {
-        log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Name, $"result=VERSION_INFO kind=info source={SafePluginActionValue(source)} route={SafePluginActionValue(route)} version={SafePluginActionValue(actionInfo.Version)} browserNavigation={(isTraySource ? "none" : "version_dialog_fallback")} mainBrowserOpened=False programGuideOpened=False redirectBack={!isTraySource} returnUrl={(isTraySource ? "-" : SafePluginActionValue(returnUrlForLog))} rule=v0.11.235_programguide_wave_source_final");
+        log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Name, $"result=VERSION_INFO kind=info source={SafePluginActionValue(source)} route={SafePluginActionValue(route)} version={SafePluginActionValue(actionInfo.Version)} browserNavigation={(isTraySource ? "none" : "version_dialog_fallback")} mainBrowserOpened=False programGuideOpened=False redirectBack={!isTraySource} returnUrl={(isTraySource ? "-" : SafePluginActionValue(returnUrlForLog))} rule=release_contract");
         return isTraySource ? Results.NoContent() : RenderPluginVersionInfoPage(actionInfo, returnUrlForLog);
     }
 
-    log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Name, $"result=DENIED kind={SafePluginActionValue(kind)} reason=unsupported_action_kind source={SafePluginActionValue(source)} route={SafePluginActionValue(route)} rule=v0.11.235_programguide_wave_source_final");
+    log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Name, $"result=DENIED kind={SafePluginActionValue(kind)} reason=unsupported_action_kind source={SafePluginActionValue(source)} route={SafePluginActionValue(route)} rule=release_contract");
     return PluginHtmlMessage("プラグイン操作", "このプラグインの既定アクション種別はTvAIr本体で実行できません。", StatusCodes.Status400BadRequest, ResolvePluginMenuReturnUrl(http), "戻る");
 }
 
@@ -2580,10 +2594,10 @@ static IResult RenderPluginVersionInfoPage(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-notification.css?v=1.0.0">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.0.4">
 </head>
 <body>
-<script src="/tvair-notification.js?v=1.0.0"></script>
+<script src="/tvair-notification.js?v=1.0.4"></script>
 <script>
 document.addEventListener('DOMContentLoaded',function(){
   if(window.TvAIrNotify){ TvAIrNotify({ title:'{{safeTitle}}', message:'バージョン: {{safeVersion}}', onOk:function(){ location.replace('{{safeReturn}}'); } }); }
@@ -2601,18 +2615,18 @@ static IResult RenderPluginDefaultMenuInfoByRoute(string routeSegment, PluginReg
     var actionInfo = menuActions.ResolveActionByRoute(routeSegment);
     if (actionInfo is null)
     {
-        log.Add("PLUGIN_MENU_INFO_RENDER", "DENY", $"result=NOT_FOUND route={SafePluginActionValue(routeSegment)} rule=v0.11.30_plugin_menu_no_page_navigation_contract");
+        log.Add("PLUGIN_MENU_INFO_RENDER", "DENY", $"result=NOT_FOUND route={SafePluginActionValue(routeSegment)} rule=release_contract");
         return PluginHtmlMessage("プラグイン情報", "指定されたプラグイン情報が見つかりません。", StatusCodes.Status404NotFound, "/", "番組表へ戻る");
     }
 
     var plugin = FindPluginForDefaultMenuAction(registry, actionInfo.PluginId, actionInfo.RouteSegment);
     if (plugin is null)
     {
-        log.Add("PLUGIN_MENU_INFO_RENDER", actionInfo.Name, $"result=PLUGIN_NOT_FOUND route={SafePluginActionValue(actionInfo.RouteSegment)} rule=v0.11.30_plugin_menu_no_page_navigation_contract");
+        log.Add("PLUGIN_MENU_INFO_RENDER", actionInfo.Name, $"result=PLUGIN_NOT_FOUND route={SafePluginActionValue(actionInfo.RouteSegment)} rule=release_contract");
         return PluginHtmlMessage("プラグイン情報", "対象プラグインが読み込まれていません。", StatusCodes.Status404NotFound, "/", "番組表へ戻る");
     }
 
-    log.Add("PLUGIN_MENU_INFO_RENDER", actionInfo.Name, $"result=OK route={SafePluginActionValue(actionInfo.RouteSegment)} version={SafePluginActionValue(actionInfo.Version)} rule=v0.11.30_plugin_menu_no_page_navigation_contract");
+    log.Add("PLUGIN_MENU_INFO_RENDER", actionInfo.Name, $"result=OK route={SafePluginActionValue(actionInfo.RouteSegment)} version={SafePluginActionValue(actionInfo.Version)} rule=release_contract");
     return RenderPluginDefaultMenuInfo(actionInfo, plugin);
 }
 
@@ -2713,12 +2727,12 @@ static IResult BuildPluginViewerActionResponse(PluginActionResult result, string
         var session = windows.Refresh(resolvedWindowId, pluginId, refreshRequest);
         if (session is null)
         {
-            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action={SafePluginActionValue(action)} responseMode=refreshWindow result=REFRESH_NOT_FOUND windowId={SafePluginActionValue(resolvedWindowId)} rule=v0.10.96_plugin_viewer_api_cleanup");
+            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action={SafePluginActionValue(action)} responseMode=refreshWindow result=REFRESH_NOT_FOUND windowId={SafePluginActionValue(resolvedWindowId)} rule=release_contract");
             return PluginHtmlMessage("Plugin action accepted", result.Message, StatusCodes.Status200OK, "/", "番組表へ戻る");
         }
 
         var contentRoute = BuildHostManagedPluginContentRoute(session.ContentRoute, session.WindowId, session.Revision);
-        log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action={SafePluginActionValue(action)} responseMode=refreshWindow result=REDIRECT windowId={SafePluginActionValue(session.WindowId)} target=content preserveScroll={preserveScroll} revision={session.Revision} contentRoute={SafePluginActionValue(contentRoute)} rule=v0.10.96_plugin_viewer_api_cleanup");
+        log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action={SafePluginActionValue(action)} responseMode=refreshWindow result=REDIRECT windowId={SafePluginActionValue(session.WindowId)} target=content preserveScroll={preserveScroll} revision={session.Revision} contentRoute={SafePluginActionValue(contentRoute)} rule=release_contract");
         return PluginSeeOther(contentRoute);
     }
 
@@ -2754,14 +2768,14 @@ static IResult BuildPluginViewerActionResponse(PluginActionResult result, string
                 refreshIssued = true;
                 var normalizedScrollTarget = NormalizePluginRefreshScrollTarget(refreshScrollTarget);
                 if (!string.IsNullOrWhiteSpace(normalizedScrollTarget))
-                    log.Add("PLUGIN_WINDOW_REFRESH_SCROLL", pluginName, $"result=REQUESTED action={SafePluginActionValue(action)} windowId={SafePluginActionValue(session.WindowId)} target={SafePluginActionValue(normalizedScrollTarget)} mode={SafePluginActionValue(NormalizePluginRefreshScrollMode(refreshScrollMode))} hostKind={SafePluginActionValue(hostResult.HostKind)} refreshTarget={SafePluginActionValue(normalizedTarget)} reason=viewer_action_refresh_after_host_content_rerender rule=v0.11.28_viewer_retune_guard_light_stability");
+                    log.Add("PLUGIN_WINDOW_REFRESH_SCROLL", pluginName, $"result=REQUESTED action={SafePluginActionValue(action)} windowId={SafePluginActionValue(session.WindowId)} target={SafePluginActionValue(normalizedScrollTarget)} mode={SafePluginActionValue(NormalizePluginRefreshScrollMode(refreshScrollMode))} hostKind={SafePluginActionValue(hostResult.HostKind)} refreshTarget={SafePluginActionValue(normalizedTarget)} reason=viewer_action_refresh_after_host_content_rerender rule=release_contract");
             }
             else
             {
                 hostRefresh = session is null ? "REFRESH_NOT_FOUND" : "HOST_UNAVAILABLE";
             }
         }
-        log.Add("PLUGIN_ACTION_RESPONSE_CONTRACT", pluginName, $"action={SafePluginActionValue(action)} result=NO_CONTENT responseMode={SafePluginActionValue(responseMode)} windowId={SafePluginActionValue(windowId)} refreshAfter={refreshAfter} refreshTarget={SafePluginActionValue(normalizedTarget)} refreshScrollTarget={SafePluginActionValue(NormalizePluginRefreshScrollTarget(refreshScrollTarget))} refreshScrollMode={SafePluginActionValue(NormalizePluginRefreshScrollMode(refreshScrollMode))} refreshIssued={refreshIssued} hostRefresh={SafePluginActionValue(hostRefresh)} jsonSuppressed=True contract=plugin_action_hosthandled_refresh_after_content rule=v0.11.28_viewer_retune_guard_light_stability");
+        log.Add("PLUGIN_ACTION_RESPONSE_CONTRACT", pluginName, $"action={SafePluginActionValue(action)} result=NO_CONTENT responseMode={SafePluginActionValue(responseMode)} windowId={SafePluginActionValue(windowId)} refreshAfter={refreshAfter} refreshTarget={SafePluginActionValue(normalizedTarget)} refreshScrollTarget={SafePluginActionValue(NormalizePluginRefreshScrollTarget(refreshScrollTarget))} refreshScrollMode={SafePluginActionValue(NormalizePluginRefreshScrollMode(refreshScrollMode))} refreshIssued={refreshIssued} hostRefresh={SafePluginActionValue(hostRefresh)} jsonSuppressed=True contract=plugin_action_hosthandled_refresh_after_content rule=release_contract");
         return Results.NoContent();
     }
     if (responseMode.Equals("html", StringComparison.OrdinalIgnoreCase)) return PluginHtmlMessage("Plugin action accepted", result.Message, StatusCodes.Status200OK, string.IsNullOrWhiteSpace(windowId) ? "/" : $"/plugin-window/{Uri.EscapeDataString(windowId)}", "戻る");
@@ -2794,7 +2808,7 @@ static IResult BuildPluginViewerExpectedDeniedResponse(
     string refreshScrollMode = "center")
 {
     externalTuners.SetLastViewerActionResult(pluginName, action, result.Success, state, errorCode, result.Message, leaseId, tunerName, did, bonDriverFileName, processId, networkId, transportStreamId, serviceId, result.Diagnostics);
-    log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action={SafePluginActionValue(action)} result=EXPECTED_DENIED state={SafePluginActionValue(state)} errorCode={SafePluginActionValue(errorCode)} responseMode={SafePluginActionValue(responseMode)} windowId={SafePluginActionValue(windowId)} action=refresh_or_json_no_plugin_error_screen rule=v0.10.96_viewer_expected_denied_response_contract");
+    log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action={SafePluginActionValue(action)} result=EXPECTED_DENIED state={SafePluginActionValue(state)} errorCode={SafePluginActionValue(errorCode)} responseMode={SafePluginActionValue(responseMode)} windowId={SafePluginActionValue(windowId)} action=refresh_or_json_no_plugin_error_screen rule=release_contract");
     return BuildPluginViewerActionResponse(result, responseMode, windowId, refreshTarget, preserveScroll, windows, pluginId, log, pluginName, action, refreshScrollTarget: refreshScrollTarget, refreshScrollMode: refreshScrollMode);
 }
 
@@ -2855,19 +2869,19 @@ static async Task<IResult> HandlePluginActionDispatchAsync(HttpRequest http, Plu
     {
         requestedRefreshAfter = true;
         if (string.IsNullOrWhiteSpace(requestedRefreshTarget)) requestedRefreshTarget = "content";
-        log.Add("PLUGIN_ACTION_VIEWER_DEFAULT", pluginName, $"action={SafePluginActionValue(action)} result=APPLIED defaultRefreshAfter=True refreshTarget={SafePluginActionValue(requestedRefreshTarget)} windowId={SafePluginActionValue(requestedWindowId)} reason=host_managed_toolwindow_viewer_action_no_plugin_update_needed rule=v0.11.28_viewer_retune_guard_light_stability");
+        log.Add("PLUGIN_ACTION_VIEWER_DEFAULT", pluginName, $"action={SafePluginActionValue(action)} result=APPLIED defaultRefreshAfter=True refreshTarget={SafePluginActionValue(requestedRefreshTarget)} windowId={SafePluginActionValue(requestedWindowId)} reason=host_managed_toolwindow_viewer_action_no_plugin_update_needed rule=release_contract");
     }
     if (!preserveViewerWindowStateExplicit && isViewerStartAction && isHostManagedToolWindowViewerAction)
     {
         preserveViewerWindowState = true;
         if (string.IsNullOrWhiteSpace(viewerActivation)) viewerActivation = "preserve";
-        log.Add("PLUGIN_ACTION_VIEWER_DEFAULT", pluginName, $"action={SafePluginActionValue(action)} result=APPLIED defaultPreserveViewerWindowState=True viewerActivation={SafePluginActionValue(viewerActivation)} windowId={SafePluginActionValue(requestedWindowId)} reason=host_managed_toolwindow_viewer_action_no_plugin_update_needed rule=v0.11.28_viewer_retune_guard_light_stability");
+        log.Add("PLUGIN_ACTION_VIEWER_DEFAULT", pluginName, $"action={SafePluginActionValue(action)} result=APPLIED defaultPreserveViewerWindowState=True viewerActivation={SafePluginActionValue(viewerActivation)} windowId={SafePluginActionValue(requestedWindowId)} reason=host_managed_toolwindow_viewer_action_no_plugin_update_needed rule=release_contract");
     }
     if (!retuneExistingViewerExplicit && isViewerStartAction && isHostManagedToolWindowViewerAction && preserveViewerWindowState)
     {
-        // v0.11.28: preserveViewerWindowState は通常ウィンドウ化抑制であり、retuneExistingViewer の明示要求とは分離する。
+        // release_contract: preserveViewerWindowState は通常ウィンドウ化抑制であり、retuneExistingViewer の明示要求とは分離する。
         // AIrCon管理viewerが生存している場合でも、後段の internal retune は同一BonDriver/DID内に限定する。
-        log.Add("PLUGIN_ACTION_VIEWER_DEFAULT", pluginName, $"action={SafePluginActionValue(action)} result=SKIPPED defaultRetuneExistingViewer=False windowId={SafePluginActionValue(requestedWindowId)} reason=preserve_window_state_is_not_retune_flag rule=v0.11.28_viewer_retune_guard_light_stability");
+        log.Add("PLUGIN_ACTION_VIEWER_DEFAULT", pluginName, $"action={SafePluginActionValue(action)} result=SKIPPED defaultRetuneExistingViewer=False windowId={SafePluginActionValue(requestedWindowId)} reason=preserve_window_state_is_not_retune_flag rule=release_contract");
     }
     if (!string.IsNullOrWhiteSpace(safeEvent))
     {
@@ -2877,13 +2891,13 @@ static async Task<IResult> HandlePluginActionDispatchAsync(HttpRequest http, Plu
             string.IsNullOrWhiteSpace(ReadPayload(payload, "TransportStreamId", "transportStreamId", "transport_stream_id", "transport-stream-id", "tsid")) ? "transportStreamId" : string.Empty,
             string.IsNullOrWhiteSpace(ReadPayload(payload, "ServiceId", "serviceId", "service_id", "service-id", "sid")) ? "serviceId" : string.Empty
         }.Where(x => !string.IsNullOrWhiteSpace(x)));
-        log.Add("PLUGIN_SAFE_EVENT", pluginName, $"event={SafePluginActionValue(safeEvent)} action={SafePluginActionValue(action)} safeEventAction={SafePluginActionValue(safeEventAction)} result=RECEIVED source={SafePluginActionValue(safeEventSource)} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(route)} windowId={SafePluginActionValue(requestedWindowId)} safeEventWindowId={SafePluginActionValue(safeEventWindowId)} responseMode={SafePluginActionValue(responseMode)} refreshAfter={requestedRefreshAfter} refreshTarget={SafePluginActionValue(requestedRefreshTarget)} refreshScrollTarget={SafePluginActionValue(requestedRefreshScrollTarget)} refreshScrollMode={SafePluginActionValue(requestedRefreshScrollMode)} missingPayload={SafePluginActionValue(string.IsNullOrWhiteSpace(missingTriplet) ? "-" : missingTriplet)} endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.11.38_toolwindow_keepalive_recovery_tray_silent");
-        log.Add("PLUGIN_SAFE_EVENT_PAYLOAD_AUDIT", pluginName, $"result=RECEIVED action={SafePluginActionValue(action)} queryKeys={SafePluginActionValue(FormatPluginQueryKeys(http))} payloadKeys={SafePluginActionValue(FormatPluginPayloadKeys(payload))} networkId={ReadUShortPayload(payload, "NetworkId", "networkId", "network_id", "network-id", "nid")} transportStreamId={ReadUShortPayload(payload, "TransportStreamId", "transportStreamId", "transport_stream_id", "transport-stream-id", "tsid")} serviceId={ReadUShortPayload(payload, "ServiceId", "serviceId", "service_id", "service-id", "sid")} endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.11.38_toolwindow_keepalive_recovery_tray_silent");
+        log.Add("PLUGIN_SAFE_EVENT", pluginName, $"event={SafePluginActionValue(safeEvent)} action={SafePluginActionValue(action)} safeEventAction={SafePluginActionValue(safeEventAction)} result=RECEIVED source={SafePluginActionValue(safeEventSource)} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(route)} windowId={SafePluginActionValue(requestedWindowId)} safeEventWindowId={SafePluginActionValue(safeEventWindowId)} responseMode={SafePluginActionValue(responseMode)} refreshAfter={requestedRefreshAfter} refreshTarget={SafePluginActionValue(requestedRefreshTarget)} refreshScrollTarget={SafePluginActionValue(requestedRefreshScrollTarget)} refreshScrollMode={SafePluginActionValue(requestedRefreshScrollMode)} missingPayload={SafePluginActionValue(string.IsNullOrWhiteSpace(missingTriplet) ? "-" : missingTriplet)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
+        log.Add("PLUGIN_SAFE_EVENT_PAYLOAD_AUDIT", pluginName, $"result=RECEIVED action={SafePluginActionValue(action)} queryKeys={SafePluginActionValue(FormatPluginQueryKeys(http))} payloadKeys={SafePluginActionValue(FormatPluginPayloadKeys(payload))} networkId={ReadUShortPayload(payload, "NetworkId", "networkId", "network_id", "network-id", "nid")} transportStreamId={ReadUShortPayload(payload, "TransportStreamId", "transportStreamId", "transport_stream_id", "transport-stream-id", "tsid")} serviceId={ReadUShortPayload(payload, "ServiceId", "serviceId", "service_id", "service-id", "sid")} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
     }
 
     if (plugin is null)
     {
-        log.Add("PLUGIN_ACTION", "DENY", $"plugin={SafePluginActionValue(pluginId)} action={SafePluginActionValue(action)} result=DENIED reason=plugin_not_found endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.10.96_plugin_viewer_api_cleanup");
+        log.Add("PLUGIN_ACTION", "DENY", $"plugin={SafePluginActionValue(pluginId)} action={SafePluginActionValue(action)} result=DENIED reason=plugin_not_found endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
         return BuildPluginActionDispatchError(new PluginActionResult { Success = false, Message = "Plugin not found.", Diagnostics = "plugin_not_found" }, responseMode, requestedWindowId, StatusCodes.Status404NotFound);
     }
 
@@ -2892,14 +2906,14 @@ static async Task<IResult> HandlePluginActionDispatchAsync(HttpRequest http, Plu
     if (!ValidatePluginActionTokenOrRecoverHostWindow(actionTokens, windows, token, pluginActionIdForToken, route, pluginName, action, requestedWindowId, safeEventWindowId, http.Path.Value ?? string.Empty, "action_dispatch", log, out var tokenReason))
     {
         if (!string.IsNullOrWhiteSpace(safeEvent))
-            log.Add("PLUGIN_SAFE_EVENT", pluginName, $"event={SafePluginActionValue(safeEvent)} action={SafePluginActionValue(action)} result=DENIED reason={tokenReason} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(route)} windowId={SafePluginActionValue(requestedWindowId)} endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.11.34_toolwindow_token_recovery_guard");
-        log.Add("PLUGIN_ACTION", pluginName, $"action={SafePluginActionValue(action)} result=DENIED reason={tokenReason} windowId={SafePluginActionValue(requestedWindowId)} endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.11.34_toolwindow_token_recovery_guard");
+            log.Add("PLUGIN_SAFE_EVENT", pluginName, $"event={SafePluginActionValue(safeEvent)} action={SafePluginActionValue(action)} result=DENIED reason={tokenReason} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(route)} windowId={SafePluginActionValue(requestedWindowId)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
+        log.Add("PLUGIN_ACTION", pluginName, $"action={SafePluginActionValue(action)} result=DENIED reason={tokenReason} windowId={SafePluginActionValue(requestedWindowId)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
         return BuildPluginActionDispatchError(new PluginActionResult { Success = false, Message = "Invalid plugin action token.", Diagnostics = tokenReason }, responseMode, requestedWindowId, StatusCodes.Status400BadRequest);
     }
 
     if (!actionAllowed)
     {
-        log.Add("PLUGIN_ACTION", pluginName, $"action={SafePluginActionValue(action)} result=DENIED reason=missing_ControlViewer_permission endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.10.96_plugin_viewer_api_cleanup");
+        log.Add("PLUGIN_ACTION", pluginName, $"action={SafePluginActionValue(action)} result=DENIED reason=missing_ControlViewer_permission endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
         return BuildPluginActionDispatchError(new PluginActionResult { Success = false, Message = "ControlViewer permission is required.", Diagnostics = "missing_ControlViewer_permission" }, responseMode, requestedWindowId, StatusCodes.Status403Forbidden);
     }
 
@@ -2920,14 +2934,14 @@ static async Task<IResult> HandlePluginActionDispatchAsync(HttpRequest http, Plu
         if (!requestedViewerProfile.Enabled)
         {
             var denied = new PluginActionResult { Success = false, Message = "Requested viewer profile is not configured.", Diagnostics = $"state=denied;errorCode=viewerProfileUnavailable;viewerProfile={requestedViewerProfile.Id}" };
-            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=DENIED reason=viewerProfileUnavailable viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.11.52_viewer_profile_contract");
+            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=DENIED reason=viewerProfileUnavailable viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
             return BuildPluginViewerExpectedDeniedResponse(externalTuners, denied, "denied", "viewerProfileUnavailable", responseMode, requestedWindowId, requestedRefreshTarget, requestedPreserveScroll, windows, GetPluginActionIdentity(plugin, route), log, pluginName, "viewerStart");
         }
 
         if (nid == 0 || tsid == 0 || sid == 0)
         {
             var denied = new PluginActionResult { Success = false, Message = "ViewerStart payload is incomplete.", Diagnostics = $"state=denied;errorCode=missingViewerPayload;networkId={nid};transportStreamId={tsid};serviceId={sid}" };
-            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=DENIED reason=missingViewerPayload networkId={nid} transportStreamId={tsid} serviceId={sid} endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.10.96_plugin_viewer_api_cleanup");
+            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=DENIED reason=missingViewerPayload networkId={nid} transportStreamId={tsid} serviceId={sid} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
             return BuildPluginViewerExpectedDeniedResponse(externalTuners, denied, "denied", "missingViewerPayload", responseMode, requestedWindowId, requestedRefreshTarget, requestedPreserveScroll, windows, GetPluginActionIdentity(plugin, route), log, pluginName, "viewerStart", networkId: nid, transportStreamId: tsid, serviceId: sid);
         }
 
@@ -2937,7 +2951,7 @@ static async Task<IResult> HandlePluginActionDispatchAsync(HttpRequest http, Plu
         if (channel is null)
         {
             var denied = new PluginActionResult { Success = false, Message = "Viewer target channel was not found in TvAIr channel map.", Diagnostics = $"state=denied;errorCode=channelNotFound;networkId={nid};transportStreamId={tsid};serviceId={sid}" };
-            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=DENIED reason=channel_not_found nid={nid} tsid={tsid} sid={sid} endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.10.96_plugin_viewer_api_cleanup");
+            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=DENIED reason=channel_not_found nid={nid} tsid={tsid} sid={sid} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
             return BuildPluginViewerExpectedDeniedResponse(externalTuners, denied, "denied", "channelNotFound", responseMode, requestedWindowId, requestedRefreshTarget, requestedPreserveScroll, windows, GetPluginActionIdentity(plugin, route), log, pluginName, "viewerStart", networkId: nid, transportStreamId: tsid, serviceId: sid);
         }
 
@@ -2946,7 +2960,7 @@ static async Task<IResult> HandlePluginActionDispatchAsync(HttpRequest http, Plu
         {
             var availableGroups = string.Join(",", requestedViewerProfile.AvailableGroups ?? Array.Empty<string>());
             var denied = new PluginActionResult { Success = false, Message = "Requested viewer profile has no viewer tuner for this broadcast group.", Diagnostics = $"state=denied;errorCode=viewerProfileGroupUnavailable;viewerProfile={requestedViewerProfile.Id};group={group};availableGroups={availableGroups}" };
-            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=DENIED reason=viewerProfileGroupUnavailable viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} group={SafePluginActionValue(group)} availableGroups={SafePluginActionValue(availableGroups)} endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.11.73_viewer_profile_safe_event_selector_capture");
+            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=DENIED reason=viewerProfileGroupUnavailable viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} group={SafePluginActionValue(group)} availableGroups={SafePluginActionValue(availableGroups)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
             return BuildPluginViewerExpectedDeniedResponse(externalTuners, denied, "denied", "viewerProfileGroupUnavailable", responseMode, requestedWindowId, requestedRefreshTarget, requestedPreserveScroll, windows, GetPluginActionIdentity(plugin, route), log, pluginName, "viewerStart", networkId: nid, transportStreamId: tsid, serviceId: sid);
         }
         var requestedServiceName = serviceName;
@@ -2992,20 +3006,20 @@ static async Task<IResult> HandlePluginActionDispatchAsync(HttpRequest http, Plu
             if (stalePid > 0 && !IsProcessAlive(stalePid))
             {
                 var delayedDeath = ViewerRetuneDelayedDeathAudit.MarkDetectedDead(stalePid);
-                log.Add("VIEWER_RETUNE_DELAYED_DEATH_AUDIT", pluginName, $"result={SafePluginActionValue(delayedDeath.Result)} stalePid={stalePid} leaseId={SafePluginActionValue(stale.LeaseId)} lastRetuneAt={SafePluginActionValue(delayedDeath.LastRetuneAtText)} detectedDeadAt={SafePluginActionValue(delayedDeath.DetectedDeadAtText)} elapsedSinceRetuneMs={SafePluginActionValue(delayedDeath.ElapsedMsText)} lastRetuneNid={SafePluginActionValue(delayedDeath.NetworkIdText)} lastRetuneTsid={SafePluginActionValue(delayedDeath.TransportStreamIdText)} lastRetuneSid={SafePluginActionValue(delayedDeath.ServiceIdText)} lastRetuneGroup={SafePluginActionValue(delayedDeath.Group)} lastRetuneDid={SafePluginActionValue(delayedDeath.Did)} lastRetuneBonDriver={SafePluginActionValue(delayedDeath.BonDriver)} reason=existing_process_not_alive_before_light_retune rule=v0.11.39_viewer_retune_delayed_death_audit");
+                log.Add("VIEWER_RETUNE_DELAYED_DEATH_AUDIT", pluginName, $"result={SafePluginActionValue(delayedDeath.Result)} stalePid={stalePid} leaseId={SafePluginActionValue(stale.LeaseId)} lastRetuneAt={SafePluginActionValue(delayedDeath.LastRetuneAtText)} detectedDeadAt={SafePluginActionValue(delayedDeath.DetectedDeadAtText)} elapsedSinceRetuneMs={SafePluginActionValue(delayedDeath.ElapsedMsText)} lastRetuneNid={SafePluginActionValue(delayedDeath.NetworkIdText)} lastRetuneTsid={SafePluginActionValue(delayedDeath.TransportStreamIdText)} lastRetuneSid={SafePluginActionValue(delayedDeath.ServiceIdText)} lastRetuneGroup={SafePluginActionValue(delayedDeath.Group)} lastRetuneDid={SafePluginActionValue(delayedDeath.Did)} lastRetuneBonDriver={SafePluginActionValue(delayedDeath.BonDriver)} reason=existing_process_not_alive_before_light_retune rule=release_contract");
                 externalTuners.Release(stale.LeaseId, $"Plugin:{pluginName}:stale_viewer_lease_cleanup_before_start");
-                log.Add("VIEWER_INTERNAL_RETUNE", pluginName, $"result=STALE_LEASE_RELEASED leaseId={SafePluginActionValue(stale.LeaseId)} stalePid={stalePid} reason=existing_process_not_alive_before_light_retune rule=v0.11.39_viewer_retune_delayed_death_audit");
+                log.Add("VIEWER_INTERNAL_RETUNE", pluginName, $"result=STALE_LEASE_RELEASED leaseId={SafePluginActionValue(stale.LeaseId)} stalePid={stalePid} reason=existing_process_not_alive_before_light_retune rule=release_contract");
             }
         }
 
         var internalRetunePreferred = existingManagedViewer is not null && existingManagedViewerPid > 0;
         log.Add("VIEWER_INTERNAL_RETUNE_DECISION", pluginName,
-            $"result={(internalRetunePreferred ? "PREFERRED" : "NEW_VIEWER_REQUIRED")} reason={(internalRetunePreferred ? "existing_tvair_managed_viewer_alive" : "no_alive_tvair_managed_viewer")} sameClient=True viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} tvTestPathKey={SafePluginActionValue(viewerProfilePathKey)} existingPid={(existingManagedViewerPid > 0 ? existingManagedViewerPid.ToString(CultureInfo.InvariantCulture) : "-")} existingGroup={SafePluginActionValue(existingManagedViewer?.Group)} requestedGroup={SafePluginActionValue(group)} existingDid={SafePluginActionValue(existingManagedViewer?.Did)} requestedNid={nid} requestedTsid={tsid} requestedSid={sid} requestedChspace={channel.ResolvedSpace} requestedChi={channel.ResolvedChannelIndex} processRestartPreferred=False retuneExistingViewerPayload={retuneExistingViewer} preserveViewerWindowState={preserveViewerWindowState} rule=v0.11.28_viewer_retune_guard_light_stability");
+            $"result={(internalRetunePreferred ? "PREFERRED" : "NEW_VIEWER_REQUIRED")} reason={(internalRetunePreferred ? "existing_tvair_managed_viewer_alive" : "no_alive_tvair_managed_viewer")} sameClient=True viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} tvTestPathKey={SafePluginActionValue(viewerProfilePathKey)} existingPid={(existingManagedViewerPid > 0 ? existingManagedViewerPid.ToString(CultureInfo.InvariantCulture) : "-")} existingGroup={SafePluginActionValue(existingManagedViewer?.Group)} requestedGroup={SafePluginActionValue(group)} existingDid={SafePluginActionValue(existingManagedViewer?.Did)} requestedNid={nid} requestedTsid={tsid} requestedSid={sid} requestedChspace={channel.ResolvedSpace} requestedChi={channel.ResolvedChannelIndex} processRestartPreferred=False retuneExistingViewerPayload={retuneExistingViewer} preserveViewerWindowState={preserveViewerWindowState} rule=release_contract");
 
-        log.Add("VIEWER_START_REQUEST", pluginName, $"requestedServiceName={SafePluginActionValue(requestedServiceName)} requestedNid={nid} requestedTsid={tsid} requestedSid={sid} requestedChspace={(requestedChspace.HasValue ? requestedChspace.Value.ToString(CultureInfo.InvariantCulture) : "-")} requestedChi={(requestedChi.HasValue ? requestedChi.Value.ToString(CultureInfo.InvariantCulture) : "-")} requestedProgramGuideGroup={SafePluginActionValue(requestedProgramGuideGroup)} requestedBroadcastGroup={SafePluginActionValue(requestedBroadcastGroup)} resolvedServiceName={SafePluginActionValue(channel.Name)} resolvedNid={channel.OriginalNetworkId} resolvedTsid={channel.TransportStreamId} resolvedSid={channel.ServiceId} resolvedChspace={channel.ResolvedSpace} resolvedChi={channel.ResolvedChannelIndex} group={SafePluginActionValue(group)} viewerChannelArgument={SafePluginActionValue(viewerChannelArgument)} identityArgument={SafePluginActionValue(identityArgument)} selectedChannelSource={SafePluginActionValue(selectedChannelSource)} sameTransportServiceCount={sameTransportServices.Count} sameTransportServiceIds={SafePluginActionValue(sameTransportServiceIds)} requestedWindowId={SafePluginActionValue(requestedWindowId)} viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} tvTestPathKey={SafePluginActionValue(viewerProfilePathKey)} contract=viewer_start_triplet_sid_launch_profile_scoped rule=v0.11.28_viewer_retune_guard_light_stability");
+        log.Add("VIEWER_START_REQUEST", pluginName, $"requestedServiceName={SafePluginActionValue(requestedServiceName)} requestedNid={nid} requestedTsid={tsid} requestedSid={sid} requestedChspace={(requestedChspace.HasValue ? requestedChspace.Value.ToString(CultureInfo.InvariantCulture) : "-")} requestedChi={(requestedChi.HasValue ? requestedChi.Value.ToString(CultureInfo.InvariantCulture) : "-")} requestedProgramGuideGroup={SafePluginActionValue(requestedProgramGuideGroup)} requestedBroadcastGroup={SafePluginActionValue(requestedBroadcastGroup)} resolvedServiceName={SafePluginActionValue(channel.Name)} resolvedNid={channel.OriginalNetworkId} resolvedTsid={channel.TransportStreamId} resolvedSid={channel.ServiceId} resolvedChspace={channel.ResolvedSpace} resolvedChi={channel.ResolvedChannelIndex} group={SafePluginActionValue(group)} viewerChannelArgument={SafePluginActionValue(viewerChannelArgument)} identityArgument={SafePluginActionValue(identityArgument)} selectedChannelSource={SafePluginActionValue(selectedChannelSource)} sameTransportServiceCount={sameTransportServices.Count} sameTransportServiceIds={SafePluginActionValue(sameTransportServiceIds)} requestedWindowId={SafePluginActionValue(requestedWindowId)} viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} tvTestPathKey={SafePluginActionValue(viewerProfilePathKey)} contract=viewer_start_triplet_sid_launch_profile_scoped rule=release_contract");
         if (!string.IsNullOrWhiteSpace(preferredTunerName) || !string.IsNullOrWhiteSpace(preferredDid) || preferredSlot.HasValue)
         {
-            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart preferredTunerContract=ignored_light_api preferredTunerName={SafePluginActionValue(preferredTunerName)} preferredDid={SafePluginActionValue(preferredDid)} preferredSlot={(preferredSlot.HasValue ? preferredSlot.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "-")} rule=v0.10.96_plugin_viewer_api_cleanup");
+            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart preferredTunerContract=ignored_light_api preferredTunerName={SafePluginActionValue(preferredTunerName)} preferredDid={SafePluginActionValue(preferredDid)} preferredSlot={(preferredSlot.HasValue ? preferredSlot.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "-")} rule=release_contract");
         }
 
         var lease = externalTuners.Request(new ExternalTunerLeaseRequest
@@ -3030,7 +3044,7 @@ static async Task<IResult> HandlePluginActionDispatchAsync(HttpRequest http, Plu
         {
             var reason = string.IsNullOrWhiteSpace(lease.Reason) ? "tunerUnavailable" : lease.Reason!;
             var denied = new PluginActionResult { Success = false, Message = "No viewer tuner is available.", Diagnostics = $"state=denied;errorCode={reason};status={lease.Status}" };
-            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=DENIED reason={SafePluginActionValue(reason)} service={SafePluginActionValue(serviceName)} group={SafePluginActionValue(group)} endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.10.96_plugin_viewer_api_cleanup");
+            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=DENIED reason={SafePluginActionValue(reason)} service={SafePluginActionValue(serviceName)} group={SafePluginActionValue(group)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
             return BuildPluginViewerExpectedDeniedResponse(externalTuners, denied, "denied", reason, responseMode, requestedWindowId, requestedRefreshTarget, requestedPreserveScroll, windows, GetPluginActionIdentity(plugin, route), log, pluginName, "viewerStart", networkId: nid, transportStreamId: tsid, serviceId: sid);
         }
 
@@ -3040,7 +3054,7 @@ static async Task<IResult> HandlePluginActionDispatchAsync(HttpRequest http, Plu
         var sameRetuneGroup = internalRetunePreferred && string.Equals(existingViewerGroup, requestedLeaseGroup, StringComparison.OrdinalIgnoreCase);
         var sameRetuneDid = internalRetunePreferred && string.Equals((existingManagedViewer?.Did ?? string.Empty).Trim(), (lease.Lease.Did ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase);
         var sameRetuneBonDriver = internalRetunePreferred && string.Equals(System.IO.Path.GetFileName(existingManagedViewer?.BonDriverFileName ?? string.Empty), System.IO.Path.GetFileName(lease.Lease.BonDriverFileName ?? string.Empty), StringComparison.OrdinalIgnoreCase);
-        // v0.11.80: TVTest1/TVTest2 の意味を「TvAIrが最初に紐付けた viewerProfile 専属PID」として扱う。
+        // release_contract: TVTest1/TVTest2 の意味を「TvAIrが最初に紐付けた viewerProfile 専属PID」として扱う。
         // TVTest の /s は PID 指定ではないが、コマンド投入前に対象 profile の所有PIDを前面化し、
         // アクティブウィンドウへ吸われる環境でも「選択中TVTest枠」を受け口にする。
         // exe名変更/ini複製はタスクバーアイコンを増やすため採用しない。
@@ -3052,8 +3066,8 @@ static async Task<IResult> HandlePluginActionDispatchAsync(HttpRequest http, Plu
             : "no_alive_tvair_managed_viewer";
         if (internalRetunePreferred)
         {
-            log.Add("VIEWER_RETUNE_SCOPE_DECISION", pluginName, $"result=ALLOW_PROFILE_PID_BINDING reason={SafePluginActionValue(internalRetuneGuardReason)} viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} existingPid={existingManagedViewerPid} existingGroup={SafePluginActionValue(existingViewerGroup)} requestedGroup={SafePluginActionValue(requestedLeaseGroup)} sameGroup={sameRetuneGroup} sameDid={sameRetuneDid} sameBonDriver={sameRetuneBonDriver} existingDid={SafePluginActionValue(existingManagedViewer?.Did)} requestedDid={SafePluginActionValue(lease.Lease.Did)} existingBonDriver={SafePluginActionValue(existingManagedViewer?.BonDriverFileName)} requestedBonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} retuneCommandScope=tvtest_single_instance_target_foreground_binding pidScopedRetuneAvailable={pidScopedRetuneAvailable} retuneScopeStable={retuneScopeStable} processRestartRequiredByScope=False preserveViewerWindowState={preserveViewerWindowState} policy=profile_owned_pid_binding_no_exe_rename rule=v0.11.80_viewer_profile_pid_binding");
-            log.Add("VIEWER_INTERNAL_RETUNE_GUARD", pluginName, $"result=ALLOW reason={SafePluginActionValue(internalRetuneGuardReason)} existingPid={existingManagedViewerPid} existingGroup={SafePluginActionValue(existingViewerGroup)} requestedGroup={SafePluginActionValue(requestedLeaseGroup)} sameGroup={sameRetuneGroup} sameDid={sameRetuneDid} sameBonDriver={sameRetuneBonDriver} existingDid={SafePluginActionValue(existingManagedViewer?.Did)} requestedDid={SafePluginActionValue(lease.Lease.Did)} existingBonDriver={SafePluginActionValue(existingManagedViewer?.BonDriverFileName)} requestedBonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} policy=foreground_target_before_unscoped_command noExeRename=True noIniClone=True rule=v0.11.80_viewer_profile_pid_binding");
+            log.Add("VIEWER_RETUNE_SCOPE_DECISION", pluginName, $"result=ALLOW_PROFILE_PID_BINDING reason={SafePluginActionValue(internalRetuneGuardReason)} viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} existingPid={existingManagedViewerPid} existingGroup={SafePluginActionValue(existingViewerGroup)} requestedGroup={SafePluginActionValue(requestedLeaseGroup)} sameGroup={sameRetuneGroup} sameDid={sameRetuneDid} sameBonDriver={sameRetuneBonDriver} existingDid={SafePluginActionValue(existingManagedViewer?.Did)} requestedDid={SafePluginActionValue(lease.Lease.Did)} existingBonDriver={SafePluginActionValue(existingManagedViewer?.BonDriverFileName)} requestedBonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} retuneCommandScope=tvtest_single_instance_target_foreground_binding pidScopedRetuneAvailable={pidScopedRetuneAvailable} retuneScopeStable={retuneScopeStable} processRestartRequiredByScope=False preserveViewerWindowState={preserveViewerWindowState} policy=profile_owned_pid_binding_no_exe_rename rule=release_contract");
+            log.Add("VIEWER_INTERNAL_RETUNE_GUARD", pluginName, $"result=ALLOW reason={SafePluginActionValue(internalRetuneGuardReason)} existingPid={existingManagedViewerPid} existingGroup={SafePluginActionValue(existingViewerGroup)} requestedGroup={SafePluginActionValue(requestedLeaseGroup)} sameGroup={sameRetuneGroup} sameDid={sameRetuneDid} sameBonDriver={sameRetuneBonDriver} existingDid={SafePluginActionValue(existingManagedViewer?.Did)} requestedDid={SafePluginActionValue(lease.Lease.Did)} existingBonDriver={SafePluginActionValue(existingManagedViewer?.BonDriverFileName)} requestedBonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} policy=foreground_target_before_unscoped_command noExeRename=True noIniClone=True rule=release_contract");
         }
         ViewerWindowStateSnapshot? restartFallbackWindowState = null;
         if (internalRetunePreferred && !internalRetuneAllowed && existingManagedViewerPid > 0 && preserveViewerWindowState)
@@ -3065,12 +3079,12 @@ static async Task<IResult> HandlePluginActionDispatchAsync(HttpRequest http, Plu
             var previousPid = lease.Lease.ProcessId.Value;
             if (internalRetuneAllowed && previousPid == existingManagedViewerPid)
             {
-                log.Add("VIEWER_START_PREVIOUS_VIEWER_STOP", pluginName, $"action=viewerStart leaseId={SafePluginActionValue(leaseId)} previousPid={previousPid} stopSkipped=True clientId={SafePluginActionValue(viewerClientId)} reusedLease=True reason=internal_retune_keeps_existing_viewer_process beforeNewLaunch=False rule=v0.11.36_viewer_retune_first_keepalive_contract");
+                log.Add("VIEWER_START_PREVIOUS_VIEWER_STOP", pluginName, $"action=viewerStart leaseId={SafePluginActionValue(leaseId)} previousPid={previousPid} stopSkipped=True clientId={SafePluginActionValue(viewerClientId)} reusedLease=True reason=internal_retune_keeps_existing_viewer_process beforeNewLaunch=False rule=release_contract");
             }
             else if (stoppedBeforeStartPids.Add(previousPid))
             {
                 var stop = tvTestLauncher.StopManagedViewerProcess(previousPid, internalRetunePreferred && !internalRetuneAllowed ? "viewerStart_scope_guard_profile_restart" : "viewerStart_reuse_previous_pid_guard");
-                log.Add("VIEWER_START_PREVIOUS_VIEWER_STOP", pluginName, $"action=viewerStart leaseId={SafePluginActionValue(leaseId)} previousPid={previousPid} stopSuccess={stop.Success} stopMessage={SafePluginActionValue(stop.Message)} clientId={SafePluginActionValue(viewerClientId)} reusedLease=True reason={(internalRetunePreferred && !internalRetuneAllowed ? "scope_guard_profile_restart" : "reuse_previous_pid_guard")} beforeNewLaunch=True rule=v0.11.80_viewer_profile_pid_binding");
+                log.Add("VIEWER_START_PREVIOUS_VIEWER_STOP", pluginName, $"action=viewerStart leaseId={SafePluginActionValue(leaseId)} previousPid={previousPid} stopSuccess={stop.Success} stopMessage={SafePluginActionValue(stop.Message)} clientId={SafePluginActionValue(viewerClientId)} reusedLease=True reason={(internalRetunePreferred && !internalRetuneAllowed ? "scope_guard_profile_restart" : "reuse_previous_pid_guard")} beforeNewLaunch=True rule=release_contract");
             }
         }
         var viewerStartExternalSnapshot = TvTestProcessAuditor.Capture(log, "VIEWER_START_LIGHT_EXTERNAL_SCAN", emitLegacyEvents: false);
@@ -3084,15 +3098,15 @@ static async Task<IResult> HandlePluginActionDispatchAsync(HttpRequest http, Plu
         if (blocking is null && unknownExternalLive.Count > 0)
         {
             log.Add("VIEWER_START_EXTERNAL_IDENTITY_SNAPSHOT", pluginName,
-                $"result=INFO unknownExternalLive={unknownExternalLive.Count} targetDid={SafePluginActionValue(lease.Lease.Did)} targetBonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} action=do_not_deny_viewer_start_on_unknown_external_identity policy=snapshot_only_recording_slot_guard_no_external_process_touch rule=v0.11.590_external_tvtest_identity_snapshot_contract");
+                $"result=INFO unknownExternalLive={unknownExternalLive.Count} targetDid={SafePluginActionValue(lease.Lease.Did)} targetBonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} action=do_not_deny_viewer_start_on_unknown_external_identity policy=snapshot_only_recording_slot_guard_no_external_process_touch rule=release_contract");
         }
         if (blocking is not null)
         {
             externalTuners.Release(leaseId, $"Plugin:{pluginName}:external_did_guard");
             var message = $"External TVTest is using DID {lease.Lease.Did}.";
             var denied = new PluginActionResult { Success = false, Message = message, Diagnostics = $"state=denied;errorCode=externalViewerOccupyingDid;tuner={lease.Lease.TunerName};did={lease.Lease.Did};bonDriver={lease.Lease.BonDriverFileName};blockingPid={blocking.ProcessId}" };
-            log.Add("VIEWER_START_EXTERNAL_DID_GUARD", pluginName, $"result=DENIED reason=externalViewerOccupyingDid tuner={SafePluginActionValue(lease.Lease.TunerName)} did={SafePluginActionValue(lease.Lease.Did)} bonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} blockingPid={blocking.ProcessId} action=release_viewer_lease_no_external_process_touch rule=v0.10.96_plugin_viewer_api_cleanup");
-            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=DENIED reason=externalViewerOccupyingDid service={SafePluginActionValue(serviceName)} group={SafePluginActionValue(group)} tuner={SafePluginActionValue(lease.Lease.TunerName)} did={SafePluginActionValue(lease.Lease.Did)} blockingPid={blocking.ProcessId} endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.10.96_plugin_viewer_api_cleanup");
+            log.Add("VIEWER_START_EXTERNAL_DID_GUARD", pluginName, $"result=DENIED reason=externalViewerOccupyingDid tuner={SafePluginActionValue(lease.Lease.TunerName)} did={SafePluginActionValue(lease.Lease.Did)} bonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} blockingPid={blocking.ProcessId} action=release_viewer_lease_no_external_process_touch rule=release_contract");
+            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=DENIED reason=externalViewerOccupyingDid service={SafePluginActionValue(serviceName)} group={SafePluginActionValue(group)} tuner={SafePluginActionValue(lease.Lease.TunerName)} did={SafePluginActionValue(lease.Lease.Did)} blockingPid={blocking.ProcessId} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
             return BuildPluginViewerExpectedDeniedResponse(externalTuners, denied, "denied", "externalViewerOccupyingDid", responseMode, requestedWindowId, requestedRefreshTarget, requestedPreserveScroll, windows, GetPluginActionIdentity(plugin, route), log, pluginName, "viewerStart", leaseId, lease.Lease.TunerName, lease.Lease.Did, lease.Lease.BonDriverFileName, blocking.ProcessId, nid, tsid, sid);
         }
 
@@ -3102,13 +3116,13 @@ static async Task<IResult> HandlePluginActionDispatchAsync(HttpRequest http, Plu
         if (internalRetunePreferred && !internalRetuneAllowed && existingManagedViewerPid > 0 && stoppedBeforeStartPids.Add(existingManagedViewerPid))
         {
             var stop = tvTestLauncher.StopManagedViewerProcess(existingManagedViewerPid, "viewerStart_scope_guard_previous_viewer_stop");
-            log.Add("VIEWER_START_PREVIOUS_VIEWER_STOP", pluginName, $"action=viewerStart leaseId={SafePluginActionValue(leaseId)} previousPid={existingManagedViewerPid} stopSuccess={stop.Success} stopMessage={SafePluginActionValue(stop.Message)} clientId={SafePluginActionValue(viewerClientId)} reusedLease={lease.Reused} reason=scope_guard_previous_viewer_stop beforeNewLaunch=True afterExternalGuard=True guardReason={SafePluginActionValue(internalRetuneGuardReason)} restoreStateCaptured={(restartFallbackWindowState?.Captured == true)} rule=v0.11.80_viewer_profile_pid_binding");
+            log.Add("VIEWER_START_PREVIOUS_VIEWER_STOP", pluginName, $"action=viewerStart leaseId={SafePluginActionValue(leaseId)} previousPid={existingManagedViewerPid} stopSuccess={stop.Success} stopMessage={SafePluginActionValue(stop.Message)} clientId={SafePluginActionValue(viewerClientId)} reusedLease={lease.Reused} reason=scope_guard_previous_viewer_stop beforeNewLaunch=True afterExternalGuard=True guardReason={SafePluginActionValue(internalRetuneGuardReason)} restoreStateCaptured={(restartFallbackWindowState?.Captured == true)} rule=release_contract");
         }
         if (internalRetuneAllowed && existingManagedViewer is not null && existingManagedViewerPid > 0)
         {
-            log.Add("VIEWER_CHANNEL_ARGUMENT", pluginName, $"source=ProgramGuideProjectionTriplet finalChannelArgument={SafePluginActionValue(viewerChannelArgument)} identityArgument={SafePluginActionValue(identityArgument)} requestedServiceName={SafePluginActionValue(requestedServiceName)} resolvedServiceName={SafePluginActionValue(channel.Name)} nid={nid} tsid={tsid} sid={sid} chspace={channel.ResolvedSpace} chi={channel.ResolvedChannelIndex} sameTransportServiceCount={sameTransportServices.Count} sameTransportServiceIds={SafePluginActionValue(sameTransportServiceIds)} selectedChannelSource={SafePluginActionValue(selectedChannelSource)} preserveViewerWindowState={preserveViewerWindowState} viewerActivation={SafePluginActionValue(viewerActivation)} internalRetunePreferred=True internalRetuneAllowed=True targetBonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} targetDid={SafePluginActionValue(lease.Lease.Did)} rule=v0.11.80_viewer_profile_pid_binding");
+            log.Add("VIEWER_CHANNEL_ARGUMENT", pluginName, $"source=ProgramGuideProjectionTriplet finalChannelArgument={SafePluginActionValue(viewerChannelArgument)} identityArgument={SafePluginActionValue(identityArgument)} requestedServiceName={SafePluginActionValue(requestedServiceName)} resolvedServiceName={SafePluginActionValue(channel.Name)} nid={nid} tsid={tsid} sid={sid} chspace={channel.ResolvedSpace} chi={channel.ResolvedChannelIndex} sameTransportServiceCount={sameTransportServices.Count} sameTransportServiceIds={SafePluginActionValue(sameTransportServiceIds)} selectedChannelSource={SafePluginActionValue(selectedChannelSource)} preserveViewerWindowState={preserveViewerWindowState} viewerActivation={SafePluginActionValue(viewerActivation)} internalRetunePreferred=True internalRetuneAllowed=True targetBonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} targetDid={SafePluginActionValue(lease.Lease.Did)} rule=release_contract");
             var targetPrepared = tvTestLauncher.PrepareViewerProfileCommandTarget(existingManagedViewerPid, requestedViewerProfile.Id, "viewerStart_before_single_instance_command");
-            log.Add("VIEWER_PROFILE_PID_BIND", pluginName, $"result={(targetPrepared ? "OK" : "WARN")} action=before_retune viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} existingPid={existingManagedViewerPid} requestedGroup={SafePluginActionValue(requestedLeaseGroup)} requestedDid={SafePluginActionValue(lease.Lease.Did)} requestedBonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} policy=selector_id_to_owned_pid_then_command rule=v0.11.80_viewer_profile_pid_binding");
+            log.Add("VIEWER_PROFILE_PID_BIND", pluginName, $"result={(targetPrepared ? "OK" : "WARN")} action=before_retune viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} existingPid={existingManagedViewerPid} requestedGroup={SafePluginActionValue(requestedLeaseGroup)} requestedDid={SafePluginActionValue(lease.Lease.Did)} requestedBonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} policy=selector_id_to_owned_pid_then_command rule=release_contract");
             var retune = tvTestLauncher.RetuneExistingViewer(existingManagedViewerPid, leaseBonDriverFileName, leaseDid, viewerChannelArgument, true, string.IsNullOrWhiteSpace(viewerActivation) ? "preserve" : viewerActivation);
             if (retune.Success)
             {
@@ -3116,11 +3130,11 @@ static async Task<IResult> HandlePluginActionDispatchAsync(HttpRequest http, Plu
                 externalTuners.AttachViewerProcess(leaseId, existingManagedViewerPid, viewerChannelArgument, "retuned", "reused", "internalRetuneCommandSent", "preserved", nid, tsid, sid, channel.ResolvedSpace, channel.ResolvedChannelIndex);
                 var internalRetuneDiag = $"state=retuned;leaseId={leaseId};tuner={lease.Lease.TunerName};did={lease.Lease.Did};bonDriver={lease.Lease.BonDriverFileName};viewerProcessId={existingManagedViewerPid};channelArgument={viewerChannelArgument};identityArgument={identityArgument};selectedChannelSource={selectedChannelSource};sameTransportServiceIds={sameTransportServiceIds};launchResult=reused;tuneResult=internalRetuneCommandSent;activateResult=preserved;processRestarted=False;preserveViewerWindowState=True;viewerActivation={viewerActivation};internalRetune=True;retuneScope=profileOwnedPidForegroundBinding";
                 externalTuners.SetLastViewerActionResult(pluginName, "viewerStart", true, "retuned", "-", "Viewer retuned inside existing TvAIr managed TVTest.", leaseId, lease.Lease.TunerName, lease.Lease.Did, lease.Lease.BonDriverFileName, existingManagedViewerPid, nid, tsid, sid, internalRetuneDiag);
-                log.Add("VIEWER_RETUNE_SURVIVAL", pluginName, $"result=OK source=viewerStart_action_context existingPid={existingManagedViewerPid} leaseId={SafePluginActionValue(leaseId)} previousNid={(existingManagedViewer.NetworkId.HasValue ? existingManagedViewer.NetworkId.Value.ToString(CultureInfo.InvariantCulture) : "-")} previousTsid={(existingManagedViewer.TransportStreamId.HasValue ? existingManagedViewer.TransportStreamId.Value.ToString(CultureInfo.InvariantCulture) : "-")} previousSid={(existingManagedViewer.ServiceId.HasValue ? existingManagedViewer.ServiceId.Value.ToString(CultureInfo.InvariantCulture) : "-")} requestedNid={nid} requestedTsid={tsid} requestedSid={sid} requestedGroup={SafePluginActionValue(requestedLeaseGroup)} requestedDid={SafePluginActionValue(lease.Lease.Did)} requestedBonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} processRestarted=False retuneScope=profileOwnedPidForegroundBinding rule=v0.11.38_toolwindow_keepalive_recovery_tray_silent");
-                log.Add("VIEWER_INTERNAL_RETUNE", pluginName, $"result=OK method=tvtest_single_instance_commandline pid={existingManagedViewerPid} leaseId={SafePluginActionValue(leaseId)} previousLeaseId={SafePluginActionValue(existingManagedViewer.LeaseId)} previousNid={(existingManagedViewer.NetworkId.HasValue ? existingManagedViewer.NetworkId.Value.ToString(CultureInfo.InvariantCulture) : "-")} previousTsid={(existingManagedViewer.TransportStreamId.HasValue ? existingManagedViewer.TransportStreamId.Value.ToString(CultureInfo.InvariantCulture) : "-")} previousSid={(existingManagedViewer.ServiceId.HasValue ? existingManagedViewer.ServiceId.Value.ToString(CultureInfo.InvariantCulture) : "-")} requestedNid={nid} requestedTsid={tsid} requestedSid={sid} requestedChspace={channel.ResolvedSpace} requestedChi={channel.ResolvedChannelIndex} bonDriverChanged={!string.Equals(System.IO.Path.GetFileName(existingManagedViewer.BonDriverFileName), System.IO.Path.GetFileName(lease.Lease.BonDriverFileName), StringComparison.OrdinalIgnoreCase)} didChanged={!string.Equals(existingManagedViewer.Did, lease.Lease.Did, StringComparison.OrdinalIgnoreCase)} processRestarted=False retuneScope=profileOwnedPidForegroundBinding rule=v0.11.80_viewer_profile_pid_binding");
+                log.Add("VIEWER_RETUNE_SURVIVAL", pluginName, $"result=OK source=viewerStart_action_context existingPid={existingManagedViewerPid} leaseId={SafePluginActionValue(leaseId)} previousNid={(existingManagedViewer.NetworkId.HasValue ? existingManagedViewer.NetworkId.Value.ToString(CultureInfo.InvariantCulture) : "-")} previousTsid={(existingManagedViewer.TransportStreamId.HasValue ? existingManagedViewer.TransportStreamId.Value.ToString(CultureInfo.InvariantCulture) : "-")} previousSid={(existingManagedViewer.ServiceId.HasValue ? existingManagedViewer.ServiceId.Value.ToString(CultureInfo.InvariantCulture) : "-")} requestedNid={nid} requestedTsid={tsid} requestedSid={sid} requestedGroup={SafePluginActionValue(requestedLeaseGroup)} requestedDid={SafePluginActionValue(lease.Lease.Did)} requestedBonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} processRestarted=False retuneScope=profileOwnedPidForegroundBinding rule=release_contract");
+                log.Add("VIEWER_INTERNAL_RETUNE", pluginName, $"result=OK method=tvtest_single_instance_commandline pid={existingManagedViewerPid} leaseId={SafePluginActionValue(leaseId)} previousLeaseId={SafePluginActionValue(existingManagedViewer.LeaseId)} previousNid={(existingManagedViewer.NetworkId.HasValue ? existingManagedViewer.NetworkId.Value.ToString(CultureInfo.InvariantCulture) : "-")} previousTsid={(existingManagedViewer.TransportStreamId.HasValue ? existingManagedViewer.TransportStreamId.Value.ToString(CultureInfo.InvariantCulture) : "-")} previousSid={(existingManagedViewer.ServiceId.HasValue ? existingManagedViewer.ServiceId.Value.ToString(CultureInfo.InvariantCulture) : "-")} requestedNid={nid} requestedTsid={tsid} requestedSid={sid} requestedChspace={channel.ResolvedSpace} requestedChi={channel.ResolvedChannelIndex} bonDriverChanged={!string.Equals(System.IO.Path.GetFileName(existingManagedViewer.BonDriverFileName), System.IO.Path.GetFileName(lease.Lease.BonDriverFileName), StringComparison.OrdinalIgnoreCase)} didChanged={!string.Equals(existingManagedViewer.Did, lease.Lease.Did, StringComparison.OrdinalIgnoreCase)} processRestarted=False retuneScope=profileOwnedPidForegroundBinding rule=release_contract");
                 if (!string.IsNullOrWhiteSpace(safeEvent))
-                    log.Add("PLUGIN_SAFE_EVENT", pluginName, $"event={SafePluginActionValue(safeEvent)} action=viewerStart result=POSTED_TO_VIEWER_INTERNAL_RETUNE service={SafePluginActionValue(serviceName)} nid={nid} tsid={tsid} sid={sid} windowId={SafePluginActionValue(requestedWindowId)} responseMode={SafePluginActionValue(responseMode)} state=retuned rule=v0.11.28_viewer_retune_guard_light_stability");
-                log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=ACCEPTED state=retuned service={SafePluginActionValue(serviceName)} nid={nid} tsid={tsid} sid={sid} group={SafePluginActionValue(group)} tuner={SafePluginActionValue(lease.Lease.TunerName)} did={SafePluginActionValue(lease.Lease.Did)} pid={existingManagedViewerPid} endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.11.28_viewer_retune_guard_light_stability");
+                    log.Add("PLUGIN_SAFE_EVENT", pluginName, $"event={SafePluginActionValue(safeEvent)} action=viewerStart result=POSTED_TO_VIEWER_INTERNAL_RETUNE service={SafePluginActionValue(serviceName)} nid={nid} tsid={tsid} sid={sid} windowId={SafePluginActionValue(requestedWindowId)} responseMode={SafePluginActionValue(responseMode)} state=retuned rule=release_contract");
+                log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=ACCEPTED state=retuned service={SafePluginActionValue(serviceName)} nid={nid} tsid={tsid} sid={sid} group={SafePluginActionValue(group)} tuner={SafePluginActionValue(lease.Lease.TunerName)} did={SafePluginActionValue(lease.Lease.Did)} pid={existingManagedViewerPid} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
                 var retuneActionResult = new PluginActionResult { Success = true, Message = "Viewer retuned inside existing TvAIr managed TVTest.", Diagnostics = internalRetuneDiag };
                 return BuildPluginViewerActionResponse(retuneActionResult, responseMode, requestedWindowId, requestedRefreshTarget, requestedPreserveScroll, windows, GetPluginActionIdentity(plugin, route), log, pluginName, "viewerStart", requestedRefreshAfter, toolWindows, http, requestedRefreshScrollTarget, requestedRefreshScrollMode);
             }
@@ -3130,7 +3144,7 @@ static async Task<IResult> HandlePluginActionDispatchAsync(HttpRequest http, Plu
                 || retuneFailureMessage.Contains("exited", StringComparison.OrdinalIgnoreCase)
                 || retuneFailureMessage.Contains("not found", StringComparison.OrdinalIgnoreCase)
                 || retuneFailureMessage.Contains("lost", StringComparison.OrdinalIgnoreCase);
-            log.Add("VIEWER_INTERNAL_RETUNE", pluginName, $"result=FAILED method=tvtest_single_instance_commandline pid={existingManagedViewerPid} leaseId={SafePluginActionValue(leaseId)} requestedNid={nid} requestedTsid={tsid} requestedSid={sid} message={SafePluginActionValue(retune.Message)} processLost={retuneProcessLost} action={(retuneProcessLost ? "stale_release_then_restart_recovery" : "deny_without_restart")} reason=internal_retune_failed rule=v0.11.36_viewer_retune_first_keepalive_contract");
+            log.Add("VIEWER_INTERNAL_RETUNE", pluginName, $"result=FAILED method=tvtest_single_instance_commandline pid={existingManagedViewerPid} leaseId={SafePluginActionValue(leaseId)} requestedNid={nid} requestedTsid={tsid} requestedSid={sid} message={SafePluginActionValue(retune.Message)} processLost={retuneProcessLost} action={(retuneProcessLost ? "stale_release_then_restart_recovery" : "deny_without_restart")} reason=internal_retune_failed rule=release_contract");
             if (retuneProcessLost)
             {
                 TvAirManagedProcessRegistry.Unregister(existingManagedViewerPid);
@@ -3140,7 +3154,7 @@ static async Task<IResult> HandlePluginActionDispatchAsync(HttpRequest http, Plu
             if (lease.Reused && string.Equals(existingManagedViewer.LeaseId, leaseId, StringComparison.OrdinalIgnoreCase))
             {
                 externalTuners.SetViewerState(leaseId, "active", "reused", "retuneFailed", "preserved", "notNeeded");
-                log.Add("VIEWER_INTERNAL_RETUNE", pluginName, $"result=KEEP_EXISTING_LEASE leaseId={SafePluginActionValue(leaseId)} pid={existingManagedViewerPid} reason=retune_failed_same_lease_no_restart rule=v0.11.36_viewer_retune_first_keepalive_contract");
+                log.Add("VIEWER_INTERNAL_RETUNE", pluginName, $"result=KEEP_EXISTING_LEASE leaseId={SafePluginActionValue(leaseId)} pid={existingManagedViewerPid} reason=retune_failed_same_lease_no_restart rule=release_contract");
             }
             else
             {
@@ -3151,25 +3165,25 @@ static async Task<IResult> HandlePluginActionDispatchAsync(HttpRequest http, Plu
         }
 
 StartNewViewer:
-        log.Add("VIEWER_CHANNEL_ARGUMENT", pluginName, $"source=ProgramGuideProjectionTriplet finalChannelArgument={SafePluginActionValue(viewerChannelArgument)} identityArgument={SafePluginActionValue(identityArgument)} requestedServiceName={SafePluginActionValue(requestedServiceName)} resolvedServiceName={SafePluginActionValue(channel.Name)} nid={nid} tsid={tsid} sid={sid} chspace={channel.ResolvedSpace} chi={channel.ResolvedChannelIndex} sameTransportServiceCount={sameTransportServices.Count} sameTransportServiceIds={SafePluginActionValue(sameTransportServiceIds)} selectedChannelSource={SafePluginActionValue(selectedChannelSource)} preserveViewerWindowState={preserveViewerWindowState} viewerActivation={SafePluginActionValue(viewerActivation)} viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} tvTestPathKey={SafePluginActionValue(viewerProfilePathKey)} internalRetunePreferred={internalRetunePreferred} internalRetuneAllowed={internalRetuneAllowed} launchReason={(internalRetunePreferred && !internalRetuneAllowed ? "scope_guard_restart" : internalRetunePreferred ? "retune_failed_or_no_alive_viewer" : "no_alive_viewer")} rule=v0.11.80_viewer_profile_pid_binding");
+        log.Add("VIEWER_CHANNEL_ARGUMENT", pluginName, $"source=ProgramGuideProjectionTriplet finalChannelArgument={SafePluginActionValue(viewerChannelArgument)} identityArgument={SafePluginActionValue(identityArgument)} requestedServiceName={SafePluginActionValue(requestedServiceName)} resolvedServiceName={SafePluginActionValue(channel.Name)} nid={nid} tsid={tsid} sid={sid} chspace={channel.ResolvedSpace} chi={channel.ResolvedChannelIndex} sameTransportServiceCount={sameTransportServices.Count} sameTransportServiceIds={SafePluginActionValue(sameTransportServiceIds)} selectedChannelSource={SafePluginActionValue(selectedChannelSource)} preserveViewerWindowState={preserveViewerWindowState} viewerActivation={SafePluginActionValue(viewerActivation)} viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} tvTestPathKey={SafePluginActionValue(viewerProfilePathKey)} internalRetunePreferred={internalRetunePreferred} internalRetuneAllowed={internalRetuneAllowed} launchReason={(internalRetunePreferred && !internalRetuneAllowed ? "scope_guard_restart" : internalRetunePreferred ? "retune_failed_or_no_alive_viewer" : "no_alive_viewer")} rule=release_contract");
         var restartReason = internalRetunePreferred && !internalRetuneAllowed ? "scope_guard_unscoped_retune_banned" : internalRetunePreferred ? "retune_failed_restart_recovery" : "no_alive_tvair_managed_viewer";
         var restartPreviousPid = internalRetunePreferred && existingManagedViewerPid > 0 ? existingManagedViewerPid.ToString(CultureInfo.InvariantCulture) : "-";
-        log.Add("VIEWER_PROCESS_RESTART", pluginName, $"reason={SafePluginActionValue(restartReason)} previousPid={restartPreviousPid} newPid=- unavoidable={(internalRetunePreferred && !internalRetuneAllowed ? "True" : internalRetunePreferred ? "False" : "True")} processRestarted=True restoreRequested={(restartFallbackWindowState?.Captured == true)} restoreSourcePid={(restartFallbackWindowState?.ProcessId.ToString(CultureInfo.InvariantCulture) ?? "-")} policy=profile_scoped_restart_on_unscoped_retune_ban rule=v0.11.80_viewer_profile_pid_binding");
+        log.Add("VIEWER_PROCESS_RESTART", pluginName, $"reason={SafePluginActionValue(restartReason)} previousPid={restartPreviousPid} newPid=- unavoidable={(internalRetunePreferred && !internalRetuneAllowed ? "True" : internalRetunePreferred ? "False" : "True")} processRestarted=True restoreRequested={(restartFallbackWindowState?.Captured == true)} restoreSourcePid={(restartFallbackWindowState?.ProcessId.ToString(CultureInfo.InvariantCulture) ?? "-")} policy=profile_scoped_restart_on_unscoped_retune_ban rule=release_contract");
         var viewerLaunch = tvTestLauncher.StartViewer(leaseBonDriverFileName, leaseDid, viewerChannelArgument, preserveViewerWindowState, viewerActivation, restartFallbackWindowState);
         if (!viewerLaunch.Success)
         {
             externalTuners.Release(leaseId, $"Plugin:{pluginName}:viewer_launch_failed");
             var failed = new PluginActionResult { Success = false, Message = "Failed to launch TVTest viewer.", Diagnostics = $"state=failed;errorCode=viewerLaunchFailed;leaseId={leaseId};tuner={lease.Lease.TunerName};did={lease.Lease.Did};bonDriver={lease.Lease.BonDriverFileName};message={viewerLaunch.Message}" };
-            log.Add("VIEWER_START_RESULT", pluginName, $"success=False state=failed errorCode=viewerLaunchFailed leaseId={SafePluginActionValue(leaseId)} tuner={SafePluginActionValue(lease.Lease.TunerName)} did={SafePluginActionValue(lease.Lease.Did)} bonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} nid={nid} tsid={tsid} sid={sid} channelArgument={SafePluginActionValue(viewerChannelArgument)} identityArgument={SafePluginActionValue(identityArgument)} launchResult=failed rollbackResult=released rule=v0.11.28_viewer_retune_guard_light_stability");
+            log.Add("VIEWER_START_RESULT", pluginName, $"success=False state=failed errorCode=viewerLaunchFailed leaseId={SafePluginActionValue(leaseId)} tuner={SafePluginActionValue(lease.Lease.TunerName)} did={SafePluginActionValue(lease.Lease.Did)} bonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} nid={nid} tsid={tsid} sid={sid} channelArgument={SafePluginActionValue(viewerChannelArgument)} identityArgument={SafePluginActionValue(identityArgument)} launchResult=failed rollbackResult=released rule=release_contract");
             return BuildPluginViewerExpectedDeniedResponse(externalTuners, failed, "failed", "viewerLaunchFailed", responseMode, requestedWindowId, requestedRefreshTarget, requestedPreserveScroll, windows, GetPluginActionIdentity(plugin, route), log, pluginName, "viewerStart", leaseId, lease.Lease.TunerName, lease.Lease.Did, lease.Lease.BonDriverFileName, viewerLaunch.ProcessId, nid, tsid, sid);
         }
 
         externalTuners.AttachViewerProcess(leaseId, viewerLaunch.ProcessId, viewerChannelArgument, "launched", "started", "argumentPassed", "requested", nid, tsid, sid, channel.ResolvedSpace, channel.ResolvedChannelIndex);
         var diag = $"state=launched;leaseId={leaseId};tuner={lease.Lease.TunerName};did={lease.Lease.Did};bonDriver={lease.Lease.BonDriverFileName};viewerProcessId={viewerLaunch.ProcessId};channelArgument={viewerChannelArgument};identityArgument={identityArgument};selectedChannelSource={selectedChannelSource};sameTransportServiceIds={sameTransportServiceIds};launchResult=started;tuneResult=argumentPassed;activateResult=requested;preserveViewerWindowState={preserveViewerWindowState};viewerActivation={viewerActivation};viewerProfile={requestedViewerProfile.Id};viewerProfileName={requestedViewerProfile.Name};tvTestPathKey={viewerProfilePathKey};restoreWindowStateRequested={(restartFallbackWindowState?.Captured == true)}";
-        log.Add("VIEWER_START_RESULT", pluginName, $"success=True state=launched errorCode=- leaseId={SafePluginActionValue(leaseId)} tuner={SafePluginActionValue(lease.Lease.TunerName)} did={SafePluginActionValue(lease.Lease.Did)} bonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} pid={viewerLaunch.ProcessId} nid={nid} tsid={tsid} sid={sid} channelArgument={SafePluginActionValue(viewerChannelArgument)} identityArgument={SafePluginActionValue(identityArgument)} launchResult=started tuneResult=argumentPassed activateResult=requested viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} tvTestPathKey={SafePluginActionValue(viewerProfilePathKey)} rule=v0.11.52_viewer_profile_contract");
+        log.Add("VIEWER_START_RESULT", pluginName, $"success=True state=launched errorCode=- leaseId={SafePluginActionValue(leaseId)} tuner={SafePluginActionValue(lease.Lease.TunerName)} did={SafePluginActionValue(lease.Lease.Did)} bonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} pid={viewerLaunch.ProcessId} nid={nid} tsid={tsid} sid={sid} channelArgument={SafePluginActionValue(viewerChannelArgument)} identityArgument={SafePluginActionValue(identityArgument)} launchResult=started tuneResult=argumentPassed activateResult=requested viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} tvTestPathKey={SafePluginActionValue(viewerProfilePathKey)} rule=release_contract");
         if (!string.IsNullOrWhiteSpace(safeEvent))
-            log.Add("PLUGIN_SAFE_EVENT", pluginName, $"event={SafePluginActionValue(safeEvent)} action=viewerStart result=POSTED_TO_VIEWER_START service={SafePluginActionValue(serviceName)} nid={nid} tsid={tsid} sid={sid} windowId={SafePluginActionValue(requestedWindowId)} responseMode={SafePluginActionValue(responseMode)} state=launched rule=v0.10.96_plugin_viewer_api_cleanup");
-        log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=ACCEPTED state=launched service={SafePluginActionValue(serviceName)} nid={nid} tsid={tsid} sid={sid} group={SafePluginActionValue(group)} tuner={SafePluginActionValue(lease.Lease.TunerName)} did={SafePluginActionValue(lease.Lease.Did)} pid={viewerLaunch.ProcessId} viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.11.52_viewer_profile_contract");
+            log.Add("PLUGIN_SAFE_EVENT", pluginName, $"event={SafePluginActionValue(safeEvent)} action=viewerStart result=POSTED_TO_VIEWER_START service={SafePluginActionValue(serviceName)} nid={nid} tsid={tsid} sid={sid} windowId={SafePluginActionValue(requestedWindowId)} responseMode={SafePluginActionValue(responseMode)} state=launched rule=release_contract");
+        log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=ACCEPTED state=launched service={SafePluginActionValue(serviceName)} nid={nid} tsid={tsid} sid={sid} group={SafePluginActionValue(group)} tuner={SafePluginActionValue(lease.Lease.TunerName)} did={SafePluginActionValue(lease.Lease.Did)} pid={viewerLaunch.ProcessId} viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
         var actionResult = new PluginActionResult { Success = true, Message = "Viewer launch requested by TvAIr host.", Diagnostics = diag };
         return BuildPluginViewerActionResponse(actionResult, responseMode, requestedWindowId, requestedRefreshTarget, requestedPreserveScroll, windows, GetPluginActionIdentity(plugin, route), log, pluginName, "viewerStart", requestedRefreshAfter, toolWindows, http, requestedRefreshScrollTarget, requestedRefreshScrollMode);
     }
@@ -3200,7 +3214,7 @@ StartNewViewer:
             {
                 stopResolveMode = "leaseId_profile_mismatch_denied";
                 stopDeniedReason = $"lease_profile_mismatch requestedProfile={requestedViewerProfileId} leaseProfile={NormalizeViewerProfileActionId(leaseById.ViewerProfileId)}";
-                log.Add("VIEWER_STOP_PROFILE_GUARD", pluginName, $"result=DENY reason=lease_profile_mismatch requestedLeaseId={SafePluginActionValue(requestedLeaseId)} requestedViewerProfile={SafePluginActionValue(requestedViewerProfileId)} leaseViewerProfile={SafePluginActionValue(leaseById.ViewerProfileId)} leasePid={(leaseById.ProcessId.HasValue ? leaseById.ProcessId.Value.ToString(CultureInfo.InvariantCulture) : "-")} policy=selected_viewer_profile_must_match_lease rule=v0.11.81_viewer_stop_profile_binding");
+                log.Add("VIEWER_STOP_PROFILE_GUARD", pluginName, $"result=DENY reason=lease_profile_mismatch requestedLeaseId={SafePluginActionValue(requestedLeaseId)} requestedViewerProfile={SafePluginActionValue(requestedViewerProfileId)} leaseViewerProfile={SafePluginActionValue(leaseById.ViewerProfileId)} leasePid={(leaseById.ProcessId.HasValue ? leaseById.ProcessId.Value.ToString(CultureInfo.InvariantCulture) : "-")} policy=selected_viewer_profile_must_match_lease rule=release_contract");
             }
             else if (leaseById is not null)
             {
@@ -3237,7 +3251,7 @@ StartNewViewer:
                 ? "missing_viewer_profile_denied"
                 : stopResolveMode;
             stopDeniedReason = hasRequestedViewerProfile ? "viewer_profile_session_not_found" : "missing_viewer_profile_and_lease";
-            log.Add("VIEWER_STOP_PROFILE_GUARD", pluginName, $"result=DENY reason={SafePluginActionValue(stopDeniedReason)} requestedLeaseId={SafePluginActionValue(requestedLeaseId)} requestedViewerProfile={SafePluginActionValue(requestedViewerProfileId)} clientId={SafePluginActionValue(clientId)} policy=no_generic_client_or_active_window_fallback rule=v0.11.81_viewer_stop_profile_binding");
+            log.Add("VIEWER_STOP_PROFILE_GUARD", pluginName, $"result=DENY reason={SafePluginActionValue(stopDeniedReason)} requestedLeaseId={SafePluginActionValue(requestedLeaseId)} requestedViewerProfile={SafePluginActionValue(requestedViewerProfileId)} clientId={SafePluginActionValue(clientId)} policy=no_generic_client_or_active_window_fallback rule=release_contract");
         }
 
         var resolvedLeaseId = targetLease?.LeaseId ?? string.Empty;
@@ -3261,8 +3275,8 @@ StartNewViewer:
         var activeViewerSessionsAfterStop = hasRequestedViewerProfile
             ? externalTuners.GetActiveLeases().Count(l => string.Equals(NormalizeViewerProfileActionId(l.ViewerProfileId), requestedViewerProfileId, StringComparison.OrdinalIgnoreCase))
             : externalTuners.GetActiveLeases().Count(l => string.Equals(l.ClientId ?? string.Empty, clientId, StringComparison.OrdinalIgnoreCase));
-        log.Add("VIEWER_STOP_RESOLVE", pluginName, $"action=viewerStop requestedLeaseId={SafePluginActionValue(requestedLeaseId)} requestedViewerProfile={SafePluginActionValue(requestedViewerProfileId)} resolvedLeaseId={SafePluginActionValue(resolvedLeaseId)} resolvedViewerProfile={SafePluginActionValue(targetLease?.ViewerProfileId)} resolveMode={SafePluginActionValue(stopResolveMode)} clientId={SafePluginActionValue(clientId)} currentWindowId={SafePluginActionValue(requestedWindowId)} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(route)} resolvedGroup={SafePluginActionValue(targetLease?.Group)} resolvedTuner={SafePluginActionValue(targetLease?.TunerName)} resolvedDid={SafePluginActionValue(targetLease?.Did)} resolvedPid={(targetLease?.ProcessId.HasValue == true ? targetLease.ProcessId.Value.ToString(CultureInfo.InvariantCulture) : "-")} cleanupPids={SafePluginActionValue(string.Join(",", stopPids))} deniedReason={SafePluginActionValue(stopDeniedReason)} result={(ok ? "OK" : "NOT_FOUND")} rule=v0.11.81_viewer_stop_profile_binding");
-        log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStop result={(ok ? "OK" : "NOT_FOUND")} requestedLeaseId={SafePluginActionValue(requestedLeaseId)} requestedViewerProfile={SafePluginActionValue(requestedViewerProfileId)} resolvedLeaseId={SafePluginActionValue(resolvedLeaseId)} resolvedViewerProfile={SafePluginActionValue(targetLease?.ViewerProfileId)} leaseResolveMode={SafePluginActionValue(stopResolveMode)} processStop={SafePluginActionValue(stopDiag)} activeViewerSessionsAfterStop={activeViewerSessionsAfterStop} cleanupPids={SafePluginActionValue(string.Join(",", stopPids))} uiStateSource=GetViewerSessions current_active_sessions_only notFoundProcessPolicy=deny_if_profile_or_lease_not_resolved endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.11.81_viewer_stop_profile_binding");
+        log.Add("VIEWER_STOP_RESOLVE", pluginName, $"action=viewerStop requestedLeaseId={SafePluginActionValue(requestedLeaseId)} requestedViewerProfile={SafePluginActionValue(requestedViewerProfileId)} resolvedLeaseId={SafePluginActionValue(resolvedLeaseId)} resolvedViewerProfile={SafePluginActionValue(targetLease?.ViewerProfileId)} resolveMode={SafePluginActionValue(stopResolveMode)} clientId={SafePluginActionValue(clientId)} currentWindowId={SafePluginActionValue(requestedWindowId)} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(route)} resolvedGroup={SafePluginActionValue(targetLease?.Group)} resolvedTuner={SafePluginActionValue(targetLease?.TunerName)} resolvedDid={SafePluginActionValue(targetLease?.Did)} resolvedPid={(targetLease?.ProcessId.HasValue == true ? targetLease.ProcessId.Value.ToString(CultureInfo.InvariantCulture) : "-")} cleanupPids={SafePluginActionValue(string.Join(",", stopPids))} deniedReason={SafePluginActionValue(stopDeniedReason)} result={(ok ? "OK" : "NOT_FOUND")} rule=release_contract");
+        log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStop result={(ok ? "OK" : "NOT_FOUND")} requestedLeaseId={SafePluginActionValue(requestedLeaseId)} requestedViewerProfile={SafePluginActionValue(requestedViewerProfileId)} resolvedLeaseId={SafePluginActionValue(resolvedLeaseId)} resolvedViewerProfile={SafePluginActionValue(targetLease?.ViewerProfileId)} leaseResolveMode={SafePluginActionValue(stopResolveMode)} processStop={SafePluginActionValue(stopDiag)} activeViewerSessionsAfterStop={activeViewerSessionsAfterStop} cleanupPids={SafePluginActionValue(string.Join(",", stopPids))} uiStateSource=GetViewerSessions current_active_sessions_only notFoundProcessPolicy=deny_if_profile_or_lease_not_resolved endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
         var actionResult = ok
             ? new PluginActionResult { Success = true, Message = "Viewer lease released.", Diagnostics = $"released;processStop={stopDiag};leaseResolveMode={stopResolveMode};viewerProfile={requestedViewerProfileId}" }
             : new PluginActionResult { Success = false, Message = "Viewer lease not found or viewerProfile mismatch.", Diagnostics = $"lease_not_found_or_profile_mismatch;leaseResolveMode={stopResolveMode};reason={stopDeniedReason};viewerProfile={requestedViewerProfileId}" };
@@ -3271,7 +3285,7 @@ StartNewViewer:
             : BuildPluginActionDispatchError(actionResult, responseMode, requestedWindowId, StatusCodes.Status404NotFound);
     }
 
-    log.Add("PLUGIN_ACTION", pluginName, $"action={SafePluginActionValue(action)} result=DENIED reason=unsupported_action endpoint={SafePluginActionValue(http.Path.Value)} rule=v0.10.96_plugin_viewer_api_cleanup");
+    log.Add("PLUGIN_ACTION", pluginName, $"action={SafePluginActionValue(action)} result=DENIED reason=unsupported_action endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
     return BuildPluginActionDispatchError(new PluginActionResult { Success = false, Message = "Unsupported plugin action.", Diagnostics = "unsupported_action" }, responseMode, requestedWindowId, StatusCodes.Status400BadRequest);
 }
 
@@ -3595,7 +3609,7 @@ static void NormalizePluginActionPayloadAliases(Dictionary<string, string> paylo
 
 static void NormalizeViewerProfilePayloadAlias(Dictionary<string, string> payload)
 {
-    // v0.11.82: vtuner is accepted only as a backward-compatible input alias.
+    // release_contract: vtuner is accepted only as a backward-compatible input alias.
     // The host canonicalizes viewer profile to viewerProfile/viewerProfileId aliases and no longer
     // re-emits vtuner, so plugin UI can retire the legacy name without breaking older payloads.
     var candidates = new[]
@@ -3779,13 +3793,13 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'">
 <title>{{safeTitle}} - TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.0">
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.0">
-<link rel="stylesheet" href="/tvair-notification.css?v=1.0.0">
-<link rel="stylesheet" href="/tvair-epg-panel.css?v=1.0.0">
-<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.0.0">
-<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.0.0">
-<script src="/tvair-theme.js?v=1.0.0"></script>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.4">
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.4">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.0.4">
+<link rel="stylesheet" href="/tvair-epg-panel.css?v=1.0.4">
+<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.0.4">
+<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.0.4">
+<script src="/tvair-theme.js?v=1.0.4"></script>
 
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -3801,14 +3815,14 @@ body{font-family:'Meiryo',sans-serif;font-size:12px;background:var(--tvair-bg-pa
 #menu-wrap{position:relative}
 #menu-btn{background:var(--nav-btn-bg);color:var(--tvair-nav-button-text,#222);border:none;padding:3px 10px;cursor:pointer;font-size:15px;border-radius:2px;line-height:1;letter-spacing:1px}
 #menu-btn:hover{background:var(--nav-btn-hover)}
-/* v0.11.531 MenuLegacyEntryCleanupContract: plugin shell menu behavior is owned by tvair-menu-spine.js; this CSS only keeps host-frame placement. */
+/* release_contract MenuLegacyEntryCleanupContract: plugin shell menu behavior is owned by tvair-menu-spine.js; this CSS only keeps host-frame placement. */
 #menu-dropdown{display:none;position:absolute;top:100%;right:0;z-index:500;min-width:160px;margin-top:2px}
 #menu-dropdown.open{display:block}
 .menu-item{display:block;width:100%;padding:8px 14px;background:transparent;border:none;text-align:left;font-size:12px;cursor:pointer;color:var(--tvair-content-primary,#333);white-space:nowrap;text-decoration:none}
 .menu-item:hover{background:var(--tvair-surface-soft-hover,#eef4ff);color:var(--tvair-content-link,var(--nav-bg))}
 .menu-sep{height:1px;background:var(--timecol-bg);margin:3px 0}
 
-/* v0.8.39: EPG操作を1階層目から退避し、共通サブメニュー化 */
+/* release_contract: EPG操作を1階層目から退避し、共通サブメニュー化 */
 .menu-group{margin:0;padding:0}
 .menu-group>summary{list-style:none}
 .menu-group>summary::-webkit-details-marker{display:none}
@@ -3845,11 +3859,11 @@ body{font-family:'Meiryo',sans-serif;font-size:12px;background:var(--tvair-bg-pa
 {{pluginBody}}
   </main>
 </div>
-<script src="/tvair-notification.js?v=1.0.0"></script>
-<script src="/tvair-epg-run-contract.js?v=1.0.0"></script>
-<script src="/tvair-epg-widget.js?v=1.0.0"></script>
-<script src="/tvair-safe-event-host.js?v=0.10.96"></script>
-<script src="/tvair-menu-spine.js?v=1.0.0"></script>
+<script src="/tvair-notification.js?v=1.0.4"></script>
+<script src="/tvair-epg-run-contract.js?v=1.0.4"></script>
+<script src="/tvair-epg-widget.js?v=1.0.4"></script>
+<script src="/tvair-safe-event-host.js?v=1.0.4"></script>
+<script src="/tvair-menu-spine.js?v=1.0.4"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -4002,11 +4016,11 @@ button,input,select,textarea{font-family:inherit;font-size:inherit}
 </style>
 {{pluginStyles}}
 </head>
-<body class="tvair-plugin-toolwindow-content-only" data-plugin-route="{{safeRoute}}" data-tvair-host-kind="winforms_webbrowser_fallback_direct_content" data-tvair-toolwindow-contract="v0.11.15_updatewindow_refresh_after_contract">
+<body class="tvair-plugin-toolwindow-content-only" data-plugin-route="{{safeRoute}}" data-tvair-host-kind="winforms_webbrowser_fallback_direct_content" data-tvair-toolwindow-contract="release_contract">
 <div class="tvair-toolwindow-content-root">
 {{pluginContent}}
 </div>
-<script src="/tvair-safe-event-host.js?v=0.11.15"></script>
+<script src="/tvair-safe-event-host.js?v=1.0.4"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -4092,7 +4106,7 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
     var currentRequestWave = currentRequestQuery.TryGetValue("wave", out var requestWave) ? requestWave : string.Empty;
     var currentRequestQueryKeys = string.Join(",", currentRequestQuery.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase));
 
-    // v0.11.15: Window state absolute URL contract must be derived before PluginUiContext construction.
+    // release_contract: Window state absolute URL contract must be derived before PluginUiContext construction.
     // Keep this outside the plugin-specific block so WindowContract and diagnostics can share one authoritative value.
     var currentWindowStateEndpoint = isHostManagedWindowContent && !string.IsNullOrWhiteSpace(currentWindowId)
         ? $"/plugin-window/{Uri.EscapeDataString(currentWindowId)}/state"
@@ -4120,14 +4134,14 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
     {
         windows.UpdateContentRouteFromRender(currentWindowId, expectedWindowPluginId, currentRequestPathAndQuery);
     }
-    log.Add("PLUGIN_RENDER_ENTER", plugin?.Name ?? publicRoute, $"routeSegment={SafePluginActionValue(publicRoute)} requestedRoute={SafePluginActionValue(requestedRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} requestPath={SafePluginActionValue(currentRequestPath)} query={SafePluginActionValue(currentRequestQueryString)} rule=v0.11.03_window_canonical_state_preservation_fix");
+    log.Add("PLUGIN_RENDER_ENTER", plugin?.Name ?? publicRoute, $"routeSegment={SafePluginActionValue(publicRoute)} requestedRoute={SafePluginActionValue(requestedRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} requestPath={SafePluginActionValue(currentRequestPath)} query={SafePluginActionValue(currentRequestQueryString)} rule=release_contract");
 
     try
     {
         string body;
 
-        // TvAIr 0.2.6: プラグインページはTvAIr共通ヘッダー付きの拡張画面として表示する。
-        // v0.8.40: AI-rhythm は /plugin/airhythm を正式入口とし、旧 /plugin/airithm は legacy alias として解決する。
+        // TvAIr 1.0.0: プラグインページはTvAIr共通ヘッダー付きの拡張画面として表示する。
+        // release_contract: AI-rhythm は /plugin/airhythm を正式入口とし、旧 /plugin/airithm は legacy alias として解決する。
         var physicalRoute = plugin?.Ui.RouteSegment ?? publicRoute;
         var indexPath = Path.Combine(AppContext.BaseDirectory, "Plugins", physicalRoute, "wwwroot", "index.html");
         if (!File.Exists(indexPath) && IsAirhythmRouteCandidate(publicRoute))
@@ -4139,7 +4153,7 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
         {
             var staticHtml = File.ReadAllText(indexPath);
             body = ExtractPluginBodyFragment(staticHtml);
-            log.Add("PLUGIN_RENDER_RESULT", plugin?.Name ?? publicRoute, $"source=static_index routeSegment={SafePluginActionValue(publicRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} {BuildPluginRenderHtmlAudit(body)} rule=v0.10.96_plugin_renderhtml_diagnostics");
+            log.Add("PLUGIN_RENDER_RESULT", plugin?.Name ?? publicRoute, $"source=static_index routeSegment={SafePluginActionValue(publicRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} {BuildPluginRenderHtmlAudit(body)} rule=release_contract");
         }
         else if (plugin is not null)
         {
@@ -4153,7 +4167,7 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
             var viewerProfilesForContext = viewerProfileProjection.Profiles.Select(ToPluginViewerProfileInfo).ToList();
             var selectableViewerProfilesForContext = viewerProfileProjection.SelectableProfiles.Select(ToPluginViewerProfileInfo).ToList();
             log.Add("VIEWER_PROFILE_PROJECTION", plugin.Name,
-                $"result=OK source=PluginUiContext routeSegment={SafePluginActionValue(publicRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} viewingTuners={viewerProfileProjection.ViewingTunerCount} profiles={viewerProfileProjection.Profiles.Count} selectable={viewerProfileProjection.SelectableProfiles.Count} enabledReal={viewerProfileProjection.EnabledRealProfileCount} selectorVisibleRecommended={viewerProfileProjection.SelectorVisibleRecommended} profileIds={SafePluginActionValue(viewerProfileProjection.ProfileIds)} selectableIds={SafePluginActionValue(viewerProfileProjection.SelectableProfileIds)} default={SafePluginActionValue(viewerProfileProjection.DefaultViewerProfile)} rule=v0.11.73_viewer_profile_safe_event_selector_capture");
+                $"result=OK source=PluginUiContext routeSegment={SafePluginActionValue(publicRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} viewingTuners={viewerProfileProjection.ViewingTunerCount} profiles={viewerProfileProjection.Profiles.Count} selectable={viewerProfileProjection.SelectableProfiles.Count} enabledReal={viewerProfileProjection.EnabledRealProfileCount} selectorVisibleRecommended={viewerProfileProjection.SelectorVisibleRecommended} profileIds={SafePluginActionValue(viewerProfileProjection.ProfileIds)} selectableIds={SafePluginActionValue(viewerProfileProjection.SelectableProfileIds)} default={SafePluginActionValue(viewerProfileProjection.DefaultViewerProfile)} rule=release_contract");
             var actionContext = new TvAIrPlugin.PluginUiContext
             {
                 RequestedAt = DateTime.Now,
@@ -4244,7 +4258,7 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
                 },
                 ViewerControlActionContract = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                 {
-                    ["contractVersion"] = "0.11.28",
+                    ["contractVersion"] = "1.0.0",
                     ["toolWindowOnlySafeEvents"] = "true",
                     ["pluginScriptAllowed"] = "false",
                     ["safeEventAttributePrefix"] = "data-tvair-",
@@ -4300,7 +4314,7 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
                 PluginAssetBaseUrl = pluginAssetBaseUrl,
                 PluginAssetContract = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                 {
-                    ["contractVersion"] = "0.11.03",
+                    ["contractVersion"] = "1.0.0",
                     ["preferredUrlPattern"] = "/plugin-assets/{routeSegment}/{assetName}",
                     ["apiUrlPattern"] = "/api/plugins/{pluginId}/assets/{assetName}",
                     ["assetBaseUrl"] = pluginAssetBaseUrl,
@@ -4395,22 +4409,22 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
                     ["toolWindowFormIconSourcePriority"] = "EmbeddedResource>plugin_file>default_TvAIr_icon"
                 }
             };
-            log.Add("PLUGIN_UI_CONTEXT_ACTION_CONTRACT", plugin.Name, $"result=ISSUED route={SafePluginActionValue(actionContext.ActionRoute)} pluginActionRoute={SafePluginActionValue(actionContext.PluginActionRoute)} endpoint={SafePluginActionValue(actionContext.ActionEndpoint)} method={SafePluginActionValue(actionContext.ActionMethod)} actions={SafePluginActionValue(string.Join(",", supportedActions))} tokenPresent={!string.IsNullOrWhiteSpace(actionContext.ActionToken)} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(publicRoute)} rule=v0.10.96_plugin_viewer_api_cleanup");
-            log.Add("PLUGIN_UI_CONTEXT_WINDOW_CONTRACT", plugin.Name, $"result=ISSUED route={SafePluginActionValue(actionContext.WindowRoute)} endpoint={SafePluginActionValue(actionContext.WindowEndpoint)} method={SafePluginActionValue(actionContext.WindowMethod)} actions={SafePluginActionValue(string.Join(",", actionContext.SupportedWindowActions))} tokenPresent={!string.IsNullOrWhiteSpace(actionContext.WindowToken)} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(publicRoute)} hostManaged=True currentWindowId={SafePluginActionValue(currentWindowId)} isHostManagedWindowContent={isHostManagedWindowContent} refreshTarget=content toolWindowSupported={toolWindowCaps.ToolWindowSupported} webView2Runtime={toolWindowCaps.WebView2RuntimeAvailable} hostKind={SafePluginActionValue(toolWindowCaps.HostKind)} reuseKey={SafePluginActionValue(toolWindowCaps.ReuseKey)} positionPersistence={toolWindowCaps.SupportsPositionPersistence} statePersistence={toolWindowCaps.SupportsStatePersistence} closeSync=closeWindow_and_host_x_button rule=v0.10.96_plugin_viewer_api_cleanup");
-            log.Add("WINDOW_STATE_ENDPOINT_CONTRACT", plugin.Name, $"result=ISSUED currentWindowId={SafePluginActionValue(currentWindowId)} endpoint={SafePluginActionValue(currentWindowStateEndpoint)} absoluteUrl={SafePluginActionValue(currentWindowStateUrl)} currentWindowAlwaysOnTop={currentWindowAlwaysOnTop} currentWindowRevision={currentWindowRevision} currentWindowHostAlive={currentWindowHostAlive} csharpReadable={(!string.IsNullOrWhiteSpace(currentWindowStateUrl)).ToString()} stateDirectValues=PluginUiContext source=PluginUiContext.WindowContract rule=v0.11.28_viewer_retune_guard_light_stability");
-            log.Add("PLUGIN_UI_CONTEXT_REQUEST_CONTRACT", plugin.Name, $"result=ISSUED routeSegment={SafePluginActionValue(publicRoute)} requestPath={SafePluginActionValue(actionContext.CurrentRequestPath)} requestQuery={SafePluginActionValue(actionContext.CurrentRequestQueryString)} pathAndQuery={SafePluginActionValue(actionContext.CurrentRequestPathAndQuery)} queryKeys={SafePluginActionValue(currentRequestQueryKeys)} wave={SafePluginActionValue(currentRequestWave)} toolWindow={isHostManagedWindowContent} directContent={toolWindowContentOnly} currentWindowId={SafePluginActionValue(currentWindowId)} rule=v0.10.97_plugin_ui_context_request_query_contract");
-            log.Add("PLUGIN_UI_CONTEXT_ASSET_CONTRACT", plugin.Name, $"result=ISSUED routeSegment={SafePluginActionValue(publicRoute)} pluginId={SafePluginActionValue(pluginId)} assetBaseUrl={SafePluginActionValue(pluginAssetBaseUrl)} apiBaseUrl={SafePluginActionValue(pluginAssetApiBaseUrl)} allowedExtensions=png imgTagAllowed=True externalUrlAllowed=False dataUriRecommended=False formIconAllowedExtensions=ico formIconSourcePriority=EmbeddedResource>plugin_file>default_TvAIr_icon rule=v0.11.28_viewer_retune_guard_light_stability");
+            log.Add("PLUGIN_UI_CONTEXT_ACTION_CONTRACT", plugin.Name, $"result=ISSUED route={SafePluginActionValue(actionContext.ActionRoute)} pluginActionRoute={SafePluginActionValue(actionContext.PluginActionRoute)} endpoint={SafePluginActionValue(actionContext.ActionEndpoint)} method={SafePluginActionValue(actionContext.ActionMethod)} actions={SafePluginActionValue(string.Join(",", supportedActions))} tokenPresent={!string.IsNullOrWhiteSpace(actionContext.ActionToken)} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(publicRoute)} rule=release_contract");
+            log.Add("PLUGIN_UI_CONTEXT_WINDOW_CONTRACT", plugin.Name, $"result=ISSUED route={SafePluginActionValue(actionContext.WindowRoute)} endpoint={SafePluginActionValue(actionContext.WindowEndpoint)} method={SafePluginActionValue(actionContext.WindowMethod)} actions={SafePluginActionValue(string.Join(",", actionContext.SupportedWindowActions))} tokenPresent={!string.IsNullOrWhiteSpace(actionContext.WindowToken)} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(publicRoute)} hostManaged=True currentWindowId={SafePluginActionValue(currentWindowId)} isHostManagedWindowContent={isHostManagedWindowContent} refreshTarget=content toolWindowSupported={toolWindowCaps.ToolWindowSupported} webView2Runtime={toolWindowCaps.WebView2RuntimeAvailable} hostKind={SafePluginActionValue(toolWindowCaps.HostKind)} reuseKey={SafePluginActionValue(toolWindowCaps.ReuseKey)} positionPersistence={toolWindowCaps.SupportsPositionPersistence} statePersistence={toolWindowCaps.SupportsStatePersistence} closeSync=closeWindow_and_host_x_button rule=release_contract");
+            log.Add("WINDOW_STATE_ENDPOINT_CONTRACT", plugin.Name, $"result=ISSUED currentWindowId={SafePluginActionValue(currentWindowId)} endpoint={SafePluginActionValue(currentWindowStateEndpoint)} absoluteUrl={SafePluginActionValue(currentWindowStateUrl)} currentWindowAlwaysOnTop={currentWindowAlwaysOnTop} currentWindowRevision={currentWindowRevision} currentWindowHostAlive={currentWindowHostAlive} csharpReadable={(!string.IsNullOrWhiteSpace(currentWindowStateUrl)).ToString()} stateDirectValues=PluginUiContext source=PluginUiContext.WindowContract rule=release_contract");
+            log.Add("PLUGIN_UI_CONTEXT_REQUEST_CONTRACT", plugin.Name, $"result=ISSUED routeSegment={SafePluginActionValue(publicRoute)} requestPath={SafePluginActionValue(actionContext.CurrentRequestPath)} requestQuery={SafePluginActionValue(actionContext.CurrentRequestQueryString)} pathAndQuery={SafePluginActionValue(actionContext.CurrentRequestPathAndQuery)} queryKeys={SafePluginActionValue(currentRequestQueryKeys)} wave={SafePluginActionValue(currentRequestWave)} toolWindow={isHostManagedWindowContent} directContent={toolWindowContentOnly} currentWindowId={SafePluginActionValue(currentWindowId)} rule=release_contract");
+            log.Add("PLUGIN_UI_CONTEXT_ASSET_CONTRACT", plugin.Name, $"result=ISSUED routeSegment={SafePluginActionValue(publicRoute)} pluginId={SafePluginActionValue(pluginId)} assetBaseUrl={SafePluginActionValue(pluginAssetBaseUrl)} apiBaseUrl={SafePluginActionValue(pluginAssetApiBaseUrl)} allowedExtensions=png imgTagAllowed=True externalUrlAllowed=False dataUriRecommended=False formIconAllowedExtensions=ico formIconSourcePriority=EmbeddedResource>plugin_file>default_TvAIr_icon rule=release_contract");
             var renderHtml = plugin.RenderHtml(actionContext);
-            log.Add("PLUGIN_RENDER_RESULT", plugin.Name, $"source=plugin_render_raw routeSegment={SafePluginActionValue(publicRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} {BuildPluginRenderHtmlAudit(renderHtml)} rule=v0.10.96_plugin_renderhtml_diagnostics");
+            log.Add("PLUGIN_RENDER_RESULT", plugin.Name, $"source=plugin_render_raw routeSegment={SafePluginActionValue(publicRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} {BuildPluginRenderHtmlAudit(renderHtml)} rule=release_contract");
             body = PluginHtmlSanitizer.Sanitize(renderHtml ?? string.Empty);
-            log.Add("PLUGIN_RENDER_RESULT", plugin.Name, $"source=plugin_render_sanitized routeSegment={SafePluginActionValue(publicRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} {BuildPluginRenderHtmlAudit(body)} rule=v0.10.96_plugin_renderhtml_diagnostics");
+            log.Add("PLUGIN_RENDER_RESULT", plugin.Name, $"source=plugin_render_sanitized routeSegment={SafePluginActionValue(publicRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} {BuildPluginRenderHtmlAudit(body)} rule=release_contract");
         }
         else
         {
             return Results.NotFound("Plugin UI not found.");
         }
 
-        log.Add("PLUGIN_SAFE_EVENT_INJECT", plugin?.Name ?? publicRoute, $"action=render result=INJECTED routeSegment={SafePluginActionValue(publicRoute)} toolWindowContentOnly={toolWindowContentOnly} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} script=external_and_inline_guarded hostKind={SafePluginActionValue(toolWindows.GetCapabilities().HostKind)} rule=v0.10.96_tool_window_chrome_contract_fix");
+        log.Add("PLUGIN_SAFE_EVENT_INJECT", plugin?.Name ?? publicRoute, $"action=render result=INJECTED routeSegment={SafePluginActionValue(publicRoute)} toolWindowContentOnly={toolWindowContentOnly} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} script=external_and_inline_guarded hostKind={SafePluginActionValue(toolWindows.GetCapabilities().HostKind)} rule=release_contract");
         return Results.Content(BuildPluginShellHtml(title, publicRoute, body, toolWindowContentOnly), "text/html; charset=utf-8");
     }
     catch (Exception ex)
@@ -4418,18 +4432,18 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
         var exMessage = $"{ex.GetType().Name}: {ex.Message}";
         var stackSummary = (ex.StackTrace ?? string.Empty).Replace("\r", " ").Replace("\n", " ");
         if (stackSummary.Length > 500) stackSummary = stackSummary[..500];
-        log.Add("PLUGIN_RENDER_EXCEPTION", plugin?.Name ?? publicRoute, $"routeSegment={SafePluginActionValue(publicRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} exceptionType={SafePluginActionValue(ex.GetType().Name)} message={SafePluginActionValue(ex.Message)} stack={SafePluginActionValue(stackSummary)} rule=v0.10.96_plugin_renderhtml_diagnostics");
+        log.Add("PLUGIN_RENDER_EXCEPTION", plugin?.Name ?? publicRoute, $"routeSegment={SafePluginActionValue(publicRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} exceptionType={SafePluginActionValue(ex.GetType().Name)} message={SafePluginActionValue(ex.Message)} stack={SafePluginActionValue(stackSummary)} rule=release_contract");
         var errorBody = BuildPluginRenderErrorBody(plugin?.Name ?? publicRoute, publicRoute, exMessage);
         return Results.Content(BuildPluginShellHtml(title, publicRoute, errorBody, toolWindowContentOnly), "text/html; charset=utf-8");
     }
 }
 
-// v0.8.40: 旧AI-rithm URLは legacy alias。UI露出は常に /plugin/airhythm に統一する。
+// release_contract: 旧AI-rithm URLは legacy alias。UI露出は常に /plugin/airhythm に統一する。
 app.MapGet("/plugin/airithm", () => Results.Redirect("/plugin/airhythm", permanent: false));
 app.MapGet("/plugin-ui/airithm", () => Results.Redirect("/plugin/airhythm", permanent: false));
 app.MapGet("/plugin/{route}", (string route, HttpRequest http, PluginRegistry registry, PluginActionTokenStore actionTokens, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, IOptions<TvTestSettings> tvTestOptions, IniSettingsService ini, IReadOnlyList<TunerProfile> tunerProfiles, LogRepository log) => RenderPluginHtml(route, http, registry, actionTokens, windows, toolWindows, tvTestOptions, ini, tunerProfiles, log));
 
-// 0.2.3互換URL。今後は /plugin/{route} を正式入口とする。
+// 1.0.0互換URL。今後は /plugin/{route} を正式入口とする。
 app.MapGet("/plugin-ui/{route}", (string route, HttpRequest http, PluginRegistry registry, PluginActionTokenStore actionTokens, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, IOptions<TvTestSettings> tvTestOptions, IniSettingsService ini, IReadOnlyList<TunerProfile> tunerProfiles, LogRepository log) => RenderPluginHtml(route, http, registry, actionTokens, windows, toolWindows, tvTestOptions, ini, tunerProfiles, log));
 
 
@@ -4520,33 +4534,21 @@ static int ScoreAirhythmCandidate(EpgEvent e)
 }
 // ─── バージョン情報 ───────────────────────────────────────────────
 
-// v0.7.80: DirectRecorderBridge切り離し後の残存診断APIを削除。復号実行・監視はTvAIrEpgRecへ集約。
+// release_contract: DirectRecorderBridge切り離し後の残存診断APIを削除。復号実行・監視はTvAIrEpgRecへ集約。
 app.MapGet("/api/chain-reservation-contract", () => Results.Json(new
 {
     adjacentMinGapSeconds = ChainReservationContract.AdjacentMinGapSeconds,
     adjacentMaxGapSeconds = ChainReservationContract.AdjacentMaxGapSeconds,
     adjacentMinGapMilliseconds = ChainReservationContract.AdjacentMinGapMilliseconds,
     adjacentMaxGapMilliseconds = ChainReservationContract.AdjacentMaxGapMilliseconds,
-    rule = "chain_reservation_contract_shared_boundary_v0_11_98"
+    rule = "chain_reservation_contract_shared_boundary_release_contract"
 }));
 
-app.MapGet("/api/version", () =>
+app.MapGet("/api/version", () => Results.Ok(new
 {
-    var asm = System.Reflection.Assembly.GetExecutingAssembly();
-    var file = Environment.ProcessPath ?? asm.Location;
-    var fileVersion = !string.IsNullOrWhiteSpace(file) && File.Exists(file)
-        ? FileVersionInfo.GetVersionInfo(file).FileVersion
-        : null;
-    return Results.Ok(new
-    {
-        version = GetTvAIrAppVersion(),
-        assemblyVersion = asm.GetName().Version?.ToString() ?? "unknown",
-        fileVersion = fileVersion ?? "unknown",
-        informationalVersion = GetTvAIrAppVersion(),
-        processPath = file ?? string.Empty,
-        rule = "v0.10.96_reservation_tuner_pipeline_audit"
-    });
-});
+    product = "TvAIr",
+    version = GetTvAIrAppVersion()
+}));
 
 static string GetTvAIrAppVersion()
 {
@@ -4733,6 +4735,25 @@ static Version? ParseMarkerVersion(string? markerName)
     return new Version(values[0], values[1], values[2], values[3]);
 }
 
+
+static IEnumerable<string> EnumerateLegacyReleaseMarkers(string baseDir)
+{
+    try
+    {
+        return Directory.EnumerateFiles(baseDir, "release_*.txt")
+            .Where(path =>
+            {
+                var version = ParseMarkerVersion(Path.GetFileName(path));
+                return version is not null && version.Major == 0;
+            })
+            .ToArray();
+    }
+    catch
+    {
+        return Array.Empty<string>();
+    }
+}
+
 static string ResolveLatestReleaseMarker(string baseDir)
 {
     try
@@ -4741,21 +4762,14 @@ static string ResolveLatestReleaseMarker(string baseDir)
         var expectedCurrent = MarkerNameFromVersion(currentVersionText);
         if (!string.IsNullOrWhiteSpace(expectedCurrent) && expectedCurrent != "release_.txt")
         {
-            // v0.10.51: APP_BINARY_IDENTITY is a runtime identity audit. The marker must describe
-            // the running binary version first. Older packages can leave stale release_0_10_40.txt
+            // release_contract: APP_BINARY_IDENTITY is a runtime identity audit. The marker must describe
+            // the running binary version first. Older packages can leave stale legacy release marker
             // in the deployment directory, so do not let candidate enumeration override the current
             // version marker name. Existence is reported separately by BuildReleaseMarkerAudit.
             return expectedCurrent;
         }
 
-        var markers = Directory.EnumerateFiles(baseDir, "release_0_*.txt")
-            .Select(path => new { Name = Path.GetFileName(path) ?? string.Empty, Version = ParseMarkerVersion(Path.GetFileName(path)) })
-            .Where(x => x.Version is not null)
-            .OrderByDescending(x => x.Version)
-            .ThenByDescending(x => x.Name, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        return markers.FirstOrDefault()?.Name ?? "-";
+        return "-";
     }
     catch
     {
@@ -4792,7 +4806,7 @@ static string CleanupStaleReleaseMarkers(string baseDir, string expectedMarker)
     {
         if (string.IsNullOrWhiteSpace(expectedMarker) || expectedMarker == "release_.txt") return "skipped_no_expected";
 
-        var stale = Directory.EnumerateFiles(baseDir, "release_0_*.txt")
+        var stale = EnumerateLegacyReleaseMarkers(baseDir)
             .Where(path => !string.Equals(Path.GetFileName(path), expectedMarker, StringComparison.OrdinalIgnoreCase))
             .ToList();
 
@@ -4851,25 +4865,19 @@ static string BuildReleaseMarkerAudit(string baseDir, string selectedMarker)
 
         var markerResidueCleanup = CleanupStaleReleaseMarkers(baseDir, expected);
 
-        var names = Directory.EnumerateFiles(baseDir, "release_0_*.txt")
-            .Select(Path.GetFileName)
-            .Where(name => !string.IsNullOrWhiteSpace(name))
-            .Cast<string>()
-            .OrderByDescending(name => name, StringComparer.OrdinalIgnoreCase)
-            .Take(12)
-            .ToArray();
-        var sample = names.Length == 0 ? "-" : string.Join(",", names);
+        var legacyMarkerCount = EnumerateLegacyReleaseMarkers(baseDir).Count();
+        var sample = legacyMarkerCount == 0 ? "-" : $"legacyMarkerCount={legacyMarkerCount}";
 
         var selectedExists = File.Exists(selectedPath);
         var expectedExists = File.Exists(expectedPath);
         var selectionReason = string.Equals(selectedMarker, expected, StringComparison.OrdinalIgnoreCase)
             ? "current_version_marker_forced"
-            : "semantic_fallback";
-        return $"releaseMarker={selectedMarker} expectedMarker={expected} markerExists={selectedExists} expectedMarkerExists={expectedExists} expectedMarkerPath={SafePathForLog(expectedPath)} markerSelfHeal={markerSelfHeal} markerResidueCleanup={markerResidueCleanup} markerCandidatesSample={sample} selectedReason={selectionReason} markerSelection=v0.11.341_release_marker_residue_cleanup";
+            : "no_legacy_fallback";
+        return $"releaseMarker={selectedMarker} expectedMarker={expected} markerExists={selectedExists} expectedMarkerExists={expectedExists} expectedMarkerPath={SafePathForLog(expectedPath)} markerSelfHeal={markerSelfHeal} markerResidueCleanup={markerResidueCleanup} markerCandidatesSample={sample} selectedReason={selectionReason} markerSelection=release_contract";
     }
     catch (Exception ex)
     {
-        return $"releaseMarker={selectedMarker} markerAuditError={ex.GetType().Name}:{SafePathForLog(ex.Message)} markerSelection=v0.11.341_release_marker_residue_cleanup";
+        return $"releaseMarker={selectedMarker} markerAuditError={ex.GetType().Name}:{SafePathForLog(ex.Message)} markerSelection=release_contract";
     }
 }
 
@@ -4900,16 +4908,16 @@ static void EmitTvAIrRuntimeIdentityAudit(LogRepository log)
         log.Add("APP_BINARY_IDENTITY", "START",
             $"tvairVersion={GetTvAIrAppVersion()} tvairExe={Path.GetFileName(tvairExe)} tvairFile={Stamp(tvairExe)} " +
             $"workerFileName={Path.GetFileName(workerPath)} workerFile={Stamp(workerPath)} {releaseMarkerAudit} " +
-            $"baseDir=app_base rule=v0.11.28_release_candidate_environment_log_trim rollbackPoint=True rollbackBase=0.11.470 timePolicy=BROADCAST_CLOCK_PASSIVE_ONLY ntp=removed broadcastClock=observe_only_no_internal_offset titleQuality=record_filename_event_name_nfkc_guard pluginUiAction=host_action_dispatch_value_contract logPolicy=release_candidate_noise_reduce");
+            $"baseDir=app_base rule=release_contract rollbackPoint=True rollbackBase=release_contract timePolicy=BROADCAST_CLOCK_PASSIVE_ONLY ntp=removed broadcastClock=observe_only_no_internal_offset titleQuality=record_filename_event_name_nfkc_guard pluginUiAction=host_action_dispatch_value_contract logPolicy=release_noise_reduce");
     }
     catch (Exception ex)
     {
-        log.Add("APP_BINARY_IDENTITY", "ERROR", $"error={ex.GetType().Name}:{ex.Message} rule=v0.9.94_chain_head_pretune_state_transition");
+        log.Add("APP_BINARY_IDENTITY", "ERROR", $"error={ex.GetType().Name}:{ex.Message} rule=release_contract");
     }
 }
 
 
-// v0.6.86: TvAIrEpgRec.exe のProbe/EPGジョブ契約確認API。
+// release_contract: TvAIrEpgRec.exe のProbe/EPGジョブ契約確認API。
 // --mode probe の入口だけを提供し、録画・実EPG取得・録画前EPG確認の本線には接続しない。
 app.MapPost("/api/tvairepgrec/probe", async (int? keepAliveMs, LogRepository log) =>
     await RunTvAIrEpgRecProbeAsync(keepAliveMs, log));
@@ -4917,9 +4925,9 @@ app.MapGet("/api/tvairepgrec/probe", async (int? keepAliveMs, LogRepository log)
     await RunTvAIrEpgRecProbeAsync(keepAliveMs, log));
 
 
-// v0.6.86: TvAIrEpgRec.exe --mode epg のジョブ契約確認API。
+// release_contract: TvAIrEpgRec.exe --mode epg のジョブ契約確認API。
 // BonDriverは開かず、通常EPG取得に必要な group/tuner/did/bonDriver/channel 情報をWorkerが解釈して返すだけに限定する。
-// TvAIr v0.8.34 cleanup:
+// TvAIr release_contract cleanup:
 // Obsolete TvAIrEpgRec diagnostic/plan/probe endpoints were removed from Program.cs.
 // Keep only /api/tvairepgrec/probe because it is referenced by bundled documentation and remains a safe worker launch probe.
 
@@ -4938,14 +4946,14 @@ static async Task<IResult> RunTvAIrEpgRecProbeAsync(int? keepAliveMs, LogReposit
     var workerExe = ResolveTvAIrEpgRecExecutablePath();
     if (string.IsNullOrWhiteSpace(workerExe) || !File.Exists(workerExe))
     {
-        log.Add("TVAIREPGREC_PROBE", "NG", $"result=NG reason=worker_exe_not_found checked=AppContextBaseDirectory worker=TvAIrEpgRec.exe rule=v0.6.86_tvairepgrec_probe_api");
+        log.Add("TVAIREPGREC_PROBE", "NG", $"result=NG reason=worker_exe_not_found checked=AppContextBaseDirectory worker=TvAIrEpgRec.exe rule=release_contract");
         return Results.NotFound(new
         {
             result = "NG",
             reason = "worker_exe_not_found",
             expectedProcessName = "TvAIrEpgRec.exe",
             checkedBaseDirectory = AppContext.BaseDirectory,
-            rule = "v0.6.86_tvairepgrec_probe_api"
+            rule = "release_contract"
         });
     }
 
@@ -4962,7 +4970,7 @@ static async Task<IResult> RunTvAIrEpgRecProbeAsync(int? keepAliveMs, LogReposit
             ["caller"] = "TvAIr",
             ["purpose"] = "worker_process_shell_probe",
             ["tvairVersion"] = GetTvAIrAppVersion(),
-            ["rule"] = "v0.6.86_tvairepgrec_probe_api"
+            ["rule"] = "release_contract"
         }
     };
 
@@ -4973,7 +4981,7 @@ static async Task<IResult> RunTvAIrEpgRecProbeAsync(int? keepAliveMs, LogReposit
     }));
 
     var startedAt = DateTimeOffset.Now;
-    log.Add("TVAIREPGREC_PROBE", "START", $"jobId={jobId} exe={workerExe} keepAliveMs={boundedKeepAliveMs} rule=v0.6.86_tvairepgrec_probe_api");
+    log.Add("TVAIREPGREC_PROBE", "START", $"jobId={jobId} exe={workerExe} keepAliveMs={boundedKeepAliveMs} rule=release_contract");
 
     try
     {
@@ -4997,7 +5005,7 @@ static async Task<IResult> RunTvAIrEpgRecProbeAsync(int? keepAliveMs, LogReposit
 
         if (!process.Start())
         {
-            log.Add("TVAIREPGREC_PROBE", "NG", $"jobId={jobId} result=NG reason=process_start_returned_false exe={workerExe} rule=v0.6.86_tvairepgrec_probe_api");
+            log.Add("TVAIREPGREC_PROBE", "NG", $"jobId={jobId} result=NG reason=process_start_returned_false exe={workerExe} rule=release_contract");
             return Results.Problem("TvAIrEpgRec.exe start returned false.");
         }
 
@@ -5009,7 +5017,7 @@ static async Task<IResult> RunTvAIrEpgRecProbeAsync(int? keepAliveMs, LogReposit
         if (!completed)
         {
             try { process.Kill(entireProcessTree: true); } catch { }
-            log.Add("TVAIREPGREC_PROBE", "TIMEOUT", $"jobId={jobId} pid={pid} timeoutMs={timeoutMs} action=kill_requested rule=v0.6.86_tvairepgrec_probe_api");
+            log.Add("TVAIREPGREC_PROBE", "TIMEOUT", $"jobId={jobId} pid={pid} timeoutMs={timeoutMs} action=kill_requested rule=release_contract");
             return Results.Ok(new
             {
                 result = "TIMEOUT",
@@ -5022,13 +5030,13 @@ static async Task<IResult> RunTvAIrEpgRecProbeAsync(int? keepAliveMs, LogReposit
                 progress = ReadRecentTextLines(progressPath, 20),
                 resultPath,
                 progressPath,
-                rule = "v0.6.86_tvairepgrec_probe_api"
+                rule = "release_contract"
             });
         }
 
         var resultJson = TryReadJsonElement(resultPath);
         var progressLines = ReadRecentTextLines(progressPath, 20);
-        log.Add("TVAIREPGREC_PROBE", process.ExitCode == 0 ? "OK" : "NG", $"jobId={jobId} pid={pid} exitCode={process.ExitCode} elapsedMs={(int)(endedAt - startedAt).TotalMilliseconds} resultExists={File.Exists(resultPath)} progressLines={progressLines.Length} rule=v0.6.86_tvairepgrec_probe_api");
+        log.Add("TVAIREPGREC_PROBE", process.ExitCode == 0 ? "OK" : "NG", $"jobId={jobId} pid={pid} exitCode={process.ExitCode} elapsedMs={(int)(endedAt - startedAt).TotalMilliseconds} resultExists={File.Exists(resultPath)} progressLines={progressLines.Length} rule=release_contract");
 
         return Results.Ok(new
         {
@@ -5045,12 +5053,12 @@ static async Task<IResult> RunTvAIrEpgRecProbeAsync(int? keepAliveMs, LogReposit
             progressPath,
             jobPath,
             expectedProcessName = "TvAIrEpgRec.exe",
-            rule = "v0.6.86_tvairepgrec_probe_api"
+            rule = "release_contract"
         });
     }
     catch (Exception ex)
     {
-        log.Add("TVAIREPGREC_PROBE", "ERROR", $"jobId={jobId} error={ex.GetType().Name} message={ex.Message} rule=v0.6.86_tvairepgrec_probe_api");
+        log.Add("TVAIREPGREC_PROBE", "ERROR", $"jobId={jobId} error={ex.GetType().Name} message={ex.Message} rule=release_contract");
         return Results.Problem(ex.Message);
     }
 }
@@ -5467,7 +5475,7 @@ app.MapGet("/api/epg/run-state", (EpgScheduler scheduler) =>
 app.MapPost("/api/app/exit", (string? source, LogRepository log) =>
 {
     var safeSource = string.IsNullOrWhiteSpace(source) ? "WebMenu" : source.Trim().Replace("\r", " ").Replace("\n", " ");
-    try { log.Add("APP_EXIT_REQUEST", "Menu", $"source={safeSource} action=EnvironmentExit rule=v0.11.302_menu_tree_epg_guard"); } catch { }
+    try { log.Add("APP_EXIT_REQUEST", "Menu", $"source={safeSource} action=EnvironmentExit rule=release_contract"); } catch { }
     _ = Task.Run(async () =>
     {
         await Task.Delay(150).ConfigureAwait(false);
@@ -5634,7 +5642,7 @@ app.MapGet("/api/epg/events", (string? date, EpgStore store, ReservationStore re
     var cellItemsCount = displayEvents.Count(e => !string.IsNullOrEmpty(e.CellText.Items));
 
     log.Add("PROGRAMGUIDE_CELL_TEXT_DIRECT_HANDOFF", "API",
-        $"result=OK date={baseDate:yyyy-MM-dd} events={displayEvents.Count} blankTitle={rawBlankTitleCount} titleLessDescriptor={titleLessDescriptorCount} rawExtendedDescriptorHex={rawExtendedDescriptorHexCount} cellTitle={cellTitleCount} cellOutline={cellOutlineCount} cellDetail={cellDetailCount} cellItems={cellItemsCount} cellTextSource=db_raw_descriptor_common_decoder boundary=outline_detail_separator_kept dbReadFilters=none ch2Filter=removed reservationTitleBorrow=removed dtoDirectField=cellText legacyBodyFields=deleted rule=v0.11.442_programguide_celltext_payload_cache");
+        $"result=OK date={baseDate:yyyy-MM-dd} events={displayEvents.Count} blankTitle={rawBlankTitleCount} titleLessDescriptor={titleLessDescriptorCount} rawExtendedDescriptorHex={rawExtendedDescriptorHexCount} cellTitle={cellTitleCount} cellOutline={cellOutlineCount} cellDetail={cellDetailCount} cellItems={cellItemsCount} cellTextSource=db_raw_descriptor_common_decoder boundary=outline_detail_separator_kept dbReadFilters=none ch2Filter=removed reservationTitleBorrow=removed dtoDirectField=cellText legacyBodyFields=deleted rule=release_contract");
 
     return Results.Ok(new
     {
@@ -5769,39 +5777,38 @@ app.MapGet("/api/epg/tagged", (
         })
         .ToList();
 
-    return Results.Ok(new { count = filtered.Count, events = filtered, rule = "v0.11.442_programguide_celltext_payload_cache" });
+    return Results.Ok(new { count = filtered.Count, events = filtered, rule = "release_contract" });
 });
 
-// ログ
-app.MapGet("/api/debug/tuner-allocation", (ReservationStore store) =>
-{
-    var json = store.ReadTunerAllocationDebugJson();
-    return json is null
-        ? Results.NotFound(new { message = "tuner_allocation_debug.json がまだ作成されていません。" })
-        : Results.Text(json, "application/json; charset=utf-8");
-});
-
-app.MapPost("/api/debug/tuner-allocation/rebuild",
-    (ReservationStore store, ReservationAllocationRouteService allocationRoute) =>
-{
-    allocationRoute.Run(new ReservationAllocationRouteRequest(
-        Source: "Debug",
-        Action: "TunerAllocationRebuild",
-        RunKeywordMatcher: false,
-        SyncProgramRuleReservations: true,
-        ReevaluateAllocations: true,
-        RefreshPreRecordEpgEntries: false,
-        RefreshWakeTask: false));
-
-    var json = store.ReadTunerAllocationDebugJson();
-    return json is null
-        ? Results.NotFound(new { message = "tuner_allocation_debug.json の生成に失敗しました。" })
-        : Results.Text(json, "application/json; charset=utf-8");
-});
-
-
+// 開発診断API
 if (enableRouteReplayDebugApi)
 {
+    app.MapGet("/api/debug/tuner-allocation", (ReservationStore store) =>
+    {
+        var json = store.ReadTunerAllocationDebugJson();
+        return json is null
+            ? Results.NotFound(new { message = "tuner_allocation_debug.json がまだ作成されていません。" })
+            : Results.Text(json, "application/json; charset=utf-8");
+    });
+
+    app.MapPost("/api/debug/tuner-allocation/rebuild",
+        (ReservationStore store, ReservationAllocationRouteService allocationRoute) =>
+    {
+        allocationRoute.Run(new ReservationAllocationRouteRequest(
+            Source: "Debug",
+            Action: "TunerAllocationRebuild",
+            RunKeywordMatcher: false,
+            SyncProgramRuleReservations: true,
+            ReevaluateAllocations: true,
+            RefreshPreRecordEpgEntries: false,
+            RefreshWakeTask: false));
+
+        var json = store.ReadTunerAllocationDebugJson();
+        return json is null
+            ? Results.NotFound(new { message = "tuner_allocation_debug.json の生成に失敗しました。" })
+            : Results.Text(json, "application/json; charset=utf-8");
+    });
+
     app.MapPost("/api/debug/tuner-allocation/rebuild-manual-route",
         (ReservationStore store, ReservationAllocationRouteService allocationRoute) =>
     {
@@ -5841,6 +5848,7 @@ if (enableRouteReplayDebugApi)
 
 
 
+
 app.MapGet("/api/log", () => Results.NotFound());
 
 app.MapGet("/api/user-events", (int? count, string? severity, string? category, UserEventLogService userEvents) =>
@@ -5863,7 +5871,7 @@ app.MapDelete("/api/user-events", (UserEventLogService userEvents) =>
     return Results.Ok(new { message = $"ユーザー向けログを{removed}件削除しました。", removed });
 });
 
-// v0.6.82: DROP品質調査再開用の読み取り専用ログ窓口。
+// release_contract: DROP品質調査再開用の読み取り専用ログ窓口。
 // 既存ログを絞り込むだけで、録画・EPG・割当・停止処理には介入しない。
 app.MapGet("/api/recording-quality/logs", (int? count, LogRepository log) =>
 {
@@ -5888,7 +5896,7 @@ app.MapGet("/api/recording-quality/logs", (int? count, LogRepository log) =>
         count = entries.Length,
         limit = max,
         purpose = "drop_quality_audit_readonly",
-        rule = "v0.6.82_drop_quality_audit_readonly_endpoint",
+        rule = "release_contract",
         events = targetEvents.OrderBy(x => x).ToArray(),
         entries
     });
@@ -5942,7 +5950,7 @@ static bool ApplyReservationTitleQualityGuard(Reservation r, EpgEvent? requestEv
             r.Title = projectedTitle.Trim();
     }
     log.Add("RESERVATION_TITLE_SOURCE", source,
-        $"result=PASSTHROUGH service=[{TitleGuardLogValue(r.ServiceName)}] title=[{TitleGuardLogValue(r.Title)}] beforeTitle=[{TitleGuardLogValue(beforeTitle)}] dbTitle=[{TitleGuardLogValue(requestEvent?.Title)}] projectedTitle=[{TitleGuardLogValue(requestEvent is null ? null : EpgProjection.Title(requestEvent))}] displayTitle=[{ReservationUserTitleLogValue(r.Title)}] displaySource=reservation_display_metadata_contract nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eid={r.EventId} rule=v0.11.516_reservation_display_metadata_contract");
+        $"result=PASSTHROUGH service=[{TitleGuardLogValue(r.ServiceName)}] title=[{TitleGuardLogValue(r.Title)}] beforeTitle=[{TitleGuardLogValue(beforeTitle)}] dbTitle=[{TitleGuardLogValue(requestEvent?.Title)}] projectedTitle=[{TitleGuardLogValue(requestEvent is null ? null : EpgProjection.Title(requestEvent))}] displayTitle=[{ReservationUserTitleLogValue(r.Title)}] displaySource=reservation_display_metadata_contract nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eid={r.EventId} rule=release_contract");
     return true;
 }
 
@@ -6002,7 +6010,7 @@ app.MapPost("/api/reservations", (HttpRequest request, Reservation r, Reservatio
 {
     try
     {
-        // v0.5.65: 番組表の「予約」と「今すぐ録画」は同じAPI入口を通るが、
+        // release_contract: 番組表の「予約」と「今すぐ録画」は同じAPI入口を通るが、
         // ファイル名タイムスタンプ基準が異なるため source をここで確定する。
         // フロントから Immediate が明示された場合だけ今すぐ録画、それ以外は番組表予約。
         r.Source = r.Source == ReservationSource.Immediate
@@ -6031,7 +6039,7 @@ app.MapPost("/api/reservations", (HttpRequest request, Reservation r, Reservatio
         r.StartTime = r.StartTime.ToLocalTime();
         r.EndTime   = r.EndTime.ToLocalTime();
 
-        // v0.11.582:
+        // release_contract:
         // Immediate は「番組表の当該イベントを今から録る」操作であり、予約本体の時間軸は実開始側を正本にする。
         // EPG 番組開始時刻は requestEvent/EPG DB の event metadata として残し、StartTime / occupancy / segmentStart へは流し込まない。
         // REC_FOLLOW_UPDATE 側の巻き戻りガードより前に、初期予約作成時点で過去開始を作らない。
@@ -6044,19 +6052,19 @@ app.MapPost("/api/reservations", (HttpRequest request, Reservation r, Reservatio
             {
                 r.StartTime = immediateNow;
                 log.Add("IMMEDIATE_START_TIME_GUARD", sourceText,
-                    $"result=APPLIED source=Immediate oldStart={requestedStart:MM/dd HH:mm:ss} effectiveStart={r.StartTime:MM/dd HH:mm:ss} eventStart={(eventStart.HasValue ? eventStart.Value.ToString("MM/dd HH:mm:ss") : "-")} end={r.EndTime:MM/dd HH:mm:ss} policy=reservation_start_uses_runtime_actual_start eventMetadataPreserved=True occupancyRewindPrevented=True segmentStartRewindPrevented=True rule=v0.11.582_immediate_user_start_runtime_guard");
+                    $"result=APPLIED source=Immediate oldStart={requestedStart:MM/dd HH:mm:ss} effectiveStart={r.StartTime:MM/dd HH:mm:ss} eventStart={(eventStart.HasValue ? eventStart.Value.ToString("MM/dd HH:mm:ss") : "-")} end={r.EndTime:MM/dd HH:mm:ss} policy=reservation_start_uses_runtime_actual_start eventMetadataPreserved=True occupancyRewindPrevented=True segmentStartRewindPrevented=True rule=release_contract");
             }
             else
             {
                 log.Add("IMMEDIATE_START_TIME_GUARD", sourceText,
-                    $"result=NOT_APPLIED source=Immediate reason=no_past_start_to_guard oldStart={requestedStart:MM/dd HH:mm:ss} effectiveStart={r.StartTime:MM/dd HH:mm:ss} eventStart={(eventStart.HasValue ? eventStart.Value.ToString("MM/dd HH:mm:ss") : "-")} end={r.EndTime:MM/dd HH:mm:ss} rule=v0.11.582_immediate_user_start_runtime_guard");
+                    $"result=NOT_APPLIED source=Immediate reason=no_past_start_to_guard oldStart={requestedStart:MM/dd HH:mm:ss} effectiveStart={r.StartTime:MM/dd HH:mm:ss} eventStart={(eventStart.HasValue ? eventStart.Value.ToString("MM/dd HH:mm:ss") : "-")} end={r.EndTime:MM/dd HH:mm:ss} rule=release_contract");
             }
         }
 
         if (!ApplyReservationTitleQualityGuard(r, requestEvent, sourceText, log, out var rawTitleError))
             return Results.BadRequest(new { message = rawTitleError });
 
-        // v0.11.87:
+        // release_contract:
         // 番組表/局別リスト/予約ボタンの正規Add入口で同一親予約を1件に正規化する。
         // SystemEpg/PreRecEpg子予約はReservationStore側で親予約扱いしない。
         // 既存予約がある場合は新規IDを作らず、以後の割当は既存の共通ALLOC_ROUTEに任せる。
@@ -6064,7 +6072,7 @@ app.MapPost("/api/reservations", (HttpRequest request, Reservation r, Reservatio
         if (duplicate is not null)
         {
             log.Add("RESERVATION_DEDUPE", sourceText,
-                $"result=REUSE_EXISTING existing=R{duplicate.Id} requestedSource={sourceText} service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] rawTitleBlank={ReservationTitleDisplayContract.RawBlankFlag(r.Title)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eid={r.EventId} start={r.StartTime:MM/dd HH:mm} end={r.EndTime:MM/dd HH:mm} commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=v0.11.87_reservation_parent_dedupe");
+                $"result=REUSE_EXISTING existing=R{duplicate.Id} requestedSource={sourceText} service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] rawTitleBlank={ReservationTitleDisplayContract.RawBlankFlag(r.Title)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eid={r.EventId} start={r.StartTime:MM/dd HH:mm} end={r.EndTime:MM/dd HH:mm} commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
             var existing = store.GetById(duplicate.Id);
             return Results.Ok(new { id = duplicate.Id, message = "既に予約済みです。", isConflicted = existing?.IsConflicted ?? false, reused = true });
         }
@@ -6076,17 +6084,17 @@ app.MapPost("/api/reservations", (HttpRequest request, Reservation r, Reservatio
         {
             var accepted = epgScheduler.Cancel($"ReservationAdd.EpgCancelConfirmed.{sourceText}");
             log.Add("EPG_RESERVATION_ADD_CANCEL_CONFIRMED", sourceText,
-                $"result={(accepted ? "REQUESTED" : "NO_RUNNING_EPG")} targetScope={preAddRunState.TargetScope} source={preAddRunState.Source} uiMode={preAddRunState.UiMode} action=cancel_epg_before_reservation_add rule=v0.11.181_epg_reservation_cancel_confirmation");
+                $"result={(accepted ? "REQUESTED" : "NO_RUNNING_EPG")} targetScope={preAddRunState.TargetScope} source={preAddRunState.Source} uiMode={preAddRunState.UiMode} action=cancel_epg_before_reservation_add rule=release_contract");
         }
         else if (preAddRunState.IsRunning)
         {
             log.Add("EPG_RESERVATION_ADD_CANCEL_DECLINED", sourceText,
-                $"targetScope={preAddRunState.TargetScope} source={preAddRunState.Source} uiMode={preAddRunState.UiMode} action=continue_epg_and_add_reservation rule=v0.11.181_epg_reservation_cancel_confirmation");
+                $"targetScope={preAddRunState.TargetScope} source={preAddRunState.Source} uiMode={preAddRunState.UiMode} action=continue_epg_and_add_reservation rule=release_contract");
         }
 
-        log.Add("RESERVE_ENTRY", sourceText, $"共通入口要求 source={sourceText} service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] rawTitleBlank={ReservationTitleDisplayContract.RawBlankFlag(r.Title)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} start={r.StartTime:MM/dd HH:mm} end={r.EndTime:MM/dd HH:mm} rule=v0.5.78_service_title_first_log");
+        log.Add("RESERVE_ENTRY", sourceText, $"共通入口要求 source={sourceText} service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] rawTitleBlank={ReservationTitleDisplayContract.RawBlankFlag(r.Title)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} start={r.StartTime:MM/dd HH:mm} end={r.EndTime:MM/dd HH:mm} rule=release_contract");
         var id = store.Add(r);
-        log.Add("Reservation", "Add", $"予約追加: service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] id=R{id} source={sourceText} {r.StartTime:HH:mm}〜{r.EndTime:HH:mm} rule=v0.5.78_service_title_first_log");
+        log.Add("Reservation", "Add", $"予約追加: service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] id=R{id} source={sourceText} {r.StartTime:HH:mm}〜{r.EndTime:HH:mm} rule=release_contract");
 
         allocationRoute.Run(new ReservationAllocationRouteRequest(
             Source: routeSource,
@@ -6102,7 +6110,7 @@ app.MapPost("/api/reservations", (HttpRequest request, Reservation r, Reservatio
 
         var added = store.GetById(id);
 
-        // v0.11.178: EPG取得中の新規予約は、UI確認で了承された場合だけEPG全体をキャンセルする。
+        // release_contract: EPG取得中の新規予約は、UI確認で了承された場合だけEPG全体をキャンセルする。
         // 了承しない場合は予約追加のみ行い、既存の実行中EPGは継続する。
 
 
@@ -6120,11 +6128,11 @@ app.MapPost("/api/reservations/chain", (Reservation r, ReservationStore store, E
 {
     try
     {
-        // v0.9.67: チェーン予約は「後番組優先ON＋チェーン録画ON」を利用条件にしたうえで、
+        // release_contract: チェーン予約は「後番組優先ON＋チェーン録画ON」を利用条件にしたうえで、
         // ユーザーが番組表のチェーンボタンで明示指定した場合だけ成立する予約契約。
         // 自動救済ではなく、同一SID連続番組だけをAPI入口でも強制検証する。
         log.Add("RESERVE_ENTRY", "UserChainPolicy",
-            $"later={ini.LaterProgramPriority} chain={ini.PseudoContinuousRecording} explicitButton=True title=[{ReservationUserTitleLogValue(r.Title)}] service=[{r.ServiceName}] rule=v0.9.71_chain_follow_preserve_tail");
+            $"later={ini.LaterProgramPriority} chain={ini.PseudoContinuousRecording} explicitButton=True title=[{ReservationUserTitleLogValue(r.Title)}] service=[{r.ServiceName}] rule=release_contract");
 
         var requestEvent = r.EventId == 0 ? null : epgStore.GetOne(r.NetworkId, r.TransportStreamId, r.ServiceId, r.EventId);
 
@@ -6171,14 +6179,14 @@ app.MapPost("/api/reservations/chain", (Reservation r, ReservationStore store, E
         if (!chainSameChannel)
         {
             log.Add("RESERVE_ENTRY", "UserChainRejected",
-                $"reason=chain_requires_same_sid predecessor=R{predecessor.Id} sameNetwork={chainSameNetwork} sameTransport={chainSameTransport} sameService={chainSameService} prevNid={predecessor.NetworkId} prevTsid={predecessor.TransportStreamId} prevSid={predecessor.ServiceId} nextNid={r.NetworkId} nextTsid={r.TransportStreamId} nextSid={r.ServiceId} rule=v0.9.71_chain_follow_preserve_tail");
+                $"reason=chain_requires_same_sid predecessor=R{predecessor.Id} sameNetwork={chainSameNetwork} sameTransport={chainSameTransport} sameService={chainSameService} prevNid={predecessor.NetworkId} prevTsid={predecessor.TransportStreamId} prevSid={predecessor.ServiceId} nextNid={r.NetworkId} nextTsid={r.TransportStreamId} nextSid={r.ServiceId} rule=release_contract");
             return Results.Conflict(new { message = "チェーン予約は同一局（同一NID/TSID/SID）の連続番組のみ使用できます。" });
         }
 
         if (!chainAdjacent)
         {
             log.Add("RESERVE_ENTRY", "UserChainRejected",
-                $"reason=chain_requires_adjacent_program predecessor=R{predecessor.Id} gapSec={chainGapSeconds} prevEnd={predecessor.EndTime:MM/dd HH:mm:ss} nextStart={r.StartTime:MM/dd HH:mm:ss} rule=v0.9.71_chain_follow_preserve_tail");
+                $"reason=chain_requires_adjacent_program predecessor=R{predecessor.Id} gapSec={chainGapSeconds} prevEnd={predecessor.EndTime:MM/dd HH:mm:ss} nextStart={r.StartTime:MM/dd HH:mm:ss} rule=release_contract");
             return Results.Conflict(new { message = "チェーン予約は同一時刻を跨ぐ連続番組のみ使用できます。" });
         }
 
@@ -6203,27 +6211,27 @@ app.MapPost("/api/reservations/chain", (Reservation r, ReservationStore store, E
 
         var chainExecutionMode = "ChainDirectRecorder";
 
-        log.Add("RESERVE_ENTRY", "UserChain", $"共通入口要求 source=UserChain service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] predecessor=R{predecessor.Id} root=R{r.UserChainRootId} inheritTuner=[{predecessorTuner}] nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} start={r.StartTime:MM/dd HH:mm} end={r.EndTime:MM/dd HH:mm} executionMode={chainExecutionMode} commonRoute=ALLOC_ROUTE rule=v0.9.71_chain_follow_preserve_tail");
+        log.Add("RESERVE_ENTRY", "UserChain", $"共通入口要求 source=UserChain service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] predecessor=R{predecessor.Id} root=R{r.UserChainRootId} inheritTuner=[{predecessorTuner}] nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} start={r.StartTime:MM/dd HH:mm} end={r.EndTime:MM/dd HH:mm} executionMode={chainExecutionMode} commonRoute=ALLOC_ROUTE rule=release_contract");
         log.Add("CHAIN_COMMON_ENTRY", $"R{predecessor.Id}->pending",
-            $"button=Chain route=ALLOC_ROUTE executionMode={chainExecutionMode} normalRecordingRouteTouched=False prevService=[{predecessor.ServiceName}] prevTitle=[{ReservationUserTitleLogValue(predecessor.Title)}] nextService=[{r.ServiceName}] nextTitle=[{ReservationUserTitleLogValue(r.Title)}] prevTuner={predecessorTuner} prevActualTuner={(string.IsNullOrWhiteSpace(predecessor.ActualTunerName) ? "-" : predecessor.ActualTunerName)} root=R{r.UserChainRootId} rule=v0.9.71_chain_follow_preserve_tail");
+            $"button=Chain route=ALLOC_ROUTE executionMode={chainExecutionMode} normalRecordingRouteTouched=False prevService=[{predecessor.ServiceName}] prevTitle=[{ReservationUserTitleLogValue(predecessor.Title)}] nextService=[{r.ServiceName}] nextTitle=[{ReservationUserTitleLogValue(r.Title)}] prevTuner={predecessorTuner} prevActualTuner={(string.IsNullOrWhiteSpace(predecessor.ActualTunerName) ? "-" : predecessor.ActualTunerName)} root=R{r.UserChainRootId} rule=release_contract");
         log.Add("CHAIN_PAIR_EVAL", $"R{predecessor.Id}->pending",
-            $"result=READY_FOR_COMMON_ALLOC_ROUTE sameNetwork={chainSameNetwork} sameTransport={chainSameTransport} sameService={chainSameService} sameChannel={chainSameChannel} adjacent={chainAdjacent} gapSec={chainGapSeconds} userChain=True executionMode={chainExecutionMode} contract=same_sid_adjacent_explicit_button note=execution_layer_scaffold_only prevStart={predecessor.StartTime:MM/dd HH:mm:ss} prevEnd={predecessor.EndTime:MM/dd HH:mm:ss} nextStart={r.StartTime:MM/dd HH:mm:ss} nextEnd={r.EndTime:MM/dd HH:mm:ss} rule=v0.9.71_chain_follow_preserve_tail");
+            $"result=READY_FOR_COMMON_ALLOC_ROUTE sameNetwork={chainSameNetwork} sameTransport={chainSameTransport} sameService={chainSameService} sameChannel={chainSameChannel} adjacent={chainAdjacent} gapSec={chainGapSeconds} userChain=True executionMode={chainExecutionMode} contract=same_sid_adjacent_explicit_button note=execution_layer_scaffold_only prevStart={predecessor.StartTime:MM/dd HH:mm:ss} prevEnd={predecessor.EndTime:MM/dd HH:mm:ss} nextStart={r.StartTime:MM/dd HH:mm:ss} nextEnd={r.EndTime:MM/dd HH:mm:ss} rule=release_contract");
         log.Add("CHAIN_CONTRACT_WARNING", $"R{predecessor.Id}->pending",
-            $"accepted=True frontSegmentMayBeCut=True successorCompletenessPriority=True sameSidOnly=True userExplicitButton=True message=チェーン予約では前番組の後半がカットされる可能性があります rule=v0.9.71_chain_follow_preserve_tail");
+            $"accepted=True frontSegmentMayBeCut=True successorCompletenessPriority=True sameSidOnly=True userExplicitButton=True message=チェーン予約では前番組の後半がカットされる可能性があります rule=release_contract");
 
         int id;
         if (existingReservation is not null)
         {
             id = existingReservation.Id;
             store.UpdateUserChainLink(id, predecessor.Id, r.UserChainRootId.Value);
-            log.Add("Reservation", "ChainConvert", $"既存予約をチェーン予約へ昇格: service=[{existingReservation.ServiceName}] title=[{ReservationUserTitleLogValue(existingReservation.Title)}] id=R{id} predecessor=R{predecessor.Id} tuner=[{predecessorTuner}] executionMode={chainExecutionMode} wasConflicted={existingReservation.IsConflicted} {existingReservation.StartTime:HH:mm}〜{existingReservation.EndTime:HH:mm} rule=v0.9.71_chain_follow_preserve_tail");
-            log.Add("CHAIN_EXECUTION_MODE", $"R{id}", $"mode={chainExecutionMode} stage=existing_reservation_converted commonRoute=ALLOC_ROUTE normalExecutorFrozen=True bridgeHandoffImplemented=False predecessor=R{predecessor.Id} rule=v0.9.71_chain_follow_preserve_tail");
+            log.Add("Reservation", "ChainConvert", $"既存予約をチェーン予約へ昇格: service=[{existingReservation.ServiceName}] title=[{ReservationUserTitleLogValue(existingReservation.Title)}] id=R{id} predecessor=R{predecessor.Id} tuner=[{predecessorTuner}] executionMode={chainExecutionMode} wasConflicted={existingReservation.IsConflicted} {existingReservation.StartTime:HH:mm}〜{existingReservation.EndTime:HH:mm} rule=release_contract");
+            log.Add("CHAIN_EXECUTION_MODE", $"R{id}", $"mode={chainExecutionMode} stage=existing_reservation_converted commonRoute=ALLOC_ROUTE normalExecutorFrozen=True bridgeHandoffImplemented=False predecessor=R{predecessor.Id} rule=release_contract");
         }
         else
         {
             id = store.Add(r);
-            log.Add("Reservation", "ChainAdd", $"チェーン予約追加: service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] id=R{id} predecessor=R{predecessor.Id} tuner=[{predecessorTuner}] executionMode={chainExecutionMode} {r.StartTime:HH:mm}〜{r.EndTime:HH:mm} rule=v0.9.71_chain_follow_preserve_tail");
-            log.Add("CHAIN_EXECUTION_MODE", $"R{id}", $"mode={chainExecutionMode} stage=new_chain_reservation_added commonRoute=ALLOC_ROUTE normalExecutorFrozen=True bridgeHandoffImplemented=False predecessor=R{predecessor.Id} rule=v0.9.71_chain_follow_preserve_tail");
+            log.Add("Reservation", "ChainAdd", $"チェーン予約追加: service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] id=R{id} predecessor=R{predecessor.Id} tuner=[{predecessorTuner}] executionMode={chainExecutionMode} {r.StartTime:HH:mm}〜{r.EndTime:HH:mm} rule=release_contract");
+            log.Add("CHAIN_EXECUTION_MODE", $"R{id}", $"mode={chainExecutionMode} stage=new_chain_reservation_added commonRoute=ALLOC_ROUTE normalExecutorFrozen=True bridgeHandoffImplemented=False predecessor=R{predecessor.Id} rule=release_contract");
         }
 
         allocationRoute.Run(new ReservationAllocationRouteRequest(
@@ -6240,7 +6248,7 @@ app.MapPost("/api/reservations/chain", (Reservation r, ReservationStore store, E
             ExecutionMode: chainExecutionMode));
 
         var added = store.GetById(id);
-        log.Add("CHAIN_COMMON_ENTRY", $"R{id}", $"result=ROUTED_TO_ALLOC_ROUTE executionMode={chainExecutionMode} isConflicted={(added?.IsConflicted.ToString() ?? "-")} assignedTuner={(string.IsNullOrWhiteSpace(added?.TunerName) ? "-" : added!.TunerName)} actualTuner={(string.IsNullOrWhiteSpace(added?.ActualTunerName) ? "-" : added!.ActualTunerName)} predecessor=R{predecessor.Id} normalRecordingRouteTouched=False rule=v0.9.71_chain_follow_preserve_tail");
+        log.Add("CHAIN_COMMON_ENTRY", $"R{id}", $"result=ROUTED_TO_ALLOC_ROUTE executionMode={chainExecutionMode} isConflicted={(added?.IsConflicted.ToString() ?? "-")} assignedTuner={(string.IsNullOrWhiteSpace(added?.TunerName) ? "-" : added!.TunerName)} actualTuner={(string.IsNullOrWhiteSpace(added?.ActualTunerName) ? "-" : added!.ActualTunerName)} predecessor=R{predecessor.Id} normalRecordingRouteTouched=False rule=release_contract");
         if (added is not null)
             userEvents.AddChainReservationAdded(predecessor, added, id, existingReservation is not null);
         return Results.Ok(new { id, message = existingReservation is null ? "チェーン予約しました。" : "既存予約をチェーン予約に変更しました。", isConflicted = added?.IsConflicted ?? false, tunerName = added?.TunerName ?? "" });
@@ -6259,7 +6267,7 @@ app.MapDelete("/api/reservations/{id}", (int id, ReservationStore store, Reserva
     var r = store.GetById(id);
     if (r is null) return Results.NotFound();
 
-    // v0.6.31: 番組表セルが内部用の録画前EPG確認(SystemEpg)を拾ってしまっても、
+    // release_contract: 番組表セルが内部用の録画前EPG確認(SystemEpg)を拾ってしまっても、
     // 取消対象は親の実録画予約へ向ける。SystemEpgは番組表上の通常予約として扱わない。
     if (r.Source == ReservationSource.Epg
         && r.SourceRuleId.HasValue
@@ -6270,7 +6278,7 @@ app.MapDelete("/api/reservations/{id}", (int id, ReservationStore store, Reserva
         if (parent is not null && parent.Status != ReservationStatus.Completed && parent.Status != ReservationStatus.Failed && parent.Status != ReservationStatus.Cancelled)
         {
             log.Add("PROGRAM_GRID_CANCEL_TARGET", $"R{id}",
-                $"result=REDIRECT_CHILD_TO_PARENT child=R{id} parent=R{parent.Id} childTitle={ReservationUserTitleLogValue(r.Title)} parentService={parent.ServiceName} parentTitle={ReservationUserTitleLogValue(parent.Title)} rule=v0.9.71_chain_follow_preserve_tail");
+                $"result=REDIRECT_CHILD_TO_PARENT child=R{id} parent=R{parent.Id} childTitle={ReservationUserTitleLogValue(r.Title)} parentService={parent.ServiceName} parentTitle={ReservationUserTitleLogValue(parent.Title)} rule=release_contract");
             id = parent.Id;
             r = parent;
         }
@@ -6302,7 +6310,7 @@ app.MapDelete("/api/reservations/{id}", (int id, ReservationStore store, Reserva
     var policyTargetText = string.Join(",", chainTargets.Select(x => $"R{x.Id}:{x.ServiceName}:{ReservationUserTitleLogValue(x.Title)}:rawTitleBlank={ReservationTitleDisplayContract.RawBlankFlag(x.Title)}"));
     var policyHead = chainTargets.FirstOrDefault(x => x.Id == id) ?? chainTargets.FirstOrDefault();
     log.Add("CHAIN_CANCEL_POLICY", $"R{id}",
-        $"operation=ReservationCancel service={TitleGuardLogValue(policyHead?.ServiceName)} title={ReservationUserTitleLogValue(policyHead?.Title)} rawTitleBlank={ReservationTitleDisplayContract.RawBlankFlag(policyHead?.Title)} result={(targetIds.Count > 1 ? "CANCEL_CHAIN_RANGE" : "CANCEL_SINGLE")} reason=explicit_reservation_cancel cancelSuccessors={(targetIds.Count > 1)} stopOperation=False targetCount={targetIds.Count} targets=[{policyTargetText}] rule=v0.11.516_chain_stop_policy_title_metadata_contract");
+        $"operation=ReservationCancel service={TitleGuardLogValue(policyHead?.ServiceName)} title={ReservationUserTitleLogValue(policyHead?.Title)} rawTitleBlank={ReservationTitleDisplayContract.RawBlankFlag(policyHead?.Title)} result={(targetIds.Count > 1 ? "CANCEL_CHAIN_RANGE" : "CANCEL_SINGLE")} reason=explicit_reservation_cancel cancelSuccessors={(targetIds.Count > 1)} stopOperation=False targetCount={targetIds.Count} targets=[{policyTargetText}] rule=release_contract");
     foreach (var target in chainTargets.Where(x => x.Source == ReservationSource.Keyword && x.Status == ReservationStatus.Scheduled))
         store.AddKeywordCancelOnce(target);
     store.UpdateStatusMany(targetIds, ReservationStatus.Cancelled);
@@ -6321,17 +6329,17 @@ app.MapDelete("/api/reservations/{id}", (int id, ReservationStore store, Reserva
     if (preRecChildCancelled > 0)
     {
         log.Add("PRE_REC_EPG_CHILD_CANCEL", $"R{id}",
-            $"result=CANCELLED children={preRecChildCancelled} parents=[{string.Join(",", targetIds.Select(x => $"R{x}"))}] reason=parent_reservation_cancelled rule=v0.9.71_chain_follow_preserve_tail");
+            $"result=CANCELLED children={preRecChildCancelled} parents=[{string.Join(",", targetIds.Select(x => $"R{x}"))}] reason=parent_reservation_cancelled rule=release_contract");
     }
 
     if (targetIds.Count > 1)
     {
         var rangeText = string.Join(",", targetIds.Select(x => $"R{x}"));
-        log.Add("Reservation", "ChainCancel", $"チェーン予約キャンセル: start=R{id} count={targetIds.Count} targets=[{rangeText}] policy=reservation_cancel_cascades_chain rule=v0.9.71_chain_follow_preserve_tail");
+        log.Add("Reservation", "ChainCancel", $"チェーン予約キャンセル: start=R{id} count={targetIds.Count} targets=[{rangeText}] policy=reservation_cancel_cascades_chain rule=release_contract");
     }
     else
     {
-        log.Add("Reservation", "Cancel", $"予約キャンセル: [{ReservationUserTitleLogValue(r.Title)}] {r.StartTime:HH:mm}〜{r.EndTime:HH:mm} policy=single_reservation_cancel rule=v0.9.71_chain_follow_preserve_tail");
+        log.Add("Reservation", "Cancel", $"予約キャンセル: [{ReservationUserTitleLogValue(r.Title)}] {r.StartTime:HH:mm}〜{r.EndTime:HH:mm} policy=single_reservation_cancel rule=release_contract");
     }
 
     allocationRoute.Run(new ReservationAllocationRouteRequest(
@@ -6374,8 +6382,8 @@ app.MapGet("/api/wake-status", (TaskSchedulerService taskSvc) =>
 });
 
 // 録画停止（録画中の予約を停止し、録画ライフサイクル側で状態確定する）
-// v0.11.178: 番組表/自動検索/プログラム/手動を同じ共通停止入口に通す。
-app.MapPost("/api/reservations/{id}/stop", (int id, ReservationStore store, ReservationScheduler scheduler, ReservationAllocationRouteService allocationRoute, LogRepository log) =>
+// release_contract: 番組表/自動検索/プログラム/手動を同じ共通停止入口に通す。
+app.MapPost("/api/reservations/{id}/stop", (int id, ReservationStore store, ReservationScheduler scheduler, LogRepository log) =>
 {
     var r = store.GetById(id);
     if (r is null) return Results.NotFound(new { message = "予約が見つかりません。" });
@@ -6390,7 +6398,7 @@ app.MapPost("/api/reservations/{id}/stop", (int id, ReservationStore store, Rese
         if (parent is not null && parent.Status == ReservationStatus.Recording)
         {
             log.Add("REC_STOP_ROUTE", $"R{id}",
-                $"result=REDIRECT_CHILD_TO_PARENT child=R{id} parent=R{parent.Id} childTitle={ReservationUserTitleLogValue(r.Title)} parentService={parent.ServiceName} parentTitle={ReservationUserTitleLogValue(parent.Title)} rule=v0.11.181_program_recording_common_stop_route");
+                $"result=REDIRECT_CHILD_TO_PARENT child=R{id} parent=R{parent.Id} childTitle={ReservationUserTitleLogValue(r.Title)} parentService={parent.ServiceName} parentTitle={ReservationUserTitleLogValue(parent.Title)} rule=release_contract");
             id = parent.Id;
             r = parent;
         }
@@ -6400,25 +6408,16 @@ app.MapPost("/api/reservations/{id}/stop", (int id, ReservationStore store, Rese
         return Results.BadRequest(new { message = "録画中ではありません。" });
 
     log.Add("REC_STOP_ROUTE", $"R{id}",
-        $"result=REQUESTED source={r.Source} service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] status={r.Status} tuner=[{r.TunerName}] actualTuner=[{r.ActualTunerName}] route=ReservationApiStop->ReservationScheduler.StopRecording commonRoute=recording_stop_all_sources rule=v0.11.181_program_recording_common_stop_route");
+        $"result=REQUESTED source={r.Source} service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] status={r.Status} tuner=[{r.TunerName}] actualTuner=[{r.ActualTunerName}] route=ReservationApiStop->ReservationScheduler.StopRecording commonRoute=recording_stop_all_sources rule=release_contract");
 
     scheduler.StopRecording(id);
 
-    // StopSessionAsync側で停止後の再評価/Wake再構築を行うが、API共通入口としても要求を記録し、
-    // StopPhaseGate配下ではdeferされる前提で横串再評価を要求する。
-    allocationRoute.Run(new ReservationAllocationRouteRequest(
-        Source: "ReservationStop",
-        Action: "StopRecording",
-        RunKeywordMatcher: false,
-        SyncProgramRuleReservations: true,
-        ReevaluateAllocations: true,
-        RefreshPreRecordEpgEntries: true,
-        RefreshWakeTask: true,
-        EmitConflictLogs: true,
-        ConflictLogCategory: "ReservationAPI",
-        ConflictLogTitle: "StopRecordingConflict"));
+    // StopSessionAsync側が停止完了後の再評価/Wake再構築を正本として実行する。
+    // API入口では停止要求を即時受理し、二重の同期再評価でUI応答を待たせない。
+    log.Add("REC_STOP_ROUTE", $"R{id}",
+        $"result=ACCEPTED_DEFER_REALLOCATION source={r.Source} service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] route=ReservationApiStop->StopSessionAsyncReevaluation apiSynchronousAllocation=False rule=release_contract");
 
-    return Results.Ok(new { message = "録画を停止しました。", stoppedId = id, source = r.Source.ToString() });
+    return Results.Ok(new { message = "録画を停止しました。", stoppedId = id, source = r.Source.ToString(), accepted = true });
 });
 
 // 録画ON/OFF切り替え（ユーザーによる能動的な有効/無効化）
@@ -6432,7 +6431,7 @@ app.MapPatch("/api/reservations/{id}/enabled", (int id, EnabledRequest req, Rese
     {
         var deletedPreRec = store.DeleteScheduledPreRecordEpgEntriesForParent(id);
         log.Add("PRE_REC_EPG_PARENT_CLEANUP", $"R{id}",
-            $"result={(deletedPreRec > 0 ? "DELETED" : "NONE")} parent=R{id} reason=parent_disabled deleted={deletedPreRec} trigger=enabled_toggle action=release_prerec_epg_before_reallocation rule=v0.11.302_prerec_parent_state_cleanup");
+            $"result={(deletedPreRec > 0 ? "DELETED" : "NONE")} parent=R{id} reason=parent_disabled deleted={deletedPreRec} trigger=enabled_toggle action=release_prerec_epg_before_reallocation rule=release_contract");
     }
     allocationRoute.Run(new ReservationAllocationRouteRequest(
         Source: "ReservationList",
@@ -6670,7 +6669,7 @@ app.MapPut("/api/keyword-rules/{id}", (int id, KeywordRule r, ReservationStore s
     NormalizeKeywordRule(r);
     r.Id = id;
 
-    // v32.65: ルール更新時はリアルタイム整合性のため、
+    // ルール更新時はリアルタイム整合性のため、
     // 旧ルール由来の scheduled キーワード予約を物理削除してから更新・再マッチングする。
     // これによりルール内容変更・有効/無効切り替え問わず予約リストが最新状態に保たれる。
     // recording/completed/failed/cancelled は触らない(ユーザーの録画行為や履歴は保持)。
@@ -6721,7 +6720,7 @@ app.MapPost("/api/keyword-rules/reorder", (KeywordRuleOrderRequest req, Reservat
 
 app.MapDelete("/api/keyword-rules/{id}", (int id, ReservationStore store, ReservationAllocationRouteService allocationRoute, LogRepository log) =>
 {
-    // v33.32: ルール削除時は、ルール本体削除だけで終わらせず、
+    // ルール削除時は、ルール本体削除だけで終わらせず、
     // 旧ルール由来予約の解放→再マッチング→共通割当再評価まで必ず通す。
     // さらに前後の件数をログに残し、画面側の誤認と切り分けやすくする。
     var beforeCount = store.GetKeywordRules().Count;
@@ -6852,7 +6851,7 @@ app.MapDelete("/api/program-rules/{id}", (int id, ReservationStore store, Reserv
 app.MapGet("/api/settings", (IniSettingsService ini, IOptions<TvTestSettings> tvTestOpts, IOptions<AppSettings> appOpts) =>
 {
     var dto = ini.ToDto();
-    // v0.5.77: 初回設定画面で TVTest/BonDriver/.ch2 の個人環境パスを推定表示しない。
+    // release_contract: 初回設定画面で TVTest/BonDriver/.ch2 の個人環境パスを推定表示しない。
     // appsettings.json は安全な空欄既定値のみ保持し、サンプルは appsettings.example.json へ分離する。
     if (ini.IsFirstRun)
     {
@@ -6872,7 +6871,7 @@ app.MapGet("/api/settings-theme-state", (IniSettingsService ini) =>
         systemTheme = theme,
         selectedTheme = theme,
         revision = Interlocked.Read(ref settingsThemeRuntimeRevision),
-        rule = "v0.11.590_settings_theme_cleanup_completion_audit_contract"
+        rule = "release_contract"
     });
 });
 
@@ -6919,30 +6918,30 @@ app.MapPut("/api/settings", (IniSettingsDto dto, IniSettingsService ini, Channel
     var afterSystemTheme = IniSettingsService.NormalizeSystemTheme(dto.SystemTheme);
     var systemThemeChanged = !string.Equals(beforeSystemTheme, afterSystemTheme, StringComparison.OrdinalIgnoreCase);
 
-    // v0.11.95: チューナー変更は再起動必須。保存はするが、稼働中RuntimeTopologyへは即時反映しない。
-    // v0.11.682: ch2/ChSetはRuntimeTopologyではなくChannelMap契約として扱い、保存直後にChannelFileLoaderのcacheを明示破棄する。
+    // release_contract: チューナー変更は再起動必須。保存はするが、稼働中RuntimeTopologyへは即時反映しない。
+    // release_contract: ch2/ChSetはRuntimeTopologyではなくChannelMap契約として扱い、保存直後にChannelFileLoaderのcacheを明示破棄する。
     ini.Save(dto, applyTunerTopologyToRuntime: !tunerTopologyChanged);
     if (channelMapChanged)
     {
         channelLoader.Invalidate();
         log.Add("CHANNEL_MAP_SETTINGS_HOT_RELOAD", "Settings",
-            $"changed=True grCh2={SafePathForLog(before.GrChannelFilePath)}->{SafePathForLog(dto.GrChannelFilePath)} grChSet={SafePathForLog(before.GrChSetFilePath)}->{SafePathForLog(dto.GrChSetFilePath)} bscsCh2={SafePathForLog(before.BscsChannelFilePath)}->{SafePathForLog(dto.BscsChannelFilePath)} bscsChSet={SafePathForLog(before.BscsChSetFilePath)}->{SafePathForLog(dto.BscsChSetFilePath)} action=invalidate_channel_cache dbMutation=none tunerTopologyMutation={tunerTopologyChanged} rule=v0.11.682_channel_runtime_settings_cache_contract");
+            $"changed=True grCh2={SafePathForLog(before.GrChannelFilePath)}->{SafePathForLog(dto.GrChannelFilePath)} grChSet={SafePathForLog(before.GrChSetFilePath)}->{SafePathForLog(dto.GrChSetFilePath)} bscsCh2={SafePathForLog(before.BscsChannelFilePath)}->{SafePathForLog(dto.BscsChannelFilePath)} bscsChSet={SafePathForLog(before.BscsChSetFilePath)}->{SafePathForLog(dto.BscsChSetFilePath)} action=invalidate_channel_cache dbMutation=none tunerTopologyMutation={tunerTopologyChanged} rule=release_contract");
     }
     var themeRevision = systemThemeChanged ? Interlocked.Increment(ref settingsThemeRuntimeRevision) : Interlocked.Read(ref settingsThemeRuntimeRevision);
     log.Add("SETTINGS_THEME_HOT_RELOAD", "Theme",
-        $"changed={systemThemeChanged} before={beforeSystemTheme} after={afterSystemTheme} revision={themeRevision} bridge=settings-theme-state frontend=TvAIrTheme.syncRuntime rule=v0.11.590_settings_theme_cleanup_completion_audit_contract");
+        $"changed={systemThemeChanged} before={beforeSystemTheme} after={afterSystemTheme} revision={themeRevision} bridge=settings-theme-state frontend=TvAIrTheme.syncRuntime rule=release_contract");
     log.Add("SETTINGS_HOT_RELOAD", "RecordingPolicy",
         $"changed={recordingPolicyChanged} beforeLater={before.LaterProgramPriority} afterLater={dto.LaterProgramPriority} beforeChain={before.PseudoContinuousRecording} afterChain={dto.PseudoContinuousRecording} pre={before.PreStartMarginSeconds}->{dto.PreStartMarginSeconds} post={before.PostEndMarginSeconds}->{dto.PostEndMarginSeconds} afterAction={before.RecordingAfterAction}->{IniSettingsService.NormalizeRecordingAfterAction(dto.RecordingAfterAction)} afterActionDelayMin={before.RecordingAfterActionDelayMinutes}->{IniSettingsService.NormalizeRecordingAfterActionDelayMinutes(dto.RecordingAfterActionDelayMinutes)}");
     log.Add("SETTINGS_EFFECTIVE_STATE", "Server",
         $"afterSave later={ini.LaterProgramPriority} chain={ini.PseudoContinuousRecording} afterAction={ini.RecordingAfterAction} afterActionDelayMin={ini.RecordingAfterActionDelayMinutes} dtoLater={dto.LaterProgramPriority} dtoChain={dto.PseudoContinuousRecording} dtoAfterAction={dto.RecordingAfterAction} dtoAfterActionDelayMin={dto.RecordingAfterActionDelayMinutes}");
     log.Add("SETTINGS_RECORDING_OPTIONS", "Recording",
-        $"curServiceOnly={before.TvTestRecordCurServiceOnly}->{dto.TvTestRecordCurServiceOnly} subtitle={before.TvTestRecordSubtitle}->{dto.TvTestRecordSubtitle} dataCarrousel={before.TvTestRecordDataCarrousel}->{dto.TvTestRecordDataCarrousel} showTvAIrEpgRecTaskbarIcon={before.ShowTvAIrEpgRecTaskbarIcon}->{dto.ShowTvAIrEpgRecTaskbarIcon} trayBlinkContract=recording_epg_epgcheck rule=v0.11.393_libisdb_style_eit_reader_rebuild");
+        $"curServiceOnly={before.TvTestRecordCurServiceOnly}->{dto.TvTestRecordCurServiceOnly} subtitle={before.TvTestRecordSubtitle}->{dto.TvTestRecordSubtitle} dataCarrousel={before.TvTestRecordDataCarrousel}->{dto.TvTestRecordDataCarrousel} showTvAIrEpgRecTaskbarIcon={before.ShowTvAIrEpgRecTaskbarIcon}->{dto.ShowTvAIrEpgRecTaskbarIcon} trayBlinkContract=recording_epg_epgcheck rule=release_contract");
     log.Add("EPG_SETTINGS_SAVE_AUDIT", "Settings",
-        $"enabled={before.EpgEnabled}->{dto.EpgEnabled} time={before.EpgHour:D2}:{before.EpgMinute:D2}->{Math.Clamp(dto.EpgHour,0,23):D2}:{Math.Clamp(dto.EpgMinute,0,59):D2} depth={before.EpgDepth}->{dto.EpgDepth} preRecordMinutes={before.EpgPreRecordMinutes}->{dto.EpgPreRecordMinutes} timePolicy=BROADCAST_CLOCK_PASSIVE_ONLY ntp=removed_code_path broadcastClock=observe_only_no_internal_offset route=SettingsSave->EpgScheduler.UpdateConfig->ALLOC_ROUTE/Wake rule=v0.11.502_ntp_code_removal_rollback470");
+        $"enabled={before.EpgEnabled}->{dto.EpgEnabled} time={before.EpgHour:D2}:{before.EpgMinute:D2}->{Math.Clamp(dto.EpgHour,0,23):D2}:{Math.Clamp(dto.EpgMinute,0,59):D2} depth={before.EpgDepth}->{dto.EpgDepth} preRecordMinutes={before.EpgPreRecordMinutes}->{dto.EpgPreRecordMinutes} timePolicy=BROADCAST_CLOCK_PASSIVE_ONLY ntp=removed_code_path broadcastClock=observe_only_no_internal_offset route=SettingsSave->EpgScheduler.UpdateConfig->ALLOC_ROUTE/Wake rule=release_contract");
     if (tunerTopologyChanged)
     {
         log.Add("TUNER_TOPOLOGY_RESTART_REQUIRED", "Settings",
-            $"result=PENDING_RESTART applyRuntimeTopology=False runtimeTunerCount={before.Tuners.Count} savedTunerCount={(dto.Tuners?.Count ?? 0)} runtimeSignature={SafePathForLog(BuildTunerTopologySignature(before.Tuners))} pendingSignature={SafePathForLog(BuildTunerTopologySignature(dto.Tuners))} affected=Wake,TunerPool,EPG,PreRecEpg,PluginUiContext,ExternalTuner,ViewingProtection rule=v0.11.95_tuner_change_restart_required_buildfix");
+            $"result=PENDING_RESTART applyRuntimeTopology=False runtimeTunerCount={before.Tuners.Count} savedTunerCount={(dto.Tuners?.Count ?? 0)} runtimeSignature={SafePathForLog(BuildTunerTopologySignature(before.Tuners))} pendingSignature={SafePathForLog(BuildTunerTopologySignature(dto.Tuners))} affected=Wake,TunerPool,EPG,PreRecEpg,PluginUiContext,ExternalTuner,ViewingProtection rule=release_contract");
     }
 
     // EPGスケジュール設定を動的反映（再起動不要）
@@ -7150,7 +7149,7 @@ static string BuildTunerTopologySignature(IEnumerable<TunerProfileDto>? tuners)
         .OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
 }
 
-// v0.6.07: Windows アプリテーマ取得。current 選択時のフロントテーマ決定に使う。
+// release_contract: Windows アプリテーマ取得。current 選択時のフロントテーマ決定に使う。
 // AppsUseLightTheme: 0=dark, 1=light
 app.MapGet("/api/system-theme", () =>
 {
@@ -7210,12 +7209,12 @@ static void EmitTvAIrEpgRecRuntimePrerequisiteAudit(LogRepository log, TvTestSet
             $"b25Decoder={(b25Exists ? "OK" : "MISSING")} " +
             $"winscard={(winSCardExists ? "OK_OR_NOT_REQUIRED" : "MISSING_OR_NOT_REQUIRED")} winscardIni={(winSCardIniExists ? "OK" : "MISSING_OR_NOT_REQUIRED")} " +
             $"tvTestIni={(tvTestIniExists ? "OK" : "MISSING")} " +
-            $"paths=diagnostic_only note=runtime_prerequisite_summary rule=runtime_prerequisite_release_candidate_trim");
+            $"paths=diagnostic_only note=runtime_prerequisite_summary rule=runtime_prerequisite_release_trim");
     }
     catch (Exception ex)
     {
         log.Add("TVAIREPGREC_RUNTIME_PREREQUISITE", "WARN",
-            $"result=CHECK_FAILED error={SafeRuntimePrereqLogValue(ex.GetType().Name)} message={SafeRuntimePrereqLogValue(ex.Message)} rule=runtime_prerequisite_release_candidate_trim");
+            $"result=CHECK_FAILED error={SafeRuntimePrereqLogValue(ex.GetType().Name)} message={SafeRuntimePrereqLogValue(ex.Message)} rule=runtime_prerequisite_release_trim");
     }
 }
 
@@ -7326,7 +7325,7 @@ static IReadOnlyList<EpgEvent> ProgramGuideNormalizeServiceDayEvents(
     DateTime dayStart,
     DateTime dayEnd)
 {
-    // v0.11.612: keep one row per broadcast event identity.  Collapse only
+    // release_contract: keep one row per broadcast event identity.  Collapse only
     // duplicate table rows for the exact same event/time; never collapse by
     // service key alone.
     var candidates = events
@@ -7368,8 +7367,8 @@ static IReadOnlyList<EpgEvent> BuildProgramGuideTimelineEvents(
     LogRepository log,
     DateOnly baseDate)
 {
-    // v0.11.612: use the actual day-overlapping event list as the unit of
-    // projection.  v0.11.606 showed NHK General had dbEvents=61 but
+    // release_contract: use the actual day-overlapping event list as the unit of
+    // projection.  release_contract showed NHK General had dbEvents=61 but
     // renderedCells=1, which means the service-level join was present but
     // event multiplicity was lost in the timeline projection.
     var daySortedEvents = sortedEvents
@@ -7411,7 +7410,7 @@ static IReadOnlyList<EpgEvent> BuildProgramGuideTimelineEvents(
 
             var displayEvent = ev;
 
-            // v0.11.442: ProgramGuide timeline projection must not render overlapping
+            // release_contract: ProgramGuide timeline projection must not render overlapping
             // cells in the same service column.  DB/raw EPG facts are left intact;
             // only the display timeline is裁定済みにする。
             if (evStart < cursor)
@@ -7436,7 +7435,7 @@ static IReadOnlyList<EpgEvent> BuildProgramGuideTimelineEvents(
     if (fallbackHits.Count > 0)
     {
         log.Add("PROGRAMGUIDE_SERVICE_PROJECTION_FALLBACK", "APPLIED",
-            $"result=APPLIED date={baseDate:yyyy-MM-dd} count={fallbackHits.Count} sample={SafeProgramGuideProjectionLogValue(string.Join('|', fallbackHits))} rule=v0.11.682_programguide_side_effect_audit_contract");
+            $"result=APPLIED date={baseDate:yyyy-MM-dd} count={fallbackHits.Count} sample={SafeProgramGuideProjectionLogValue(string.Join('|', fallbackHits))} rule=release_contract");
     }
 
     return result;
@@ -7483,7 +7482,7 @@ static void AddProgramGuideGapFrame(
 
 static ProgramGuideEpgEventDto NormalizeProgramGuideEventForDisplay(EpgEvent e)
 {
-    // v0.11.442: ProgramGuide legacy body route purge.
+    // release_contract: ProgramGuide legacy body route purge.
     // 番組表セル/API投影はDB raw descriptorから作ったCellTextを正本にする。
     // 旧description/extendedDescription/decodedExtendedTextの本文経路はここで切断する。
     var cellText = ProgramGuideCellTextDecoder.Decode(e);

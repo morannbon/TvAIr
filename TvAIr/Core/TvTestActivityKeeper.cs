@@ -1,12 +1,12 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 namespace TvAIr.Core;
 
 /// <summary>
 /// 録画/EPG取得/EPG確認中に、SleepGuardとタスクバー識別用のTVTest表示を最小情報で管理する。
-/// v0.5.65: 対象ごとのTVTest表示を維持し、TVTest側のタイトル再設定に負けないよう所有PIDだけ低頻度で再適用する。
-/// v0.5.73: DirectRecorder録画中は、既存LIVETest/外部TVTestをActivityKeeperの代用にしない。
+/// release_contract: 対象ごとのTVTest表示を維持し、TVTest側のタイトル再設定に負けないよう所有PIDだけ低頻度で再適用する。
+/// release_contract: DirectRecorder録画中は、既存LIVETest/外部TVTestをActivityKeeperの代用にしない。
 /// SleepGuard監視用にTvAIr管理のActivityKeeper TVTestを明示起動し、視聴用プロセスとは分離する。
 /// </summary>
 public sealed class TvTestActivityKeeper
@@ -36,7 +36,7 @@ public sealed class TvTestActivityKeeper
 
         lock (_gate)
         {
-            // v0.5.73:
+            // release_contract:
             // DirectRecorder録画中のSleepGuard監視は、既存LIVETest/外部TVTestを証跡代用しない。
             // 視聴用プロセスはユーザー操作対象であり、TvAIrの録画中アクティビティとは別物として扱う。
             // そのため、録画開始ごとにTvAIr管理のActivityKeeper TVTestを明示起動する。
@@ -45,7 +45,7 @@ public sealed class TvTestActivityKeeper
             var pidValue = token.OwnedProcess?.Id;
             var pid = pidValue?.ToString() ?? "-";
             var mode = token.OwnedProcess is null ? "activitykeeper_not_started" : "activitykeeper_started";
-            _log.Add("RECORDER_ACTIVITY", "ACQUIRE", $"mode={mode} reason={token.Reason} service={Safe(token.ServiceName)} title={Safe(token.Title)} pid={pid} activeCount={_tokens.Count} rule=v0.5.73_no_existing_livetest_witness_for_recording");
+            _log.Add("RECORDER_ACTIVITY", "ACQUIRE", $"mode={mode} reason={token.Reason} service={Safe(token.ServiceName)} title={Safe(token.Title)} pid={pid} activeCount={_tokens.Count} rule=release_contract");
             return new TvTestActivityHandle(this, id, pidValue);
         }
     }
@@ -66,7 +66,7 @@ public sealed class TvTestActivityKeeper
         {
             _tokens[id] = token;
             StartTitleRefresh(token, pid);
-            _log.Add("RECORDER_ACTIVITY", "ATTACH", $"mode=existing_per_target reason={token.Reason} service={Safe(token.ServiceName)} title={Safe(token.Title)} pid={pid} activeCount={_tokens.Count} rule=v0.5.65_target_separated_recorder_activity_cleanup");
+            _log.Add("RECORDER_ACTIVITY", "ATTACH", $"mode=existing_per_target reason={token.Reason} service={Safe(token.ServiceName)} title={Safe(token.Title)} pid={pid} activeCount={_tokens.Count} rule=release_contract");
             return new TvTestActivityHandle(this, id, pid);
         }
     }
@@ -79,7 +79,7 @@ public sealed class TvTestActivityKeeper
             if (!_tokens.Remove(id, out token)) return;
             token.TitleRefreshCts?.Cancel();
             token.DialogSuppressCts?.Cancel();
-            _log.Add("RECORDER_ACTIVITY", "RELEASE", $"token={id:N} reason={token.Reason} service={Safe(token.ServiceName)} pid={TokenPid(token)} activeCount={_tokens.Count} rule=v0.5.65_target_separated_recorder_activity_cleanup");
+            _log.Add("RECORDER_ACTIVITY", "RELEASE", $"token={id:N} reason={token.Reason} service={Safe(token.ServiceName)} pid={TokenPid(token)} activeCount={_tokens.Count} rule=release_contract");
         }
 
         if (token.OwnsProcess)
@@ -94,7 +94,7 @@ public sealed class TvTestActivityKeeper
         var exe = ResolveTvTestExecutable();
         if (string.IsNullOrWhiteSpace(exe) || !File.Exists(exe))
         {
-            _log.Add("RECORDER_ACTIVITY", "NOT_STARTED", $"reason={token.Reason} service={Safe(token.ServiceName)} activityExe=missing rule=v0.5.65_target_separated_recorder_activity_cleanup");
+            _log.Add("RECORDER_ACTIVITY", "NOT_STARTED", $"reason={token.Reason} service={Safe(token.ServiceName)} activityExe=missing rule=release_contract");
             return null;
         }
 
@@ -111,7 +111,7 @@ public sealed class TvTestActivityKeeper
             if (_ini.UseMinOption) psi.ArgumentList.Add("/min");
             if (_ini.UseNodshowOption) psi.ArgumentList.Add("/nodshow");
 
-            // v0.5.73:
+            // release_contract:
             // ActivityKeeperはTVTestプロセスをSleepGuard監視用に維持するだけで、録画・選局は行わない。
             // 実在する非PT系BonDriverがあれば明示し、TVTestの前回終了時BonDriver復元によるPT系チューナーOpenを避ける。
             // 見つからない場合も既存LIVETestへの代用はせず、TVTestを最小オプションで起動する。
@@ -128,13 +128,13 @@ public sealed class TvTestActivityKeeper
                 TvAirManagedProcessRegistry.RegisterActivity(process.Id, token.Reason, token.ServiceName);
                 StartTitleRefresh(token, process.Id);
                 StartOwnedDialogSuppression(token, process.Id);
-                _log.Add("RECORDER_ACTIVITY", "STARTED", $"pid={process.Id} exe={Safe(exe)} reason={token.Reason} service={Safe(token.ServiceName)} title={Safe(token.Title)} passiveBonDriver={Safe(passiveBonDriver)} rule=v0.5.73_owned_activity_process_for_sleepguard");
+                _log.Add("RECORDER_ACTIVITY", "STARTED", $"pid={process.Id} exe={Safe(exe)} reason={token.Reason} service={Safe(token.ServiceName)} title={Safe(token.Title)} passiveBonDriver={Safe(passiveBonDriver)} rule=release_contract");
             }
             return process;
         }
         catch (Exception ex)
         {
-            _log.Add("RECORDER_ACTIVITY", "START_ERROR", $"reason={token.Reason} service={Safe(token.ServiceName)} error={Safe(ex.Message)} rule=v0.5.65_target_separated_recorder_activity_cleanup");
+            _log.Add("RECORDER_ACTIVITY", "START_ERROR", $"reason={token.Reason} service={Safe(token.ServiceName)} error={Safe(ex.Message)} rule=release_contract");
             return null;
         }
     }
@@ -154,11 +154,11 @@ public sealed class TvTestActivityKeeper
                     try { process.Kill(entireProcessTree: false); } catch { }
                 }
             }
-            _log.Add("RECORDER_ACTIVITY", "STOPPED", $"pid={pid} reason={token.Reason} service={Safe(token.ServiceName)} rule=started_by_tvair_only_v0_5_63");
+            _log.Add("RECORDER_ACTIVITY", "STOPPED", $"pid={pid} reason={token.Reason} service={Safe(token.ServiceName)} rule=started_by_tvair_only_release_contract");
         }
         catch (Exception ex)
         {
-            _log.Add("RECORDER_ACTIVITY", "STOP_ERROR", $"pid={pid} reason={token.Reason} service={Safe(token.ServiceName)} error={Safe(ex.Message)} rule=v0.5.65_target_separated_recorder_activity_cleanup");
+            _log.Add("RECORDER_ACTIVITY", "STOP_ERROR", $"pid={pid} reason={token.Reason} service={Safe(token.ServiceName)} error={Safe(ex.Message)} rule=release_contract");
         }
         finally
         {
@@ -186,7 +186,7 @@ public sealed class TvTestActivityKeeper
                     if (applied && !appliedOnce)
                     {
                         appliedOnce = true;
-                        _log.Add("RECORDER_ACTIVITY", "TITLE_APPLIED", $"pid={pid} reason={token.Reason} service={Safe(token.ServiceName)} rule=v0.5.94_short_activity_title_without_tvair_prefix");
+                        _log.Add("RECORDER_ACTIVITY", "TITLE_APPLIED", $"pid={pid} reason={token.Reason} service={Safe(token.ServiceName)} rule=release_contract");
                     }
 
                     // 起動直後はTVTestが自前タイトルへ戻しやすいので短く、安定後は負荷を抑える。
@@ -238,7 +238,7 @@ public sealed class TvTestActivityKeeper
             {
                 suppressed.Add(hWnd);
                 _log.Add("RECORDER_ACTIVITY_DIALOG_SUPPRESSED", "CLOSE",
-                    $"pid={pid} service={Safe(token.ServiceName)} reason={Safe(token.Reason)} class={Safe(cls)} title={Safe(title)} rule=v0.5.65_owned_activity_dialog_suppression");
+                    $"pid={pid} service={Safe(token.ServiceName)} reason={Safe(token.Reason)} class={Safe(cls)} title={Safe(title)} rule=release_contract");
             }
 
             PostMessage(hWnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
@@ -286,7 +286,7 @@ public sealed class TvTestActivityKeeper
 
     private string ResolveTvTestExecutable()
     {
-        // v0.5.73:
+        // release_contract:
         // ActivityKeeperはSleepGuard監視用のTvAIr管理TVTestとして起動する。
         // 視聴用LIVETestはユーザー視聴プロセスなので、録画中アクティビティの代用にも起動対象にも使わない。
         if (!string.IsNullOrWhiteSpace(_ini.TvTestExecutablePath) && File.Exists(_ini.TvTestExecutablePath)) return _ini.TvTestExecutablePath;
@@ -366,7 +366,7 @@ public sealed class TvTestActivityKeeper
 
     private static string BuildTitle(ActivityToken token)
     {
-        // v0.5.94:
+        // release_contract:
         // タスクバー上で後半の局名/番組名が欠けないよう、
         // ActivityKeeperのウィンドウタイトルから "TvAIr" 固定接頭辞を外す。
         // EPG取得の代表プロセス化やEPG用TVTestの一律非表示化は行わない。

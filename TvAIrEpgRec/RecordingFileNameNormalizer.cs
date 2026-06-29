@@ -1,11 +1,11 @@
-﻿using System.Text;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace TvAIrEpgRec;
 
 internal static class RecordingFileNameNormalizer
 {
-    public const string Rule = "v0.10.44_record_filename_event_name_normalization_unified";
+    public const string Rule = "release_contract";
 
     public static string NormalizeOutputPathFileName(string? path)
     {

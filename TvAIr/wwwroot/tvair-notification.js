@@ -1,5 +1,5 @@
-﻿/*
- * TvAIr common silent notification dialog - v0.11.178
+/*
+ * TvAIr common silent notification dialog - release_contract
  * For short user-operation result notifications. No sound, toast, or balloon.
  */
 (function(){

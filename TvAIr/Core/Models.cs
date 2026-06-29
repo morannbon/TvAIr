@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Core;
+namespace TvAIr.Core;
 
 // ─── EPGイベント ─────────────────────────────────────────────────
 
@@ -45,7 +45,7 @@ public sealed class ChannelTarget
     public string Name { get; set; } = "";
     public string ChannelArgument { get; set; } = ""; // "/ch 14" / "/chspace 0 /chi 3" 等
 
-    // v0.3.77: BS/CSチャンネル取り違え調査用。録画開始直前に、.ch2/ChSet由来の
+    // release_contract: BS/CSチャンネル取り違え調査用。録画開始直前に、.ch2/ChSet由来の
     // チャンネル同定情報をログへ出し、TVTestへ渡している /chspace /chi /sid が
     // どの行・どのTSID対応から生成されたかを追えるようにする。
     public string Ch2FileName { get; set; } = "";

@@ -1,9 +1,9 @@
-﻿namespace TvAIr.Core;
+namespace TvAIr.Core;
 
 /// <summary>
 /// 通常録画の保存先を TVTest.ini の RecordFolder から解決する。
 ///
-/// v0.3.74 方針:
+/// release_contract 方針:
 /// - 録画直前に TVTest.ini 全体を毎回推測探索しない。
 /// - TvAIr 起動時に TVTest.ini の RecordFolder を1回だけ直読みにし、ランタイム固定する。
 /// - RecordFolder が存在したら DriverDirectory / UseDirectWrite / ProgramGuide 等は一切見ない。

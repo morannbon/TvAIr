@@ -1,5 +1,5 @@
-﻿/*
- * TvAIr reservations/log page module - v0.11.314
+/*
+ * TvAIr reservations/log page module - release_contract
  *
  * Scope:
  * - reservations.html tabs, toolbar, action controls, log controls, semantic text roles.
@@ -13,7 +13,7 @@
 *{box-sizing:border-box;margin:0;padding:0}
 html{height:100%;overflow:hidden} body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:var(--tvair-reservation-page-bg);color:var(--text-main);height:100%;margin:0;overflow:hidden}
 
-/* TopNav is owned by tvair-style-system.css (v0.11.198). */
+/* TopNav is owned by tvair-style-system.css (release_contract). */
 #page-menu-wrap{position:relative;margin-left:4px;flex:0 0 auto}
 
 
@@ -35,10 +35,10 @@ html{height:100%;overflow:hidden} body{font-family:'Meiryo','メイリオ',sans-
 #table-wrap{background:var(--panel-bg);border:1px solid var(--panel-border);border-radius:0 3px 3px 3px}
 
 /* Reservation-family row state paint is owned by tvair-list-module.css.
-   v0.11.502 ReservationRowStateGenreGuard: disabled/cancelled/conflict rows are
+   release_contract ReservationRowStateGenreGuard: disabled/cancelled/conflict rows are
    operational states; genre-color paint must not override disabled rows. */
 
-/* v0.11.314 Reservation page owns tabs, toolbar, actions, log controls, and semantic text roles only. Reservation-family table structure/vertical rhythm stays in tvair-list-module.css. */
+/* release_contract Reservation page owns tabs, toolbar, actions, log controls, and semantic text roles only. Reservation-family table structure/vertical rhythm stays in tvair-list-module.css. */
 
 
 /* 各列(予約リスト配下一覧系共通の固定幅。タイトル/内容だけ可変) */
@@ -80,7 +80,7 @@ html{height:100%;overflow:hidden} body{font-family:'Meiryo','メイリオ',sans-
 .st-cancelled{color:var(--tvair-status-cancelled-text);font-weight:bold}
 .st-failed   {color:var(--tvair-status-failed-text)}
 
-/* v0.11.554 ListMetadataColumnParityContract: this page keeps operation button color semantics only. ○/× state-cell geometry remains unchanged and is owned by tvair-list-module.css, not by action button rules. */
+/* release_contract ListMetadataColumnParityContract: this page keeps operation button color semantics only. ○/× state-cell geometry remains unchanged and is owned by tvair-list-module.css, not by action button rules. */
 /* 操作ボタン */
 .act-btn{padding:1px 10px;border:none;border-radius:2px;cursor:pointer;font-size:11px;white-space:nowrap;font-family:'Meiryo','メイリオ',sans-serif;color:var(--tvair-content-inverse);display:inline-flex;align-items:center;justify-content:center;min-width:80px;height:20px}
 .btn-stop  {background:var(--rec-btn)}
@@ -112,13 +112,13 @@ html{height:100%;overflow:hidden} body{font-family:'Meiryo','メイリオ',sans-
 
 /* トースト */
 /* 予約リストはページ本体で一貫した縦スクロールを使う */
-/* v0.11.502: #toast geometry/paint/animation is owned by tvair-notification.css. */
+/* release_contract: #toast geometry/paint/animation is owned by tvair-notification.css. */
 .flash-conflict{outline:3px solid var(--tvair-state-warning-text); outline-offset:-2px}
 
 
 
 
-/* v0.11.502 ReservationSubtabThemeTokenContract
+/* release_contract ReservationSubtabThemeTokenContract
    Reservation page owns reservation-family tabs, reservation action cell geometry,
    reservation state/toggle semantics, and reservation action button states.
    User-operation log report/clear controls, log column schema, message clipping,
@@ -126,9 +126,9 @@ html{height:100%;overflow:hidden} body{font-family:'Meiryo','メイリオ',sans-
    Shared list row-state, genre paint and disabled/cancelled/conflict guards are
    owned by tvair-list-module.css. */
 
-/* v0.11.502 ListPageImportantReductionPhase2: page-side display/alignment overrides now rely on selector ownership where safe; semantic action colors still keep required guards. */
+/* release_contract ListPageImportantReductionPhase2: page-side display/alignment overrides now rely on selector ownership where safe; semantic action colors still keep required guards. */
 
-/* v0.11.465 ReservationActionStateContract
+/* release_contract ReservationActionStateContract
    Operation buttons and state/boolean indicators are separate contracts.
    This block intentionally targets only .reservation-action-button.
    The ○/× recording-intent toggle remains .toggle-btn and is not an action button. */
@@ -203,7 +203,7 @@ html{height:100%;overflow:hidden} body{font-family:'Meiryo','メイリオ',sans-
   cursor:default!important;
   opacity:1!important;
 }
-/* v0.11.465 Candidate/list state labels are not action buttons. */
+/* release_contract Candidate/list state labels are not action buttons. */
 .reservation-state-label{
   display:inline-flex;
   align-items:center;
