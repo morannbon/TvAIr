@@ -79,7 +79,11 @@ public sealed class EpgCapture
     private DateTime lastEpgWorkerCoverageLogUtc = DateTime.MinValue;
     private DateTime lastEpgWorkerGapLogUtc = DateTime.MinValue;
     private volatile bool epgRunAcceptingNewWorkers = false;
-    private int epgActiveWorkerTasks = 0;
+    private long epgRunSequence = 0;
+    private string currentEpgRunId = "none";
+    // release_contract: EPG worker task state is tracked by actual task registration, not by increment/decrement counters.
+    // Cancellation can finish the run before worker finally blocks drain; a global counter can underflow in that case.
+    private readonly ConcurrentDictionary<string, ActiveEpgWorkerTask> activeEpgWorkerTasks = new(StringComparer.Ordinal);
     // 通常EPG取得中だけ、TS間クールダウンでSleepGuard監視対象TVTestがゼロになる穴を塞ぐ。
     // 録画前EPG確認では使わず、BonDriver実機取得には触らないTvAIr管理TVTestマーカーとして扱う。
     // 起動/停止/診断を専用ヘルパーへ分離し、キャンセル/例外時も監視用TVTestと監視タスクを確実に片付ける。
@@ -226,7 +230,8 @@ public sealed class EpgCapture
 
         while (true)
         {
-            var activeWorkers = Volatile.Read(ref epgActiveWorkerTasks);
+            var runId = currentEpgRunId;
+            var activeTasks = SnapshotActiveEpgWorkerTasks(runId);
             var tracked = activeEpgWorkerProcesses.Values.OrderBy(x => x.Group).ThenBy(x => x.TsId).ThenBy(x => x.Pid).ToList();
             var alive = new List<ActiveEpgWorkerProcess>();
             foreach (var worker in tracked)
@@ -247,11 +252,11 @@ public sealed class EpgCapture
             foreach (var expired in epgCooldownWaits.Values.Where(x => x.Until < DateTime.Now).ToList())
                 epgCooldownWaits.TryRemove(expired.Key, out _);
 
-            if (alive.Count == 0 && activeWorkers == 0 && epgSlots.Count == 0)
+            if (alive.Count == 0 && activeTasks.Count == 0 && epgSlots.Count == 0)
             {
                 LogEpgWorkerCoverage("cancel_quiescence_complete", force: true);
                 Log("EPG_CANCEL_RELEASE_COMPLETE", "EPG",
-                    $"result=OK source={SafeLog(source)} silent={silent} uiMode={(silent ? "Silent" : "Visible")} targetScope={SafeLog(targetScope)} aliveWorkers=0 activeWorkerTasks=0 epgSlots=0 cooldownWaits={cooldowns.Count} action=allow_epg_run_end_and_allocation_reevaluate rule=release_contract");
+                    $"result=OK source={SafeLog(source)} silent={silent} uiMode={(silent ? "Silent" : "Visible")} targetScope={SafeLog(targetScope)} runId={SafeLog(runId)} aliveWorkers=0 activeWorkerTasks=0 epgSlots=0 cooldownWaits={cooldowns.Count} action=allow_epg_run_end_and_allocation_reevaluate rule=release_contract");
                 return;
             }
 
@@ -260,14 +265,15 @@ public sealed class EpgCapture
                 loggedWait = true;
                 LogEpgWorkerCoverage("cancel_quiescence_wait", force: true);
                 Log("EPG_CANCEL_RELEASE_WAIT", "EPG",
-                    $"source={SafeLog(source)} silent={silent} uiMode={(silent ? "Silent" : "Visible")} targetScope={SafeLog(targetScope)} aliveWorkers={alive.Count} activeWorkerTasks={activeWorkers} epgSlots={epgSlots.Count} cooldownWaits={cooldowns.Count} action=wait_before_epg_run_end_and_allocation_reevaluate rule=release_contract");
+                    $"source={SafeLog(source)} silent={silent} uiMode={(silent ? "Silent" : "Visible")} targetScope={SafeLog(targetScope)} runId={SafeLog(runId)} aliveWorkers={alive.Count} activeWorkerTasks={activeTasks.Count} epgSlots={epgSlots.Count} cooldownWaits={cooldowns.Count} action=wait_before_epg_run_end_and_allocation_reevaluate rule=release_contract");
             }
 
             if (DateTime.UtcNow >= deadline)
             {
                 LogEpgWorkerCoverage("cancel_quiescence_timeout", force: true);
+                var activeTaskSummary = FormatActiveEpgWorkerTaskSummary(activeTasks);
                 Log("EPG_CANCEL_RELEASE_COMPLETE", "WARN",
-                    $"result=TIMEOUT source={SafeLog(source)} silent={silent} uiMode={(silent ? "Silent" : "Visible")} targetScope={SafeLog(targetScope)} aliveWorkers={alive.Count} activeWorkerTasks={activeWorkers} epgSlots={epgSlots.Count} cooldownWaits={cooldowns.Count} action=continue_with_warn_before_allocation_reevaluate rule=release_contract");
+                    $"result=TIMEOUT source={SafeLog(source)} silent={silent} uiMode={(silent ? "Silent" : "Visible")} targetScope={SafeLog(targetScope)} runId={SafeLog(runId)} aliveWorkers={alive.Count} activeWorkerTasks={activeTasks.Count} activeTaskSummary={SafeLog(activeTaskSummary)} epgSlots={epgSlots.Count} cooldownWaits={cooldowns.Count} action=continue_with_warn_before_allocation_reevaluate rule=release_contract");
                 return;
             }
 
@@ -301,6 +307,9 @@ public sealed class EpgCapture
         var normalizedDepth = NormalizeDepth(runDepth ?? effectiveEpgDepth);
         var singleServiceMode = expectedServiceId.HasValue || expectedTransportStreamId.HasValue || expectedNetworkId.HasValue || !string.IsNullOrWhiteSpace(expectedServiceName);
         var runPurpose = isPreRecordCheck ? "pre_record_time_follow" : "normal_epg_capture";
+        var runId = $"epg-{DateTime.UtcNow:yyyyMMddHHmmssfff}-{Interlocked.Increment(ref epgRunSequence)}";
+        currentEpgRunId = runId;
+        PruneCompletedEpgWorkerTasksForOldRuns(runId);
         runtimeEpgDepthOverride = normalizedDepth;
         if (!isPreRecordCheck)
         {
@@ -317,7 +326,6 @@ public sealed class EpgCapture
             Log("EPG_RUN_START", "EPG", $"EPG取得を開始します。targetScope={normalizedScope} runDepth={normalizedDepth} purpose={runPurpose} uiVisible={showProgress} uiMode={(showProgress ? "Visible" : "Silent")} singleServiceMode={singleServiceMode} maxCaptureSeconds={(maxCaptureSeconds?.ToString() ?? "-")} expectedNid={(expectedNetworkId?.ToString() ?? "-")} expectedTsid={(expectedTransportStreamId?.ToString() ?? "-")} expectedSid={(expectedServiceId?.ToString() ?? "-")} expectedService={SafeLogValue(expectedServiceName)} preferredTuner={SafeLogValue(preferredRecordingTunerName)} rule=release_contract");
         }
         epgRunAcceptingNewWorkers = true;
-        Interlocked.Exchange(ref epgActiveWorkerTasks, 0);
         TvTestActivityHandle? epgSleepGuardBridge = null;
         CancellationTokenSource? coverageCts = null;
         Task? coverageMonitor = null;
@@ -510,7 +518,6 @@ public sealed class EpgCapture
         finally
         {
             epgRunAcceptingNewWorkers = false;
-            Interlocked.Exchange(ref epgActiveWorkerTasks, 0);
             await StopEpgWorkerCoverageMonitorIfStartedAsync(coverageCts, coverageMonitor);
             StopEpgSleepGuardBridgeIfStarted(epgSleepGuardBridge, isPreRecordCheck, normalizedScope, normalizedDepth, bridgeStopReason);
         }
@@ -763,7 +770,7 @@ public sealed class EpgCapture
 
             var g = group;
             var releaseSemaphore = groupSemaphore;
-            Interlocked.Increment(ref epgActiveWorkerTasks);
+            var workerTaskState = RegisterActiveEpgWorkerTask(g, pass);
             tasks.Add(Task.Run(async () =>
             {
                 try
@@ -791,9 +798,9 @@ public sealed class EpgCapture
                 finally
                 {
                     releaseSemaphore.Release();
-                    Interlocked.Decrement(ref epgActiveWorkerTasks);
+                    CompleteActiveEpgWorkerTask(workerTaskState);
                 }
-            }, ct));
+            }, CancellationToken.None));
         }
 
         while (pendingGroups.Count > 0 && !ct.IsCancellationRequested)
@@ -952,7 +959,7 @@ public sealed class EpgCapture
             firstLaunch = false;
 
             var g = group;
-            Interlocked.Increment(ref epgActiveWorkerTasks);
+            var workerTaskState = RegisterActiveEpgWorkerTask(g, pass);
             tasks.Add(Task.Run(async () =>
             {
                 try
@@ -980,9 +987,9 @@ public sealed class EpgCapture
                 finally
                 {
                     sem.Release();
-                    Interlocked.Decrement(ref epgActiveWorkerTasks);
+                    CompleteActiveEpgWorkerTask(workerTaskState);
                 }
-            }, ct));
+            }, CancellationToken.None));
         }
 
         await Task.WhenAll(tasks);
@@ -1055,9 +1062,12 @@ public sealed class EpgCapture
                 {
                     if (launch.Success && launch.ProcessId > 0)
                     {
-                        Log("EPG_CANCEL_PROCESS_STOP_REQUEST", $"TS{group.TsId}", $"pid={launch.ProcessId} worker={workerName} phase=launch_gate_delay route=TvAIrEpgRec rule=epg_worker_route_contract");
-                        RequestTvAIrEpgRecStopOrKill(launch, workerName, group, "launch_gate_cancelled");
-                        UnregisterActiveEpgWorkerProcess(launch.ProcessId, workerName, group, "launch_cancelled");
+                        await StopAndRetireActiveEpgWorkerAsync(
+                            launch,
+                            workerName,
+                            group,
+                            "launch_gate_delay",
+                            "launch_gate_cancelled").ConfigureAwait(false);
                     }
                     throw;
                 }
@@ -1270,6 +1280,48 @@ public sealed class EpgCapture
         KillProcess(launch.ProcessId);
     }
 
+    private async Task<bool> StopAndRetireActiveEpgWorkerAsync(
+        EpgWorkerLaunchResult launch,
+        string workerName,
+        TsGroup group,
+        string phase,
+        string reason,
+        TimeSpan? gracefulTimeout = null)
+    {
+        if (!launch.Success || launch.ProcessId <= 0) return false;
+
+        var pid = launch.ProcessId;
+        var timeout = gracefulTimeout ?? TimeSpan.FromSeconds(4);
+
+        if (IsProcessAlive(pid))
+        {
+            Log("EPG_CANCEL_PROCESS_STOP_REQUEST", $"TS{group.TsId}",
+                $"pid={pid} worker={workerName} phase={SafeLog(phase)} route=TvAIrEpgRec reason={SafeLog(reason)} rule=epg_worker_route_contract");
+            RequestTvAIrEpgRecStopOrKill(launch, workerName, group, reason);
+
+            await WaitForExitAsync(pid, timeout, CancellationToken.None).ConfigureAwait(false);
+            if (IsProcessAlive(pid))
+            {
+                Log("EPG_CANCEL_PROCESS_STOP_WAIT", $"TS{group.TsId}",
+                    $"result=TIMEOUT pid={pid} worker={workerName} phase={SafeLog(phase)} waitMs={(int)timeout.TotalMilliseconds} action=kill rule=epg_worker_route_contract");
+                KillProcess(pid);
+                await WaitForExitAsync(pid, TimeSpan.FromSeconds(2), CancellationToken.None).ConfigureAwait(false);
+            }
+        }
+
+        if (!IsProcessAlive(pid))
+        {
+            UnregisterActiveEpgWorkerProcess(pid, workerName, group, reason);
+            Log("EPG_CANCEL_PROCESS_EXIT_OK", $"TS{group.TsId}",
+                $"pid={pid} worker={workerName} phase={SafeLog(phase)} action=stopped_and_unregistered rule=epg_worker_route_contract");
+            return true;
+        }
+
+        Log("EPG_CANCEL_PROCESS_EXIT_WARN", $"TS{group.TsId}",
+            $"pid={pid} worker={workerName} phase={SafeLog(phase)} action=still_alive_keep_tracked rule=epg_worker_route_contract");
+        return false;
+    }
+
     // ─── 1グループのキャプチャ ────────────────────────────────────
 
     private async Task<int> CaptureGroupAsync(TsGroup group, int pass, CancellationToken ct, bool isPreRecordCheck, int? maxCaptureSeconds, ushort? expectedNetworkId, ushort? expectedTransportStreamId, ushort? expectedServiceId, ushort? expectedEventId, DateTime? expectedStartTime, DateTime? expectedEndTime, string? preferredRecordingTunerName = null, string? preTuneChainPosition = null, string? preTuneAction = null, bool preTuneKeepWorkerUntilSafetyCeiling = false)
@@ -1378,6 +1430,8 @@ public sealed class EpgCapture
             }
 
             int imported;
+            EpgWorkerLaunchResult? activeLaunch = null;
+            var activeLaunchRetired = false;
             try
             {
                 // TSファイルのディレクトリ確保
@@ -1404,6 +1458,7 @@ public sealed class EpgCapture
                     preTuneChainPosition,
                     preTuneAction,
                     preTuneKeepWorkerUntilSafetyCeiling);
+                activeLaunch = launch;
 
                 if (!launch.Success)
                 {
@@ -1439,9 +1494,12 @@ public sealed class EpgCapture
                     try { await Task.Delay(stabilizeMs, ct); }
                     catch (OperationCanceledException)
                     {
-                        Log("EPG_CANCEL_PROCESS_STOP_REQUEST", $"TS{group.TsId}", $"pid={launch.ProcessId} worker={workerName} phase=post_launch_stabilize rule=epg_plan_contract");
-                        RequestTvAIrEpgRecStopOrKill(launch, workerName, group, "post_launch_stabilize_cancelled");
-                        UnregisterActiveEpgWorkerProcess(launch.ProcessId, workerName, group, "cancelled");
+                        activeLaunchRetired = await StopAndRetireActiveEpgWorkerAsync(
+                            launch,
+                            workerName,
+                            group,
+                            "post_launch_stabilize",
+                            "post_launch_stabilize_cancelled").ConfigureAwait(false);
                         throw;
                     }
                 }
@@ -1475,6 +1533,7 @@ public sealed class EpgCapture
                     await WaitForExitAsync(launch.ProcessId, TimeSpan.FromSeconds(5), CancellationToken.None);
                     await HandleEpgProcessEndAsync(group, workerName, launch.ProcessId, ct);
                     UnregisterActiveEpgWorkerProcess(launch.ProcessId, workerName, group, "process_end");
+                    activeLaunchRetired = true;
 
                     imported = probe.ImportedEvents > 0
                         ? probe.ImportedEvents
@@ -1498,18 +1557,21 @@ public sealed class EpgCapture
                     // キャンセル時はTvAIrEpgRecへ停止要求を送る
                     if (cancelled)
                     {
-                        Log("EPG_CANCEL_PROCESS_STOP_REQUEST", $"TS{group.TsId}", $"pid={launch.ProcessId} worker={workerName} phase=wait_for_exit rule=epg_plan_contract");
-                        RequestTvAIrEpgRecStopOrKill(launch, workerName, group, "wait_for_exit_cancelled");
-                        Log("EPG_CANCEL_PROCESS_EXIT_OK", $"TS{group.TsId}", $"pid={launch.ProcessId} worker={workerName} action=stop_signal_or_kill_requested rule=epg_worker_route_contract");
+                        activeLaunchRetired = await StopAndRetireActiveEpgWorkerAsync(
+                            launch,
+                            workerName,
+                            group,
+                            "wait_for_exit",
+                            "wait_for_exit_cancelled").ConfigureAwait(false);
                         Log("EPG_CAPTURE_CANCELLED", $"TS{group.TsId}",
                             $"EPG取得がキャンセルされました。TvAIrEpgRec(PID={launch.ProcessId})を終了しました。");
-                        UnregisterActiveEpgWorkerProcess(launch.ProcessId, workerName, group, "cancelled");
                         ct.ThrowIfCancellationRequested();
                         return 0;
                     }
 
                     await HandleEpgProcessEndAsync(group, workerName, launch.ProcessId, ct);
                     UnregisterActiveEpgWorkerProcess(launch.ProcessId, workerName, group, "process_end");
+                    activeLaunchRetired = true;
 
                     broadcastClock.ObserveFromTsFile(tsFile, "normal_epg", group.Group, group.Targets.FirstOrDefault()?.Name, group.Targets.FirstOrDefault()?.Name);
 
@@ -1518,6 +1580,19 @@ public sealed class EpgCapture
                     var captureSufficient = IsNormalEpgCaptureSufficient(group, imported, isPreRecordCheck);
                     CleanupTvAIrEpgRecRuntimeFiles(launch, workerName, group, reason: captureSufficient ? "epg_parse_done" : "epg_parse_done");
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                if (activeLaunch is not null && activeLaunch.Success && activeLaunch.ProcessId > 0 && !activeLaunchRetired)
+                {
+                    activeLaunchRetired = await StopAndRetireActiveEpgWorkerAsync(
+                        activeLaunch,
+                        workerName,
+                        group,
+                        "capture_scope",
+                        "capture_scope_cancelled").ConfigureAwait(false);
+                }
+                throw;
             }
             finally
             {
@@ -1827,7 +1902,9 @@ public sealed class EpgCapture
             : string.Join(",", cooldowns.Take(6).Select(e => $"{e.Group}:{e.TsId}/{e.ServiceName}/slot={e.SlotName}"));
         if (cooldowns.Count > 6) cooldownSummary += $",...+{cooldowns.Count - 6}";
 
-        var activeWorkers = Volatile.Read(ref epgActiveWorkerTasks);
+        var activeTasks = SnapshotActiveEpgWorkerTasks(currentEpgRunId);
+        var activeWorkers = activeTasks.Count;
+        var activeTaskSummary = FormatActiveEpgWorkerTaskSummary(activeTasks);
         var bridgePid = Volatile.Read(ref epgSleepGuardBridgePid);
         var bridgeAlive = bridgePid > 0 && IsProcessAlive(bridgePid);
         if (bridgePid > 0 && !bridgeAlive)
@@ -1838,7 +1915,7 @@ public sealed class EpgCapture
         Log("EPG_PROCESS_COVERAGE", "EPG",
             $"phase={phase} activeTrackedIndividual={entries.Count} aliveIndividualTvAIrEpgRec={alive.Count} cooldownWaits={cooldowns.Count} activeWorkers={activeWorkers} " +
             $"runActivityKeeper={bridgeAlive} representativePid={(bridgePid > 0 ? bridgePid.ToString() : "-")} representativeAlive={bridgeAlive} processVisible={tvTestIconActive} individualPids={FormatPidList(alive.Select(e => e.Pid))} " +
-            $"individualSummary={SafeLog(summary)} cooldownSummary={SafeLog(cooldownSummary)} " +
+            $"individualSummary={SafeLog(summary)} cooldownSummary={SafeLog(cooldownSummary)} activeTaskSummary={SafeLog(activeTaskSummary)} " +
             "mode=tvairepgrec_worker_processes rule=epg_tuner_cooldown_contract");
 
         if (!tvTestIconActive && phase != "run_start" && phase != "run_end")
@@ -1882,6 +1959,56 @@ public sealed class EpgCapture
             return !p.HasExited;
         }
         catch { return false; }
+    }
+
+    private ActiveEpgWorkerTask RegisterActiveEpgWorkerTask(TsGroup group, int pass)
+    {
+        var runId = currentEpgRunId;
+        var normalizedGroup = NormalizeEpgTargetGroup(group.Group);
+        var key = $"{runId}:{pass}:{normalizedGroup}:{group.TsId}:{Guid.NewGuid():N}";
+        var state = new ActiveEpgWorkerTask(
+            key,
+            runId,
+            pass,
+            normalizedGroup,
+            group.TsId,
+            group.Targets.FirstOrDefault()?.Name ?? "-",
+            DateTime.Now);
+        activeEpgWorkerTasks[key] = state;
+        return state;
+    }
+
+    private void CompleteActiveEpgWorkerTask(ActiveEpgWorkerTask state)
+    {
+        activeEpgWorkerTasks.TryRemove(state.Key, out _);
+    }
+
+    private List<ActiveEpgWorkerTask> SnapshotActiveEpgWorkerTasks(string runId)
+    {
+        return activeEpgWorkerTasks.Values
+            .Where(x => string.Equals(x.RunId, runId, StringComparison.Ordinal))
+            .OrderBy(x => x.Group)
+            .ThenBy(x => x.TsId)
+            .ThenBy(x => x.Pass)
+            .ThenBy(x => x.StartedAt)
+            .ToList();
+    }
+
+    private void PruneCompletedEpgWorkerTasksForOldRuns(string currentRunId)
+    {
+        foreach (var item in activeEpgWorkerTasks.ToArray())
+        {
+            if (!string.Equals(item.Value.RunId, currentRunId, StringComparison.Ordinal))
+                activeEpgWorkerTasks.TryRemove(item.Key, out _);
+        }
+    }
+
+    private static string FormatActiveEpgWorkerTaskSummary(IReadOnlyList<ActiveEpgWorkerTask> tasks)
+    {
+        if (tasks.Count == 0) return "-";
+        var summary = string.Join(",", tasks.Take(8).Select(t => $"{t.Group}:{t.TsId}/pass={t.Pass}/service={t.ServiceName}"));
+        if (tasks.Count > 8) summary += $",...+{tasks.Count - 8}";
+        return summary;
     }
 
     private static string FormatPidList(IEnumerable<int> pids)
@@ -3389,6 +3516,15 @@ internal sealed record ActiveEpgWorkerProcess(
     string ServiceName,
     DateTime StartedAt,
     string? StopSignalPath = null);
+
+internal sealed record ActiveEpgWorkerTask(
+    string Key,
+    string RunId,
+    int Pass,
+    string Group,
+    ushort TsId,
+    string ServiceName,
+    DateTime StartedAt);
 
 internal sealed record EpgCooldownWait(
     string Key,

@@ -2594,10 +2594,10 @@ static IResult RenderPluginVersionInfoPage(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-notification.css?v=1.0.4">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.0.6">
 </head>
 <body>
-<script src="/tvair-notification.js?v=1.0.4"></script>
+<script src="/tvair-notification.js?v=1.0.6"></script>
 <script>
 document.addEventListener('DOMContentLoaded',function(){
   if(window.TvAIrNotify){ TvAIrNotify({ title:'{{safeTitle}}', message:'バージョン: {{safeVersion}}', onOk:function(){ location.replace('{{safeReturn}}'); } }); }
@@ -3793,13 +3793,13 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'">
 <title>{{safeTitle}} - TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.4">
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.4">
-<link rel="stylesheet" href="/tvair-notification.css?v=1.0.4">
-<link rel="stylesheet" href="/tvair-epg-panel.css?v=1.0.4">
-<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.0.4">
-<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.0.4">
-<script src="/tvair-theme.js?v=1.0.4"></script>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.6">
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.6">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.0.6">
+<link rel="stylesheet" href="/tvair-epg-panel.css?v=1.0.6">
+<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.0.6">
+<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.0.6">
+<script src="/tvair-theme.js?v=1.0.6"></script>
 
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -3859,11 +3859,11 @@ body{font-family:'Meiryo',sans-serif;font-size:12px;background:var(--tvair-bg-pa
 {{pluginBody}}
   </main>
 </div>
-<script src="/tvair-notification.js?v=1.0.4"></script>
-<script src="/tvair-epg-run-contract.js?v=1.0.4"></script>
-<script src="/tvair-epg-widget.js?v=1.0.4"></script>
-<script src="/tvair-safe-event-host.js?v=1.0.4"></script>
-<script src="/tvair-menu-spine.js?v=1.0.4"></script>
+<script src="/tvair-notification.js?v=1.0.6"></script>
+<script src="/tvair-epg-run-contract.js?v=1.0.6"></script>
+<script src="/tvair-epg-widget.js?v=1.0.6"></script>
+<script src="/tvair-safe-event-host.js?v=1.0.6"></script>
+<script src="/tvair-menu-spine.js?v=1.0.6"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -4020,7 +4020,7 @@ button,input,select,textarea{font-family:inherit;font-size:inherit}
 <div class="tvair-toolwindow-content-root">
 {{pluginContent}}
 </div>
-<script src="/tvair-safe-event-host.js?v=1.0.4"></script>
+<script src="/tvair-safe-event-host.js?v=1.0.6"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -7305,13 +7305,6 @@ static IReadOnlyList<EpgEvent> ResolveProgramGuideChannelEvents(
 }
 
 
-
-static string HexHead(string? rawHex, int maxChars)
-{
-    if (string.IsNullOrWhiteSpace(rawHex)) return string.Empty;
-    var hex = new string(rawHex.Where(Uri.IsHexDigit).ToArray()).ToUpperInvariant();
-    return hex.Length <= maxChars ? hex : hex[..maxChars] + "...";
-}
 
 static string SafeProgramGuideProjectionLogValue(string? value)
 {

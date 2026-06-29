@@ -460,7 +460,7 @@ internal sealed class EitSectionReader
         }
     }
 
-    private void EnsureEvent(ushort nid, ushort tsid, ushort sid, ushort eid, byte tableId, byte sectionNumber, byte versionNumber, DateTime start, int durationSeconds, string title, string description, string extendedDescription, string genreCodes, string decodeRoute, string decodeStatus, string boundaryStatus, string rawDescriptorLoopHex, string rawShortEventDescriptorHex, string rawExtendedEventDescriptorHex, string rawContentDescriptorHex)
+    private void EnsureEvent(ushort nid, ushort tsid, ushort sid, ushort eid, byte tableId, byte sectionNumber, byte versionNumber, DateTime start, int durationSeconds, string? title, string? description, string? extendedDescription, string? genreCodes, string? decodeRoute, string? decodeStatus, string? boundaryStatus, string? rawDescriptorLoopHex, string? rawShortEventDescriptorHex, string? rawExtendedEventDescriptorHex, string? rawContentDescriptorHex)
     {
         if (start == DateTime.MinValue || durationSeconds <= 0) return;
         var key = (nid, tsid, sid, eid, start, durationSeconds);
@@ -637,7 +637,7 @@ internal sealed class EitSectionReader
         return null;
     }
 
-    private static void UpdateAccumulatorMetadata(MutableEvent ev, byte tableId, string rawShortEventDescriptorHex, string rawExtendedEventDescriptorHex)
+    private static void UpdateAccumulatorMetadata(MutableEvent ev, byte tableId, string? rawShortEventDescriptorHex, string? rawExtendedEventDescriptorHex)
     {
         ev.SourceTables.Add(tableId);
         ev.ObservationCount++;

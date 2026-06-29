@@ -1,5 +1,10 @@
 <Project>
+  <PropertyGroup>
+    <TvAIrVersionContractGenerator>$(MSBuildThisFileDirectory)build\GenerateVersionContracts.ps1</TvAIrVersionContractGenerator>
+  </PropertyGroup>
+
   <Target Name="GenerateTvAIrVersionContracts" BeforeTargets="CoreCompile" Condition="'$(MSBuildProjectName)' == 'TvAIr' Or '$(MSBuildProjectName)' == 'TvAIrPlugin'">
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)build\GenerateVersionContracts.ps1&quot; -ProjectName &quot;$(MSBuildProjectName)&quot; -ProjectDirectory &quot;$(MSBuildProjectDirectory)&quot; -ProductVersion &quot;$(TvAIrProductVersion)&quot; -PluginSdkVersion &quot;$(TvAIrPluginSdkVersion)&quot; -PluginHostContractVersion &quot;$(TvAIrPluginHostContractVersion)&quot; -MinimumSupportedPluginHostContractVersion &quot;$(TvAIrMinimumSupportedPluginHostContractVersion)&quot; -PluginCompatibilityMajor &quot;$(TvAIrPluginCompatibilityMajor)&quot; -LegacyPluginMajor &quot;$(TvAIrLegacyPluginMajor)&quot; -PublicContractName &quot;$(TvAIrPublicContractName)&quot; -PluginHostContractName &quot;$(TvAIrPluginHostContractName)&quot;" />
+    <Error Condition="!Exists('$(TvAIrVersionContractGenerator)')" Text="TvAIr version contract generator is missing: $(TvAIrVersionContractGenerator). Extract the full source ZIP including the build folder, or restore build\GenerateVersionContracts.ps1." />
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(TvAIrVersionContractGenerator)&quot; -ProjectName &quot;$(MSBuildProjectName)&quot; -ProjectDirectory &quot;$(MSBuildProjectDirectory)&quot; -ProductVersion &quot;$(TvAIrProductVersion)&quot; -PluginSdkVersion &quot;$(TvAIrPluginSdkVersion)&quot; -PluginHostContractVersion &quot;$(TvAIrPluginHostContractVersion)&quot; -MinimumSupportedPluginHostContractVersion &quot;$(TvAIrMinimumSupportedPluginHostContractVersion)&quot; -PluginCompatibilityMajor &quot;$(TvAIrPluginCompatibilityMajor)&quot; -LegacyPluginMajor &quot;$(TvAIrLegacyPluginMajor)&quot; -PublicContractName &quot;$(TvAIrPublicContractName)&quot; -PluginHostContractName &quot;$(TvAIrPluginHostContractName)&quot;" />
   </Target>
 </Project>
