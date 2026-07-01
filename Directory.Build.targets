@@ -1,10 +1,13 @@
 <Project>
   <PropertyGroup>
     <TvAIrVersionContractGenerator>$(MSBuildThisFileDirectory)build\GenerateVersionContracts.ps1</TvAIrVersionContractGenerator>
+    <TvAIrVersionContractFile>$(MSBuildThisFileDirectory)TvAIr\Core\TvAIrVersionContract.generated.cs</TvAIrVersionContractFile>
+    <TvAIrPluginSdkContractFile>$(MSBuildThisFileDirectory)TvAIrPlugin\TvAIrPluginSdkContract.generated.cs</TvAIrPluginSdkContractFile>
   </PropertyGroup>
 
   <Target Name="GenerateTvAIrVersionContracts" BeforeTargets="CoreCompile" Condition="'$(MSBuildProjectName)' == 'TvAIr' Or '$(MSBuildProjectName)' == 'TvAIrPlugin'">
-    <Error Condition="!Exists('$(TvAIrVersionContractGenerator)')" Text="TvAIr version contract generator is missing: $(TvAIrVersionContractGenerator). Extract the full source ZIP including the build folder, or restore build\GenerateVersionContracts.ps1." />
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(TvAIrVersionContractGenerator)&quot; -ProjectName &quot;$(MSBuildProjectName)&quot; -ProjectDirectory &quot;$(MSBuildProjectDirectory)&quot; -ProductVersion &quot;$(TvAIrProductVersion)&quot; -PluginSdkVersion &quot;$(TvAIrPluginSdkVersion)&quot; -PluginHostContractVersion &quot;$(TvAIrPluginHostContractVersion)&quot; -MinimumSupportedPluginHostContractVersion &quot;$(TvAIrMinimumSupportedPluginHostContractVersion)&quot; -PluginCompatibilityMajor &quot;$(TvAIrPluginCompatibilityMajor)&quot; -PublicContractName &quot;$(TvAIrPublicContractName)&quot; -PluginHostContractName &quot;$(TvAIrPluginHostContractName)&quot;" />
+    <Exec Condition="Exists('$(TvAIrVersionContractGenerator)')" Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(TvAIrVersionContractGenerator)&quot; -ProjectName &quot;$(MSBuildProjectName)&quot; -ProjectDirectory &quot;$(MSBuildProjectDirectory)&quot; -ProductVersion &quot;$(TvAIrProductVersion)&quot; -PluginSdkVersion &quot;$(TvAIrPluginSdkVersion)&quot; -PluginHostContractVersion &quot;$(TvAIrPluginHostContractVersion)&quot; -MinimumSupportedPluginHostContractVersion &quot;$(TvAIrMinimumSupportedPluginHostContractVersion)&quot; -PluginCompatibilityMajor &quot;$(TvAIrPluginCompatibilityMajor)&quot; -PublicContractName &quot;$(TvAIrPublicContractName)&quot; -PluginHostContractName &quot;$(TvAIrPluginHostContractName)&quot;" />
+    <Error Condition="!Exists('$(TvAIrVersionContractGenerator)') And '$(MSBuildProjectName)' == 'TvAIr' And !Exists('$(TvAIrVersionContractFile)')" Text="TvAIr version contract source is missing: $(TvAIrVersionContractFile). Restore the generated contract file or run the internal version contract generator." />
+    <Error Condition="!Exists('$(TvAIrVersionContractGenerator)') And '$(MSBuildProjectName)' == 'TvAIrPlugin' And !Exists('$(TvAIrPluginSdkContractFile)')" Text="TvAIr plugin SDK contract source is missing: $(TvAIrPluginSdkContractFile). Restore the generated contract file or run the internal version contract generator." />
   </Target>
 </Project>
