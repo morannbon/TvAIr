@@ -6,12 +6,12 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.6"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.6"/>
-<link href="/tvair-notification.css?v=1.0.6" rel="stylesheet"/>
-<script src="/tvair-theme.js?v=1.0.6"></script>
-<script>var TVA_IR_UI_VERSION="1.0.6";</script>
-<script src="/genre-shared.js?v=1.0.6"></script>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.7"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.7"/>
+<link href="/tvair-notification.css?v=1.0.7" rel="stylesheet"/>
+<script src="/tvair-theme.js?v=1.0.7"></script>
+<script>var TVA_IR_UI_VERSION="1.0.7";</script>
+<script src="/genre-shared.js?v=1.0.7"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Meiryo',sans-serif;font-size:12px;background:var(--tvair-theme-surface-app);color:var(--tvair-theme-text-main);overflow:hidden;height:100vh;display:flex;flex-direction:column}
@@ -87,10 +87,10 @@ body{font-family:'Meiryo',sans-serif;font-size:12px;background:var(--tvair-theme
 
 /* ProgramGuide toolbar/theme repairs are owned by ProgramGuideToolbarFilterOwnerContract. */
 </style>
-<link href="/tvair-epg-panel.css?v=1.0.6" rel="stylesheet"/>
-<link href="/tvair-ui-foundation.css?v=1.0.6" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.0.6" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.0.6" rel="stylesheet"/>
+<link href="/tvair-epg-panel.css?v=1.0.7" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.0.7" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.0.7" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.0.7" rel="stylesheet"/>
 </head>
 <body class="tvair-guide-page">
 <div class="tvair-topnav" id="nav">
@@ -286,12 +286,20 @@ body{font-family:'Meiryo',sans-serif;font-size:12px;background:var(--tvair-theme
 <div class="cfg-note">最初に本数を決めてから、放送波と録画用・視聴用の役割を割り当ててください。地デジ/BS/CSは1本で全波に対応するチューナー向けです。</div>
 </div>
 <table id="cfg-tuner-table">
+<colgroup>
+<col class="cfg-tuner-name-col"/>
+<col class="cfg-tuner-bon-col"/>
+<col class="cfg-tuner-wave-col"/>
+<col class="cfg-tuner-role-col"/>
+<col class="cfg-tuner-action-col"/>
+</colgroup>
 <thead>
 <tr>
 <th class="cfg-tuner-name-col">仮想枠</th>
 <th class="cfg-tuner-bon-col">BonDriver</th>
 <th class="cfg-tuner-wave-col">放送波</th>
 <th class="cfg-tuner-role-col">用途</th>
+<th class="cfg-tuner-action-col" data-cell-role="reservation-action">操作</th>
 </tr>
 </thead>
 <tbody id="cfg-tuner-tbody"></tbody>
@@ -443,9 +451,9 @@ body{font-family:'Meiryo',sans-serif;font-size:12px;background:var(--tvair-theme
 </div>
 </div>
 </div>
-<script src="/tvair-notification.js?v=1.0.6"></script>
-<script src="/tvair-epg-run-contract.js?v=1.0.6"></script>
-<script src="/tvair-epg-widget.js?v=1.0.6"></script>
+<script src="/tvair-notification.js?v=1.0.7"></script>
+<script src="/tvair-epg-run-contract.js?v=1.0.7"></script>
+<script src="/tvair-epg-widget.js?v=1.0.7"></script>
 <script>
 const PROGRAM_GUIDE_GEOMETRY=Object.freeze({
   dayStartHour:4,
@@ -4307,7 +4315,7 @@ function hideCfgModal(){
   closeCfgDialog();
 }
 window.TvAIrSettingsModule = window.TvAIrSettingsModule || {
-  version:'1.0.6',
+  version:'1.0.7',
   open:()=>showCfgModal(),
   close:()=>hideCfgModal(),
   contract:'single-settings-module-web-modal-basis'
@@ -4490,7 +4498,7 @@ function makeTunerRow(t, idx){
   tr.dataset.did=initialDid;
 
   const tdName=document.createElement('td');
-  tdName.className='cfg-tuner-virtual-cell';
+  tdName.className='cfg-tuner-virtual-cell cfg-tuner-name-cell';
   const inName=document.createElement('input');
   inName.type='text';
   inName.readOnly=true;
@@ -4499,10 +4507,13 @@ function makeTunerRow(t, idx){
   tdName.appendChild(inName);
 
   const tdBd=document.createElement('td');
+  tdBd.className='cfg-tuner-bon-cell';
   const selBd=buildBonDriverSelect(t.bonDriverFileName || ''); tdBd.appendChild(selBd);
   const tdGroup=document.createElement('td');
+  tdGroup.className='cfg-tuner-wave-cell';
   const selGroup=buildTunerGroupSelect(initialGroup); selGroup.className='cfg-tuner-group-select'; tdGroup.appendChild(selGroup);
   const tdRole=document.createElement('td');
+  tdRole.className='cfg-tuner-role-cell';
   const selRole=buildTunerRoleSelect(t.role || ''); tdRole.appendChild(selRole);
 
   selBd.addEventListener('change', ()=>{
@@ -4511,8 +4522,34 @@ function makeTunerRow(t, idx){
     refreshTunerVirtualNames();
   });
   selGroup.addEventListener('change', refreshTunerVirtualNames);
-  tr.append(tdName, tdBd, tdGroup, tdRole);
+  const tdAction=document.createElement('td');
+  tdAction.className='cfg-tuner-action-cell';
+  tdAction.dataset.cellRole='reservation-action';
+  const delBtn=document.createElement('button');
+  delBtn.type='button';
+  delBtn.className='cfg-tuner-delete-button';
+  delBtn.dataset.programAction='delete';
+  delBtn.dataset.actionRole='settings-tuner-delete';
+  delBtn.dataset.actionLabel='削除';
+  delBtn.dataset.actionContext='settings-tuner-row';
+  delBtn.textContent='削除';
+  delBtn.addEventListener('click', ()=>deleteTunerRow(delBtn));
+  tdAction.appendChild(delBtn);
+
+  tr.append(tdName, tdBd, tdGroup, tdRole, tdAction);
   return tr;
+}
+function syncTunerRowCount(){
+  const input=document.getElementById('cfg-tuner-count');
+  const tbody=document.getElementById('cfg-tuner-tbody');
+  if(input && tbody) input.value=String(tbody.querySelectorAll('tr').length);
+}
+function deleteTunerRow(btn){
+  const tr=btn && btn.closest ? btn.closest('tr') : null;
+  if(!tr) return;
+  tr.remove();
+  syncTunerRowCount();
+  refreshTunerVirtualNames();
 }
 function renderTunerTable(tuners){
   const tbody=document.getElementById('cfg-tuner-tbody'); tbody.innerHTML='';
@@ -4528,6 +4565,7 @@ function applyTunerCount(){
   const rebuild=()=>{
     tbody.innerHTML='';
     for(let i=0;i<target;i++) tbody.appendChild(makeTunerRow(defaultTunerData(i,target), i));
+    syncTunerRowCount();
     refreshTunerVirtualNames();
   };
   if(current>0){
@@ -4542,16 +4580,17 @@ function collectTuners(){
   const rows=[...document.querySelectorAll('#cfg-tuner-tbody tr')];
   return rows.map((tr, idx)=>{
     const cells=tr.cells;
-    const bon=cells[1].querySelector('select').value;
-    const group=normalizeTunerGroup(cells[2].querySelector('select').value);
+    const bon=tr.querySelector('td:nth-child(2) select')?.value || '';
+    const group=normalizeTunerGroup(tr.querySelector('.cfg-tuner-group-select')?.value || '');
+    const roleValue=tr.querySelector('td:nth-child(4) select')?.value || '';
     const did=(tr.dataset.did || nextDid(idx)).trim().toUpperCase();
-    const nameRaw=(tr.dataset.virtualName || cells[0].querySelector('input').value || '').trim();
+    const nameRaw=(tr.dataset.virtualName || tr.querySelector('.cfg-tuner-virtual-name')?.value || '').trim();
     return {
       name: nameRaw || virtualTunerName(group, 1),
       bonDriverFileName: bon,
       group,
       did,
-      role: normalizeTunerRole(cells[3].querySelector('select').value),
+      role: normalizeTunerRole(roleValue),
     };
   });
 }
@@ -4927,7 +4966,7 @@ async function handleStartupOpenRequest(){
 
 bindGuideTopOperationUi();
 </script>
-<script src="/tvair-menu-spine.js?v=1.0.6"></script>
+<script src="/tvair-menu-spine.js?v=1.0.7"></script>
 <script>
 (function(){
   try{

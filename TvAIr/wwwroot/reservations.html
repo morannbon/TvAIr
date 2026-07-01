@@ -5,19 +5,19 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>予約リスト — TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.6"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.6"/>
-<link href="/tvair-notification.css?v=1.0.6" rel="stylesheet"/>
-<script src="/tvair-theme.js?v=1.0.6"></script>
-<script src="/genre-shared.js?v=1.0.6"></script>
-<script src="/tvair-user-log.js?v=1.0.6"></script>
-<link href="/tvair-reservations.css?v=1.0.6" rel="stylesheet"/>
-<link href="/tvair-epg-panel.css?v=1.0.6" rel="stylesheet"/>
-<link href="/tvair-ui-foundation.css?v=1.0.6" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.0.6" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.0.6" rel="stylesheet"/>
-<link href="/tvair-list-module.css?v=1.0.6" rel="stylesheet"/>
-<link href="/tvair-user-log.css?v=1.0.6" rel="stylesheet"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.7"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.7"/>
+<link href="/tvair-notification.css?v=1.0.7" rel="stylesheet"/>
+<script src="/tvair-theme.js?v=1.0.7"></script>
+<script src="/genre-shared.js?v=1.0.7"></script>
+<script src="/tvair-user-log.js?v=1.0.7"></script>
+<link href="/tvair-reservations.css?v=1.0.7" rel="stylesheet"/>
+<link href="/tvair-epg-panel.css?v=1.0.7" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.0.7" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.0.7" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.0.7" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.0.7" rel="stylesheet"/>
+<link href="/tvair-user-log.css?v=1.0.7" rel="stylesheet"/>
 </head>
 <body class="tvair-non-program-page tvair-reservation-page">
 <div class="tvair-topnav" id="nav">
@@ -91,7 +91,7 @@ let taggedLoadedOnce = { newprogram: false, finalepisode: false };
 let currentFilter = 'active';
 let keywordLoading = false;
 let keywordLoadedOnce = false;
-// .0: reservation sub-tabs share toolbar styling, but functional actions are materialized by tab capability.
+// release_contract: reservation sub-tabs share toolbar styling, but functional actions are materialized by tab capability.
 // The operation log tab is a reservation-family list surface, not a genre-capable surface.
 const reservationTabContracts = Object.freeze({
   active:       Object.freeze({ listRole:'reservation', supportsGenreColor:true,  supportsLogActions:false, supportsRefresh:true }),
@@ -115,18 +115,26 @@ function collectReservationStationNames(){
     if(text && text !== '—' && text !== '（局名不明）') names.add(text);
   };
 
+  // release_contract: reservation-family station width is derived from the current
+  // channel contract only. Do not widen/narrow per tab, reservation data, stale DB
+  // service names, keyword results, or tagged program rows. Channel renames must be
+  // absorbed by /api/channels without a TvAIr code change.
   stationChannelMetaList.forEach(ch => add(ch.name || ch.channelArgument));
   stationGroupMetaMap.forEach(meta => add(meta.label));
-  allData.forEach(r => add(r.serviceName || r.channelArgument));
 
-  keywordGroups.forEach(group => {
-    (group && Array.isArray(group.items) ? group.items : []).forEach(r => add(r.serviceName || r.channelArgument));
-    (group && Array.isArray(group.reservations) ? group.reservations : []).forEach(r => add(r.serviceName || r.channelArgument));
-  });
+  // Fail-soft only when channel metadata is unavailable. This keeps the table usable
+  // but does not let ordinary reservation data become the width owner.
+  if(names.size === 0){
+    allData.forEach(r => add(r.serviceName || r.channelArgument));
+    keywordGroups.forEach(group => {
+      (group && Array.isArray(group.items) ? group.items : []).forEach(r => add(r.serviceName || r.channelArgument));
+      (group && Array.isArray(group.reservations) ? group.reservations : []).forEach(r => add(r.serviceName || r.channelArgument));
+    });
+    Object.values(taggedPrograms).forEach(list => {
+      (Array.isArray(list) ? list : []).forEach(ev => add(ev.serviceName || ev.channelName || ev.channelArgument));
+    });
+  }
 
-  Object.values(taggedPrograms).forEach(list => {
-    (Array.isArray(list) ? list : []).forEach(ev => add(ev.serviceName || ev.channelName || ev.channelArgument));
-  });
   return Array.from(names).sort((a,b)=>a.localeCompare(b, 'ja'));
 }
 
@@ -886,6 +894,13 @@ function getStationGroupMeta(item){
   };
 }
 
+function getDisplayServiceName(item){
+  const meta = getStationGroupMeta(item || {});
+  const label = String(meta && meta.label || '').trim();
+  if(label && label !== '（局名不明）') return label;
+  return String((item && (item.serviceName || item.channelName || item.channelArgument)) || '—').trim() || '—';
+}
+
 async function loadStationChannelMeta(){
   try{
     const response = await fetch('/api/channels').catch(()=>null);
@@ -995,7 +1010,7 @@ function renderSpecialGroups(){
           <td class="col-no tvair-genre-list-index-cell tvair-reservation-list-index-cell" data-cell-role="list-index">${idx + 1}</td>
           <td class="col-date tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="date-metadata">${fmtDate(r.start)}</td>
           <td class="col-time tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="time-metadata">${fmtTime(r.start, r.end)}</td>
-          <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata">${esc(r.serviceName || '—')}</td>
+          <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata">${esc(getDisplayServiceName(r))}</td>
           <td class="col-title tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="title-data" title="${esc(r.titleDisplay || r.title || '')}">${esc(r.titleDisplay || r.title || '')}</td>
           <td class="col-action tvair-reservation-action-cell" data-cell-role="reservation-action"><div class="reservation-action-slot">${actionBtn}</div></td>
         </tr>`;
@@ -1030,7 +1045,7 @@ function renderSpecialGroups(){
         <td class="col-toggle tvair-reservation-state-cell" data-cell-role="reservation-state">${toggleBtn}</td>
         <td class="col-date tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="date-metadata">${fmtDate(r.startTime)}</td>
         <td class="col-time tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="time-metadata">${fmtTime(r.startTime, r.endTime)}</td>
-        <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata" title="${esc(r.serviceName || r.channelArgument || '')}">${esc(r.serviceName || r.channelArgument || '—')}</td>
+        <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata" title="${esc(getDisplayServiceName(r))}">${esc(getDisplayServiceName(r))}</td>
         <td class="col-title tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="title-data" title="${esc(buildDisplayTitle(r))}">${esc(buildDisplayTitle(r))}</td>
         <td class="col-status tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="source-metadata"><span class="source-label" data-state-role="source-label" title="${esc(r.sourceLabel || "")}">${esc(r.sourceLabel || "—")}</span></td>
       </tr>`;
@@ -1122,7 +1137,7 @@ function renderKeywordGroups(){
         <td class="col-toggle tvair-reservation-state-cell" data-cell-role="reservation-state">${toggleBtn}</td>
         <td class="col-date tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="date-metadata">${fmtDate(r.startTime)}</td>
         <td class="col-time tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="time-metadata">${fmtTime(r.startTime, r.endTime)}</td>
-        <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata" title="${esc(r.serviceName || r.channelArgument || '')}">${esc(r.serviceName || r.channelArgument || '—')}</td>
+        <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata" title="${esc(getDisplayServiceName(r))}">${esc(getDisplayServiceName(r))}</td>
         <td class="col-title tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="title-data" title="${esc(buildDisplayTitle(r))}">${esc(buildDisplayTitle(r))}</td>
         <td class="col-status tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="source-metadata"><span class="source-label" data-state-role="source-label" title="${esc(r.sourceLabel || "")}">${esc(r.sourceLabel || "—")}</span></td>
       </tr>`;
@@ -1259,7 +1274,8 @@ function render(){
         : `<span class="tuner-normal">${esc(tunerText)}</span>`);
 
     // 局名
-    const chCell = esc(r.serviceName || r.channelArgument || '—');
+    const chName = getDisplayServiceName(r);
+    const chCell = esc(chName);
 
     // タイトル（EPGエントリは青文字イタリック）
     const titleClass = isEpg ? 'title-epg' : 'title-normal';
@@ -1308,7 +1324,7 @@ function render(){
         <td class="col-tuner tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="priority-metadata">${tunerCell}</td>
         <td class="col-date tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="date-metadata">${fmtDate(r.startTime)}</td>
         <td class="col-time tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="time-metadata">${fmtTime(r.startTime, r.endTime)}</td>
-        <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata" title="${esc(r.serviceName || r.channelArgument || '')}">${chCell}</td>
+        <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata" title="${esc(chName)}">${chCell}</td>
         <td class="col-title tvair-genre-list-text-cell tvair-reservation-list-text-cell ${titleClass}" data-cell-role="title-data" title="${esc(buildDisplayTitle(r))}">${esc(buildDisplayTitle(r))}</td>
         <td class="col-status tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="source-metadata"><span class="source-label" data-state-role="source-label" title="${esc(r.sourceLabel || "")}">${esc(r.sourceLabel || "—")}</span></td>
       </tr>`;
@@ -1320,7 +1336,7 @@ function render(){
       <td class="col-tuner tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="priority-metadata">${tunerCell}</td>
       <td class="col-date tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="date-metadata">${fmtDate(r.startTime)}</td>
       <td class="col-time tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="time-metadata">${fmtTime(r.startTime, r.endTime)}</td>
-      <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata" title="${esc(r.serviceName || r.channelArgument || '')}">${chCell}</td>
+      <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata" title="${esc(chName)}">${chCell}</td>
       <td class="col-title tvair-genre-list-text-cell tvair-reservation-list-text-cell ${titleClass}" data-cell-role="title-data" title="${esc(buildDisplayTitle(r))}">${esc(buildDisplayTitle(r))}</td>
       <td class="col-status tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="source-metadata"><span class="source-label" data-state-role="source-label" title="${esc(r.sourceLabel || "")}">${esc(r.sourceLabel || "—")}</span></td>
       <td class="col-action tvair-reservation-action-cell" data-cell-role="reservation-action"><div class="reservation-action-slot">${actionBtn}</div></td>
@@ -1544,9 +1560,9 @@ document.addEventListener('DOMContentLoaded', ()=>{
 });
 
 </script>
-<script src="/tvair-notification.js?v=1.0.6"></script>
-<script src="/tvair-epg-run-contract.js?v=1.0.6"></script>
-<script src="/tvair-epg-widget.js?v=1.0.6"></script>
-<script src="/tvair-menu-spine.js?v=1.0.6"></script>
+<script src="/tvair-notification.js?v=1.0.7"></script>
+<script src="/tvair-epg-run-contract.js?v=1.0.7"></script>
+<script src="/tvair-epg-widget.js?v=1.0.7"></script>
+<script src="/tvair-menu-spine.js?v=1.0.7"></script>
 </body>
 </html>

@@ -172,11 +172,11 @@ internal sealed class PluginLoader : IHostedService
             }
 
             var externalManifestContract = LoadExternalManifestContract(dllPath);
-            if (IsLegacyPluginContract(externalManifestContract))
+            if (IsPreFoundationPluginContract(externalManifestContract))
             {
-                var message = $"旧SDKプラグインのため読み込みませんでした。TvAIrPlugin SDK {TvAIrVersionContract.PluginSdkVersion} 以降で再ビルドしてください。";
+                var message = $"対応外のPlugin SDK契約のため読み込みませんでした。TvAIrPlugin SDK {TvAIrVersionContract.PluginSdkVersion} 以降で再ビルドしてください。";
                 _userEvents.AddPluginLoadFailed(fileName, message);
-                _log.Add("Plugin", fileName, $"[Plugin] Rejected: legacy_sdk requiredSdk={TvAIrVersionContract.PluginSdkVersion} rule={TvAIrVersionContract.PublicContractName}");
+                _log.Add("Plugin", fileName, $"[Plugin] Rejected: pre_foundation_sdk requiredSdk={TvAIrVersionContract.PluginSdkVersion} rule={TvAIrVersionContract.PublicContractName}");
                 return;
             }
 
@@ -549,10 +549,10 @@ internal sealed class PluginLoader : IHostedService
 
 
 
-    private static bool IsLegacyPluginContract(PluginExternalManifestContract? contract)
+    private static bool IsPreFoundationPluginContract(PluginExternalManifestContract? contract)
         => contract is not null && (
-            TvAIrVersionContract.IsLegacyZeroMajor(contract.HostContractVersion) ||
-            TvAIrVersionContract.IsLegacyZeroMajor(contract.SdkVersion));
+            TvAIrVersionContract.IsPreFoundationPluginContract(contract.HostContractVersion) ||
+            TvAIrVersionContract.IsPreFoundationPluginContract(contract.SdkVersion));
 
     private static bool IsUnsupportedPluginContract(PluginExternalManifestContract? contract)
     {
@@ -564,7 +564,7 @@ internal sealed class PluginLoader : IHostedService
     private static bool IsUnsupportedPluginVersion(string? version)
     {
         if (string.IsNullOrWhiteSpace(version)) return false;
-        return !TvAIrVersionContract.IsLegacyZeroMajor(version)
+        return !TvAIrVersionContract.IsPreFoundationPluginContract(version)
             && !TvAIrVersionContract.IsSupportedPluginContract(version);
     }
 

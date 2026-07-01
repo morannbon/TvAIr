@@ -7,7 +7,7 @@ namespace TvAIr.Core;
 public sealed class LogRepository
 {
     // release_contract: 表版/裏版ログプロファイル入口。Developmentは従来診断、Releaseは開発者詳細を強く抑制する。
-    private enum RuntimeLogProfile { PublicRelease }
+    private enum RuntimeLogProfile { Development, Release }
 
     private readonly object gate = new();
     private readonly Queue<LogEntry> buffer;
@@ -30,20 +30,15 @@ public sealed class LogRepository
             || File.Exists(Path.Combine(AppContext.BaseDirectory, "verbose-log.flag"));
         runtimeProfile = ResolveRuntimeLogProfile();
     }
+
+
     private static RuntimeLogProfile ResolveRuntimeLogProfile()
     {
-        return RuntimeLogProfile.PublicRelease;
+        return RuntimeLogProfile.Release;
     }
 
     public void Add(LogEntry entry)
     {
-        if (runtimeProfile == RuntimeLogProfile.PublicRelease)
-        {
-            // 表版: 開発者ログは画面非表示ではなく非生成・非保持。
-            // ユーザー運用ログへの変換も行わず、長期運用でログが蓄積しないようにする。
-            return;
-        }
-
         if (ShouldSuppress(entry)) return;
 
         lock (gate)
@@ -79,6 +74,16 @@ public sealed class LogRepository
         var ev = entry.Event ?? string.Empty;
         var title = entry.Title ?? string.Empty;
         var msg = entry.Message ?? string.Empty;
+
+        // release_contract: Release profileでは表版向けに開発診断ノイズをさらに抑える。
+        // ユーザー運用ログ(UserOperationEvent)とは正本が別なので、ここを切ってもログタブ/報告用コピーは維持される。
+        if (runtimeProfile == RuntimeLogProfile.Release)
+        {
+            if (ev.StartsWith("EPG_", StringComparison.OrdinalIgnoreCase) && ev != "EPG_RUN_START" && ev != "EPG_RUN_OK" && ev != "EPG_RUN_PARTIAL" && ev != "EPG_RUN_BLOCKED" && ev != "EPG_RUN_FAILED") return true;
+            if (ev.StartsWith("TUNER_", StringComparison.OrdinalIgnoreCase) || ev.StartsWith("CHAIN_TRACE", StringComparison.OrdinalIgnoreCase)) return true;
+            if (ev.Contains("AUDIT", StringComparison.OrdinalIgnoreCase) || ev.Contains("TRACE", StringComparison.OrdinalIgnoreCase)) return true;
+            if (ev == "TaskScheduler" && !msg.Contains("FAILED", StringComparison.OrdinalIgnoreCase)) return true;
+        }
 
         // release_contract: 通常運用ログでは、周期監視・keepalive・内部割当トレースを抑制する。
         // 必要な場合は TVAIR_VERBOSE_LOG=1 または verbose-log.flag で詳細診断ログを復活させる。

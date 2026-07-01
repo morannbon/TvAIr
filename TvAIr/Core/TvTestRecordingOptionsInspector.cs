@@ -123,7 +123,7 @@ public static class TvTestRecordingOptionsInspector
             : "recording_related_keys=" + matches.Count;
 
         var truncated = matches.Count > 30 ? $" truncated=True truncatedCount={matches.Count - 30}" : " truncated=False";
-        return $"result=OK tvTestIni=OK {currentServiceText}{effectiveCurrentServiceText} {optionText}{truncated} rule=startup_record_options_release_trim";
+        return $"result=OK tvTestIni=OK {currentServiceText}{effectiveCurrentServiceText} {optionText}{truncated} rule=startup_record_options_release_candidate_trim";
     }
 
     private static bool IsRecordingOptionKey(string key)

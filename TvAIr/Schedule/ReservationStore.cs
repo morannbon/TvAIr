@@ -2,7 +2,6 @@ using System.Text.Json;
 using System.Text;
 using System.Security.Cryptography;
 using Microsoft.Data.Sqlite;
-using Microsoft.Extensions.Configuration;
 using TvAIr.Core;
 using TvAIr.Epg;
 using TvAIr.Channel;
@@ -48,7 +47,6 @@ public sealed class ReservationStore
     private readonly ChainDirectRecorderSessionRegistry chainSessionRegistry;
     private readonly ChannelFileLoader channelLoader;
     private readonly UserEventLogService userEvents;
-    private readonly bool tunerAllocationDebugEnabled;
     // release_contract: 通常競合ポリシーから「自動救済1回だけ」の足かせを撤去。
     // 競合が判明した時点で、前番組優先/後番組優先の共通ポリシーだけで勝敗を決める。
 
@@ -72,14 +70,13 @@ public sealed class ReservationStore
     /// <summary>時間追従の変化検出閾値（秒）。この秒数以上ずれていれば更新対象とみなす。</summary>
     private const int TimeFollowThresholdSeconds = 30;
 
-    public ReservationStore(Database db, LogRepository log, ChainDirectRecorderSessionRegistry chainSessionRegistry, ChannelFileLoader channelLoader, UserEventLogService userEvents, IConfiguration configuration)
+    public ReservationStore(Database db, LogRepository log, ChainDirectRecorderSessionRegistry chainSessionRegistry, ChannelFileLoader channelLoader, UserEventLogService userEvents)
     {
         this.db = db;
         this.log = log;
         this.chainSessionRegistry = chainSessionRegistry;
         this.channelLoader = channelLoader;
         this.userEvents = userEvents;
-        tunerAllocationDebugEnabled = configuration.GetValue<bool>("Debug:EnableRouteReplayApi");
     }
 
     private static string SafeTuner(string? tuner)
@@ -3538,34 +3535,24 @@ WHERE source <> 'Epg'
             }
         }
 
-        if (tunerAllocationDebugEnabled)
-        {
-            WriteTunerAllocationDebugSnapshot(
-                allScheduled,
-                scheduled,
-                tunerProfiles,
-                tunerCountByGroup,
-                assignedIds,
-                conflictedIds,
-                tunerAssignment,
-                chainPredecessors,
-                chainSuccessors,
-                laterProgramPriority,
-                pseudoContinuous,
-                configuredPseudoContinuous,
-                chainModeEnabled,
-                userChainCandidatePairs,
-                preStartMarginSeconds,
-                postEndMarginSeconds,
-                debugTrace);
-        }
-        else
-        {
-            log.Add("TUNER_CONFLICT_VISIBILITY_CONTRACT", "Summary",
-                $"candidatePreflight=False conflictVisibleAfterReservation=True programGuideUnreservedAction=reserve" +
-                $" finalSource=ReconcileFinalConflictPlanByUnitKey commonRoute=ALLOC_ROUTE/TUNER_ALLOC" +
-                $" finalPriorityAxis=rebuilt capacityFirst=True adjacentBoundaryOverridesClickOrder=True evaluated={scheduled.Count(r => r.Source != ReservationSource.Epg && r.IsEnabled)} conflict={conflictedIds.Count} rule=release_contract");
-        }
+        WriteTunerAllocationDebugSnapshot(
+            allScheduled,
+            scheduled,
+            tunerProfiles,
+            tunerCountByGroup,
+            assignedIds,
+            conflictedIds,
+            tunerAssignment,
+            chainPredecessors,
+            chainSuccessors,
+            laterProgramPriority,
+            pseudoContinuous,
+            configuredPseudoContinuous,
+            chainModeEnabled,
+            userChainCandidatePairs,
+            preStartMarginSeconds,
+            postEndMarginSeconds,
+            debugTrace);
 
         return changes;
     }
@@ -4550,7 +4537,7 @@ WHERE source <> 'Epg'
         }
 
         if (evaluatedProgramRules > 0)
-            log.Add("RESERVE_ENTRY", "ProgramResolveSummary", $"result=OK evaluated={evaluatedProgramRules} okDetails=diagnostic_only errorsAndFallbacks=regular_log rule=program_projection_channel_resolve_release_summary");
+            log.Add("RESERVE_ENTRY", "ProgramResolveSummary", $"result=OK evaluated={evaluatedProgramRules} okDetails=diagnostic_only errorsAndFallbacks=regular_log rule=program_projection_channel_resolve_release_candidate_summary");
 
         using var con = db.Open();
         using var cmd = con.CreateCommand();

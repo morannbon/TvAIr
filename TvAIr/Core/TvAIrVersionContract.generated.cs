@@ -6,19 +6,19 @@ namespace TvAIr.Core;
 internal static class TvAIrVersionContract
 {
     public const string ProductName = "TvAIr";
-    public const string ProductVersion = "1.0.6";
+    public const string ProductVersion = "1.0.7";
     public const string PluginSdkVersion = "1.0.0";
     public const string PluginHostContractVersion = "1.0.0";
     public const string MinimumSupportedPluginHostContractVersion = "1.0.0";
     public const int PluginCompatibilityMajor = 1;
-    public const int LegacyPluginMajor = 0;
     public const string PublicContractName = "release_contract";
     public const string PluginHostContractName = "plugin-host-foundation";
 
-    public static bool IsLegacyZeroMajor(string? version)
+    public static bool IsPreFoundationPluginContract(string? version)
     {
         if (string.IsNullOrWhiteSpace(version)) return false;
-        return global::System.Version.TryParse(NormalizeVersion(version), out var parsed) && parsed.Major == LegacyPluginMajor;
+        return global::System.Version.TryParse(NormalizeVersion(version), out var parsed)
+            && parsed.Major < PluginCompatibilityMajor;
     }
 
     public static bool IsSupportedPluginContract(string? version)

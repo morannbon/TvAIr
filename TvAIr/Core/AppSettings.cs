@@ -118,7 +118,7 @@ public sealed class TunerProfile
     /// </summary>
     public string Did { get; set; } = "";
 
-    /// <summary>用途。Recording=録画/EPG用、Viewing=視聴用、Shared=共用。</summary>
+    /// <summary>用途。Recording=録画/EPG用、Viewing=視聴用。</summary>
     public string Role { get; set; } = "";
 }
 

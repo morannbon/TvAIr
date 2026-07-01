@@ -639,24 +639,13 @@ public sealed class EpgScheduler : BackgroundService
             else if (now > catchupLimit && !alreadyRanToday && !deferredScheduledEpgAt.HasValue)
             {
                 // release_contract: 大幅遅延catchupで全体EPGを勝手に開始しない。
-                // release_contract: ただし、DBが部分的に埋まっていて可視チャンネルだけが欠けている場合は、
-                // 全局catchupではなく欠損波だけを論理リソース経路で補修する。
+                // release_contract: partial repair も起動直後・遅延catchup経路では自動発火させない。
+                // 欠損局の補修は、定時枠内の通常EPGまたはユーザー明示の手動EPGに任せる。
                 var delaySec = Math.Max(0, (int)(now - todayDue).TotalSeconds);
-                if (lastPartialEpgRepairDate?.Date != now.Date
-                    && TryResolvePartialDayEpgRepairScope(now, out var repairScope, out var repairDetail))
-                {
-                    deferredScheduledEpgAt = now.AddSeconds(10);
-                    deferredScheduledEpgScope = repairScope;
-                    lastPartialEpgRepairDate = now.Date;
-                    log.Add("EPG_SCHEDULER_PARTIAL_REPAIR", "EPG",
-                        $"result=DEFER_PARTIAL_REPAIR source=Scheduler.Daily scheduled={todayDue:yyyy-MM-dd HH:mm:ss} now={now:yyyy-MM-dd HH:mm:ss} delaySec={delaySec} windowEnd={catchupLimit:yyyy-MM-dd HH:mm:ss} repairAt={deferredScheduledEpgAt.Value:yyyy-MM-dd HH:mm:ss} targetScope={repairScope} {repairDetail} rule=release_contract");
-                }
-                else
-                {
-                    lastScheduledRunDate = now.Date;
-                    log.Add("EPG_SCHEDULER_DUE", "EPG",
-                        $"result=MISSED_WAKE_CATCHUP_SUPPRESSED source=Scheduler.Daily scheduled={todayDue:yyyy-MM-dd HH:mm:ss} now={now:yyyy-MM-dd HH:mm:ss} delaySec={delaySec} windowEnd={catchupLimit:yyyy-MM-dd HH:mm:ss} action=do_not_start_all_epg reason=late_start_outside_catchup_window rule=epg_scheduler_catchup_contract");
-                }
+                lastScheduledRunDate = now.Date;
+                lastPartialEpgRepairDate = now.Date;
+                log.Add("EPG_SCHEDULER_DUE", "EPG",
+                    $"result=MISSED_WAKE_CATCHUP_SUPPRESSED source=Scheduler.Daily scheduled={todayDue:yyyy-MM-dd HH:mm:ss} now={now:yyyy-MM-dd HH:mm:ss} delaySec={delaySec} windowEnd={catchupLimit:yyyy-MM-dd HH:mm:ss} action=do_not_start_all_epg reason=late_start_outside_catchup_window partialRepair=disabled_in_late_catchup rule=epg_scheduler_catchup_contract");
             }
 
             var minutes = Math.Max(0, (int)(next - now).TotalMinutes);

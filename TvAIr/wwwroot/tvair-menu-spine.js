@@ -1,9 +1,9 @@
-/* TvAIr Menu Spine v1.0.0
+/* TvAIr Menu Spine release_contract
    Windows-style menu projection: shared tree, surface attributes, JS-managed flyout.
    MenuLegacyEntryCleanupContract: hamburger/page/context/tray keep a single command spine; page-local onclick menu fallbacks are removed, and only EPG silent remains a surface attribute.
-   v1.0.0: menu page-open actions use a shared entry contract; Help opens as a separate tab from every menu surface.
-   v1.0.0: Web context is an in-app surface: app.open/app.exit stay tray-only and are not projected into page context menus.
-   v1.0.0: Manual EPG run uses the shared scope-based request contract; Web context is visible, tray is silent. */
+   release_contract: menu page-open actions use a shared entry contract; Help opens as a separate tab from every menu surface.
+   release_contract: Web context is an in-app surface: app.open/app.exit stay tray-only and are not projected into page context menus.
+   release_contract: Manual EPG run uses the shared scope-based request contract; Web context is visible, tray is silent. */
 (function(){
   'use strict';
   if(window.TvAIrMenuSpine && window.TvAIrMenuSpine.version === '1.0.0') return;

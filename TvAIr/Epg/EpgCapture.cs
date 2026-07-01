@@ -1114,9 +1114,7 @@ public sealed class EpgCapture
         var resultPath = Path.Combine(runtimeDir, $"epg_result_{workerName}_{stamp}_{Guid.NewGuid():N}.json");
         var progressPath = Path.Combine(runtimeDir, $"epg_progress_{workerName}_{stamp}_{Guid.NewGuid():N}.jsonl");
         var stopSignalPath = Path.Combine(runtimeDir, $"epg_stop_{workerName}_{stamp}_{Guid.NewGuid():N}.signal");
-        // 表版: 内部実行統計は生成しない。EPG/録画判定に必要な job/result/progress は
-        // 親プロセスで読み終えた後に削除する。
-        var runtimeStatsPath = string.Empty;
+        var runtimeStatsPath = tsFile + ".runtime.jsonl";
         var target = group.Targets.FirstOrDefault();
         var bonDriverPath = ResolveBonDriverPathForEpg(bonDriverFileName);
         var displayLogoPaths = target is null
@@ -1299,21 +1297,25 @@ public sealed class EpgCapture
                 $"pid={pid} worker={workerName} phase={SafeLog(phase)} route=TvAIrEpgRec reason={SafeLog(reason)} rule=epg_worker_route_contract");
             RequestTvAIrEpgRecStopOrKill(launch, workerName, group, reason);
 
-            await WaitForExitAsync(pid, timeout, CancellationToken.None).ConfigureAwait(false);
-            if (IsProcessAlive(pid))
+            var waitResult = await WaitForExitAsync(pid, timeout, CancellationToken.None).ConfigureAwait(false);
+            if (waitResult == EpgProcessExitWaitResult.Timeout && IsProcessAlive(pid))
             {
                 Log("EPG_CANCEL_PROCESS_STOP_WAIT", $"TS{group.TsId}",
                     $"result=TIMEOUT pid={pid} worker={workerName} phase={SafeLog(phase)} waitMs={(int)timeout.TotalMilliseconds} action=kill rule=epg_worker_route_contract");
                 KillProcess(pid);
-                await WaitForExitAsync(pid, TimeSpan.FromSeconds(2), CancellationToken.None).ConfigureAwait(false);
+                waitResult = await WaitForExitAsync(pid, TimeSpan.FromSeconds(2), CancellationToken.None).ConfigureAwait(false);
             }
+
+            Log("EPG_CANCEL_PROCESS_WAIT_RESULT", $"TS{group.TsId}",
+                $"result={waitResult} pid={pid} worker={workerName} phase={SafeLog(phase)} reason={SafeLog(reason)} rule=epg_worker_route_contract");
         }
 
         if (!IsProcessAlive(pid))
         {
             UnregisterActiveEpgWorkerProcess(pid, workerName, group, reason);
+            var released = tunerPool.ForceReleaseEpgByProcessId(group.Group, pid, null, null, reason, workerName);
             Log("EPG_CANCEL_PROCESS_EXIT_OK", $"TS{group.TsId}",
-                $"pid={pid} worker={workerName} phase={SafeLog(phase)} action=stopped_and_unregistered rule=epg_worker_route_contract");
+                $"pid={pid} worker={workerName} phase={SafeLog(phase)} tunerReleased={released} action=stopped_unregistered_and_tuner_released rule=epg_worker_route_contract");
             return true;
         }
 
@@ -1530,10 +1532,29 @@ public sealed class EpgCapture
                             $"pid={launch.ProcessId} worker={workerName} reason={(probe.TargetFound ? "target_event_seen" : "safety_ceiling_reached")} rule=epg_probe_runtime_contract");
                         RequestTvAIrEpgRecStopOrKill(launch, workerName, group, "pre_record_target_probe_done");
                     }
-                    await WaitForExitAsync(launch.ProcessId, TimeSpan.FromSeconds(5), CancellationToken.None);
-                    await HandleEpgProcessEndAsync(group, workerName, launch.ProcessId, ct);
-                    UnregisterActiveEpgWorkerProcess(launch.ProcessId, workerName, group, "process_end");
-                    activeLaunchRetired = true;
+                    var probeWaitResult = await WaitForExitAsync(launch.ProcessId, TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false);
+                    if (probeWaitResult == EpgProcessExitWaitResult.Timeout && IsProcessAlive(launch.ProcessId))
+                    {
+                        Log("PRE_REC_EPG_PROBE_STOP_TIMEOUT", $"TS{group.TsId}",
+                            $"result=TIMEOUT pid={launch.ProcessId} worker={workerName} action=kill reason=pre_record_target_probe_done rule=epg_probe_runtime_contract");
+                        KillProcess(launch.ProcessId);
+                        probeWaitResult = await WaitForExitAsync(launch.ProcessId, TimeSpan.FromSeconds(2), CancellationToken.None).ConfigureAwait(false);
+                    }
+                    Log("PRE_REC_EPG_PROBE_STOP_RESULT", $"TS{group.TsId}",
+                        $"result={probeWaitResult} pid={launch.ProcessId} worker={workerName} rule=epg_probe_runtime_contract");
+                    if (!IsProcessAlive(launch.ProcessId))
+                    {
+                        await HandleEpgProcessEndAsync(group, workerName, launch.ProcessId, ct).ConfigureAwait(false);
+                        UnregisterActiveEpgWorkerProcess(launch.ProcessId, workerName, group, "process_end");
+                        activeLaunchRetired = true;
+                        lease.Dispose();
+                    }
+                    else
+                    {
+                        Log("PRE_REC_EPG_PROBE_STOP_WARN", $"TS{group.TsId}",
+                            $"result=STILL_ALIVE pid={launch.ProcessId} worker={workerName} action=skip_parse_keep_tracked rule=epg_probe_runtime_contract");
+                        return 0;
+                    }
 
                     imported = probe.ImportedEvents > 0
                         ? probe.ImportedEvents
@@ -1552,10 +1573,10 @@ public sealed class EpgCapture
                 {
                     // TvAIrEpgRec の終了を待つ
                     var processTimeout = TimeSpan.FromSeconds(effectiveWait + 8 + 30);
-                    var cancelled = await WaitForExitAsync(launch.ProcessId, processTimeout, ct);
+                    var waitResult = await WaitForExitAsync(launch.ProcessId, processTimeout, ct).ConfigureAwait(false);
 
                     // キャンセル時はTvAIrEpgRecへ停止要求を送る
-                    if (cancelled)
+                    if (waitResult == EpgProcessExitWaitResult.Cancelled)
                     {
                         activeLaunchRetired = await StopAndRetireActiveEpgWorkerAsync(
                             launch,
@@ -1569,9 +1590,32 @@ public sealed class EpgCapture
                         return 0;
                     }
 
-                    await HandleEpgProcessEndAsync(group, workerName, launch.ProcessId, ct);
-                    UnregisterActiveEpgWorkerProcess(launch.ProcessId, workerName, group, "process_end");
-                    activeLaunchRetired = true;
+                    if (waitResult == EpgProcessExitWaitResult.Timeout && IsProcessAlive(launch.ProcessId))
+                    {
+                        Log("EPG_CAPTURE_WAIT_TIMEOUT", $"TS{group.TsId}",
+                            $"result=TIMEOUT pid={launch.ProcessId} worker={workerName} waitSec={(int)processTimeout.TotalSeconds} action=stop_then_kill_if_needed rule=epg_worker_route_contract");
+                        activeLaunchRetired = await StopAndRetireActiveEpgWorkerAsync(
+                            launch,
+                            workerName,
+                            group,
+                            "wait_for_exit_timeout",
+                            "wait_for_exit_timeout").ConfigureAwait(false);
+                    }
+
+                    if (IsProcessAlive(launch.ProcessId))
+                    {
+                        Log("EPG_CAPTURE_PROCESS_STILL_ALIVE", $"TS{group.TsId}",
+                            $"result=STILL_ALIVE pid={launch.ProcessId} worker={workerName} waitResult={waitResult} action=skip_parse_keep_tracked rule=epg_worker_route_contract");
+                        return 0;
+                    }
+
+                    await HandleEpgProcessEndAsync(group, workerName, launch.ProcessId, ct).ConfigureAwait(false);
+                    if (!activeLaunchRetired)
+                    {
+                        UnregisterActiveEpgWorkerProcess(launch.ProcessId, workerName, group, "process_end");
+                        activeLaunchRetired = true;
+                    }
+                    lease.Dispose();
 
                     broadcastClock.ObserveFromTsFile(tsFile, "normal_epg", group.Group, group.Targets.FirstOrDefault()?.Name, group.Targets.FirstOrDefault()?.Name);
 
@@ -1800,8 +1844,9 @@ public sealed class EpgCapture
 
         if (targets.Count == 0)
         {
+            var pidlessReleased = tunerPool.ForceReleasePidlessEpgSlots(group, reason, "pre_record_preempt_no_tracked_worker");
             Log("PRE_REC_PRETUNE_PREEMPT_NORMAL_EPG", "EPG",
-                $"result=NO_TARGET targetGroup={SafeLog(group)} reason={SafeLog(reason)} action=continue_pre_record_probe rule=release_contract");
+                $"result=NO_TARGET targetGroup={SafeLog(group)} reason={SafeLog(reason)} pidlessReleased={pidlessReleased} action=continue_pre_record_probe rule=release_contract");
             return 0;
         }
 
@@ -1811,43 +1856,27 @@ public sealed class EpgCapture
             ct.ThrowIfCancellationRequested();
             try
             {
-                if (!string.IsNullOrWhiteSpace(w.StopSignalPath))
-                {
-                    Directory.CreateDirectory(Path.GetDirectoryName(w.StopSignalPath) ?? AppContext.BaseDirectory);
-                    await File.WriteAllTextAsync(w.StopSignalPath, DateTimeOffset.Now.ToString("O"), ct).ConfigureAwait(false);
-                    Log("PRE_REC_PRETUNE_PREEMPT_NORMAL_EPG", $"TS{w.TsId}",
-                        $"result=STOP_SIGNAL_SENT pid={w.Pid} worker={SafeLog(w.WorkerName)} group={SafeLog(w.Group)} service={SafeLog(w.ServiceName)} reason={SafeLog(reason)} stopSignal={SafeLogValue(w.StopSignalPath)} action=make_room_for_pre_record_pretune rule=release_contract");
-                }
-                else
-                {
-                    KillProcess(w.Pid);
-                    Log("PRE_REC_PRETUNE_PREEMPT_NORMAL_EPG", $"TS{w.TsId}",
-                        $"result=KILL_SENT pid={w.Pid} worker={SafeLog(w.WorkerName)} group={SafeLog(w.Group)} service={SafeLog(w.ServiceName)} reason={SafeLog(reason)} action=make_room_for_pre_record_pretune rule=release_contract");
-                }
-                stopped++;
+                var launch = new EpgWorkerLaunchResult(true, w.Pid, string.Empty, w.StopSignalPath, null, null, null);
+                var pseudoGroup = new TsGroup($"{w.Group}:{w.TsId}", w.Group, w.TsId, string.Empty, new List<ChannelTarget>());
+                var retired = await StopAndRetireActiveEpgWorkerAsync(
+                    launch,
+                    w.WorkerName,
+                    pseudoGroup,
+                    "pre_record_preempt_normal_epg",
+                    reason,
+                    TimeSpan.FromSeconds(6)).ConfigureAwait(false);
+                if (retired) stopped++;
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 Log("PRE_REC_PRETUNE_PREEMPT_NORMAL_EPG", $"TS{w.TsId}",
                     $"result=ERROR pid={w.Pid} worker={SafeLog(w.WorkerName)} group={SafeLog(w.Group)} service={SafeLog(w.ServiceName)} reason={SafeLog(reason)} error={SafeLog(ex.Message)} action=continue_pre_record_probe rule=release_contract");
             }
         }
 
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(6);
-        while (DateTime.UtcNow < deadline)
-        {
-            ct.ThrowIfCancellationRequested();
-            var alive = targets.Where(w => IsProcessAlive(w.Pid)).ToList();
-            if (alive.Count == 0) break;
-            try { await Task.Delay(250, ct).ConfigureAwait(false); }
-            catch (OperationCanceledException) { throw; }
-        }
-
-        foreach (var w in targets)
-        {
-            if (!IsProcessAlive(w.Pid))
-                activeEpgWorkerProcesses.TryRemove(w.Pid, out _);
-        }
+        var pidlessAfter = tunerPool.ForceReleasePidlessEpgSlots(group, reason, "pre_record_preempt_after_stop");
+        Log("PRE_REC_PRETUNE_PREEMPT_NORMAL_EPG", "EPG",
+            $"result=SUMMARY targetGroup={SafeLog(group)} reason={SafeLog(reason)} targets={targets.Count} stopped={stopped} pidlessReleased={pidlessAfter} action=continue_pre_record_probe rule=release_contract");
         LogEpgWorkerCoverage("pre_record_preempt_normal_epg", force: true);
         return stopped;
     }
@@ -3431,29 +3460,35 @@ public sealed class EpgCapture
 
     /// <summary>
     /// TvAIrEpgRec/対象プロセスの終了を待つ。
-    /// 正常終了・タイムアウトの場合 false、外部キャンセル(ct)の場合 true を返す。
+    /// 終了・タイムアウト・外部キャンセル・既に存在しない状態を分離して返す。
     /// </summary>
-    private static async Task<bool> WaitForExitAsync(int pid, TimeSpan timeout, CancellationToken ct)
+    private static async Task<EpgProcessExitWaitResult> WaitForExitAsync(int pid, TimeSpan timeout, CancellationToken ct)
     {
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        cts.CancelAfter(timeout);
-        try
-        {
-            while (!cts.IsCancellationRequested)
-            {
-                try
-                {
-                    using var p = System.Diagnostics.Process.GetProcessById(pid);
-                    if (p.HasExited) return false;
-                }
-                catch (ArgumentException) { return false; } // プロセスが既に終了
-                await Task.Delay(500, cts.Token);
-            }
-        }
-        catch (OperationCanceledException) { /* タイムアウト or 外部キャンセル */ }
+        if (ct.IsCancellationRequested) return EpgProcessExitWaitResult.Cancelled;
 
-        // タイムアウト(timeout経過)は正常扱い、外部キャンセルのみ true
-        return ct.IsCancellationRequested;
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (ct.IsCancellationRequested) return EpgProcessExitWaitResult.Cancelled;
+
+            try
+            {
+                using var p = System.Diagnostics.Process.GetProcessById(pid);
+                if (p.HasExited) return EpgProcessExitWaitResult.Exited;
+            }
+            catch (ArgumentException)
+            {
+                return EpgProcessExitWaitResult.NotFound;
+            }
+
+            var remaining = deadline - DateTime.UtcNow;
+            var delay = remaining < TimeSpan.FromMilliseconds(500) ? remaining : TimeSpan.FromMilliseconds(500);
+            if (delay <= TimeSpan.Zero) break;
+            try { await Task.Delay(delay, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return EpgProcessExitWaitResult.Cancelled; }
+        }
+
+        return EpgProcessExitWaitResult.Timeout;
     }
 
     /// <summary>対象プロセスを強制終了する。</summary>
@@ -3486,6 +3521,14 @@ public sealed class EpgCapture
 }
 
 // ─── 内部型 ──────────────────────────────────────────────────────
+
+internal enum EpgProcessExitWaitResult
+{
+    Exited,
+    Timeout,
+    Cancelled,
+    NotFound
+}
 
 internal sealed record EpgWorkerLaunchResult(bool Success, int ProcessId, string Message, string? StopSignalPath, string? ResultPath, string? ProgressPath, string? JobPath = null);
 

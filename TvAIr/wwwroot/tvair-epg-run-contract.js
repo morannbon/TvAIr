@@ -1,4 +1,4 @@
-﻿/* TvAIr Manual EPG Run Contract v1.0.0
+/* TvAIr Manual EPG Run Contract release_contract
    Owns the manual EPG run request shape for Web surfaces.
    API boundary uses scope. targetScope remains server/internal state terminology only. */
 (function(){
@@ -55,7 +55,7 @@
       surface,
       silent,
       source: sourceFor(surface, silent),
-      contract: 'ManualEpgRunContract/v1.0.0'
+      contract: 'ManualEpgRunContract/release_contract'
     });
   }
 

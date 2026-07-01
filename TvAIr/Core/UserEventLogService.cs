@@ -19,8 +19,8 @@ namespace TvAIr.Core;
 /// </summary>
 public sealed class UserEventLogService
 {
-    private const int MaxRows = 100;
-    private static readonly TimeSpan Retention = TimeSpan.FromDays(1);
+    private const int MaxRows = 1000;
+    private static readonly TimeSpan Retention = TimeSpan.FromDays(7);
     private readonly Database db;
     private readonly object gate = new();
     private int pruneCounter;
@@ -100,7 +100,7 @@ public sealed class UserEventLogService
 
     public IReadOnlyList<UserEventLogEntry> GetRecent(int count = 100, string? severity = null, string? category = null)
     {
-        count = Math.Clamp(count, 1, 100);
+        count = Math.Clamp(count, 1, 1000);
         lock (gate)
         {
             Prune();
@@ -131,7 +131,7 @@ public sealed class UserEventLogService
 
     public IReadOnlyList<UserEventLogEntry> GetReportEntries(TimeSpan window, int maxRows = 200)
     {
-        maxRows = Math.Clamp(maxRows, 1, 100);
+        maxRows = Math.Clamp(maxRows, 1, 500);
         var since = DateTime.Now.Subtract(window);
         lock (gate)
         {

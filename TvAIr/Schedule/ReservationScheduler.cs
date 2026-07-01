@@ -913,11 +913,13 @@ class ReservationScheduler : BackgroundService
             if (launchedAtLeastOneThisTick && _ini.TunerSlotCooldownMs > 0)
             {
                 var waitPlan = ResolveTransportBatchLaunchWait(previousLaunchedThisTick, startCandidate, transportBatchLaunchCount);
+                var previousReservationLabel = previousLaunchedThisTick is null ? "-" : $"R{previousLaunchedThisTick.Id}";
+                var previousTransportKey = previousLaunchedThisTick is null ? "-" : BuildTransportBatchKey(previousLaunchedThisTick);
                 _log.Add("REC_MULTI_START_BATCH", $"R{startCandidate.Id}",
                     $"mode={waitPlan.Mode} waitMs={waitPlan.WaitMs} baseCooldownMs={_ini.TunerSlotCooldownMs} " +
-                    $"previous={(previousLaunchedThisTick is null ? "-" : $"R{previousLaunchedThisTick.Id}")} sameTransport={waitPlan.SameTransport} sameStart={waitPlan.SameStart} " +
-                    $"batchCount={transportBatchLaunchCount} currentKey={BuildTransportBatchKey(startCandidate)} previousKey={(previousLaunchedThisTick is null ? "-" : BuildTransportBatchKey(previousLaunchedThisTick))} " +
-                    $"reason={waitPlan.Reason} rule=due_recording_batch_launch_contract");
+                    $"previous={previousReservationLabel} sameTransport={waitPlan.SameTransport} sameStart={waitPlan.SameStart} " +
+                    $"batchCount={transportBatchLaunchCount} currentKey={BuildTransportBatchKey(startCandidate)} previousKey={previousTransportKey} " +
+                    $"reason={waitPlan.Reason} rule=release_contract");
                 if (waitPlan.WaitMs > 0)
                 {
                     await Task.Delay(waitPlan.WaitMs, ct);
@@ -1776,7 +1778,7 @@ class ReservationScheduler : BackgroundService
         if (IsActiveRecordingDidOccupiedByOtherReservation(group, lease.Did, r.Id, out var activeDidOwner))
         {
             _log.Add("ACTIVE_RECORDING_DID_GUARD", $"R{r.Id}",
-                $"result=DENY group={group} candidateTuner={lease.Name} did={lease.Did} owner={activeDidOwner} requestedTuner={SafeValue(r.TunerName)} action=release_and_fail_this_start reason=active_recording_did_is_source_of_truth rule=release_contract");
+                $"result=DENY group={group} candidateTuner={lease.Name} did={lease.Did} owner={activeDidOwner} requestedTuner={SafeValue(r.TunerName)} action=release_candidate_and_fail_this_start reason=active_recording_did_is_source_of_truth rule=release_contract");
             lease.Dispose();
             Fail(r, $"録画中の実チューナーを保護したため録画開始を中止しました。did={lease.Did} owner={activeDidOwner}");
             return false;
@@ -1984,8 +1986,7 @@ class ReservationScheduler : BackgroundService
         var requestPath = Path.Combine(workDir, $"record_job_R{r.Id}_{stamp}_{Guid.NewGuid():N}.json");
         var responsePath = Path.Combine(workDir, $"record_result_R{r.Id}_{stamp}_{Guid.NewGuid():N}.json");
         var progressPath = Path.Combine(workDir, $"record_progress_R{r.Id}_{stamp}_{Guid.NewGuid():N}.jsonl");
-        // 表版: worker内部runtime統計JSONLは生成しない。
-        var runtimeStatsPath = string.Empty;
+        var runtimeStatsPath = Path.Combine(workDir, $"record_runtime_R{r.Id}_{stamp}_{Guid.NewGuid():N}.jsonl");
         var segmentPlanPath = Path.Combine(workDir, $"record_segments_R{r.Id}_{stamp}_{Guid.NewGuid():N}.json");
         var stopSignalPath = Path.Combine(workDir, $"record_stop_R{r.Id}_{stamp}_{Guid.NewGuid():N}.signal");
         var directRecorderChannelIndex = ResolveDirectRecorderChannelIndex(resolvedChannel);
@@ -3428,9 +3429,7 @@ class ReservationScheduler : BackgroundService
     private void CleanupTvAIrEpgRecRecordingRuntimeFiles(RecordingSession session, DirectRecorderOutcome outcome, int reservationId, ReservationStatus finalStatus, RecordingTsVerifier.VerificationResult? tsVerification)
     {
         var responseMissingButFileClear = !outcome.ResponseExists && tsVerification?.ClearEnoughForCompleted == true;
-        // 表版: 成否に関係なく内部 job/result/progress/runtime/stopSignal は保持しない。
-        // 不具合報告は外部掲示板などで受け、配布版の長期運用では蓄積を避ける。
-        var shouldKeep = false;
+        var shouldKeep = finalStatus == ReservationStatus.Failed || (!outcome.ResponseExists && !responseMissingButFileClear) || (outcome.ResponseExists && !outcome.Success);
         var targets = new[]
             {
                 session.JobPath,
@@ -4499,7 +4498,7 @@ class ReservationScheduler : BackgroundService
         if (!string.Equals(before, after, StringComparison.OrdinalIgnoreCase))
         {
             _log.Add("REC_MULTI_START_BATCH", "Order",
-                $"result=REORDERED count={ordered.Count} before={before} after={after} rule=due_recording_batch_launch_contract");
+                $"result=REORDERED count={ordered.Count} before={before} after={after} rule=release_contract");
         }
 
         return ordered;
@@ -4513,7 +4512,7 @@ class ReservationScheduler : BackgroundService
         var sameTransport = IsSameTransportBatch(previous, current);
         var sameStart = IsSameStartBucket(previous, current);
 
-        // 録画本線は TvAIrEpgRec へ移行済み。
+        // release_contract: 録画本線は TvAIrEpgRec へ移行済み。
         // 旧TVTest録画ルート由来の TunerSlotCooldownMs=15000 を、同時刻の別予約起動間隔として流用しない。
         // TunerSlotCooldownMs は StartRecordingAsync 内の同一チューナー再利用ゲートでのみ効かせる。
         if (sameStart)
@@ -4674,7 +4673,7 @@ class ReservationScheduler : BackgroundService
                     _lastPastTerminalAuditSignature = signature;
                     _lastPastTerminalAuditLogUtc = nowUtc;
                     _log.Add("RESERVATION_AUDIT", $"{context}_PAST_TERMINAL_SUMMARY",
-                        $"suppressed={terminalPastReservations.Count} completed={completed} cancelled={cancelled} failed={failed} sample=diagnostic_only rule=reservation_audit_terminal_summary_release_trim");
+                        $"suppressed={terminalPastReservations.Count} completed={completed} cancelled={cancelled} failed={failed} sample=diagnostic_only rule=reservation_audit_terminal_summary_release_candidate_trim");
                 }
             }
         }

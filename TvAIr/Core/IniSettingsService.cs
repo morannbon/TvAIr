@@ -631,7 +631,7 @@ public sealed class IniSettingsService
         {
             "録画用" or "Recording" or "RECORDING" => "Recording",
             "視聴用" or "Viewing" or "VIEWING" => "Viewing",
-            "共用" or "Shared" or "SHARED" => "Shared",
+            "Shared" or "SHARED" => "Recording",
             _ => raw,
         };
     }
@@ -639,7 +639,7 @@ public sealed class IniSettingsService
     public static bool IsKnownTunerRole(string? role)
     {
         var normalized = NormalizeTunerRole(role);
-        return normalized is "Recording" or "Viewing" or "Shared";
+        return normalized is "Recording" or "Viewing";
     }
 
     // ── ヘルパー ────────────────────────────────────────────────────

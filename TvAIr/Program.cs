@@ -1,4 +1,4 @@
-/* release_contract epg-progress-panel-theme-role-rebuild-and-light-button-luminance-tuning: no Program.cs behavior changed; WAKE/EPG contracts remain unchanged. */
+﻿/* release_contract epg-progress-panel-theme-role-rebuild-and-light-button-luminance-tuning: no Program.cs behavior changed; WAKE/EPG contracts remain unchanged. */
 ﻿/* release_contract gr-cdt-data-module-logo-save-bscs-no-deep: Wakeタスク起動時は --wake-task を単一インスタンス合流シグナルとして扱い、既存TvAIrがいる場合は本体二重起動せず signal ファイルを書いて終了する。 */
 /* release_contract recording-options-cleanup-worker-launch-policy: 録画オプションUIの説明文を撤去し、TvAIrEpgRec表示ON/OFFの起動ポリシーを共通ヘルパーへ集約。 */
 /* release_contract ai-rhythm-core-migration: AI-rhythm正式名・新旧URL/ID互換・旧設定移行を本体側に追加。 */
@@ -26,39 +26,7 @@ using Microsoft.Win32;
 
 // ─── エンコーディング登録（ARIB文字コード用）───────────────────
 System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
-CleanupPublicReleaseRuntimeArtifacts();
 
-static void CleanupPublicReleaseRuntimeArtifacts()
-{
-    try
-    {
-        var runtimeDir = Path.Combine(AppContext.BaseDirectory, "runtime");
-        if (!Directory.Exists(runtimeDir)) return;
-
-        var targets = new[]
-        {
-            Path.Combine(runtimeDir, "tvairepgrec-production-epg"),
-            Path.Combine(runtimeDir, "tvairepgrec-production-recording"),
-            Path.Combine(runtimeDir, "tvairepgrec-probe")
-        };
-
-        foreach (var dir in targets)
-        {
-            if (!Directory.Exists(dir)) continue;
-            foreach (var pattern in new[] { "*.json", "*.jsonl", "*.signal", "*.runtime.jsonl" })
-            {
-                foreach (var file in Directory.EnumerateFiles(dir, pattern, SearchOption.TopDirectoryOnly))
-                {
-                    try { File.Delete(file); } catch { }
-                }
-            }
-        }
-    }
-    catch
-    {
-        // 表版の起動を妨げない。
-    }
-}
 
 static (bool IsWakeTask, string Kind, string At, string Generation, string SlotId, string ReservationId) ParseWakeTaskArgs(string[] argv)
 {
@@ -2594,10 +2562,10 @@ static IResult RenderPluginVersionInfoPage(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-notification.css?v=1.0.6">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.0.7">
 </head>
 <body>
-<script src="/tvair-notification.js?v=1.0.6"></script>
+<script src="/tvair-notification.js?v=1.0.7"></script>
 <script>
 document.addEventListener('DOMContentLoaded',function(){
   if(window.TvAIrNotify){ TvAIrNotify({ title:'{{safeTitle}}', message:'バージョン: {{safeVersion}}', onOk:function(){ location.replace('{{safeReturn}}'); } }); }
@@ -3793,13 +3761,13 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'">
 <title>{{safeTitle}} - TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.6">
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.6">
-<link rel="stylesheet" href="/tvair-notification.css?v=1.0.6">
-<link rel="stylesheet" href="/tvair-epg-panel.css?v=1.0.6">
-<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.0.6">
-<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.0.6">
-<script src="/tvair-theme.js?v=1.0.6"></script>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.7">
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.7">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.0.7">
+<link rel="stylesheet" href="/tvair-epg-panel.css?v=1.0.7">
+<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.0.7">
+<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.0.7">
+<script src="/tvair-theme.js?v=1.0.7"></script>
 
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -3859,11 +3827,11 @@ body{font-family:'Meiryo',sans-serif;font-size:12px;background:var(--tvair-bg-pa
 {{pluginBody}}
   </main>
 </div>
-<script src="/tvair-notification.js?v=1.0.6"></script>
-<script src="/tvair-epg-run-contract.js?v=1.0.6"></script>
-<script src="/tvair-epg-widget.js?v=1.0.6"></script>
-<script src="/tvair-safe-event-host.js?v=1.0.6"></script>
-<script src="/tvair-menu-spine.js?v=1.0.6"></script>
+<script src="/tvair-notification.js?v=1.0.7"></script>
+<script src="/tvair-epg-run-contract.js?v=1.0.7"></script>
+<script src="/tvair-epg-widget.js?v=1.0.7"></script>
+<script src="/tvair-safe-event-host.js?v=1.0.7"></script>
+<script src="/tvair-menu-spine.js?v=1.0.7"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -4020,7 +3988,7 @@ button,input,select,textarea{font-family:inherit;font-size:inherit}
 <div class="tvair-toolwindow-content-root">
 {{pluginContent}}
 </div>
-<script src="/tvair-safe-event-host.js?v=1.0.6"></script>
+<script src="/tvair-safe-event-host.js?v=1.0.7"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -4690,61 +4658,17 @@ static string SafePathForLog(string? value)
     return value.Replace("\r", " ").Replace("\n", " ").Replace("|", "/").Trim();
 }
 
-static string MarkerNameFromVersion(string? versionText)
-{
-    if (string.IsNullOrWhiteSpace(versionText)) return string.Empty;
-    var cleaned = versionText.Trim();
-    var plus = cleaned.IndexOf('+');
-    if (plus >= 0) cleaned = cleaned[..plus];
-    var dash = cleaned.IndexOf('-');
-    if (dash >= 0) cleaned = cleaned[..dash];
-    var parts = cleaned.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-    if (parts.Length == 0) return string.Empty;
-
-    var numeric = new List<int>();
-    foreach (var part in parts)
-    {
-        var digits = new string(part.TakeWhile(char.IsDigit).ToArray());
-        if (string.IsNullOrWhiteSpace(digits)) break;
-        if (!int.TryParse(digits, out var n)) break;
-        numeric.Add(n);
-    }
-
-    if (numeric.Count == 0) return string.Empty;
-    return "release_" + string.Join("_", numeric) + ".txt";
-}
-
-static Version? ParseMarkerVersion(string? markerName)
-{
-    if (string.IsNullOrWhiteSpace(markerName)) return null;
-    var name = Path.GetFileNameWithoutExtension(markerName.Trim());
-    const string prefix = "release_";
-    if (!name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return null;
-    var tail = name[prefix.Length..];
-    var parts = tail.Split('_', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-    if (parts.Length == 0) return null;
-
-    var values = new List<int>();
-    foreach (var part in parts)
-    {
-        if (!int.TryParse(part, out var n)) return null;
-        values.Add(n);
-    }
-
-    while (values.Count < 4) values.Add(0);
-    return new Version(values[0], values[1], values[2], values[3]);
-}
-
-
-static IEnumerable<string> EnumerateLegacyReleaseMarkers(string baseDir)
+static IEnumerable<string> EnumerateRuntimeReleaseMarkerFiles(string baseDir)
 {
     try
     {
-        return Directory.EnumerateFiles(baseDir, "release_*.txt")
+        if (string.IsNullOrWhiteSpace(baseDir) || !Directory.Exists(baseDir)) return Array.Empty<string>();
+        return Directory.EnumerateFiles(baseDir, "release_*.txt", SearchOption.TopDirectoryOnly)
             .Where(path =>
             {
-                var version = ParseMarkerVersion(Path.GetFileName(path));
-                return version is not null && version.Major == 0;
+                var name = Path.GetFileName(path);
+                return !string.IsNullOrWhiteSpace(name)
+                    && System.Text.RegularExpressions.Regex.IsMatch(name, @"^release_\d+_\d+_\d+\.txt$", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
             })
             .ToArray();
     }
@@ -4754,67 +4678,16 @@ static IEnumerable<string> EnumerateLegacyReleaseMarkers(string baseDir)
     }
 }
 
-static string ResolveLatestReleaseMarker(string baseDir)
+static string CleanupRuntimeReleaseMarkerFiles(string baseDir)
 {
     try
     {
-        var currentVersionText = GetTvAIrAppVersion();
-        var expectedCurrent = MarkerNameFromVersion(currentVersionText);
-        if (!string.IsNullOrWhiteSpace(expectedCurrent) && expectedCurrent != "release_.txt")
-        {
-            // release_contract: APP_BINARY_IDENTITY is a runtime identity audit. The marker must describe
-            // the running binary version first. Older packages can leave stale legacy release marker
-            // in the deployment directory, so do not let candidate enumeration override the current
-            // version marker name. Existence is reported separately by BuildReleaseMarkerAudit.
-            return expectedCurrent;
-        }
-
-        return "-";
-    }
-    catch
-    {
-        var version = GetTvAIrAppVersion();
-        return string.IsNullOrWhiteSpace(version) ? "-" : $"release_{version.Replace('.', '_')}.txt";
-    }
-}
-
-static string EnsureCurrentReleaseMarkerProvisioned(string baseDir)
-{
-    try
-    {
-        var expected = MarkerNameFromVersion(GetTvAIrAppVersion());
-        if (string.IsNullOrWhiteSpace(expected) || expected == "release_.txt") return "skipped_no_version";
-        var expectedPath = Path.Combine(baseDir, expected);
-        if (File.Exists(expectedPath)) return "not_needed";
-
-        File.WriteAllText(expectedPath,
-            $"TvAIr Alpha {GetTvAIrAppVersion()} runtime release marker\n" +
-            "Provisioned before APP_BINARY_IDENTITY so the identity audit reports the current marker consistently.\n" +
-            "This file is informational only and does not change runtime behavior.\n",
-            Encoding.UTF8);
-        return "created_before_identity";
-    }
-    catch (Exception ex)
-    {
-        return "failed_" + ex.GetType().Name;
-    }
-}
-
-static string CleanupStaleReleaseMarkers(string baseDir, string expectedMarker)
-{
-    try
-    {
-        if (string.IsNullOrWhiteSpace(expectedMarker) || expectedMarker == "release_.txt") return "skipped_no_expected";
-
-        var stale = EnumerateLegacyReleaseMarkers(baseDir)
-            .Where(path => !string.Equals(Path.GetFileName(path), expectedMarker, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-
+        var markers = EnumerateRuntimeReleaseMarkerFiles(baseDir).ToList();
         var deleted = 0;
         var failed = 0;
         var failedNames = new List<string>();
 
-        foreach (var path in stale)
+        foreach (var path in markers)
         {
             try
             {
@@ -4837,47 +4710,18 @@ static string CleanupStaleReleaseMarkers(string baseDir, string expectedMarker)
     }
 }
 
-static string BuildReleaseMarkerAudit(string baseDir, string selectedMarker)
+static string BuildReleaseNotesAudit(string baseDir)
 {
     try
     {
-        var expected = $"release_{GetTvAIrAppVersion().Replace('.', '_')}.txt";
-        var selectedPath = Path.Combine(baseDir, selectedMarker);
-        var expectedPath = Path.Combine(baseDir, expected);
-        var markerSelfHeal = "not_needed";
-
-        if (!string.IsNullOrWhiteSpace(expected) && !File.Exists(expectedPath))
-        {
-            try
-            {
-                File.WriteAllText(expectedPath,
-                    $"TvAIr Alpha {GetTvAIrAppVersion()} runtime release marker\n" +
-                    $"Generated by APP_BINARY_IDENTITY because the packaged marker was not present in the deployment directory.\n" +
-                    $"This file is informational only and does not change runtime behavior.\n",
-                    Encoding.UTF8);
-                markerSelfHeal = "created";
-            }
-            catch (Exception ex)
-            {
-                markerSelfHeal = "failed_" + ex.GetType().Name;
-            }
-        }
-
-        var markerResidueCleanup = CleanupStaleReleaseMarkers(baseDir, expected);
-
-        var legacyMarkerCount = EnumerateLegacyReleaseMarkers(baseDir).Count();
-        var sample = legacyMarkerCount == 0 ? "-" : $"legacyMarkerCount={legacyMarkerCount}";
-
-        var selectedExists = File.Exists(selectedPath);
-        var expectedExists = File.Exists(expectedPath);
-        var selectionReason = string.Equals(selectedMarker, expected, StringComparison.OrdinalIgnoreCase)
-            ? "current_version_marker_forced"
-            : "no_legacy_fallback";
-        return $"releaseMarker={selectedMarker} expectedMarker={expected} markerExists={selectedExists} expectedMarkerExists={expectedExists} expectedMarkerPath={SafePathForLog(expectedPath)} markerSelfHeal={markerSelfHeal} markerResidueCleanup={markerResidueCleanup} markerCandidatesSample={sample} selectedReason={selectionReason} markerSelection=release_contract";
+        var notesPath = Path.Combine(baseDir, "RELEASE_NOTES.txt");
+        var markerResidueCleanup = CleanupRuntimeReleaseMarkerFiles(baseDir);
+        var remainingMarkers = EnumerateRuntimeReleaseMarkerFiles(baseDir).Count();
+        return $"releaseNotes=RELEASE_NOTES.txt releaseNotesExists={File.Exists(notesPath)} releaseMarkerFiles=disabled markerResidueCleanup={markerResidueCleanup} remainingReleaseMarkers={remainingMarkers} releaseHistory=single_file";
     }
     catch (Exception ex)
     {
-        return $"releaseMarker={selectedMarker} markerAuditError={ex.GetType().Name}:{SafePathForLog(ex.Message)} markerSelection=release_contract";
+        return $"releaseNotes=RELEASE_NOTES.txt releaseNotesAuditError={ex.GetType().Name}:{SafePathForLog(ex.Message)} releaseMarkerFiles=disabled releaseHistory=single_file";
     }
 }
 
@@ -4902,13 +4746,11 @@ static void EmitTvAIrRuntimeIdentityAudit(LogRepository log)
         var asm = System.Reflection.Assembly.GetExecutingAssembly();
         var tvairExe = Environment.ProcessPath ?? asm.Location;
         var workerPath = Path.Combine(AppContext.BaseDirectory, "TvAIrEpgRec.exe");
-        var markerProvision = EnsureCurrentReleaseMarkerProvisioned(AppContext.BaseDirectory);
-        var releaseMarker = ResolveLatestReleaseMarker(AppContext.BaseDirectory);
-        var releaseMarkerAudit = BuildReleaseMarkerAudit(AppContext.BaseDirectory, releaseMarker) + $" markerProvision={markerProvision}";
+        var releaseNotesAudit = BuildReleaseNotesAudit(AppContext.BaseDirectory);
         log.Add("APP_BINARY_IDENTITY", "START",
             $"tvairVersion={GetTvAIrAppVersion()} tvairExe={Path.GetFileName(tvairExe)} tvairFile={Stamp(tvairExe)} " +
-            $"workerFileName={Path.GetFileName(workerPath)} workerFile={Stamp(workerPath)} {releaseMarkerAudit} " +
-            $"baseDir=app_base rule=release_contract rollbackPoint=True rollbackBase=release_contract timePolicy=BROADCAST_CLOCK_PASSIVE_ONLY ntp=removed broadcastClock=observe_only_no_internal_offset titleQuality=record_filename_event_name_nfkc_guard pluginUiAction=host_action_dispatch_value_contract logPolicy=release_noise_reduce");
+            $"workerFileName={Path.GetFileName(workerPath)} workerFile={Stamp(workerPath)} {releaseNotesAudit} " +
+            $"baseDir=app_base rule=release_contract rollbackPoint=True rollbackBase=release_contract timePolicy=BROADCAST_CLOCK_PASSIVE_ONLY ntp=removed broadcastClock=observe_only_no_internal_offset titleQuality=record_filename_event_name_nfkc_guard pluginUiAction=host_action_dispatch_value_contract logPolicy=release_candidate_noise_reduce");
     }
     catch (Exception ex)
     {
@@ -5608,6 +5450,13 @@ app.MapGet("/api/epg/events", (string? date, EpgStore store, ReservationStore re
         });
         chOrder.TryAdd(evGroup.Key, chOrder.Count);
     }
+    var serviceDisplayNameByKey = channels
+        .GroupBy(ProgramGuideChannelServiceKey, StringComparer.OrdinalIgnoreCase)
+        .ToDictionary(
+            g => g.Key,
+            g => string.IsNullOrWhiteSpace(g.First().Name) ? $"SID {g.First().ServiceId}" : g.First().Name,
+            StringComparer.OrdinalIgnoreCase);
+
     var sortedEvents = events
         .OrderBy(e =>
         {
@@ -5630,7 +5479,7 @@ app.MapGet("/api/epg/events", (string? date, EpgStore store, ReservationStore re
         baseDate);
 
     var displayEvents = timelineEvents
-        .Select(e => NormalizeProgramGuideEventForDisplay(e))
+        .Select(e => NormalizeProgramGuideEventForDisplay(e, serviceDisplayNameByKey))
         .ToList();
 
     var rawBlankTitleCount = displayEvents.Count(e => string.IsNullOrEmpty(e.CellText.Title));
@@ -5780,35 +5629,36 @@ app.MapGet("/api/epg/tagged", (
     return Results.Ok(new { count = filtered.Count, events = filtered, rule = "release_contract" });
 });
 
-// 開発診断API
+// ログ
+app.MapGet("/api/debug/tuner-allocation", (ReservationStore store) =>
+{
+    var json = store.ReadTunerAllocationDebugJson();
+    return json is null
+        ? Results.NotFound(new { message = "tuner_allocation_debug.json がまだ作成されていません。" })
+        : Results.Text(json, "application/json; charset=utf-8");
+});
+
+app.MapPost("/api/debug/tuner-allocation/rebuild",
+    (ReservationStore store, ReservationAllocationRouteService allocationRoute) =>
+{
+    allocationRoute.Run(new ReservationAllocationRouteRequest(
+        Source: "Debug",
+        Action: "TunerAllocationRebuild",
+        RunKeywordMatcher: false,
+        SyncProgramRuleReservations: true,
+        ReevaluateAllocations: true,
+        RefreshPreRecordEpgEntries: false,
+        RefreshWakeTask: false));
+
+    var json = store.ReadTunerAllocationDebugJson();
+    return json is null
+        ? Results.NotFound(new { message = "tuner_allocation_debug.json の生成に失敗しました。" })
+        : Results.Text(json, "application/json; charset=utf-8");
+});
+
+
 if (enableRouteReplayDebugApi)
 {
-    app.MapGet("/api/debug/tuner-allocation", (ReservationStore store) =>
-    {
-        var json = store.ReadTunerAllocationDebugJson();
-        return json is null
-            ? Results.NotFound(new { message = "tuner_allocation_debug.json がまだ作成されていません。" })
-            : Results.Text(json, "application/json; charset=utf-8");
-    });
-
-    app.MapPost("/api/debug/tuner-allocation/rebuild",
-        (ReservationStore store, ReservationAllocationRouteService allocationRoute) =>
-    {
-        allocationRoute.Run(new ReservationAllocationRouteRequest(
-            Source: "Debug",
-            Action: "TunerAllocationRebuild",
-            RunKeywordMatcher: false,
-            SyncProgramRuleReservations: true,
-            ReevaluateAllocations: true,
-            RefreshPreRecordEpgEntries: false,
-            RefreshWakeTask: false));
-
-        var json = store.ReadTunerAllocationDebugJson();
-        return json is null
-            ? Results.NotFound(new { message = "tuner_allocation_debug.json の生成に失敗しました。" })
-            : Results.Text(json, "application/json; charset=utf-8");
-    });
-
     app.MapPost("/api/debug/tuner-allocation/rebuild-manual-route",
         (ReservationStore store, ReservationAllocationRouteService allocationRoute) =>
     {
@@ -5848,8 +5698,13 @@ if (enableRouteReplayDebugApi)
 
 
 
-
-app.MapGet("/api/log", () => Results.NotFound());
+app.MapGet("/api/log", (int? count, LogRepository log) =>
+{
+    var entries = count.HasValue
+        ? log.GetRecent(count.Value)
+        : log.GetAll();
+    return Results.Ok(entries);
+});
 
 app.MapGet("/api/user-events", (int? count, string? severity, string? category, UserEventLogService userEvents) =>
 {
@@ -7209,12 +7064,12 @@ static void EmitTvAIrEpgRecRuntimePrerequisiteAudit(LogRepository log, TvTestSet
             $"b25Decoder={(b25Exists ? "OK" : "MISSING")} " +
             $"winscard={(winSCardExists ? "OK_OR_NOT_REQUIRED" : "MISSING_OR_NOT_REQUIRED")} winscardIni={(winSCardIniExists ? "OK" : "MISSING_OR_NOT_REQUIRED")} " +
             $"tvTestIni={(tvTestIniExists ? "OK" : "MISSING")} " +
-            $"paths=diagnostic_only note=runtime_prerequisite_summary rule=runtime_prerequisite_release_trim");
+            $"paths=diagnostic_only note=runtime_prerequisite_summary rule=runtime_prerequisite_release_candidate_trim");
     }
     catch (Exception ex)
     {
         log.Add("TVAIREPGREC_RUNTIME_PREREQUISITE", "WARN",
-            $"result=CHECK_FAILED error={SafeRuntimePrereqLogValue(ex.GetType().Name)} message={SafeRuntimePrereqLogValue(ex.Message)} rule=runtime_prerequisite_release_trim");
+            $"result=CHECK_FAILED error={SafeRuntimePrereqLogValue(ex.GetType().Name)} message={SafeRuntimePrereqLogValue(ex.Message)} rule=runtime_prerequisite_release_candidate_trim");
     }
 }
 
@@ -7473,18 +7328,23 @@ static void AddProgramGuideGapFrame(
 }
 
 
-static ProgramGuideEpgEventDto NormalizeProgramGuideEventForDisplay(EpgEvent e)
+static ProgramGuideEpgEventDto NormalizeProgramGuideEventForDisplay(EpgEvent e, IReadOnlyDictionary<string, string>? serviceDisplayNameByKey = null)
 {
     // release_contract: ProgramGuide legacy body route purge.
     // 番組表セル/API投影はDB raw descriptorから作ったCellTextを正本にする。
     // 旧description/extendedDescription/decodedExtendedTextの本文経路はここで切断する。
     var cellText = ProgramGuideCellTextDecoder.Decode(e);
+    var displayServiceName = serviceDisplayNameByKey is not null
+        && serviceDisplayNameByKey.TryGetValue(ProgramGuideServiceKey3(e.NetworkId, e.TransportStreamId, e.ServiceId), out var currentName)
+        && !string.IsNullOrWhiteSpace(currentName)
+            ? currentName
+            : e.ServiceName;
     return new ProgramGuideEpgEventDto(
         e.NetworkId,
         e.TransportStreamId,
         e.ServiceId,
         e.EventId,
-        e.ServiceName,
+        displayServiceName,
         cellText.Title,
         cellText.Outline,
         e.Genre,

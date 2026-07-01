@@ -631,7 +631,7 @@ public sealed class TaskSchedulerService
     {
         // release_contract:
         // 通常Wake運用の目標は録画チューナー数。Viewingチューナーは録画Wakeの収容数へ入れない。
-        // Recording/Shared/空欄など、Viewing以外は録画用として扱う。
+        // Recording/空欄など、Viewing以外は録画用として扱う。
         var count = _ini.Tuners
             .Count(t => !string.Equals(IniSettingsService.NormalizeTunerRole(t.Role), "Viewing", StringComparison.OrdinalIgnoreCase));
 

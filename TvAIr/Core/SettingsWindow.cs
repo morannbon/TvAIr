@@ -65,6 +65,7 @@ internal sealed class SettingsWindow : Form
     private readonly TextBox _txtBscsChSet = new();
 
     private readonly DataGridView _gridTuners = new();
+    private bool _refreshingTunerGridNames;
 
     private readonly CheckBox _chkTvTestRecordCurServiceOnly = new();
     private readonly CheckBox _chkTvTestRecordSubtitle = new();
@@ -874,7 +875,7 @@ internal sealed class SettingsWindow : Form
         if (_gridTuners.Columns.Count > 0) return;
         _gridTuners.Dock = DockStyle.Fill;
         _gridTuners.AllowUserToAddRows = true;
-        _gridTuners.AllowUserToDeleteRows = true;
+        _gridTuners.AllowUserToDeleteRows = false;
         _gridTuners.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
         _gridTuners.RowHeadersVisible = false;
         _gridTuners.BackgroundColor = _theme.Panel;
@@ -889,13 +890,25 @@ internal sealed class SettingsWindow : Form
         _gridTuners.DefaultCellStyle.ForeColor = _theme.Text;
         _gridTuners.DefaultCellStyle.SelectionBackColor = _theme.MenuSelected;
         _gridTuners.DefaultCellStyle.SelectionForeColor = _theme.Text;
+        _gridTuners.CellContentClick += TunerGridCellContentClick;
+        _gridTuners.CurrentCellDirtyStateChanged += (_, _) =>
+        {
+            if (_gridTuners.IsCurrentCellDirty) _gridTuners.CommitEdit(DataGridViewDataErrorContexts.Commit);
+        };
+        _gridTuners.CellValueChanged += (_, e) =>
+        {
+            if (!_refreshingTunerGridNames && e.RowIndex >= 0) RefreshTunerGridVirtualNames();
+        };
+        _gridTuners.RowsRemoved += (_, _) => RefreshTunerGridVirtualNames();
+        _gridTuners.UserAddedRow += (_, _) => RefreshTunerGridVirtualNames();
 
         // SettingsTunerAssignmentTable: keep the same semantic column contract as the
         // Web settings modal.  This is not CSS; WinForms needs the column contract here.
         _gridTuners.Columns.Add(CreateTunerTextColumn("Name", "仮想枠", 70, SettingsFieldIntent.VirtualSlot));
         _gridTuners.Columns.Add(CreateTunerComboColumn("BonDriverFileName", "BonDriver", 138, SettingsFieldIntent.BonDriver, Array.Empty<string>()));
         _gridTuners.Columns.Add(CreateTunerComboColumn("Group", "放送波", 104, SettingsFieldIntent.BroadcastWave, new[] { "地上波", "BS/CS", "地デジ/BS/CS" }));
-        _gridTuners.Columns.Add(CreateTunerComboColumn("Role", "用途", 58, SettingsFieldIntent.TunerPurpose, new[] { "録画用", "視聴用", "共用" }));
+        _gridTuners.Columns.Add(CreateTunerComboColumn("Role", "用途", 54, SettingsFieldIntent.TunerPurpose, new[] { "録画用", "視聴用" }));
+        _gridTuners.Columns.Add(CreateTunerOperationColumn());
         _gridTuners.Columns.Add(CreateTunerTextColumn("Did", "ID", 10, SettingsFieldIntent.InternalPhysicalId));
         _gridTuners.Columns["Did"]!.Visible = false;
     }
@@ -915,6 +928,64 @@ internal sealed class SettingsWindow : Form
         return column;
     }
 
+
+    private DataGridViewButtonColumn CreateTunerOperationColumn()
+    {
+        var column = new DataGridViewButtonColumn
+        {
+            Name = "Operation",
+            HeaderText = "操作",
+            Text = "削除",
+            UseColumnTextForButtonValue = true,
+            FillWeight = 44,
+            Tag = SettingsFieldIntent.OperationAction,
+            FlatStyle = FlatStyle.Flat
+        };
+        ApplySettingsColumnContract(column, SettingsFieldIntent.OperationAction);
+        column.DefaultCellStyle.BackColor = _theme.ActionDangerSoftBack;
+        column.DefaultCellStyle.ForeColor = _theme.ActionDanger;
+        column.DefaultCellStyle.SelectionBackColor = _theme.ActionDangerSoftBack;
+        column.DefaultCellStyle.SelectionForeColor = _theme.ActionDanger;
+        return column;
+    }
+
+    private void TunerGridCellContentClick(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
+        if (_gridTuners.Columns[e.ColumnIndex].Name != "Operation") return;
+        var row = _gridTuners.Rows[e.RowIndex];
+        if (row.IsNewRow) return;
+        _gridTuners.Rows.RemoveAt(e.RowIndex);
+        RefreshTunerGridVirtualNames();
+    }
+
+    private void RefreshTunerGridVirtualNames()
+    {
+        if (_refreshingTunerGridNames) return;
+        _refreshingTunerGridNames = true;
+        try
+        {
+            var didIndex = 0;
+            foreach (DataGridViewRow row in _gridTuners.Rows)
+            {
+                if (row.IsNewRow) continue;
+                var group = TunerGroupToValue(row.Cells["Group"].Value?.ToString());
+                var did = (row.Cells["Did"].Value?.ToString()?.Trim() ?? string.Empty).ToUpperInvariant();
+                if (string.IsNullOrWhiteSpace(did))
+                {
+                    did = NextDid(didIndex);
+                    row.Cells["Did"].Value = did;
+                }
+                row.Cells["Name"].Value = TunerDisplayName.Build(group, did);
+                didIndex++;
+            }
+        }
+        finally
+        {
+            _refreshingTunerGridNames = false;
+        }
+    }
+
     private static void ApplySettingsColumnContract(DataGridViewColumn column, SettingsFieldIntent intent)
     {
         var alignment = intent switch
@@ -923,6 +994,7 @@ internal sealed class SettingsWindow : Form
             SettingsFieldIntent.BroadcastWave => DataGridViewContentAlignment.MiddleCenter,
             SettingsFieldIntent.TunerPurpose => DataGridViewContentAlignment.MiddleCenter,
             SettingsFieldIntent.InternalPhysicalId => DataGridViewContentAlignment.MiddleCenter,
+            SettingsFieldIntent.OperationAction => DataGridViewContentAlignment.MiddleCenter,
             _ => DataGridViewContentAlignment.MiddleLeft,
         };
         column.DefaultCellStyle.Alignment = alignment;
@@ -944,8 +1016,9 @@ internal sealed class SettingsWindow : Form
         {
             var group = TunerDisplayName.NormalizeGroup(tuner.Group);
             var did = (tuner.Did ?? string.Empty).Trim().ToUpperInvariant();
-            _gridTuners.Rows.Add(TunerDisplayName.ForUi(tuner.Name, group, did), tuner.BonDriverFileName, TunerGroupToDisplay(group), TunerRoleToDisplay(tuner.Role), did);
+            _gridTuners.Rows.Add(TunerDisplayName.ForUi(tuner.Name, group, did), tuner.BonDriverFileName, TunerGroupToDisplay(group), TunerRoleToDisplay(tuner.Role), null, did);
         }
+        RefreshTunerGridVirtualNames();
     }
 
     private List<TunerProfileDto> CollectTunerRows()
@@ -954,11 +1027,11 @@ internal sealed class SettingsWindow : Form
         foreach (DataGridViewRow row in _gridTuners.Rows)
         {
             if (row.IsNewRow) continue;
-            var name = row.Cells[0].Value?.ToString()?.Trim() ?? string.Empty;
-            var bon = row.Cells[1].Value?.ToString()?.Trim() ?? string.Empty;
-            var group = TunerGroupToValue(row.Cells[2].Value?.ToString());
-            var role = TunerRoleToValue(row.Cells[3].Value?.ToString());
-            var did = (row.Cells[4].Value?.ToString()?.Trim() ?? string.Empty).ToUpperInvariant();
+            var name = row.Cells["Name"].Value?.ToString()?.Trim() ?? string.Empty;
+            var bon = row.Cells["BonDriverFileName"].Value?.ToString()?.Trim() ?? string.Empty;
+            var group = TunerGroupToValue(row.Cells["Group"].Value?.ToString());
+            var role = TunerRoleToValue(row.Cells["Role"].Value?.ToString());
+            var did = (row.Cells["Did"].Value?.ToString()?.Trim() ?? string.Empty).ToUpperInvariant();
             if (string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(bon) && string.IsNullOrWhiteSpace(did)) continue;
             list.Add(new TunerProfileDto { Name = TunerDisplayName.ForUi(name, group, did), Group = group, Did = did, BonDriverFileName = bon, Role = role });
         }
@@ -1401,6 +1474,12 @@ internal sealed class SettingsWindow : Form
             _ => "none",
         };
 
+    private static string NextDid(int index)
+    {
+        var i = Math.Max(0, index);
+        return ((char)('A' + (i % 26))).ToString();
+    }
+
     private static string TunerGroupToDisplay(string? group)
         => TunerDisplayName.NormalizeGroup(group) switch
         {
@@ -1417,7 +1496,6 @@ internal sealed class SettingsWindow : Form
         {
             "Recording" => "録画用",
             "Viewing" => "視聴用",
-            "Shared" => "共用",
             var raw => raw ?? string.Empty,
         };
 
@@ -1426,7 +1504,6 @@ internal sealed class SettingsWindow : Form
         {
             "録画用" => "Recording",
             "視聴用" => "Viewing",
-            "共用" => "Shared",
             var raw => raw,
         };
 
@@ -1486,6 +1563,7 @@ internal enum SettingsFieldIntent
     BroadcastWave,
     TunerPurpose,
     InternalPhysicalId,
+    OperationAction,
 }
 
 internal sealed class SettingsLayoutSpec
@@ -1832,6 +1910,8 @@ internal sealed class SettingsThemePalette
     public Color ButtonPrimary { get; private init; }
     public Color ButtonPrimaryText { get; private init; }
     public Color ButtonSecondary { get; private init; }
+    public Color ActionDanger { get; private init; }
+    public Color ActionDangerSoftBack { get; private init; }
     public Color SliderActive { get; private init; }
     public Color SliderRest { get; private init; }
     public Color SliderThumb { get; private init; }
@@ -1865,6 +1945,8 @@ internal sealed class SettingsThemePalette
         ButtonPrimary = Color.FromArgb(88, 98, 112),
         ButtonPrimaryText = Color.White,
         ButtonSecondary = Color.FromArgb(246, 247, 249),
+        ActionDanger = Color.FromArgb(150, 54, 54),
+        ActionDangerSoftBack = Color.FromArgb(255, 244, 244),
         SliderActive = Color.FromArgb(88, 98, 112),
         SliderRest = Color.FromArgb(225, 229, 235),
         SliderThumb = Color.FromArgb(255, 255, 255),

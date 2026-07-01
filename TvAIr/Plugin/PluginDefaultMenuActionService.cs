@@ -6,7 +6,7 @@ using TvAIrPlugin;
 /// <summary>
 /// release_contract: Plugin Menu Action Contract spine.
 /// TvAIr本体はプラグイン名・プラグインkind・現在存在する3プラグインから挙動を推測しない。
-/// manifest / descriptor の宣言を正規化し、未宣言互換だけを LegacyPluginMenuAdapter 相当の source として隔離する。
+/// manifest / descriptor の宣言を正規化し、未宣言互換だけを compat alias source として隔離する。
 /// </summary>
 public sealed class PluginDefaultMenuActionService
 {
@@ -83,7 +83,7 @@ public sealed class PluginDefaultMenuActionService
 
         if (string.IsNullOrWhiteSpace(kind))
         {
-            // LegacyPluginMenuAdapter: 旧SDKプラグインの移行補助だけをここに閉じ込める。
+            // 未宣言互換の補助だけをここに閉じ込める。
             // これは正式なプラグイン意思決定ではないため、ログ/APIに互換aliasとして出す。
             kind = plugin is IUiPlugin ? PluginMenuActionKinds.Page : PluginMenuActionKinds.VersionDialog;
             source = plugin is IUiPlugin ? "compat_alias_ui_page" : "compat_alias_non_ui_versionDialog";

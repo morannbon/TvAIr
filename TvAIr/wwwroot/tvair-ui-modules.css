@@ -1394,7 +1394,7 @@ body.tvair-guide-page #ch-header .ch-head[data-wave="CS"]{
   border-color:var(--tvair-guide-wave-cs-border)!important;
 }
 
-/* ProgramCell state color binding v1.0.0.
+/* ProgramCell state color binding release_contract.
    Genre owns the base cell background. Reserved is a theme-common red state layer over the genre. */
 body.tvair-guide-page .prog.reserved-now{
   background:
@@ -2627,32 +2627,30 @@ body.tvair-guide-page .prog.prog-action-unsafe .program-cell-action-btn{
   display:none!important;
 }
 
-/* release_contract Settings tuner table column balance/alignment.
-   The tuner settings virtual-slot column is a read-only/layout field.
-   It is separate from reservation-list priority and from action buttons. */
+/* release_contract SettingsTunerTableColumnContract
+   Owner: Web settings tuner table geometry and action semantics.
+   The table owns its column widths through colgroup classes; cells use semantic
+   classes so adding/removing columns does not depend on positional column overrides. */
+body.tvair-guide-page #cfg-overlay #cfg-tuner-table col.cfg-tuner-name-col{width:20%;}
+body.tvair-guide-page #cfg-overlay #cfg-tuner-table col.cfg-tuner-bon-col{width:36%;}
+body.tvair-guide-page #cfg-overlay #cfg-tuner-table col.cfg-tuner-wave-col{width:20%;}
+body.tvair-guide-page #cfg-overlay #cfg-tuner-table col.cfg-tuner-role-col{width:14%;}
+body.tvair-guide-page #cfg-overlay #cfg-tuner-table col.cfg-tuner-action-col{width:10%;}
 body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-name-col,
-body.tvair-guide-page #cfg-overlay #cfg-tuner-table th:nth-child(1),
-body.tvair-guide-page #cfg-overlay #cfg-tuner-table td:nth-child(1){width:23%;text-align:center;}
-body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-bon-col,
-body.tvair-guide-page #cfg-overlay #cfg-tuner-table th:nth-child(2),
-body.tvair-guide-page #cfg-overlay #cfg-tuner-table td:nth-child(2){width:39%;}
+body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-name-cell,
 body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-wave-col,
-body.tvair-guide-page #cfg-overlay #cfg-tuner-table th:nth-child(3),
-body.tvair-guide-page #cfg-overlay #cfg-tuner-table td:nth-child(3){width:22%;text-align:center;}
+body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-wave-cell,
 body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-role-col,
-body.tvair-guide-page #cfg-overlay #cfg-tuner-table th:nth-child(4),
-body.tvair-guide-page #cfg-overlay #cfg-tuner-table td:nth-child(4){width:16%;text-align:center;}
-body.tvair-guide-page #cfg-overlay #cfg-tuner-table td:nth-child(1) input,
-body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-virtual-name{
-  text-align:center;
-  margin-left:auto;
-  margin-right:auto;
-  display:block;
-}
-body.tvair-guide-page #cfg-overlay #cfg-tuner-table td:nth-child(3) select,
-body.tvair-guide-page #cfg-overlay #cfg-tuner-table td:nth-child(4) select{text-align:center;text-align-last:center;margin-left:auto;margin-right:auto;}
-body.tvair-guide-page #cfg-overlay #cfg-tuner-table td:nth-child(2) select{width:100%;min-width:0;box-sizing:border-box;}
-
+body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-role-cell,
+body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-action-col,
+body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-action-cell{text-align:center;}
+body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-virtual-name{display:block;margin-left:auto;margin-right:auto;text-align:center;}
+body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-bon-cell select{width:100%;min-width:0;box-sizing:border-box;}
+body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-wave-cell select,
+body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-role-cell select{margin-left:auto;margin-right:auto;text-align:center;text-align-last:center;}
+body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-action-cell{vertical-align:middle;}
+body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-delete-button[data-action-role="settings-tuner-delete"]{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;min-height:20px;padding:2px 8px;border-radius:2px;font-size:11px;font-weight:700;line-height:1.15;white-space:nowrap;cursor:pointer;font-family:'Meiryo','メイリオ',sans-serif;background:var(--tvair-action-cancel-bg);color:var(--tvair-action-cancel-fg);border:1px solid var(--tvair-action-cancel-border);box-shadow:none;appearance:none;-webkit-appearance:none;}
+body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-delete-button[data-action-role="settings-tuner-delete"]:hover{background:var(--tvair-action-cancel-hover-bg);}
 
 /* release_contract Program/search result state labels are state, not action. */
 .rsv-state-label{

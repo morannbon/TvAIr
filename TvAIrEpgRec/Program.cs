@@ -4469,9 +4469,6 @@ internal sealed class DirectRecorderCompatibleResult
 
     private static string ResolveInternalRuntimeStatsPath(TvAIrEpgRecJob? job, string? outputPath)
     {
-        // 表版: 内部runtime統計JSONLは生成しない。
-        return string.Empty;
-#pragma warning disable CS0162
         var configured = job?.RuntimeStatsPath;
         if (!string.IsNullOrWhiteSpace(configured))
         {
@@ -4500,7 +4497,6 @@ internal sealed class DirectRecorderCompatibleResult
         {
             return string.Empty;
         }
-#pragma warning restore CS0162
     }
 
     public static DirectRecorderCompatibleResult FromTsReadProbe(TvAIrEpgRecJob? job, TsReadProbeSummary summary, DateTimeOffset startedAt, DateTimeOffset endedAt)
