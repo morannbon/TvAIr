@@ -33,102 +33,102 @@ body.tvair-reservation-page,
 body.tvair-keyword-page,
 body.tvair-rule-list-page,
 body.tvair-program-reservation-page{
-  width:100vw!important;
-  height:100vh!important;
-  min-width:0!important;
-  min-height:0!important;
-  overflow:hidden!important;
-  background:var(--tvair-role-page-bg)!important;
-  color:var(--tvair-role-page-fg)!important;
+  width:100vw;
+  height:100vh;
+  min-width:0;
+  min-height:0;
+  overflow:hidden;
+  background:var(--tvair-role-page-bg);
+  color:var(--tvair-role-page-fg);
 }
 body.tvair-reservation-page #nav,
 body.tvair-keyword-page #nav,
 body.tvair-rule-list-page #nav,
 body.tvair-program-reservation-page #nav{
-  position:relative!important;
-  z-index:var(--tvair-list-nav-z)!important;
+  position:relative;
+  z-index:var(--tvair-list-nav-z);
 }
 /* ClassicMenu and modal z-order are owned by tvair-ui-modules.css. */
 
 /* Reservation page: #content-region is the only scroll root. */
 body.tvair-reservation-page #main{
-  flex:1 1 auto!important;
-  width:100%!important;
-  max-width:100%!important;
-  min-width:0!important;
-  height:calc(100vh - var(--tvair-top-nav-height,32px))!important;
-  margin:0!important;
-  padding:var(--tvair-list-pad) 0 0 0!important;
-  display:flex!important;
-  flex-direction:column!important;
-  overflow:hidden!important;
-  background:transparent!important;
-  border:0!important;
-  box-sizing:border-box!important;
+  flex:1 1 auto;
+  width:100%;
+  max-width:100%;
+  min-width:0;
+  height:calc(100vh - var(--tvair-top-nav-height,32px));
+  margin:0;
+  padding:var(--tvair-list-pad) 0 0 0;
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+  background:transparent;
+  border:0;
+  box-sizing:border-box;
 }
 body.tvair-reservation-page #filter-tabs{
-  flex:0 0 auto!important;
-  position:relative!important;
-  top:auto!important;
-  z-index:var(--tvair-list-tabs-z)!important;
-  width:var(--tvair-reservation-subtab-rail-w)!important;
-  max-width:var(--tvair-reservation-subtab-rail-w)!important;
-  min-width:0!important;
-  margin-left:auto!important;
-  margin-right:auto!important;
-  box-sizing:border-box!important;
+  flex:0 0 auto;
+  position:relative;
+  top:auto;
+  z-index:var(--tvair-list-tabs-z);
+  width:var(--tvair-reservation-subtab-rail-w);
+  max-width:var(--tvair-reservation-subtab-rail-w);
+  min-width:0;
+  margin-left:auto;
+  margin-right:auto;
+  box-sizing:border-box;
 }
 body.tvair-reservation-page #content-region{
-  flex:1 1 auto!important;
-  width:100%!important;
-  max-width:none!important;
-  min-width:0!important;
-  min-height:0!important;
-  overflow-y:auto!important;
-  overflow-x:hidden!important;
-  scrollbar-gutter:auto!important;
-  padding:0!important;
-  margin:0!important;
-  background:var(--tvair-role-page-bg)!important;
-  box-sizing:border-box!important;
+  flex:1 1 auto;
+  width:100%;
+  max-width:none;
+  min-width:0;
+  min-height:0;
+  overflow-y:auto;
+  overflow-x:hidden;
+  scrollbar-gutter:auto;
+  padding:0;
+  margin:0;
+  background:var(--tvair-role-page-bg);
+  box-sizing:border-box;
 }
 body.tvair-reservation-page #content-region::-webkit-scrollbar{
-  width:var(--tvair-list-scrollbar-size)!important;
-  height:var(--tvair-list-scrollbar-size)!important;
+  width:var(--tvair-list-scrollbar-size);
+  height:var(--tvair-list-scrollbar-size);
 }
 body.tvair-reservation-page #content-region::-webkit-scrollbar-track{
-  background:var(--tvair-role-page-bg)!important;
+  background:var(--tvair-role-page-bg);
 }
 body.tvair-reservation-page #content-region::-webkit-scrollbar-thumb{
-  background:var(--tvair-role-border-soft)!important;
-  border-radius:6px!important;
-  border:1px solid var(--tvair-role-page-bg)!important;
+  background:var(--tvair-role-border-soft);
+  border-radius:6px;
+  border:1px solid var(--tvair-role-page-bg);
 }
 body.tvair-reservation-page #content-inner{
-  width:var(--tvair-reservation-subtab-rail-w)!important;
-  max-width:var(--tvair-reservation-subtab-rail-w)!important;
-  min-width:0!important;
-  min-height:100%!important;
-  height:auto!important;
-  margin-left:auto!important;
-  margin-right:auto!important;
-  overflow:visible!important;
-  background:transparent!important;
-  box-sizing:border-box!important;
+  width:var(--tvair-reservation-subtab-rail-w);
+  max-width:var(--tvair-reservation-subtab-rail-w);
+  min-width:0;
+  min-height:100%;
+  height:auto;
+  margin-left:auto;
+  margin-right:auto;
+  overflow:visible;
+  background:transparent;
+  box-sizing:border-box;
 }
 body.tvair-reservation-page #table-wrap,
 body.tvair-reservation-page #keyword-wrap{
-  width:100%!important;
-  max-width:100%!important;
-  min-width:0!important;
-  height:auto!important;
-  min-height:100%!important;
-  overflow:hidden!important;
-  margin:0!important;
-  box-sizing:border-box!important;
-  border:1px solid var(--tvair-role-border-soft)!important;
-  border-radius:0!important;
-  background:var(--tvair-role-table-bg,var(--tvair-role-shell-bg,var(--tvair-role-page-bg)))!important;
+  width:100%;
+  max-width:100%;
+  min-width:0;
+  height:auto;
+  min-height:100%;
+  overflow:hidden;
+  margin:0;
+  box-sizing:border-box;
+  border:1px solid var(--tvair-role-border-soft);
+  border-radius:0;
+  background:var(--tvair-role-table-bg,var(--tvair-role-shell-bg,var(--tvair-role-page-bg)));
 }
 
 /* release_contract ListWidthTokenCleanupContract
@@ -146,59 +146,59 @@ body.tvair-reservation-page{
 }
 body.tvair-reservation-page .col-toggle,
 body.tvair-reservation-page .tvair-reservation-state-cell{
-  text-align:center!important;
-  justify-content:center!important;
-  white-space:nowrap!important;
+  text-align:center;
+  justify-content:center;
+  white-space:nowrap;
 }
 body.tvair-reservation-page .col-toggle .toggle-btn,
 body.tvair-reservation-page .col-toggle [data-state-role^="reservation-"]{
-  box-sizing:border-box!important;
-  display:inline-flex!important;
-  align-items:center!important;
-  justify-content:center!important;
-  min-width:22px!important;
-  height:20px!important;
-  padding:0 6px!important;
-  border-radius:2px!important;
-  font-size:12px!important;
-  line-height:1!important;
-  white-space:nowrap!important;
-  font-family:'Meiryo','メイリオ',sans-serif!important;
+  box-sizing:border-box;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-width:22px;
+  height:20px;
+  padding:0 6px;
+  border-radius:2px;
+  font-size:12px;
+  line-height:1;
+  white-space:nowrap;
+  font-family:'Meiryo','メイリオ',sans-serif;
 }
 body.tvair-reservation-page .col-toggle .toggle-btn{
-  cursor:pointer!important;
+  cursor:pointer;
 }
 body.tvair-reservation-page .col-toggle .toggle-btn:disabled{
-  cursor:not-allowed!important;
+  cursor:not-allowed;
 }
 body.tvair-reservation-page .col-action,
 body.tvair-reservation-page .tvair-reservation-action-cell,
 body.tvair-keyword-page #result-table td:nth-child(5),
 body.tvair-rule-list-page #rules-table .actions-inline,
 body.tvair-program-reservation-page #program-rules-table .act-wrap{
-  text-align:center!important;
-  justify-content:center!important;
-  white-space:nowrap!important;
+  text-align:center;
+  justify-content:center;
+  white-space:nowrap;
 }
 body.tvair-reservation-page .reservation-action-slot{
-  display:inline-flex!important;
-  align-items:center!important;
-  justify-content:center!important;
-  min-width:0!important;
-  max-width:100%!important;
-  white-space:nowrap!important;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-width:0;
+  max-width:100%;
+  white-space:nowrap;
 }
 body.tvair-reservation-page .col-action .reservation-action-button,
 body.tvair-reservation-page .col-action .act-btn{
-  box-sizing:border-box!important;
-  display:inline-flex!important;
-  align-items:center!important;
-  justify-content:center!important;
-  min-width:80px!important;
-  height:20px!important;
-  padding:1px 10px!important;
-  white-space:nowrap!important;
-  line-height:1.15!important;
+  box-sizing:border-box;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-width:80px;
+  height:20px;
+  padding:1px 10px;
+  white-space:nowrap;
+  line-height:1.15;
 }
 
 
@@ -211,19 +211,19 @@ body.tvair-rule-list-page [data-cell-role^="rule-"],
 body.tvair-program-reservation-page [data-cell-role^="rule-"],
 body.tvair-program-reservation-page [data-cell-role$="-metadata"],
 body.tvair-program-reservation-page [data-cell-role="list-index"]{
-  min-width:0!important;
+  min-width:0;
 }
 body.tvair-keyword-page [data-cell-role="reservation-action"],
 body.tvair-rule-list-page [data-cell-role$="-action"],
 body.tvair-program-reservation-page [data-cell-role$="-action"]{
-  text-align:center!important;
-  white-space:nowrap!important;
+  text-align:center;
+  white-space:nowrap;
 }
 body.tvair-keyword-page [data-cell-role="title-data"],
 body.tvair-rule-list-page [data-cell-role="rule-title-data"],
 body.tvair-program-reservation-page [data-cell-role="rule-title-data"]{
-  overflow:hidden!important;
-  text-overflow:ellipsis!important;
+  overflow:hidden;
+  text-overflow:ellipsis;
 }
 
 body.tvair-reservation-page [data-cell-role="priority-metadata"],
@@ -232,31 +232,31 @@ body.tvair-reservation-page [data-cell-role="time-metadata"],
 body.tvair-reservation-page [data-cell-role="service-metadata"],
 body.tvair-reservation-page [data-cell-role="source-metadata"],
 body.tvair-reservation-page [data-cell-role="title-data"]{
-  min-width:0!important;
+  min-width:0;
 }
 body.tvair-reservation-page [data-cell-role="source-metadata"],
 body.tvair-reservation-page [data-cell-role="priority-metadata"]{
-  text-align:center!important;
-  white-space:nowrap!important;
+  text-align:center;
+  white-space:nowrap;
 }
 body.tvair-reservation-page [data-cell-role="service-metadata"],
 body.tvair-reservation-page [data-cell-role="title-data"]{
-  overflow:hidden!important;
-  text-overflow:ellipsis!important;
+  overflow:hidden;
+  text-overflow:ellipsis;
 }
 body.tvair-reservation-page [data-state-role="source-label"]{
-  display:block!important;
-  overflow:hidden!important;
-  text-overflow:ellipsis!important;
-  white-space:nowrap!important;
+  display:block;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
 }
 
 body.tvair-reservation-page .col-toggle [data-state-role],
 body.tvair-reservation-page .col-status [data-state-role],
 body.tvair-reservation-page .col-tuner [data-state-role]{
-  max-width:100%!important;
-  overflow:hidden!important;
-  text-overflow:ellipsis!important;
+  max-width:100%;
+  overflow:hidden;
+  text-overflow:ellipsis;
 }
 
 /* Reservation table schemas */
@@ -273,95 +273,95 @@ body.tvair-reservation-page{
 }
 body.tvair-reservation-page #rsv-table,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table{
-  display:block!important;
-  width:100%!important;
-  min-width:0!important;
-  max-width:100%!important;
-  table-layout:auto!important;
-  border-collapse:separate!important;
-  border-spacing:0!important;
-  box-sizing:border-box!important;
-  background:transparent!important;
-  overflow:hidden!important;
-  contain:paint!important;
+  display:block;
+  width:100%;
+  min-width:0;
+  max-width:100%;
+  table-layout:auto;
+  border-collapse:separate;
+  border-spacing:0;
+  box-sizing:border-box;
+  background:transparent;
+  overflow:hidden;
+  contain:paint;
 }
 body.tvair-reservation-page #rsv-table thead,
 body.tvair-reservation-page #rsv-table tbody,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table thead,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody{
-  display:block!important;
-  width:100%!important;
-  min-width:0!important;
+  display:block;
+  width:100%;
+  min-width:0;
 }
 body.tvair-reservation-page #rsv-table thead,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table thead{
-  position:sticky!important;
-  top:0!important;
-  z-index:var(--tvair-list-head-z)!important;
+  position:sticky;
+  top:0;
+  z-index:var(--tvair-list-head-z);
 }
 body.tvair-reservation-page #rsv-table tr,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tr{
-  display:grid!important;
-  width:100%!important;
-  min-width:0!important;
-  max-width:none!important;
-  margin:0!important;
-  box-sizing:border-box!important;
+  display:grid;
+  width:100%;
+  min-width:0;
+  max-width:none;
+  margin:0;
+  box-sizing:border-box;
 }
 body.tvair-reservation-page #rsv-table th,
 body.tvair-reservation-page #rsv-table td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table th,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table td{
-  display:flex!important;
-  align-items:center!important;
-  justify-content:center!important;
-  width:auto!important;
-  min-width:0!important;
-  max-width:100%!important;
-  overflow:hidden!important;
-  text-overflow:ellipsis!important;
-  white-space:nowrap!important;
-  box-sizing:border-box!important;
-  background:transparent!important;
-  justify-self:stretch!important;
-  font-family:'Meiryo','メイリオ',sans-serif!important;
-  vertical-align:initial!important;
-  line-height:normal!important;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  width:auto;
+  min-width:0;
+  max-width:100%;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  box-sizing:border-box;
+  background:transparent;
+  justify-self:stretch;
+  font-family:'Meiryo','メイリオ',sans-serif;
+  vertical-align:initial;
+  line-height:normal;
 }
 body.tvair-reservation-page #rsv-table th,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table th{
-  padding:0 6px!important;
-  height:28px!important;
-  min-height:28px!important;
-  font-size:11px!important;
-  font-weight:bold!important;
-  text-align:center!important;
-  user-select:none!important;
+  padding:0 6px;
+  height:28px;
+  min-height:28px;
+  font-size:11px;
+  font-weight:bold;
+  text-align:center;
+  user-select:none;
 }
 body.tvair-reservation-page #rsv-table td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table td{
-  padding:0 6px!important;
-  height:26px!important;
-  min-height:26px!important;
-  font-size:12px!important;
-  font-weight:400!important;
+  padding:0 6px;
+  height:26px;
+  min-height:26px;
+  font-size:12px;
+  font-weight:400;
 }
 body.tvair-reservation-page #rsv-table tbody tr,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr{
-  min-height:26px!important;
+  min-height:26px;
 }
 body.tvair-reservation-page #rsv-table thead tr,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table thead tr{
-  min-height:28px!important;
+  min-height:28px;
 }
 
 body.tvair-reservation-page #rsv-table tbody tr > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr > td{
-  font-weight:400!important;
+  font-weight:400;
 }
 body.tvair-reservation-page #rsv-table tbody tr > td:not(.col-action) *,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr > td:not(.col-action) *{
-  font-weight:400!important;
+  font-weight:400;
 }
 
 
@@ -377,7 +377,7 @@ body.tvair-reservation-page #rsv-table:not([data-table-schema]) tr{
     var(--rsv-service-w)
     minmax(0,1fr)
     var(--rsv-source-w)
-    var(--rsv-action-w)!important;
+    var(--rsv-action-w);
 }
 /* grouped reservation family schemas */
 body.tvair-reservation-page #keyword-wrap table[data-table-schema="tagged"] tr,
@@ -389,7 +389,7 @@ body.tvair-reservation-page #keyword-wrap table:not([data-table-schema]) tr{
     var(--rsv-time-w)
     var(--rsv-service-w)
     minmax(0,1fr)
-    var(--rsv-source-w)!important;
+    var(--rsv-source-w);
 }
 body.tvair-reservation-page #keyword-wrap table[data-table-schema="candidate"] tr{
   grid-template-columns:
@@ -398,7 +398,7 @@ body.tvair-reservation-page #keyword-wrap table[data-table-schema="candidate"] t
     var(--rsv-time-w)
     var(--rsv-service-w)
     minmax(0,1fr)
-    var(--rsv-action-w)!important;
+    var(--rsv-action-w);
 }
 
 /* reservation-family table text alignment */
@@ -408,8 +408,8 @@ body.tvair-reservation-page #rsv-table th.col-code,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table th.col-title,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table th.col-main,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table th.col-code{
-  justify-content:center!important;
-  text-align:center!important;
+  justify-content:center;
+  text-align:center;
 }
 body.tvair-reservation-page #rsv-table td.col-title,
 body.tvair-reservation-page #rsv-table td.col-main,
@@ -417,8 +417,8 @@ body.tvair-reservation-page #rsv-table td.col-code,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table td.col-title,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table td.col-main,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table td.col-code{
-  justify-content:flex-start!important;
-  text-align:left!important;
+  justify-content:flex-start;
+  text-align:left;
 }
 body.tvair-reservation-page #rsv-table th.col-kind,
 body.tvair-reservation-page #rsv-table td.col-kind,
@@ -452,21 +452,21 @@ body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table t
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table td.col-date,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table th.col-datetime,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table td.col-datetime{
-  justify-content:center!important;
-  text-align:center!important;
+  justify-content:center;
+  text-align:center;
 }
 
 body.tvair-reservation-page #rsv-table td.col-status .source-label,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table td.col-status .source-label{
-  display:inline-flex!important;
-  align-items:center!important;
-  justify-content:center!important;
-  min-width:0!important;
-  max-width:100%!important;
-  overflow:hidden!important;
-  text-overflow:ellipsis!important;
-  white-space:nowrap!important;
-  line-height:normal!important;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-width:0;
+  max-width:100%;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  line-height:normal;
 }
 
 /* Reservation row state / genre guard contract (release_contract ReservationSubtabThemeTokenContract)
@@ -482,128 +482,128 @@ body.tvair-reservation-page #rsv-table thead tr,
 body.tvair-reservation-page #rsv-table tbody tr,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table thead tr,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr{
-  background:transparent!important;
-  overflow:hidden!important;
-  contain:paint!important;
+  background:transparent;
+  overflow:hidden;
+  contain:paint;
 }
 body.tvair-reservation-page #keyword-wrap .keyword-group{
-  border:1px solid var(--tvair-reservation-group-head-border)!important;
-  border-radius:3px!important;
-  overflow:hidden!important;
-  box-sizing:border-box!important;
+  border:1px solid var(--tvair-reservation-group-head-border);
+  border-radius:3px;
+  overflow:hidden;
+  box-sizing:border-box;
 }
 body.tvair-reservation-page #keyword-wrap .keyword-group-head{
-  border-bottom:1px solid var(--tvair-reservation-group-head-border)!important;
+  border-bottom:1px solid var(--tvair-reservation-group-head-border);
 }
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table thead tr > th{
-  border-top:1px solid var(--tvair-reservation-table-head-border,var(--tvair-reservation-list-border))!important;
+  border-top:1px solid var(--tvair-reservation-table-head-border,var(--tvair-reservation-list-border));
 }
 body.tvair-reservation-page #rsv-table thead tr > th,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table thead tr > th{
-  background:var(--tvair-reservation-table-head-bg,var(--tvair-role-table-head-bg))!important;
-  color:var(--tvair-reservation-table-head-text,var(--tvair-content-primary))!important;
-  border-right:1px solid var(--tvair-reservation-table-head-border,var(--tvair-reservation-list-border))!important;
-  border-bottom:1px solid var(--tvair-reservation-table-head-border,var(--tvair-reservation-list-border))!important;
+  background:var(--tvair-reservation-table-head-bg,var(--tvair-role-table-head-bg));
+  color:var(--tvair-reservation-table-head-text,var(--tvair-content-primary));
+  border-right:1px solid var(--tvair-reservation-table-head-border,var(--tvair-reservation-list-border));
+  border-bottom:1px solid var(--tvair-reservation-table-head-border,var(--tvair-reservation-list-border));
 }
 body.tvair-reservation-page #rsv-table thead tr > th:last-child,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table thead tr > th:last-child{
-  border-right:none!important;
+  border-right:none;
 }
 body.tvair-reservation-page #rsv-table tbody tr,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr{
-  border-bottom:none!important;
+  border-bottom:none;
 }
 body.tvair-reservation-page #rsv-table tbody tr > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr > td{
-  background:var(--tvair-reservation-list-row-odd-bg)!important;
-  border-bottom:1px solid var(--tvair-reservation-list-border)!important;
+  background:var(--tvair-reservation-list-row-odd-bg);
+  border-bottom:1px solid var(--tvair-reservation-list-border);
 }
 body.tvair-reservation-page #rsv-table tbody tr:last-child > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr:last-child > td{
-  border-bottom:none!important;
+  border-bottom:none;
 }
 body.tvair-reservation-page #rsv-table tbody tr:nth-child(even) > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr:nth-child(even) > td{
-  background:var(--tvair-reservation-list-row-even-bg)!important;
+  background:var(--tvair-reservation-list-row-even-bg);
 }
 body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.tvair-reservation-genre-row > td,
 body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr[data-genre-row="1"] > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.tvair-reservation-genre-row > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr[data-genre-row="1"] > td{
-  background:var(--tvair-genre-row-bg)!important;
+  background:var(--tvair-genre-row-bg);
 }
 body.tvair-reservation-page #rsv-table tbody tr:hover > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr:hover > td{
-  background:var(--tvair-reservation-list-row-hover-bg)!important;
+  background:var(--tvair-reservation-list-row-hover-bg);
 }
 body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.tvair-reservation-genre-row:hover > td,
 body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr[data-genre-row="1"]:hover > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.tvair-reservation-genre-row:hover > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr[data-genre-row="1"]:hover > td{
-  background:var(--tvair-reservation-genre-row-hover-bg)!important;
+  background:var(--tvair-reservation-genre-row-hover-bg);
 }
 body.tvair-reservation-page #rsv-table tbody tr.disabled-row > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row > td{
-  background:var(--tvair-reservation-list-row-disabled-bg)!important;
-  color:var(--tvair-role-reservation-disabled-fg,var(--tvair-reservation-disabled-text))!important;
-  font-weight:400!important;
+  background:var(--tvair-reservation-list-row-disabled-bg);
+  color:var(--tvair-role-reservation-disabled-fg,var(--tvair-reservation-disabled-text));
+  font-weight:400;
 }
 body.tvair-reservation-page #rsv-table tbody tr.disabled-row:hover > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row:hover > td{
-  background:var(--tvair-reservation-list-row-disabled-hover-bg)!important;
+  background:var(--tvair-reservation-list-row-disabled-hover-bg);
 }
 body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.disabled-row.tvair-reservation-genre-row > td,
 body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.disabled-row[data-genre-row="1"] > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row.tvair-reservation-genre-row > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row[data-genre-row="1"] > td{
-  background:var(--tvair-reservation-list-row-disabled-bg)!important;
-  color:var(--tvair-role-reservation-disabled-fg,var(--tvair-reservation-disabled-text))!important;
+  background:var(--tvair-reservation-list-row-disabled-bg);
+  color:var(--tvair-role-reservation-disabled-fg,var(--tvair-reservation-disabled-text));
 }
 body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.disabled-row.tvair-reservation-genre-row:hover > td,
 body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.disabled-row[data-genre-row="1"]:hover > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row.tvair-reservation-genre-row:hover > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row[data-genre-row="1"]:hover > td{
-  background:var(--tvair-reservation-list-row-disabled-hover-bg)!important;
+  background:var(--tvair-reservation-list-row-disabled-hover-bg);
 }
 body.tvair-reservation-page #rsv-table tbody tr.cancelled-row > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.cancelled-row > td{
-  background:var(--tvair-reservation-list-row-cancelled-bg)!important;
-  color:var(--tvair-reservation-cancelled-text)!important;
+  background:var(--tvair-reservation-list-row-cancelled-bg);
+  color:var(--tvair-reservation-cancelled-text);
 }
 body.tvair-reservation-page #rsv-table tbody tr.cancelled-row:hover > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.cancelled-row:hover > td{
-  background:var(--tvair-reservation-list-row-cancelled-hover-bg)!important;
+  background:var(--tvair-reservation-list-row-cancelled-hover-bg);
 }
 body.tvair-reservation-page #rsv-table tbody tr.conflicted > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.conflicted > td{
-  background:var(--tvair-reservation-row-conflict-bg)!important;
-  color:var(--tvair-reservation-row-conflict-text)!important;
-  font-weight:400!important;
+  background:var(--tvair-reservation-row-conflict-bg);
+  color:var(--tvair-reservation-row-conflict-text);
+  font-weight:400;
 }
 body.tvair-reservation-page #rsv-table tbody tr.conflicted:hover > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.conflicted:hover > td{
-  background:var(--tvair-reservation-row-conflict-hover-bg)!important;
+  background:var(--tvair-reservation-row-conflict-hover-bg);
 }
 body.tvair-reservation-page #rsv-table tbody tr.conflicted.missing-duplicate-conflict > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.conflicted.missing-duplicate-conflict > td{
-  background:var(--tvair-reservation-row-missing-duplicate-conflict-bg)!important;
-  color:var(--tvair-reservation-row-missing-duplicate-conflict-text)!important;
+  background:var(--tvair-reservation-row-missing-duplicate-conflict-bg);
+  color:var(--tvair-reservation-row-missing-duplicate-conflict-text);
 }
 body.tvair-reservation-page #rsv-table tbody tr.conflicted.missing-duplicate-conflict:hover > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.conflicted.missing-duplicate-conflict:hover > td{
-  background:var(--tvair-reservation-row-missing-duplicate-conflict-hover-bg)!important;
+  background:var(--tvair-reservation-row-missing-duplicate-conflict-hover-bg);
 }
 body.tvair-reservation-page #rsv-table tbody tr.conflicted > td:first-child,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.conflicted > td:first-child{
-  border-left:4px solid var(--tvair-reservation-row-conflict-border)!important;
+  border-left:4px solid var(--tvair-reservation-row-conflict-border);
 }
 body.tvair-reservation-page #rsv-table tbody tr.conflicted.missing-duplicate-conflict > td:first-child,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.conflicted.missing-duplicate-conflict > td:first-child{
-  border-left:4px solid var(--tvair-reservation-row-missing-duplicate-conflict-border)!important;
+  border-left:4px solid var(--tvair-reservation-row-missing-duplicate-conflict-border);
 }
 body.tvair-reservation-page #rsv-table tbody tr.cancelled-row > td:first-child,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.cancelled-row > td:first-child{
-  border-left:4px solid var(--tvair-reservation-cancelled-left-border)!important;
+  border-left:4px solid var(--tvair-reservation-cancelled-left-border);
 }
 body.tvair-reservation-page #rsv-table tbody tr.chain-head > td:first-child,
 body.tvair-reservation-page #rsv-table tbody tr.chain-mid > td:first-child,
@@ -611,16 +611,16 @@ body.tvair-reservation-page #rsv-table tbody tr.chain-tail > td:first-child,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.chain-head > td:first-child,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.chain-mid > td:first-child,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.chain-tail > td:first-child{
-  border-left:3px solid var(--chain-accent)!important;
+  border-left:3px solid var(--chain-accent);
 }
 body.tvair-reservation-page #rsv-table tbody tr.disabled-row > td *,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row > td *{
-  color:inherit!important;
-  font-weight:400!important;
+  color:inherit;
+  font-weight:400;
 }
 body.tvair-reservation-page #rsv-table tbody tr.conflicted.missing-duplicate-conflict .tuner-conflict,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.conflicted.missing-duplicate-conflict .tuner-conflict{
-  font-weight:bold!important;
+  font-weight:bold;
 }
 body.tvair-reservation-page #rsv-table tbody tr.cancelled-row .col-date,
 body.tvair-reservation-page #rsv-table tbody tr.cancelled-row .col-time,
@@ -632,7 +632,7 @@ body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table t
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.cancelled-row .col-ch,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.cancelled-row .col-title,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.cancelled-row .col-status{
-  color:var(--tvair-reservation-cancelled-strong-text)!important;
+  color:var(--tvair-reservation-cancelled-strong-text);
 }
 
 /* System EPG visible row text roles. */
@@ -642,21 +642,21 @@ body.tvair-reservation-page #rsv-table tbody tr.tvair-reservation-system-system-
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.tvair-reservation-system-daily-epg > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.tvair-reservation-system-pre-record-epg > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.tvair-reservation-system-system-epg > td{
-  color:var(--tvair-reservation-list-text-soft)!important;
-  font-style:normal!important;
+  color:var(--tvair-reservation-list-text-soft);
+  font-style:normal;
 }
 body.tvair-reservation-page #rsv-table tbody tr.tvair-reservation-system-daily-epg .col-title,
 body.tvair-reservation-page #rsv-table tbody tr.tvair-reservation-system-system-epg .col-title,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.tvair-reservation-system-daily-epg .col-title,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.tvair-reservation-system-system-epg .col-title{
-  color:var(--tvair-action-primary-bg)!important;
-  font-style:normal!important;
-  font-weight:500!important;
+  color:var(--tvair-action-primary-bg);
+  font-style:normal;
+  font-weight:500;
 }
 body.tvair-reservation-page #rsv-table tbody tr.tvair-reservation-system-pre-record-epg .col-title,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.tvair-reservation-system-pre-record-epg .col-title{
-  color:var(--tvair-state-conflict-text)!important;
-  font-style:normal!important;
+  color:var(--tvair-state-conflict-text);
+  font-style:normal;
 }
 body.tvair-reservation-page .col-no,
 body.tvair-reservation-page .col-toggle,
@@ -667,22 +667,22 @@ body.tvair-reservation-page .col-time,
 body.tvair-reservation-page .col-kind,
 body.tvair-reservation-page .col-result,
 body.tvair-reservation-page .col-status{
-  text-align:center!important;
+  text-align:center;
 }
 body.tvair-reservation-page .col-action,
 body.tvair-reservation-page .col-actions{
-  text-align:center!important;
-  justify-content:center!important;
+  text-align:center;
+  justify-content:center;
 }
 body.tvair-reservation-page .col-action button,
 body.tvair-reservation-page .reservation-action-slot button{
-  margin-inline:auto!important;
+  margin-inline:auto;
 }
 body.tvair-reservation-page .col-title,
 body.tvair-reservation-page .col-main{
-  text-align:left!important;
-  min-width:0!important;
-  max-width:none!important;
+  text-align:left;
+  min-width:0;
+  max-width:none;
 }
 
 /* release_contract ReservationSubtabThemeTokenContract:
@@ -965,25 +965,25 @@ body.tvair-program-reservation-page .btn-del[disabled]{
    button appear cramped against the top of the action cell. */
 body.tvair-keyword-page #result-table td[data-cell-role="reservation-action"],
 body.tvair-keyword-page #result-table td:nth-child(5){
-  display:table-cell!important;
-  vertical-align:middle!important;
-  text-align:center!important;
-  line-height:1!important;
+  display:table-cell;
+  vertical-align:middle;
+  text-align:center;
+  line-height:1;
 }
 body.tvair-keyword-page #result-table td[data-cell-role="reservation-action"] .rsv-btn,
 body.tvair-keyword-page #result-table td[data-cell-role="reservation-action"] .rsv-state-label{
-  box-sizing:border-box!important;
-  display:inline-flex!important;
-  align-items:center!important;
-  justify-content:center!important;
-  min-width:70px!important;
-  height:22px!important;
-  min-height:22px!important;
-  margin:0 auto!important;
-  padding:0 10px!important;
-  line-height:1!important;
-  vertical-align:middle!important;
-  white-space:nowrap!important;
+  box-sizing:border-box;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-width:70px;
+  height:22px;
+  min-height:22px;
+  margin:0 auto;
+  padding:0 10px;
+  line-height:1;
+  vertical-align:middle;
+  white-space:nowrap;
 }
 
 
@@ -1090,8 +1090,8 @@ body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.disa
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row.tvair-reservation-genre-row > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row.genre-colored-row > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row[data-genre-row="1"] > td{
-  background:var(--tvair-reservation-list-row-disabled-bg)!important;
-  color:var(--tvair-role-reservation-disabled-fg,var(--tvair-reservation-disabled-text))!important;
+  background:var(--tvair-reservation-list-row-disabled-bg);
+  color:var(--tvair-role-reservation-disabled-fg,var(--tvair-reservation-disabled-text));
 }
 body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.disabled-row.tvair-reservation-genre-row:hover > td,
 body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.disabled-row.genre-colored-row:hover > td,
@@ -1099,7 +1099,7 @@ body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.disa
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row.tvair-reservation-genre-row:hover > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row.genre-colored-row:hover > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row[data-genre-row="1"]:hover > td{
-  background:var(--tvair-reservation-list-row-disabled-hover-bg)!important;
+  background:var(--tvair-reservation-list-row-disabled-hover-bg);
 }
 
 /* release_contract ListFormFilterOwnership: non-reservation list pages share basic form controls and toolbar/filter geometry here. Toast geometry/paint is owned by tvair-notification.css. Page CSS keeps page-specific labels, panels, modal layout and semantic colors. */
@@ -1456,95 +1456,95 @@ body.tvair-rule-list-page .toolbar-btn:disabled{
 body.tvair-keyword-page #page-scroll,
 body.tvair-rule-list-page #page-scroll,
 body.tvair-program-reservation-page #page-scroll{
-  flex:1 1 auto!important;
-  width:100%!important;
-  max-width:none!important;
-  min-width:0!important;
-  min-height:0!important;
-  margin:0!important;
-  padding:var(--tvair-list-pad)!important;
-  overflow:hidden!important;
-  box-sizing:border-box!important;
-  background:var(--tvair-role-page-bg,var(--tvair-color-surface-page))!important;
+  flex:1 1 auto;
+  width:100%;
+  max-width:none;
+  min-width:0;
+  min-height:0;
+  margin:0;
+  padding:var(--tvair-list-pad);
+  overflow:hidden;
+  box-sizing:border-box;
+  background:var(--tvair-role-page-bg,var(--tvair-color-surface-page));
 }
 body.tvair-keyword-page #body,
 body.tvair-rule-list-page #main,
 body.tvair-program-reservation-page #main{
-  width:100%!important;
-  max-width:none!important;
-  min-width:0!important;
-  height:calc(100vh - var(--tvair-layout-nav-height,var(--tvair-top-nav-height,32px)) - (var(--tvair-list-pad) * 2))!important;
-  min-height:0!important;
-  margin:0!important;
-  padding:0!important;
-  box-sizing:border-box!important;
-  overflow:hidden!important;
-  background:transparent!important;
-  border:0!important;
-  border-radius:0!important;
+  width:100%;
+  max-width:none;
+  min-width:0;
+  height:calc(100vh - var(--tvair-layout-nav-height,var(--tvair-top-nav-height,32px)) - (var(--tvair-list-pad) * 2));
+  min-height:0;
+  margin:0;
+  padding:0;
+  box-sizing:border-box;
+  overflow:hidden;
+  background:transparent;
+  border:0;
+  border-radius:0;
 }
 /* release_contract SplitPaneParity: keyword/program split pages share the same left-pane width token. */
 body.tvair-keyword-page #body{
-  display:grid!important;
-  grid-template-columns:var(--tvair-keyword-form-pane,var(--tvair-split-form-pane,340px)) minmax(0,1fr)!important;
-  gap:var(--tvair-list-gap)!important;
+  display:grid;
+  grid-template-columns:var(--tvair-keyword-form-pane,var(--tvair-split-form-pane,340px)) minmax(0,1fr);
+  gap:var(--tvair-list-gap);
 }
 body.tvair-rule-list-page #main{
-  display:flex!important;
-  flex-direction:column!important;
-  gap:var(--tvair-list-gap)!important;
+  display:flex;
+  flex-direction:column;
+  gap:var(--tvair-list-gap);
 }
 body.tvair-program-reservation-page #main{
-  display:grid!important;
-  grid-template-columns:var(--tvair-program-form-pane,var(--tvair-split-form-pane,340px)) minmax(0,1fr)!important;
-  gap:var(--tvair-list-gap)!important;
-  align-items:stretch!important;
+  display:grid;
+  grid-template-columns:var(--tvair-program-form-pane,var(--tvair-split-form-pane,340px)) minmax(0,1fr);
+  gap:var(--tvair-list-gap);
+  align-items:stretch;
 }
 body.tvair-keyword-page #result-panel,
 body.tvair-rule-list-page #toolbar,
 body.tvair-rule-list-page #table-wrap,
 body.tvair-program-reservation-page #form-panel,
 body.tvair-program-reservation-page #list-panel{
-  min-width:0!important;
-  max-width:none!important;
-  box-sizing:border-box!important;
+  min-width:0;
+  max-width:none;
+  box-sizing:border-box;
 }
 body.tvair-rule-list-page #toolbar{
-  width:100%!important;
-  flex:0 0 auto!important;
-  margin:0!important;
+  width:100%;
+  flex:0 0 auto;
+  margin:0;
 }
 body.tvair-rule-list-page #table-wrap{
-  width:100%!important;
-  flex:1 1 auto!important;
-  min-height:0!important;
-  margin:0!important;
-  overflow:auto!important;
+  width:100%;
+  flex:1 1 auto;
+  min-height:0;
+  margin:0;
+  overflow:auto;
 }
 body.tvair-rule-list-page #toolbar-left,
 body.tvair-rule-list-page #toolbar-right{
-  min-width:0!important;
+  min-width:0;
 }
 body.tvair-rule-list-page #toolbar-left{
-  flex:1 1 auto!important;
+  flex:1 1 auto;
 }
 body.tvair-rule-list-page #toolbar-right{
-  flex:0 0 auto!important;
-  margin-left:auto!important;
+  flex:0 0 auto;
+  margin-left:auto;
 }
 body.tvair-rule-list-page .toolbar-btn{
-  min-height:24px!important;
-  padding:4px 12px!important;
-  line-height:1.2!important;
-  gap:4px!important;
+  min-height:24px;
+  padding:4px 12px;
+  line-height:1.2;
+  gap:4px;
 }
 body.tvair-rule-list-page #toolbar-right .toolbar-btn{
-  min-height:24px!important;
-  padding:4px 12px!important;
+  min-height:24px;
+  padding:4px 12px;
 }
 @media (max-width:900px){
   body.tvair-keyword-page #body,
   body.tvair-program-reservation-page #main{
-    grid-template-columns:1fr!important;
+    grid-template-columns:1fr;
   }
 }

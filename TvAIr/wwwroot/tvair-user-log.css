@@ -23,7 +23,7 @@
    remain in tvair-list-module.css. */
 #filter-tabs[data-list-role="log"] .tvair-log-action-host{display:inline-flex;align-items:flex-end;gap:2px;margin-bottom:0}
 #filter-tabs:not([data-list-role="log"]) .tvair-log-action-host{display:none}
-.tvair-log-action-host[hidden]{display:none!important}
+.tvair-log-action-host[hidden]{display:none}
 .tvair-log-action-button{
   background:var(--tvair-log-action-bg,var(--tvair-reservation-toolbar-bg));
   border:1px solid var(--tvair-log-action-border,var(--tvair-reservation-toolbar-border));
@@ -120,7 +120,7 @@ body.tvair-reservation-page #rsv-table[data-table-schema="log"] tr{
 
 /* release_contract UserLogTableOwner
    Loaded after the shared list module on reservations.html so these log-tab selectors
-   win by module order instead of borrowing reservation-list !important guards. */
+   win by module order instead of borrowing reservation-list priority guards. */
 body.tvair-reservation-page #rsv-table.log-mode .col-main,
 body.tvair-reservation-page #rsv-table.log-mode td.tvair-user-log-message-cell,
 body.tvair-reservation-page #rsv-table.log-mode .tvair-user-log-message,

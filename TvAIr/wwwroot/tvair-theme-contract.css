@@ -399,77 +399,77 @@ body[data-tvair-effective-theme="dark"]{
 
 /* Host module binding. Keep this narrow: no plugin-internal selectors. */
 html,body{
-  background:var(--tvair-role-page-bg)!important;
-  color:var(--tvair-role-page-fg)!important;
+  background:var(--tvair-role-page-bg);
+  color:var(--tvair-role-page-fg);
 }
 body:not(.tvair-guide-page) .tvair-topnav,body:not(.tvair-guide-page) #nav,body:not(.tvair-guide-page) #filter-tabs,
 body:not(.tvair-guide-page) .toolbar,body:not(.tvair-guide-page) .filter-bar,body:not(.tvair-guide-page) .sub-panel,body:not(.tvair-guide-page) .summary,body:not(.tvair-guide-page) .status-box,body:not(.tvair-guide-page) .keyword-group-head{
-  background:var(--tvair-role-toolbar-bg)!important;
-  color:var(--tvair-role-toolbar-fg)!important;
-  border-color:var(--tvair-role-border-soft)!important;
+  background:var(--tvair-role-toolbar-bg);
+  color:var(--tvair-role-toolbar-fg);
+  border-color:var(--tvair-role-border-soft);
 }
 body:not(.tvair-guide-page) .nav-btn,body:not(.tvair-guide-page) .ftab,body:not(.tvair-guide-page) .reservation-toolbar-action,body:not(.tvair-guide-page) .tvair-log-action-button,
 body:not(.tvair-guide-page) input[type="button"],body:not(.tvair-guide-page) input[type="submit"]{
-  background:var(--tvair-role-control-bg)!important;
-  color:var(--tvair-role-control-fg)!important;
-  border:1px solid var(--tvair-role-control-border)!important;
-  box-shadow:none!important;
+  background:var(--tvair-role-control-bg);
+  color:var(--tvair-role-control-fg);
+  border:1px solid var(--tvair-role-control-border);
+  box-shadow:none;
 }
 body:not(.tvair-guide-page) .nav-btn:hover,body:not(.tvair-guide-page) .ftab:hover,body:not(.tvair-guide-page) .reservation-toolbar-action:hover,body:not(.tvair-guide-page) .tvair-log-action-button:hover{
-  background:var(--tvair-role-control-hover-bg)!important;
+  background:var(--tvair-role-control-hover-bg);
 }
-body:not(.tvair-guide-page) .nav-btn:active,body:not(.tvair-guide-page) .ftab:active,body:not(.tvair-guide-page) .reservation-toolbar-action:active{
-  background:var(--tvair-role-control-pressed-bg)!important;
+body:not(.tvair-guide-page) .nav-btn:active,body:not(.tvair-guide-page) .ftab:active,body:not(.tvair-guide-page) .reservation-toolbar-action:active,body:not(.tvair-guide-page) .tvair-log-action-button:active{
+  background:var(--tvair-role-control-pressed-bg);
 }
 body:not(.tvair-guide-page) .nav-btn.active,body:not(.tvair-guide-page) .ftab.active{
-  background:var(--tvair-role-control-active-bg)!important;
-  color:var(--tvair-role-control-active-fg)!important;
-  border-color:var(--tvair-role-focus)!important;
+  background:var(--tvair-role-control-active-bg);
+  color:var(--tvair-role-control-active-fg);
+  border-color:var(--tvair-role-focus);
 }
 button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{
-  outline:2px solid var(--tvair-role-focus)!important;
-  outline-offset:1px!important;
+  outline:2px solid var(--tvair-role-focus);
+  outline-offset:1px;
 }
 body:not(.tvair-guide-page) .card,body:not(.tvair-guide-page) .panel,body:not(.tvair-guide-page) .section,body:not(.tvair-guide-page) .settings-card,body:not(.tvair-guide-page) .form-card,body:not(.tvair-guide-page) .filter-panel,body:not(.tvair-guide-page) .left-pane,body:not(.tvair-guide-page) .side-panel,body:not(.tvair-guide-page) .content-panel,
 body:not(.tvair-guide-page) .modal-content,body:not(.tvair-guide-page) .dialog,body:not(.tvair-guide-page) .group-box,body:not(.tvair-guide-page):not(.tvair-reservation-page) #main,body:not(.tvair-guide-page):not(.tvair-reservation-page) #content-region,body:not(.tvair-guide-page):not(.tvair-reservation-page) #content-inner,body:not(.tvair-guide-page):not(.tvair-reservation-page) #table-wrap,body:not(.tvair-guide-page):not(.tvair-reservation-page) #keyword-wrap,
 body:not(.tvair-guide-page) .help-modal-box,body:not(.tvair-guide-page) .ver-box{
-  background:var(--tvair-role-shell-bg)!important;
-  color:var(--tvair-role-shell-fg)!important;
-  border-color:var(--tvair-role-border-soft)!important;
+  background:var(--tvair-role-shell-bg);
+  color:var(--tvair-role-shell-fg);
+  border-color:var(--tvair-role-border-soft);
 }
 body:not(.tvair-guide-page) .modal-head,body:not(.tvair-guide-page) .dialog-head{
-  background:var(--tvair-role-header-bg)!important;
-  color:var(--tvair-role-header-fg)!important;
+  background:var(--tvair-role-header-bg);
+  color:var(--tvair-role-header-fg);
 }
 body:not(.tvair-guide-page) input,body:not(.tvair-guide-page) select,body:not(.tvair-guide-page) textarea,body:not(.tvair-guide-page) .input,body:not(.tvair-guide-page) .select,body:not(.tvair-guide-page) .listbox{
-  background:var(--tvair-role-control-bg)!important;
-  color:var(--tvair-role-control-fg)!important;
-  border-color:var(--tvair-role-control-border)!important;
+  background:var(--tvair-role-control-bg);
+  color:var(--tvair-role-control-fg);
+  border-color:var(--tvair-role-control-border);
 }
 body:not(.tvair-guide-page) input:disabled,body:not(.tvair-guide-page) select:disabled,body:not(.tvair-guide-page) textarea:disabled,body:not(.tvair-guide-page) button:disabled:not(.epg-btn):not(.program-cell-action-btn),body:not(.tvair-guide-page) .disabled:not(.program-cell-action-btn),body:not(.tvair-guide-page) .is-disabled:not(.program-cell-action-btn){
-  background:var(--tvair-role-control-disabled-bg)!important;
-  color:var(--tvair-role-control-disabled-fg)!important;
-  opacity:1!important;
+  background:var(--tvair-role-control-disabled-bg);
+  color:var(--tvair-role-control-disabled-fg);
+  opacity:1;
 }
 body:not(.tvair-guide-page):not(.tvair-reservation-page) table thead th{
-  background:var(--tvair-role-table-header-bg)!important;
-  color:var(--tvair-role-table-header-fg)!important;
+  background:var(--tvair-role-table-header-bg);
+  color:var(--tvair-role-table-header-fg);
 }
 body:not(.tvair-guide-page):not(.tvair-reservation-page) tbody tr:not(.disabled-row):not(.cancelled-row):not(.conflicted):not([data-genre-row="1"]):nth-child(odd)>td{
-  background:var(--tvair-role-table-row-bg)!important;
-  color:var(--tvair-role-table-row-fg)!important;
+  background:var(--tvair-role-table-row-bg);
+  color:var(--tvair-role-table-row-fg);
 }
 body:not(.tvair-guide-page):not(.tvair-reservation-page) tbody tr:not(.disabled-row):not(.cancelled-row):not(.conflicted):not([data-genre-row="1"]):nth-child(even)>td{
-  background:var(--tvair-role-table-row-alt-bg)!important;
-  color:var(--tvair-role-table-row-fg)!important;
+  background:var(--tvair-role-table-row-alt-bg);
+  color:var(--tvair-role-table-row-fg);
 }
 body:not(.tvair-guide-page) small,body:not(.tvair-guide-page) .help,body:not(.tvair-guide-page) .hint,body:not(.tvair-guide-page) .muted,body:not(.tvair-guide-page) .description,body:not(.tvair-guide-page) .field-help,body:not(.tvair-guide-page) .subtext,body:not(.tvair-guide-page) .caption,body:not(.tvair-guide-page) .note,body:not(.tvair-guide-page) .source-label{
-  color:var(--tvair-role-text-muted-fg)!important;
+  color:var(--tvair-role-text-muted-fg);
 }
 .tvair-notification,.toast,#toast{
-  background:var(--tvair-role-menu-bg)!important;
-  color:var(--tvair-role-menu-fg)!important;
-  border-color:var(--tvair-role-menu-border)!important;
+  background:var(--tvair-role-menu-bg);
+  color:var(--tvair-role-menu-fg);
+  border-color:var(--tvair-role-menu-border);
 }
 
 
@@ -569,8 +569,8 @@ body.theme-light{
 
 /* Browser chrome defaults for controls that do not respect inherited color consistently. */
 ::selection{
-  background:var(--tvair-role-control-active-bg)!important;
-  color:var(--tvair-role-control-active-fg)!important;
+  background:var(--tvair-role-control-active-bg);
+  color:var(--tvair-role-control-active-fg);
 }
 ::-webkit-scrollbar{
   width:12px;
@@ -594,20 +594,20 @@ body.theme-light{
 a:not(.program-cell-title-link),
 .tvair-link,
 .link-like{
-  color:var(--winui-system-accent-color)!important;
+  color:var(--winui-system-accent-color);
 }
 a:not(.program-cell-title-link):hover,
 .tvair-link:hover,
 .link-like:hover{
-  color:var(--winui-system-accent-color-hover)!important;
+  color:var(--winui-system-accent-color-hover);
 }
 body.tvair-guide-page .prog-title a.program-cell-title-link,
 body.tvair-guide-page .prog-title a.program-cell-title-link:visited{
-  color:var(--tvair-programcell-title-fg)!important;
+  color:var(--tvair-programcell-title-fg);
 }
 body.tvair-guide-page .prog-title a.program-cell-title-link:hover,
 body.tvair-guide-page .prog-title a.program-cell-title-link:focus-visible{
-  color:var(--tvair-programcell-title-hover-fg,var(--tvair-programcell-title-fg))!important;
+  color:var(--tvair-programcell-title-hover-fg,var(--tvair-programcell-title-fg));
   text-decoration:underline;
 }
 
@@ -616,8 +616,8 @@ body.tvair-guide-page .prog-title a.program-cell-title-link:focus-visible{
 .program-cell-action-btn:focus-visible,
 .prog-btn:focus-visible,
 .act-btn:focus-visible{
-  outline:2px solid var(--tvair-role-focus)!important;
-  outline-offset:1px!important;
+  outline:2px solid var(--tvair-role-focus);
+  outline-offset:1px;
 }
 
 /* Contract stamp. */
@@ -653,76 +653,76 @@ body:not(.tvair-guide-page) .tvair-time-row{
 }
 body:not(.tvair-guide-page) .tvair-choice-chip,
 body:not(.tvair-guide-page) .tvair-check-chip{
-  min-height:24px!important;
-  display:inline-flex!important;
-  align-items:center!important;
-  justify-content:center!important;
-  gap:4px!important;
-  padding:2px 8px!important;
-  border:1px solid var(--tvair-role-control-border)!important;
-  border-radius:3px!important;
-  background:var(--tvair-role-control-bg)!important;
-  color:var(--tvair-role-control-fg)!important;
-  font-family:'Meiryo','メイリオ',sans-serif!important;
-  font-size:12px!important;
-  line-height:1.2!important;
-  font-weight:600!important;
-  cursor:pointer!important;
-  user-select:none!important;
-  box-shadow:none!important;
+  min-height:24px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:4px;
+  padding:2px 8px;
+  border:1px solid var(--tvair-role-control-border);
+  border-radius:3px;
+  background:var(--tvair-role-control-bg);
+  color:var(--tvair-role-control-fg);
+  font-family:"Meiryo","メイリオ",sans-serif;
+  font-size:12px;
+  line-height:1.2;
+  font-weight:600;
+  cursor:pointer;
+  user-select:none;
+  box-shadow:none;
 }
 body:not(.tvair-guide-page) .tvair-weekday-chip{
-  min-width:30px!important;
-  padding-left:8px!important;
-  padding-right:8px!important;
+  min-width:30px;
+  padding-left:8px;
+  padding-right:8px;
 }
 body:not(.tvair-guide-page) .tvair-choice-chip:hover,
 body:not(.tvair-guide-page) .tvair-check-chip:hover{
-  background:var(--tvair-role-control-hover-bg)!important;
+  background:var(--tvair-role-control-hover-bg);
 }
 body:not(.tvair-guide-page) .tvair-choice-chip:focus-visible,
 body:not(.tvair-guide-page) .tvair-check-chip:focus-within,
 body:not(.tvair-guide-page) .tvair-check-chip:focus-visible,
 body:not(.tvair-guide-page) .tvair-mini-action:focus-visible{
-  outline:2px solid var(--tvair-role-focus)!important;
-  outline-offset:1px!important;
+  outline:2px solid var(--tvair-role-focus);
+  outline-offset:1px;
 }
 body:not(.tvair-guide-page) .tvair-choice-chip[aria-pressed="true"],
 body:not(.tvair-guide-page) .tvair-choice-chip.checked,
 body:not(.tvair-guide-page) .tvair-check-chip.checked,
 body:not(.tvair-guide-page) .tvair-check-chip:has(input:checked){
-  background:var(--tvair-role-control-active-bg)!important;
-  color:var(--tvair-role-control-active-fg)!important;
-  border-color:var(--tvair-role-control-active-bg)!important;
+  background:var(--tvair-role-control-active-bg);
+  color:var(--tvair-role-control-active-fg);
+  border-color:var(--tvair-role-control-active-bg);
 }
 body:not(.tvair-guide-page) .tvair-choice-chip[aria-pressed="true"] span,
 body:not(.tvair-guide-page) .tvair-choice-chip.checked span,
 body:not(.tvair-guide-page) .tvair-check-chip.checked span,
 body:not(.tvair-guide-page) .tvair-check-chip:has(input:checked) span{
-  color:var(--tvair-role-control-active-fg)!important;
+  color:var(--tvair-role-control-active-fg);
 }
 body:not(.tvair-guide-page) .tvair-check-chip input[type="checkbox"]{
-  margin:0!important;
-  flex:0 0 auto!important;
+  margin:0;
+  flex:0 0 auto;
 }
 body:not(.tvair-guide-page) .tvair-check-chip:has(input:disabled),
 body:not(.tvair-guide-page) .tvair-choice-chip:disabled{
-  opacity:.55!important;
-  cursor:default!important;
+  opacity:.55;
+  cursor:default;
 }
 body:not(.tvair-guide-page) .tvair-mini-action{
-  min-height:24px!important;
-  padding:3px 10px!important;
-  border:1px solid var(--tvair-role-control-border)!important;
-  border-radius:3px!important;
-  background:var(--tvair-role-control-bg)!important;
-  color:var(--tvair-role-control-fg)!important;
-  font-size:11px!important;
-  font-family:'Meiryo','メイリオ',sans-serif!important;
-  cursor:pointer!important;
+  min-height:24px;
+  padding:3px 10px;
+  border:1px solid var(--tvair-role-control-border);
+  border-radius:3px;
+  background:var(--tvair-role-control-bg);
+  color:var(--tvair-role-control-fg);
+  font-size:11px;
+  font-family:"Meiryo","メイリオ",sans-serif;
+  cursor:pointer;
 }
 body:not(.tvair-guide-page) .tvair-mini-action:hover{
-  background:var(--tvair-role-control-hover-bg)!important;
+  background:var(--tvair-role-control-hover-bg);
 }
 
 
@@ -730,25 +730,25 @@ body:not(.tvair-guide-page) .tvair-mini-action:hover{
    Reservation-list child tabs are a separate surface from the global top nav.
    Keep the active state visible through reservation subtab tokens across light/dark themes. */
 body.tvair-reservation-page #filter-tabs{
-  background:var(--tvair-reservation-subtab-strip-bg,var(--tvair-reservation-tab-strip-bg,var(--tvair-role-toolbar-bg)))!important;
-  border-bottom-color:var(--tvair-reservation-subtab-active-border,var(--tvair-role-focus))!important;
+  background:var(--tvair-reservation-subtab-strip-bg,var(--tvair-reservation-tab-strip-bg,var(--tvair-role-toolbar-bg)));
+  border-bottom-color:var(--tvair-reservation-subtab-active-border,var(--tvair-role-focus));
 }
 body.tvair-reservation-page #filter-tabs .ftab{
-  background:var(--tvair-reservation-subtab-bg,var(--tvair-role-control-bg))!important;
-  color:var(--tvair-reservation-subtab-fg,var(--tvair-role-control-fg))!important;
-  border-color:var(--tvair-reservation-subtab-border,var(--tvair-role-control-border))!important;
-  border-bottom-color:transparent!important;
-  box-shadow:none!important;
+  background:var(--tvair-reservation-subtab-bg,var(--tvair-role-control-bg));
+  color:var(--tvair-reservation-subtab-fg,var(--tvair-role-control-fg));
+  border-color:var(--tvair-reservation-subtab-border,var(--tvair-role-control-border));
+  border-bottom-color:transparent;
+  box-shadow:none;
 }
 body.tvair-reservation-page #filter-tabs .ftab:hover{
-  background:var(--tvair-reservation-subtab-hover-bg,var(--tvair-role-control-hover-bg))!important;
-  color:var(--tvair-reservation-subtab-hover-fg,var(--tvair-role-control-fg))!important;
+  background:var(--tvair-reservation-subtab-hover-bg,var(--tvair-role-control-hover-bg));
+  color:var(--tvair-reservation-subtab-hover-fg,var(--tvair-role-control-fg));
 }
 body.tvair-reservation-page #filter-tabs .ftab.active{
-  background:var(--tvair-reservation-subtab-active-bg,var(--tvair-role-control-active-bg))!important;
-  color:var(--tvair-reservation-subtab-active-fg,var(--tvair-role-control-active-fg))!important;
-  border-color:var(--tvair-reservation-subtab-active-border,var(--tvair-role-focus))!important;
-  box-shadow:inset 0 -3px 0 var(--tvair-reservation-subtab-active-underline,var(--tvair-reservation-subtab-active-fg,var(--tvair-role-control-active-fg)))!important;
+  background:var(--tvair-reservation-subtab-active-bg,var(--tvair-role-control-active-bg));
+  color:var(--tvair-reservation-subtab-active-fg,var(--tvair-role-control-active-fg));
+  border-color:var(--tvair-reservation-subtab-active-border,var(--tvair-role-focus));
+  box-shadow:inset 0 -3px 0 var(--tvair-reservation-subtab-active-underline,var(--tvair-reservation-subtab-active-fg,var(--tvair-role-control-active-fg)));
 }
 
 

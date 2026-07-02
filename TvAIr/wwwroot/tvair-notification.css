@@ -120,18 +120,18 @@ body.tvair-program-reservation-page{--tvair-list-toast-bg:var(--nav-bg)}
 
 /* release_contract: single semantic bridge for notification-like surfaces. */
 .tvair-notification,.tvair-dialog,.toast,#toast,.notification,.confirm-dialog{
-  background:var(--winui-card-background-fill-color-default,var(--tvair-role-dialog-bg))!important;
-  color:var(--winui-text-fill-color-primary,var(--tvair-role-dialog-fg))!important;
-  border-color:var(--winui-control-stroke-color-secondary,var(--tvair-role-border-soft))!important;
+  background:var(--winui-card-background-fill-color-default,var(--tvair-role-dialog-bg));
+  color:var(--winui-text-fill-color-primary,var(--tvair-role-dialog-fg));
+  border-color:var(--winui-control-stroke-color-secondary,var(--tvair-role-border-soft));
 }
 .tvair-notification small,.tvair-dialog small,.toast small,#toast small{
-  color:var(--tvair-role-dialog-muted-fg)!important;
+  color:var(--tvair-role-dialog-muted-fg);
 }
 .tvair-notification button,.tvair-dialog button,.toast button,#toast button{
-  background:var(--winui-control-fill-color-default,var(--tvair-role-control-bg))!important;
-  color:var(--winui-text-fill-color-primary,var(--tvair-role-control-fg))!important;
-  border-color:var(--winui-control-stroke-color-default,var(--tvair-role-control-border))!important;
+  background:var(--winui-control-fill-color-default,var(--tvair-role-control-bg));
+  color:var(--winui-text-fill-color-primary,var(--tvair-role-control-fg));
+  border-color:var(--winui-control-stroke-color-default,var(--tvair-role-control-border));
 }
 .tvair-notification button:hover,.tvair-dialog button:hover,.toast button:hover,#toast button:hover{
-  background:var(--tvair-role-control-hover-bg)!important;
+  background:var(--tvair-role-control-hover-bg);
 }

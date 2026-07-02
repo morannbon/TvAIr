@@ -56,6 +56,11 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <TargetPath>Config\allowed-plugins.json</TargetPath>
     </ContentWithTargetPath>
+
+    <ContentWithTargetPath Include="..\RELEASE_NOTES.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <TargetPath>RELEASE_NOTES.txt</TargetPath>
+    </ContentWithTargetPath>
   </ItemGroup>
 
   <!-- タスクトレイ/アプリ用アイコンを出力ディレクトリにコピー -->

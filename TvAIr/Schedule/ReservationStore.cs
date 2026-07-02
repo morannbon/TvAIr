@@ -2047,25 +2047,28 @@ WHERE source <> 'Epg'
             return tg == rg;
         }
 
-        static string CanonicalTunerDisplayName(TunerProfile profile)
-        {
-            return (profile.Name ?? string.Empty).Trim();
-        }
-
         // release_contract:
-        // 予約競合/最終割当ログのチューナー候補名は、RoleBinding の LogicalTunerDisplayName を正本にする。
-        // Recording role だけを group 別 capacity として使い、表示名を T1/S1 などに再採番しない。
-        // 再採番すると Viewing role を含む設定で「T2/T3/T4」が「T1/T2/T3」に見えるため、
-        // EPG側の GroupEpgCapacity と予約競合側の RoleBinding 表示が横串でズレる。
+        // 予約リストの「優先度」列は、物理チューナー名でも BonDriver/DID でもなく、
+        // 設定画面の優先度順に対応する仮想枠名(T1/S1/...)を表示正本にする。
+        // Recording role だけを group 別 capacity として使う点は維持するが、
+        // RoleBinding の物理識別寄り表示名を予約リストへ出さない。
         var roleBindingRecordingTunerNamesByGroup = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        var configuredTunerNameToPrioritySlotName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var g in new[] { "GR", "BSCS" })
         {
-            roleBindingRecordingTunerNamesByGroup[g] = recordingTunerProfiles
-                .Where(p => SupportsReservationGroup(p.Group, g))
-                .Select(CanonicalTunerDisplayName)
-                .Where(name => !string.IsNullOrWhiteSpace(name))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
+            var names = new List<string>();
+            var ordinal = 0;
+            foreach (var profile in recordingTunerProfiles.Where(p => SupportsReservationGroup(p.Group, g)))
+            {
+                ordinal++;
+                var displayName = TunerDisplayName.PrioritySlotName(g, ordinal);
+                names.Add(displayName);
+                var configuredName = (profile.Name ?? string.Empty).Trim();
+                if (!string.IsNullOrWhiteSpace(configuredName)) configuredTunerNameToPrioritySlotName[configuredName] = displayName;
+                var did = (profile.Did ?? string.Empty).Trim();
+                if (!string.IsNullOrWhiteSpace(did)) configuredTunerNameToPrioritySlotName[$"{TunerDisplayName.GroupLabel(profile.Group)}-{did.ToUpperInvariant()}"] = displayName;
+            }
+            roleBindingRecordingTunerNamesByGroup[g] = names.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         }
 
         var roleBindingRecordingTunerNameSet = roleBindingRecordingTunerNamesByGroup.Values
@@ -2080,8 +2083,11 @@ WHERE source <> 'Epg'
             if (roleBindingRecordingTunerNameSet.Contains(value))
                 return value;
 
-            // 旧予約などが保持する名前が現在の RoleBinding に無い場合、推測変換せず原値を残す。
-            // ここで再採番・補正すると、設定正本とログ/割当表示の横串が再び崩れる。
+            if (configuredTunerNameToPrioritySlotName.TryGetValue(value, out var priorityName))
+                return priorityName;
+
+            // 旧予約などが保持する名前が現在の優先度表に無い場合だけ原値を残す。
+            // 現在設定に存在する物理名/過去の論理名は上で T/S の優先度名へ戻す。
             return value;
         }
 

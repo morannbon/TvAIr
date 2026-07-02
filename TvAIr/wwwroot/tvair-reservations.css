@@ -174,34 +174,34 @@ html{height:100%;overflow:hidden} body{font-family:'Meiryo','メイリオ',sans-
 }
 .act-btn.reservation-action-button[data-program-action="stop"],
 .reservation-action-button--stop{
-  background:var(--tvair-program-action-stop-bg,var(--tvair-reservation-action-stop-bg))!important;
-  color:var(--tvair-program-action-stop-fg,var(--tvair-reservation-action-stop-fg))!important;
-  border-color:var(--tvair-program-action-stop-border,var(--tvair-reservation-action-stop-border))!important;
+  background:var(--tvair-program-action-stop-bg,var(--tvair-reservation-action-stop-bg));
+  color:var(--tvair-program-action-stop-fg,var(--tvair-reservation-action-stop-fg));
+  border-color:var(--tvair-program-action-stop-border,var(--tvair-reservation-action-stop-border));
 }
 .act-btn.reservation-action-button[data-program-action="stop"]:hover,
-.reservation-action-button--stop:hover{background:var(--tvair-program-action-stop-hover-bg,var(--tvair-reservation-action-stop-hover-bg))!important}
+.reservation-action-button--stop:hover{background:var(--tvair-program-action-stop-hover-bg,var(--tvair-reservation-action-stop-hover-bg))}
 .act-btn.reservation-action-button[data-program-action="cancel"],
 .reservation-action-button--cancel{
-  background:var(--tvair-program-action-cancel-bg,var(--tvair-reservation-action-cancel-bg))!important;
-  color:var(--tvair-program-action-cancel-fg,var(--tvair-reservation-action-cancel-fg))!important;
-  border-color:var(--tvair-program-action-cancel-border,var(--tvair-reservation-action-cancel-border))!important;
+  background:var(--tvair-program-action-cancel-bg,var(--tvair-reservation-action-cancel-bg));
+  color:var(--tvair-program-action-cancel-fg,var(--tvair-reservation-action-cancel-fg));
+  border-color:var(--tvair-program-action-cancel-border,var(--tvair-reservation-action-cancel-border));
 }
 .act-btn.reservation-action-button[data-program-action="cancel"]:hover,
-.reservation-action-button--cancel:hover{background:var(--tvair-program-action-cancel-hover-bg,var(--tvair-reservation-action-cancel-hover-bg))!important}
+.reservation-action-button--cancel:hover{background:var(--tvair-program-action-cancel-hover-bg,var(--tvair-reservation-action-cancel-hover-bg))}
 .act-btn.reservation-action-button[data-program-action="reserve"],
 .reservation-action-button--reserve{
-  background:var(--tvair-program-action-reserve-bg,var(--tvair-reservation-action-reserve-bg))!important;
-  color:var(--tvair-program-action-reserve-fg,var(--tvair-reservation-action-reserve-fg))!important;
-  border-color:var(--tvair-program-action-reserve-border,var(--tvair-reservation-action-reserve-border))!important;
+  background:var(--tvair-program-action-reserve-bg,var(--tvair-reservation-action-reserve-bg));
+  color:var(--tvair-program-action-reserve-fg,var(--tvair-reservation-action-reserve-fg));
+  border-color:var(--tvair-program-action-reserve-border,var(--tvair-reservation-action-reserve-border));
 }
 .act-btn.reservation-action-button[data-program-action="reserve"]:hover,
-.reservation-action-button--reserve:hover{background:var(--tvair-program-action-reserve-hover-bg,var(--tvair-reservation-action-reserve-hover-bg))!important}
+.reservation-action-button--reserve:hover{background:var(--tvair-program-action-reserve-hover-bg,var(--tvair-reservation-action-reserve-hover-bg))}
 .reservation-action-button--reserved{
-  background:var(--tvair-program-action-state-bg,var(--tvair-reservation-action-disabled-bg))!important;
-  color:var(--tvair-program-action-state-fg,var(--tvair-reservation-action-disabled-fg))!important;
-  border-color:var(--tvair-program-action-state-border,var(--tvair-reservation-action-disabled-border))!important;
-  cursor:default!important;
-  opacity:1!important;
+  background:var(--tvair-program-action-state-bg,var(--tvair-reservation-action-disabled-bg));
+  color:var(--tvair-program-action-state-fg,var(--tvair-reservation-action-disabled-fg));
+  border-color:var(--tvair-program-action-state-border,var(--tvair-reservation-action-disabled-border));
+  cursor:default;
+  opacity:1;
 }
 /* release_contract Candidate/list state labels are not action buttons. */
 .reservation-state-label{

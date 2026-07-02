@@ -966,6 +966,7 @@ internal sealed class SettingsWindow : Form
         try
         {
             var didIndex = 0;
+            var groupCounters = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             foreach (DataGridViewRow row in _gridTuners.Rows)
             {
                 if (row.IsNewRow) continue;
@@ -976,7 +977,11 @@ internal sealed class SettingsWindow : Form
                     did = NextDid(didIndex);
                     row.Cells["Did"].Value = did;
                 }
-                row.Cells["Name"].Value = TunerDisplayName.Build(group, did);
+                var normalizedGroup = TunerDisplayName.NormalizeGroup(group);
+                groupCounters.TryGetValue(normalizedGroup, out var current);
+                var ordinal = current + 1;
+                groupCounters[normalizedGroup] = ordinal;
+                row.Cells["Name"].Value = TunerDisplayName.PrioritySlotName(normalizedGroup, ordinal);
                 didIndex++;
             }
         }
@@ -986,7 +991,7 @@ internal sealed class SettingsWindow : Form
         }
     }
 
-    private static void ApplySettingsColumnContract(DataGridViewColumn column, SettingsFieldIntent intent)
+    private void ApplySettingsColumnContract(DataGridViewColumn column, SettingsFieldIntent intent)
     {
         var alignment = intent switch
         {
@@ -1000,6 +1005,19 @@ internal sealed class SettingsWindow : Form
         column.DefaultCellStyle.Alignment = alignment;
         column.HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
         column.DefaultCellStyle.Padding = intent == SettingsFieldIntent.BonDriver ? new Padding(4, 0, 4, 0) : new Padding(0);
+        if (intent == SettingsFieldIntent.VirtualSlot)
+        {
+            column.ReadOnly = true;
+            column.DefaultCellStyle.ForeColor = _theme.Text;
+            column.DefaultCellStyle.SelectionForeColor = _theme.Text;
+            column.DefaultCellStyle.BackColor = _theme.Input;
+            column.DefaultCellStyle.SelectionBackColor = _theme.MenuSelected;
+            column.DefaultCellStyle.Font = new Font("Meiryo", 9F, FontStyle.Bold);
+        }
+        else if (intent == SettingsFieldIntent.InternalPhysicalId)
+        {
+            column.ReadOnly = true;
+        }
     }
 
     private void PopulateTunerGrid(List<TunerProfileDto> tuners)

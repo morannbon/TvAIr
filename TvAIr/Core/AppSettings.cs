@@ -78,10 +78,33 @@ public static class TunerDisplayName
             var raw => raw
         };
 
+    public static string PrioritySlotName(string? group, int ordinal)
+    {
+        var index = Math.Max(1, ordinal);
+        return NormalizeGroup(group) switch
+        {
+            "GR" => $"T{index}",
+            "BSCS" => $"S{index}",
+            "HYBRID" => $"H{index}",
+            _ => $"T{index}"
+        };
+    }
+
     public static string Build(string? group, string? did)
     {
-        var label = GroupLabel(group);
+        var normalized = NormalizeGroup(group);
         var id = (did ?? string.Empty).Trim().ToUpperInvariant();
+        if (!string.IsNullOrWhiteSpace(id) && id.Length == 1 && id[0] >= 'A' && id[0] <= 'Z')
+        {
+            var ordinal = normalized switch
+            {
+                "BSCS" => id[0] >= 'E' ? id[0] - 'E' + 1 : id[0] - 'A' + 1,
+                "HYBRID" => id[0] - 'A' + 1,
+                _ => id[0] - 'A' + 1
+            };
+            return PrioritySlotName(normalized, ordinal);
+        }
+        var label = GroupLabel(normalized);
         return string.IsNullOrWhiteSpace(id) ? label : $"{label}-{id}";
     }
 
@@ -90,9 +113,12 @@ public static class TunerDisplayName
         var n = (name ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(n)) return Build(group, did);
 
-        // 旧版由来の内部名・BonDriver名などは表示名へ正規化する。
+        // 旧版由来の内部名・BonDriver名・一時的に混入した物理名などは、
+        // 予約リストの優先度表示正本である T/S/H の仮想枠名へ戻す。
         var upper = n.ToUpperInvariant();
-        if (upper.Contains("BONDRIVER") || upper is "GR" or "BSCS" or "HYBRID")
+        if (upper.Contains("BONDRIVER") || upper is "GR" or "BSCS" or "HYBRID"
+            || upper.StartsWith("地上波-", StringComparison.OrdinalIgnoreCase)
+            || upper.StartsWith("BS/CS-", StringComparison.OrdinalIgnoreCase))
             return Build(group, did);
 
         return n;
