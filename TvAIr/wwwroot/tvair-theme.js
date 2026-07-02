@@ -2,7 +2,7 @@
   const KEY = 'tvair-system-theme';
   const PREVIEW_SCOPE_KEY = 'tvair-theme-preview-scope';
   const PREVIEW_BUILD_KEY = 'tvair-theme-preview-build';
-  const PREVIEW_BUILD = '1.0.8';
+  const PREVIEW_BUILD = '1.0.9';
   const VALID = new Set(['current','light','dark']);
   const VALID_SCOPE = new Set(['off','non-program','all']);
   const DEFAULT_PREVIEW_THEME = 'dark';

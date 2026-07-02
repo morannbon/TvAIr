@@ -153,6 +153,25 @@ public sealed class Database
             CREATE INDEX IF NOT EXISTS idx_keyword_cancel_once_expire
                 ON keyword_cancel_once (expires_at);
 
+            CREATE TABLE IF NOT EXISTS manual_stopped_occurrences (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                network_id          INTEGER NOT NULL DEFAULT 0,
+                transport_stream_id INTEGER NOT NULL DEFAULT 0,
+                service_id          INTEGER NOT NULL DEFAULT 0,
+                start_time          TEXT    NOT NULL DEFAULT '',
+                end_time            TEXT    NOT NULL DEFAULT '',
+                title_hash          TEXT    NOT NULL DEFAULT '',
+                stopped_source      TEXT    NOT NULL DEFAULT '',
+                source_rule_id      INTEGER,
+                reservation_id      INTEGER NOT NULL DEFAULT 0,
+                expires_at          TEXT    NOT NULL DEFAULT '',
+                created_at          TEXT    NOT NULL DEFAULT '',
+                UNIQUE(network_id, transport_stream_id, service_id, start_time, end_time, title_hash)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_manual_stopped_occurrences_expire
+                ON manual_stopped_occurrences (expires_at);
+
             CREATE TABLE IF NOT EXISTS program_rules (
                 id                  INTEGER PRIMARY KEY AUTOINCREMENT,
                 name                TEXT    NOT NULL DEFAULT '',

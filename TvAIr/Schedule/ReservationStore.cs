@@ -526,6 +526,8 @@ public sealed class ReservationStore
         if (r.UserChainRootId.HasValue) cmd.Parameters.AddWithValue("$userChainRootId", r.UserChainRootId.Value); else cmd.Parameters.AddWithValue("$userChainRootId", DBNull.Value);
         cmd.Parameters.AddWithValue("$now",     now);
         var newId = Convert.ToInt32(cmd.ExecuteScalar());
+        if (r.Source == ReservationSource.Manual || r.Source == ReservationSource.Immediate || r.Source == ReservationSource.KeywordSearch)
+            RemoveManualStoppedOccurrence(r, "explicit_user_reservation");
         log.Add("RESERVATION_AUDIT", "ADD",
             $"service={TrimForAudit(r.ServiceName)} title={TrimTitleForAudit(r.Title)} rawTitleBlank={RawTitleBlankForAudit(r.Title)} id=R{newId} status={r.Status} source={r.Source} enabled={r.IsEnabled} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} svcId={r.ServiceId} ch={r.ChannelArgument} tuner={SafeTuner(r.TunerName)} userChain={r.IsUserChain} chainPrev={(r.UserChainPreviousId.HasValue ? $"R{r.UserChainPreviousId.Value}" : "-")} chainRoot={(r.UserChainRootId.HasValue ? $"R{r.UserChainRootId.Value}" : "-")}");
         userEvents.AddReservationAdded(r, newId);
@@ -2097,6 +2099,7 @@ WHERE source <> 'Epg'
             .Where(r => r.Status == ReservationStatus.Scheduled)
             .Where(r => r.Source != ReservationSource.Epg)
             .Where(r => r.IsEnabled)
+            .Where(r => !IsManualStoppedOccurrenceSuppressed(r))
             .ToList();
 
         // release_contract: 空欄ProgramRuleと同一局・同一時刻の正規イベント予約が存在する場合のみ、空欄側を自動削除する。
@@ -3884,6 +3887,120 @@ WHERE source <> 'Epg'
         return Convert.ToInt32(cmd.ExecuteScalar()) > 0;
     }
 
+
+    // ─── 録画停止後の同一発生回再録画抑止 ─────────────────────────────
+
+    /// <summary>
+    /// ユーザーが録画停止した発生回を、番組終了後まで再録画しないために記録する。
+    /// 予約IDではなく発生回キーで保持し、同じ発生回が別IDで再投影されても録画開始へ戻さない。
+    /// </summary>
+    public void AddManualStoppedOccurrence(Reservation r, DateTime expiresAt, string reason)
+    {
+        if (r.Source == ReservationSource.Epg)
+            return;
+
+        using var con = db.Open();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = """
+            INSERT OR REPLACE INTO manual_stopped_occurrences
+              (network_id, transport_stream_id, service_id, start_time, end_time, title_hash,
+               stopped_source, source_rule_id, reservation_id, expires_at, created_at)
+            VALUES
+              ($nid, $tsid, $sid, $start, $end, $hash,
+               $source, $rule, $reservationId, $expires, $created);
+            """;
+        cmd.Parameters.AddWithValue("$nid", r.NetworkId);
+        cmd.Parameters.AddWithValue("$tsid", r.TransportStreamId);
+        cmd.Parameters.AddWithValue("$sid", r.ServiceId);
+        cmd.Parameters.AddWithValue("$start", r.StartTime.ToString("O"));
+        cmd.Parameters.AddWithValue("$end", r.EndTime.ToString("O"));
+        cmd.Parameters.AddWithValue("$hash", BuildTitleHash(r.Title));
+        cmd.Parameters.AddWithValue("$source", r.Source.ToString().ToLowerInvariant());
+        if (r.SourceRuleId.HasValue) cmd.Parameters.AddWithValue("$rule", r.SourceRuleId.Value); else cmd.Parameters.AddWithValue("$rule", DBNull.Value);
+        cmd.Parameters.AddWithValue("$reservationId", r.Id);
+        cmd.Parameters.AddWithValue("$expires", expiresAt.ToString("O"));
+        cmd.Parameters.AddWithValue("$created", DateTime.Now.ToString("O"));
+        cmd.ExecuteNonQuery();
+
+        log.Add("MANUAL_STOP_OCCURRENCE", $"R{r.Id}",
+            $"result=REGISTER reason={reason} service={TrimForAudit(r.ServiceName)} title={TrimTitleForAudit(r.Title)} rawTitleBlank={RawTitleBlankForAudit(r.Title)} source={r.Source} ruleId={(r.SourceRuleId?.ToString() ?? "-")} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} expires={expiresAt:MM/dd HH:mm:ss} rule=release_contract");
+    }
+
+    /// <summary>
+    /// ユーザーが同じ発生回を明示的に再予約した場合は、録画停止抑止を解除する。
+    /// </summary>
+    public void RemoveManualStoppedOccurrence(Reservation r, string reason)
+    {
+        using var con = db.Open();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = """
+            DELETE FROM manual_stopped_occurrences
+            WHERE network_id = $nid
+              AND transport_stream_id = $tsid
+              AND service_id = $sid
+              AND start_time = $start
+              AND end_time = $end
+              AND title_hash = $hash;
+            """;
+        cmd.Parameters.AddWithValue("$nid", r.NetworkId);
+        cmd.Parameters.AddWithValue("$tsid", r.TransportStreamId);
+        cmd.Parameters.AddWithValue("$sid", r.ServiceId);
+        cmd.Parameters.AddWithValue("$start", r.StartTime.ToString("O"));
+        cmd.Parameters.AddWithValue("$end", r.EndTime.ToString("O"));
+        cmd.Parameters.AddWithValue("$hash", BuildTitleHash(r.Title));
+        var removed = cmd.ExecuteNonQuery();
+        if (removed > 0)
+        {
+            log.Add("MANUAL_STOP_OCCURRENCE", "Remove",
+                $"result=REMOVE reason={reason} removed={removed} service={TrimForAudit(r.ServiceName)} title={TrimTitleForAudit(r.Title)} rawTitleBlank={RawTitleBlankForAudit(r.Title)} source={r.Source} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} rule=release_contract");
+        }
+    }
+
+    public bool IsManualStoppedOccurrenceSuppressed(Reservation r)
+    {
+        if (r.Source == ReservationSource.Epg)
+            return false;
+        return IsManualStoppedOccurrenceSuppressed(r.NetworkId, r.TransportStreamId, r.ServiceId, r.StartTime, r.EndTime, r.Title);
+    }
+
+    public bool IsManualStoppedOccurrenceSuppressed(EpgEvent ev)
+        => IsManualStoppedOccurrenceSuppressed(ev.NetworkId, ev.TransportStreamId, ev.ServiceId, ev.Start, ev.End, ev.Title);
+
+    public bool IsManualStoppedOccurrenceSuppressed(ushort networkId, ushort tsId, ushort serviceId, DateTime start, DateTime end, string? title)
+    {
+        using var con = db.Open();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = """
+            SELECT 1 FROM manual_stopped_occurrences
+            WHERE network_id = $nid
+              AND transport_stream_id = $tsid
+              AND service_id = $sid
+              AND start_time = $start
+              AND end_time = $end
+              AND title_hash = $hash
+              AND expires_at >= $now
+            LIMIT 1;
+            """;
+        cmd.Parameters.AddWithValue("$nid", networkId);
+        cmd.Parameters.AddWithValue("$tsid", tsId);
+        cmd.Parameters.AddWithValue("$sid", serviceId);
+        cmd.Parameters.AddWithValue("$start", start.ToString("O"));
+        cmd.Parameters.AddWithValue("$end", end.ToString("O"));
+        cmd.Parameters.AddWithValue("$hash", BuildTitleHash(title));
+        cmd.Parameters.AddWithValue("$now", DateTime.Now.ToString("O"));
+        return cmd.ExecuteScalar() is not null;
+    }
+
+    public int PurgeExpiredManualStoppedOccurrences(DateTime? now = null)
+    {
+        var t = (now ?? DateTime.Now).ToString("O");
+        using var con = db.Open();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = "DELETE FROM manual_stopped_occurrences WHERE expires_at < $now;";
+        cmd.Parameters.AddWithValue("$now", t);
+        return cmd.ExecuteNonQuery();
+    }
+
     // ─── 自動検索予約の今回限り取消抑止 ───────────────────────────────
 
     /// <summary>
@@ -4573,6 +4690,22 @@ WHERE source <> 'Epg'
             var deleted = delExpired.ExecuteNonQuery();
             if (deleted > 0)
                 log.Add("RESERVE_ENTRY", "ProgramSync", $"result=REMOVED ruleId={rule.Id} name=[{rule.Name}] reason=no_next_occurrence deleted={deleted} rule=release_contract");
+            return;
+        }
+
+        if (IsManualStoppedOccurrenceSuppressed(reservation))
+        {
+            using var delSuppressed = con.CreateCommand();
+            delSuppressed.CommandText = """
+                DELETE FROM reservations
+                WHERE source = 'program'
+                  AND source_rule_id = $ruleId
+                  AND status IN ('scheduled','recording');
+                """;
+            delSuppressed.Parameters.AddWithValue("$ruleId", rule.Id);
+            var removed = delSuppressed.ExecuteNonQuery();
+            log.Add("RESERVE_ENTRY", "ProgramSync",
+                $"result=SKIP_MANUAL_STOPPED_OCCURRENCE removed={removed} ruleId={rule.Id} name=[{rule.Name}] service=[{reservation.ServiceName}] title=[{ReservationTitleDisplayContract.ForLog(reservation.Title)}] rawTitleBlank={ReservationTitleDisplayContract.RawBlankFlag(reservation.Title)} start={reservation.StartTime:MM/dd HH:mm} end={reservation.EndTime:MM/dd HH:mm} rule=release_contract");
             return;
         }
 

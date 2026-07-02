@@ -635,7 +635,9 @@ internal sealed class PluginContext : IPluginReadContextV4, ILiveCommentPublishe
         var from = now.AddMinutes(-Math.Clamp(query.WindowMinutesBefore, 0, 180));
         var to = now.AddMinutes(Math.Clamp(query.WindowMinutesAfter, 0, 180));
         var limit = Math.Clamp(query.Limit <= 0 ? 200 : query.Limit, 1, 1000);
+        var currentServiceKeys = BuildCurrentPluginChannelServiceKeySet(GetChannels());
         IEnumerable<EpgEvent> events = _epgStore.GetByRange(from, to)
+            .Where(e => currentServiceKeys.Contains(PluginProgramGuideEventServiceKey(e)))
             .Where(e => e.Start <= now && e.End > now);
         if (query.NetworkId.HasValue)
             events = events.Where(e => e.NetworkId == query.NetworkId.Value);
@@ -864,7 +866,11 @@ internal sealed class PluginContext : IPluginReadContextV4, ILiveCommentPublishe
         if (channels.Count == 0) return Array.Empty<PluginProgramGuideNowNext>();
         var from = at.AddHours(-8);
         var to = at.AddHours(12);
+        var currentServiceKeys = channels
+            .Select(c => PluginProgramGuideServiceKey3(c.NetworkId, c.TransportStreamId, c.ServiceId))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var rangeEvents = _epgStore.GetByRange(from, to)
+            .Where(e => currentServiceKeys.Contains(PluginProgramGuideEventServiceKey(e)))
             .OrderBy(e => e.Start).ThenBy(e => e.EventId)
             .ToList();
         var byExact = rangeEvents
@@ -928,6 +934,10 @@ internal sealed class PluginContext : IPluginReadContextV4, ILiveCommentPublishe
 
     private static string PluginProgramGuideEventServiceKey(EpgEvent e)
         => PluginProgramGuideServiceKey3(e.NetworkId, e.TransportStreamId, e.ServiceId);
+
+    private static HashSet<string> BuildCurrentPluginChannelServiceKeySet(IEnumerable<PluginChannelInfo> channels)
+        => channels.Select(c => PluginProgramGuideServiceKey3(c.NetworkId, c.TransportStreamId, c.ServiceId))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
     private static string PluginProgramGuideChannelServiceKey(PluginProgramGuideChannel ch)
         => PluginProgramGuideServiceKey3(ch.NetworkId, ch.TransportStreamId, ch.ServiceId);

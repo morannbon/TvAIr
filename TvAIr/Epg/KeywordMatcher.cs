@@ -212,6 +212,12 @@ public sealed class KeywordMatcher
                     continue;
                 }
 
+                if (_rsvStore.IsManualStoppedOccurrenceSuppressed(ev))
+                {
+                    suppressedByUserCount++;
+                    continue;
+                }
+
                 chArgMap.TryGetValue((ev.NetworkId, ev.TransportStreamId, ev.ServiceId), out var chArg);
                 var canonicalServiceName = ResolveCanonicalServiceName(ev, serviceNameMap);
                 var safeTitle = SafeKeywordEventTitle(ev);

@@ -2562,10 +2562,10 @@ static IResult RenderPluginVersionInfoPage(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-notification.css?v=1.0.8">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.0.9">
 </head>
 <body>
-<script src="/tvair-notification.js?v=1.0.8"></script>
+<script src="/tvair-notification.js?v=1.0.9"></script>
 <script>
 document.addEventListener('DOMContentLoaded',function(){
   if(window.TvAIrNotify){ TvAIrNotify({ title:'{{safeTitle}}', message:'バージョン: {{safeVersion}}', onOk:function(){ location.replace('{{safeReturn}}'); } }); }
@@ -3761,13 +3761,13 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'">
 <title>{{safeTitle}} - TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.8">
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.8">
-<link rel="stylesheet" href="/tvair-notification.css?v=1.0.8">
-<link rel="stylesheet" href="/tvair-epg-panel.css?v=1.0.8">
-<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.0.8">
-<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.0.8">
-<script src="/tvair-theme.js?v=1.0.8"></script>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.9">
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.9">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.0.9">
+<link rel="stylesheet" href="/tvair-epg-panel.css?v=1.0.9">
+<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.0.9">
+<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.0.9">
+<script src="/tvair-theme.js?v=1.0.9"></script>
 
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -3827,11 +3827,11 @@ body{font-family:'Meiryo',sans-serif;font-size:12px;background:var(--tvair-bg-pa
 {{pluginBody}}
   </main>
 </div>
-<script src="/tvair-notification.js?v=1.0.8"></script>
-<script src="/tvair-epg-run-contract.js?v=1.0.8"></script>
-<script src="/tvair-epg-widget.js?v=1.0.8"></script>
-<script src="/tvair-safe-event-host.js?v=1.0.8"></script>
-<script src="/tvair-menu-spine.js?v=1.0.8"></script>
+<script src="/tvair-notification.js?v=1.0.9"></script>
+<script src="/tvair-epg-run-contract.js?v=1.0.9"></script>
+<script src="/tvair-epg-widget.js?v=1.0.9"></script>
+<script src="/tvair-safe-event-host.js?v=1.0.9"></script>
+<script src="/tvair-menu-spine.js?v=1.0.9"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -3988,7 +3988,7 @@ button,input,select,textarea{font-family:inherit;font-size:inherit}
 <div class="tvair-toolwindow-content-root">
 {{pluginContent}}
 </div>
-<script src="/tvair-safe-event-host.js?v=1.0.8"></script>
+<script src="/tvair-safe-event-host.js?v=1.0.9"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -5421,34 +5421,22 @@ app.MapGet("/api/epg/events", (string? date, EpgStore store, ReservationStore re
     var dayEnd   = dayStart.AddDays(1);
 
     var rawEvents = store.GetAllRaw();
-    var events = rawEvents;
-    var dayEvents = rawEvents.Where(e => e.End > dayStart && e.Start < dayEnd).ToList();
     var displayDate = dayStart.ToString("M月d日・dddd",
         System.Globalization.CultureInfo.GetCultureInfo("ja-JP"));
 
-    // ch2ファイルのState=1チャンネルのみを対象にフィルタ＆ソート（TVTest準拠）
-    var channels = channelLoader.Load().Targets.ToList();
-    var chOrder = new Dictionary<string, int>();
+    var channels = BuildCurrentProgramGuideChannels(channelLoader);
+    var currentServiceKeys = BuildProgramGuideChannelServiceKeySet(channels);
+    var events = rawEvents
+        .Where(e => currentServiceKeys.Contains(ProgramGuideEventServiceKey(e)))
+        .ToList();
+    var dayEvents = events.Where(e => e.End > dayStart && e.Start < dayEnd).ToList();
+
+    var chOrder = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
     for (var ci = 0; ci < channels.Count; ci++)
     {
         var ch = channels[ci];
-        var key = ProgramGuideServiceKey3(ch.OriginalNetworkId, ch.TransportStreamId, ch.ServiceId);
+        var key = ProgramGuideChannelServiceKey(ch);
         chOrder.TryAdd(key, ci);
-    }
-    foreach (var evGroup in rawEvents.GroupBy(e => ProgramGuideServiceKey3(e.NetworkId, e.TransportStreamId, e.ServiceId)))
-    {
-        if (chOrder.ContainsKey(evGroup.Key)) continue;
-        var first = evGroup.First();
-        channels.Add(new ChannelTarget
-        {
-            Group = ProgramGuideWaveGroupFromNetworkId(first.NetworkId),
-            OriginalNetworkId = first.NetworkId,
-            TransportStreamId = first.TransportStreamId,
-            ServiceId = first.ServiceId,
-            Name = string.IsNullOrEmpty(first.ServiceName) ? $"SID {first.ServiceId}" : first.ServiceName,
-            ChannelBuildSource = "epg_db_raw_unsealed"
-        });
-        chOrder.TryAdd(evGroup.Key, chOrder.Count);
     }
     var serviceDisplayNameByKey = channels
         .GroupBy(ProgramGuideChannelServiceKey, StringComparer.OrdinalIgnoreCase)
@@ -5507,8 +5495,12 @@ app.MapGet("/api/epg/events", (string? date, EpgStore store, ReservationStore re
 // 番組詳細
 app.MapGet("/api/epg/event", (
     ushort networkId, ushort tsId, ushort serviceId, ushort eventId,
-    EpgStore store) =>
+    EpgStore store,
+    ChannelFileLoader channelLoader) =>
 {
+    if (!BuildProgramGuideChannelServiceKeySet(BuildCurrentProgramGuideChannels(channelLoader))
+        .Contains(ProgramGuideServiceKey3(networkId, tsId, serviceId)))
+        return Results.NotFound();
     var ev = store.GetOne(networkId, tsId, serviceId, eventId);
     return ev is null ? Results.NotFound() : Results.Ok(ev);
 });
@@ -5537,15 +5529,17 @@ app.MapGet("/api/epg/search", (
     var to   = DateOnly.TryParse(dateTo,   out var dt)
         ? dt.ToDateTime(TimeOnly.MaxValue) : (DateTime?)null;
 
-    var events = store.Search(q, desc ?? false, serviceIds, days, timeFrom, timeTo, from, to);
+    var channels = BuildCurrentProgramGuideChannels(channelLoader);
+    var currentServiceKeys = BuildProgramGuideChannelServiceKeySet(channels);
+    var events = store.Search(q, desc ?? false, serviceIds, days, timeFrom, timeTo, from, to)
+        .Where(e => currentServiceKeys.Contains(ProgramGuideEventServiceKey(e)))
+        .ToList();
 
-    // チャンネル順でソート
-    var channels = channelLoader.Load().Targets;
-    var chOrder  = new Dictionary<string, int>();
+    var chOrder  = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
     for (var i = 0; i < channels.Count; i++)
     {
         var ch  = channels[i];
-        var key = $"{ch.OriginalNetworkId}:{ch.TransportStreamId}:{ch.ServiceId}";
+        var key = ProgramGuideChannelServiceKey(ch);
         chOrder.TryAdd(key, i);
     }
 
@@ -5594,16 +5588,18 @@ app.MapGet("/api/epg/tagged", (
         _ => _ => false
     };
 
-    var channels = channelLoader.Load().Targets;
-    var chOrder = new Dictionary<string, int>();
+    var channels = BuildCurrentProgramGuideChannels(channelLoader);
+    var currentServiceKeys = BuildProgramGuideChannelServiceKeySet(channels);
+    var chOrder = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
     for (var i = 0; i < channels.Count; i++)
     {
         var ch = channels[i];
-        var key = $"{ch.OriginalNetworkId}:{ch.TransportStreamId}:{ch.ServiceId}";
+        var key = ProgramGuideChannelServiceKey(ch);
         chOrder.TryAdd(key, i);
     }
 
     var filtered = events
+        .Where(e => currentServiceKeys.Contains(ProgramGuideEventServiceKey(e)))
         .Where(match)
         .GroupBy(e => new { e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId })
         .Select(g => g.OrderBy(x => x.Start).First())
@@ -7084,6 +7080,12 @@ static string ProgramGuideEventServiceKey(EpgEvent e)
 
 static string ProgramGuideChannelServiceKey(ChannelTarget ch)
     => ProgramGuideServiceKey3(ch.OriginalNetworkId, ch.TransportStreamId, ch.ServiceId);
+
+static IReadOnlyList<ChannelTarget> BuildCurrentProgramGuideChannels(ChannelFileLoader channelLoader)
+    => channelLoader.Load().Targets.ToList();
+
+static HashSet<string> BuildProgramGuideChannelServiceKeySet(IEnumerable<ChannelTarget> channels)
+    => channels.Select(ProgramGuideChannelServiceKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
 static string NormalizeProgramGuideServiceName(string? value)
 {

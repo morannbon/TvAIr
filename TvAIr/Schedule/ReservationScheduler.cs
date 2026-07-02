@@ -693,6 +693,14 @@ class ReservationScheduler : BackgroundService
         var policyService = SafeValue(policyReservation?.ServiceName);
         var policyTitle = ReservationDisplayTitle(policyReservation?.Title);
         var policyRawTitleBlank = ReservationTitleDisplayContract.RawBlankFlag(policyReservation?.Title);
+        if (policyReservation is not null)
+        {
+            var suppressUntil = policyReservation.EndTime.AddSeconds(Math.Max(0, _ini.PostEndMarginSeconds));
+            if (suppressUntil < _broadcastClock.Now)
+                suppressUntil = policyReservation.EndTime;
+            _store.AddManualStoppedOccurrence(policyReservation, suppressUntil, "recording_stop");
+        }
+
         var detachedSuccessors = _store.DetachUserChainSuccessorsForManualStop(reservationId);
         _log.Add("CHAIN_STOP_POLICY", $"R{reservationId}",
             $"operation=ManualStop service={policyService} title={policyTitle} rawTitleBlank={policyRawTitleBlank} policy=current_segment_only successorAction={(detachedSuccessors.Count > 0 ? "DetachKeepScheduled" : "None")} detachedSuccessors={detachedSuccessors.Count} cancelSuccessors=False normalReservationStopRouteUnchanged=True rule=release_contract");
@@ -748,6 +756,15 @@ class ReservationScheduler : BackgroundService
         catch (Exception ex)
         {
             _log.Add("Scheduler", "Expire", $"過去予約掃除エラー: {ex.Message}");
+        }
+
+        try
+        {
+            _store.PurgeExpiredManualStoppedOccurrences(now);
+        }
+        catch (Exception ex)
+        {
+            _log.Add("Scheduler", "ManualStopOccurrence", $"期限切れ抑止キー掃除エラー: {ex.Message}");
         }
 
         // 1. 録画中セッションの健全性を先に確認する。
@@ -877,6 +894,15 @@ class ReservationScheduler : BackgroundService
             lock (_sessionGate)
             {
                 if (_activeSessions.ContainsKey(r.Id)) continue;
+            }
+
+            if (_store.IsManualStoppedOccurrenceSuppressed(r))
+            {
+                _store.UpdateStatus(r.Id, ReservationStatus.Cancelled);
+                _forceAllocationReevaluate = true;
+                _log.Add("REC_START_DECISION", $"R{r.Id}",
+                    $"result=SKIP reason=manual_stopped_occurrence service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} rawTitleBlank={ReservationTitleDisplayContract.RawBlankFlag(r.Title)} source={r.Source} ruleId={(r.SourceRuleId?.ToString() ?? "-")} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} rule=release_contract");
+                continue;
             }
 
             // release_contract: 競合のままdue到達した予約は、録画開始内部へ入る前に
@@ -1452,6 +1478,15 @@ class ReservationScheduler : BackgroundService
         {
             _log.Add("REC_START_DECISION", $"R{r.Id}",
                 "result=SKIP reason=system_epg_entry_excluded_from_recording_route " + FormatReservationForAudit(r, "system_epg_skip"));
+            return false;
+        }
+
+        if (_store.IsManualStoppedOccurrenceSuppressed(r))
+        {
+            _store.UpdateStatus(r.Id, ReservationStatus.Cancelled);
+            _forceAllocationReevaluate = true;
+            _log.Add("REC_START_DECISION", $"R{r.Id}",
+                "result=SKIP reason=manual_stopped_occurrence stage=start_request " + FormatReservationForAudit(r, "manual_stop_suppressed"));
             return false;
         }
 
