@@ -2001,7 +2001,7 @@ class ReservationScheduler : BackgroundService
         seconds = Math.Min(seconds, 12 * 60 * 60);
         Directory.CreateDirectory(recordFolder);
         var namingPolicy = ResolveDirectRecorderFileNameTimePolicy(r, now);
-        var fileNameBuild = BuildDirectRecorderFileName(r, namingPolicy.BaseTime);
+        var fileNameBuild = BuildDirectRecorderFileName(r, namingPolicy.BaseTime, lease, resolvedChannel);
         var outputPath = MakeUniqueRecordingPath(Path.Combine(recordFolder, fileNameBuild.FileName));
         _log.Add("RECORD_FILE_NAME_TIME_POLICY", $"R{r.Id}",
             $"mode={namingPolicy.Mode} base={namingPolicy.Base} source={r.Source} reservationStart={r.StartTime:yyyy-MM-dd HH:mm:ss} actualStart={now:yyyy-MM-dd HH:mm:ss} fileBaseTime={namingPolicy.BaseTime:yyyy-MM-dd HH:mm:ss} rule=release_contract");
@@ -2286,48 +2286,50 @@ class ReservationScheduler : BackgroundService
         };
     }
 
-    private DirectRecorderFileNameBuildResult BuildDirectRecorderFileName(Reservation r, DateTime baseTime)
+    private DirectRecorderFileNameBuildResult BuildDirectRecorderFileName(Reservation r, DateTime baseTime, TunerLease? lease = null, ChannelTarget? resolvedChannel = null)
     {
-        // release_contract cleanup note (based on release_contract):
-        // DirectRecorderはTVTest本体の最終命名処理を通らないため、TVTest.ini の
-        // RecordFileName 書式をTvAIr側で最低限解釈する。
-        // ただし半角化/禁止文字処理は %event-name% 相当だけに限定し、
-        // EPGタイトル・番組表・自動検索・REC_FOLLOW_CHECK には一切触らない。
-        // release_contract: TimeFollow/chain再評価で予約DB上のTitleが空になっても、
-        // 録画開始直前のファイル名生成で DB/EPG/ChainGroup から番組名を復元し、
-        // %event-name% が空のまま TvAIr.ts へ落ちることを防ぐ。
+        // TvAIrEpgRec直録画では、TVTest.ini の RecordFileName を正本にして
+        // TvAIr側で録画用の相対パスへ展開する。
+        // TvAIr独自の全角→半角強制変換・後段の _ 置換・サブフォルダ潰しは行わない。
         var titleGuard = ResolveRecordingFileNameTitle(r);
         var rawTitle = titleGuard.Title;
-        var normalizedTitle = RecordingFileNameNormalizer.NormalizeEventNameForFileName(rawTitle);
-        var sanitizedTitle = RecordingFileNameNormalizer.SanitizeFileNamePart(normalizedTitle);
 
         string template;
         string evidence;
         if (!TvTestRecordFileNameTemplateResolver.TryResolve(_ini.TvTestExecutablePath, out template, out evidence))
         {
             template = "%year2%年%month2%月%day2%日%hour2%時%minute2%分-%event-name%.ts";
-            evidence = $"{evidence} fallback=tvair_compat_template";
+            evidence = $"{evidence} fallback=tvair_default_template";
         }
 
-        var rendered = RenderTvTestRecordFileNameTemplate(template, baseTime, sanitizedTitle, r, out var unsupportedTokens);
-        rendered = RecordingFileNameNormalizer.SanitizeRenderedFileName(rendered);
-        if (string.IsNullOrWhiteSpace(Path.GetExtension(rendered)))
-        {
-            rendered += ".ts";
-        }
+        var format = TvTestRecordFileNameFormatter.Format(new TvTestRecordFileNameFormatRequest(
+            Template: template,
+            Now: baseTime,
+            StartTime: r.StartTime,
+            EndTime: r.EndTime,
+            TotTime: null,
+            EventName: rawTitle,
+            ServiceName: r.ServiceName,
+            ChannelName: r.ServiceName,
+            ChannelNo: ResolveRecordFileNameChannelNo(r, resolvedChannel),
+            ServiceId: r.ServiceId,
+            EventId: r.EventId,
+            TunerFileName: lease?.BonDriverFileName ?? string.Empty,
+            TunerName: lease?.Name ?? (!string.IsNullOrWhiteSpace(r.ActualTunerName) ? r.ActualTunerName : r.TunerName)));
 
         return new DirectRecorderFileNameBuildResult(
-            FileName: rendered,
+            FileName: format.FileName,
             RawTitle: rawTitle,
-            NormalizedEventName: normalizedTitle,
-            SanitizedEventName: sanitizedTitle,
+            NormalizedEventName: format.EventName,
+            SanitizedEventName: format.EventName,
             Template: template,
             Evidence: evidence,
-            UnsupportedTokens: unsupportedTokens.Count == 0 ? "-" : string.Join(',', unsupportedTokens),
+            UnsupportedTokens: format.UnknownTokens,
             OriginalReservationTitle: titleGuard.OriginalTitle,
             TitleSource: titleGuard.Source,
             TitleGuardResult: titleGuard.Result,
-            TitlePersisted: titleGuard.Persisted);
+            TitlePersisted: titleGuard.Persisted,
+            FormatterRule: format.Rule);
     }
 
     private RecordingFileNameTitleGuardResult ResolveRecordingFileNameTitle(Reservation r)
@@ -2353,8 +2355,7 @@ class ReservationScheduler : BackgroundService
             return new RecordingFileNameTitleGuardResult(chainTitle, originalTitle, "chain_member", "RECOVERED", persisted);
         }
 
-        var serviceFallback = RecordingFileNameNormalizer.SanitizeFileNamePart(r.ServiceName ?? string.Empty);
-        if (string.IsNullOrWhiteSpace(serviceFallback)) serviceFallback = "TvAIr";
+        var serviceFallback = string.IsNullOrWhiteSpace(r.ServiceName) ? "TvAIr" : r.ServiceName.Trim();
         var fallbackTitle = $"{serviceFallback}-R{r.Id}";
         return new RecordingFileNameTitleGuardResult(fallbackTitle, originalTitle, "service_reservation_id", "FALLBACK", false);
     }
@@ -2410,57 +2411,15 @@ class ReservationScheduler : BackgroundService
         return string.Empty;
     }
 
-    private static string RenderTvTestRecordFileNameTemplate(
-        string template,
-        DateTime baseTime,
-        string eventName,
-        Reservation r,
-        out List<string> unsupportedTokens)
+    private static string ResolveRecordFileNameChannelNo(Reservation r, ChannelTarget? resolvedChannel)
     {
-        var unsupportedTokenSet = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
-        var text = string.IsNullOrWhiteSpace(template)
-            ? "%year2%年%month2%月%day2%日%hour2%時%minute2%分-%event-name%.ts"
-            : template;
-
-        // release_contract cleanup note (based on release_contract):
-        // DirectRecorder側でTVTest本体の命名処理を完全再実装しない。
-        // ただし、現在のTVTest RecordFileName運用で使われやすく、かつ副作用なく評価できる
-        // 日時・番組名・サービス名系トークンだけを明示対応する。
-        // 未対応トークンは勝手に空文字へ潰さず、そのまま残してログへ一意化して出す。
-        var serviceName = string.IsNullOrWhiteSpace(r.ServiceName)
-            ? "TvAIr"
-            : RecordingFileNameNormalizer.SanitizeFileNamePart(r.ServiceName);
-
-        var replacements = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["%event-name%"] = eventName,
-            ["%year%"] = baseTime.ToString("yyyy"),
-            ["%year2%"] = baseTime.ToString("yy"),
-            ["%month%"] = baseTime.Month.ToString(),
-            ["%month2%"] = baseTime.ToString("MM"),
-            ["%day%"] = baseTime.Day.ToString(),
-            ["%day2%"] = baseTime.ToString("dd"),
-            ["%hour%"] = baseTime.Hour.ToString(),
-            ["%hour2%"] = baseTime.ToString("HH"),
-            ["%minute%"] = baseTime.Minute.ToString(),
-            ["%minute2%"] = baseTime.ToString("mm"),
-            ["%second%"] = baseTime.Second.ToString(),
-            ["%second2%"] = baseTime.ToString("ss"),
-            ["%channel-name%"] = serviceName,
-            ["%service-name%"] = serviceName,
-        };
-
-        text = Regex.Replace(text, "%[A-Za-z0-9_-]+%", m =>
-        {
-            if (replacements.TryGetValue(m.Value, out var replacement))
-                return replacement;
-
-            unsupportedTokenSet.Add(m.Value);
-            return m.Value;
-        });
-
-        unsupportedTokens = unsupportedTokenSet.ToList();
-        return text;
+        var source = r.ChannelArgument ?? string.Empty;
+        var chMatch = Regex.Match(source, @"(?:^|\s)/ch\s+(\d+)", RegexOptions.IgnoreCase);
+        if (chMatch.Success) return chMatch.Groups[1].Value;
+        if (resolvedChannel is not null && resolvedChannel.ResolvedChannelIndex >= 0)
+            return resolvedChannel.ResolvedChannelIndex.ToString();
+        var chiMatch = Regex.Match(source, @"(?:^|\s)/chi\s+(\d+)", RegexOptions.IgnoreCase);
+        return chiMatch.Success ? chiMatch.Groups[1].Value : string.Empty;
     }
 
     private sealed record DirectRecorderFileNameBuildResult(
@@ -2474,18 +2433,12 @@ class ReservationScheduler : BackgroundService
         string OriginalReservationTitle,
         string TitleSource,
         string TitleGuardResult,
-        bool TitlePersisted);
+        bool TitlePersisted,
+        string FormatterRule);
 
     private sealed record RecordingFileNameTitleGuardResult(string Title, string OriginalTitle, string Source, string Result, bool Persisted);
 
     private sealed record RecordingFileNameTimePolicy(string Mode, string Base, DateTime BaseTime);
-
-    private static string NormalizeEventNameForRecordingFile(string value)
-        => RecordingFileNameNormalizer.NormalizeEventNameForFileName(value);
-
-    private static string SanitizeFileName(string value)
-        => RecordingFileNameNormalizer.SanitizeRenderedFileName(value);
-
 
     private DateTime ResolveChainPlannedEndForLaunch(Reservation r, DateTime basePlannedEnd)
     {
@@ -4822,8 +4775,8 @@ class ReservationScheduler : BackgroundService
     {
         // release_contract: BS/CSはBridgeでTVTest内部currentSid確定後にTVTest標準録画を開始する。
         // 停止時はBridge RecordStop待ちを行わず、STOP_PHASE/TUNER_DEVICE_LOCKを詰まらせないTvAIr所有PID単体終了へ戻す。
-        // 通常予約録画ではTvAIrが録画ファイル名を生成せず、TVTest.ini の RecordFolder/RecordFileName に準拠する。
-        // TVTest.ini の RecordFolder だけを起動時確定済み値として確認し、RecordFileName はTVTestへ委譲する。
+        // 通常予約録画ではTVTest.ini の RecordFolder/RecordFileName に準拠する。
+        // TvAIrEpgRec直録画では、RecordFileName をTvAIr側で録画用の相対パスへ展開する。
         if (!TvTestRecordingDirectoryResolver.TryResolve(_ini.TvTestExecutablePath, out var directory, out var evidence))
         {
             _log.Add("RECORD_FOLDER_RESOLVE", $"R{r.Id}", $"result=FAIL evidence={TrimForLog(evidence, 420)}");
@@ -4832,7 +4785,7 @@ class ReservationScheduler : BackgroundService
         }
 
         _log.Add("RECORD_FOLDER_RESOLVE", $"R{r.Id}", $"result=OK folder={directory} evidence={TrimForLog(evidence, 420)}");
-        _log.Add("RECORD_FILE_PATH_BUILD", $"R{r.Id}", "result=OK reason=tvairepgrec_uses_tvtest_recordfilename_template_with_normalized_event_name source=TVTest.RecordFileName route=TvAIrEpgRecTemplateBuild rule=release_contract");
+        _log.Add("RECORD_FILE_PATH_BUILD", $"R{r.Id}", "result=OK reason=tvairepgrec_uses_recordfilename_ini source=TVTest.RecordFileName route=TvAIrEpgRecTemplateBuild rule=recordfilename_ini_template");
         return directory;
     }
 
@@ -5494,7 +5447,7 @@ class ReservationScheduler : BackgroundService
             : $"nid={resolvedChannel.OriginalNetworkId} tsid={resolvedChannel.TransportStreamId} sid={resolvedChannel.ServiceId} chspace={resolvedChannel.ResolvedSpace} chi={resolvedChannel.ResolvedChannelIndex} ch2={SafeValue(resolvedChannel.Ch2FileName)}:{resolvedChannel.Ch2LineNumber} channelSource=current_ch2";
         var fileNamePart = fileNameBuild is null
             ? "fileName=- outputPath=- filenameGuard=not_yet"
-            : $"fileName={SafeValue(fileNameBuild.FileName)} outputPath={SafeValue(outputPath)} filenameGuard=final_event_name_normalizer rawTitleChanged={!string.Equals(fileNameBuild.RawTitle, fileNameBuild.NormalizedEventName, StringComparison.Ordinal)} unsupportedTokens={SafeValue(fileNameBuild.UnsupportedTokens)}";
+            : $"fileName={SafeValue(fileNameBuild.FileName)} outputPath={SafeValue(outputPath)} filenameGuard=recordfilename_ini_template formatterRule={SafeValue(fileNameBuild.FormatterRule)} rawTitleChanged=false unsupportedTokens={SafeValue(fileNameBuild.UnsupportedTokens)}";
         var leasePart = lease is null
             ? $"plannedTuner={SafeValue(plannedTuner)} actualTuner={SafeValue(actualTuner)} did=- bonDriver=- leaseKind=-"
             : $"plannedTuner={SafeValue(plannedTuner)} actualTuner={SafeValue(actualTuner ?? lease.Name)} did={SafeValue(lease.Did)} bonDriver={SafeValue(lease.BonDriverFileName)} leaseKind=Recording elapsedSinceReleaseMs={(lease.ElapsedSinceReleaseMs.HasValue ? lease.ElapsedSinceReleaseMs.Value.ToString("F0") : "-")}";

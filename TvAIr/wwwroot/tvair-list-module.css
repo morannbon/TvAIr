@@ -1102,12 +1102,12 @@ body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table t
   background:var(--tvair-reservation-list-row-disabled-hover-bg);
 }
 
-/* release_contract ListFormFilterOwnership: non-reservation list pages share basic form controls and toolbar/filter geometry here. Toast geometry/paint is owned by tvair-notification.css. Page CSS keeps page-specific labels, panels, modal layout and semantic colors. */
+/* release_contract ListFormControlOwnership: non-reservation list pages share basic form controls and toolbar/filter geometry here. Program-reservation time select geometry is also owned here so direct form controls and compound time controls do not fight across page CSS modules. Toast geometry/paint is owned by tvair-notification.css. Page CSS keeps page-specific labels, panels, modal layout and semantic colors. */
 body.tvair-keyword-page .form-row input[type=text],
 body.tvair-keyword-page .time-row select,
 body.tvair-keyword-page .date-row input[type=date],
 body.tvair-program-reservation-page .f-row input[type=text],
-body.tvair-program-reservation-page .f-row select,
+body.tvair-program-reservation-page .f-row > select,
 body.tvair-program-reservation-page .f-row input[type=date],
 body.tvair-rule-list-page .input,
 body.tvair-rule-list-page select{
@@ -1122,12 +1122,37 @@ body.tvair-rule-list-page select{
 }
 body.tvair-keyword-page .form-row input[type=text],
 body.tvair-program-reservation-page .f-row input[type=text],
-body.tvair-program-reservation-page .f-row select,
+body.tvair-program-reservation-page .f-row > select,
 body.tvair-program-reservation-page .f-row input[type=date],
 body.tvair-rule-list-page .input,
 body.tvair-rule-list-page select{padding:5px 7px}
 body.tvair-keyword-page .time-row select,
 body.tvair-keyword-page .date-row input[type=date]{padding:3px 5px}
+body.tvair-program-reservation-page .time-wrap{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  width:max-content;
+  max-width:100%;
+}
+body.tvair-program-reservation-page .time-wrap > select{
+  width:64px;
+  min-width:64px;
+  flex:0 0 64px;
+  padding:3px 5px;
+  background:var(--tvair-role-control-bg,var(--tvair-surface-raised));
+  border:1px solid var(--tvair-role-control-border,var(--input-border));
+  color:var(--tvair-role-control-fg,var(--tvair-content-primary));
+  border-radius:2px;
+  font-size:12px;
+  font-family:'Meiryo','メイリオ',sans-serif;
+  box-sizing:border-box;
+}
+body.tvair-program-reservation-page .time-wrap > .time-sep{
+  flex:0 0 auto;
+  color:var(--tvair-action-lite-text);
+  font-size:13px;
+}
 body.tvair-keyword-page .form-row input[type=text]:focus,
 body.tvair-keyword-page .time-row select:focus,
 body.tvair-keyword-page .date-row input[type=date]:focus,

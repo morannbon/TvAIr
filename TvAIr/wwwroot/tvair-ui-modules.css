@@ -73,6 +73,8 @@ tr:nth-child(even),.row-alt{background:color-mix(in srgb,var(--tvair-module-pane
   --tvair-programguide-timeaxis-secondary-header-bg:var(--tvair-module-page-bg);
   --tvair-guide-current-line:var(--tvair-danger-a);
   --tvair-modal-z:1000;
+  --tvair-settings-modal-z:2000;
+  --tvair-settings-display-palette-z:2010;
 }
 html[data-theme="dark"],body.theme-dark,body[data-theme="dark"]{
   --tvair-nav-bg:var(--tvair-bg-b);
@@ -513,7 +515,6 @@ body.tvair-program-reservation-page #list-panel{
 body.tvair-program-reservation-page #form-body{padding:10px 14px;}
 body.tvair-program-reservation-page .f-section{margin:0 0 14px 0;}
 body.tvair-program-reservation-page .f-row{max-width:100%;margin:0 0 10px 0;}
-body.tvair-program-reservation-page .time-wrap{display:inline-flex;align-items:center;gap:6px;}
 body.tvair-program-reservation-page #f-name,
 body.tvair-program-reservation-page #f-ch,
 body.tvair-program-reservation-page #f-expires{width:100%;}
@@ -639,7 +640,6 @@ body.tvair-program-reservation-page .dow-chip[aria-pressed="true"]{
   color:var(--tvair-content-inverse);
   border-color:var(--tvair-content-link);
 }
-body.tvair-program-reservation-page .time-wrap select{width:64px;}
 body.tvair-program-reservation-page #f-name,
 body.tvair-program-reservation-page #f-ch,
 body.tvair-program-reservation-page #f-expires{height:28px;}
@@ -2305,7 +2305,7 @@ body.tvair-guide-page .program-guide-time-axis-secondary .program-guide-time-axi
 
 /* release_contract SettingsModalCssOwnerRegressionFix
    Settings modal is owned here. Context/right-click menu remains a separate entry owner. */
-body.tvair-guide-page #cfg-overlay{display:none;position:fixed;inset:0;align-items:center;justify-content:center;padding:18px;z-index:2000;background:var(--tvair-dialog-backdrop);}
+body.tvair-guide-page #cfg-overlay{display:none;position:fixed;inset:0;align-items:center;justify-content:center;padding:18px;z-index:var(--tvair-settings-modal-z);background:var(--tvair-dialog-backdrop);}
 body.tvair-guide-page #cfg-overlay.open{display:flex}
 body.tvair-guide-page #cfg-box{position:relative;width:1080px;max-width:96vw;height:840px;max-height:84vh;display:flex;flex-direction:column;overflow:hidden;background:var(--tvair-settings-panel-bg);color:var(--tvair-settings-text);border:1px solid var(--tvair-settings-border);border-radius:4px;box-shadow:var(--tvair-theme-shadow);}
 body.tvair-guide-page #cfg-head{display:flex;align-items:center;padding:8px 14px;background:var(--tvair-settings-header-bg);color:var(--tvair-settings-header-fg);border-bottom:1px solid var(--tvair-settings-border-soft);}
@@ -2401,7 +2401,7 @@ body.tvair-guide-page #cfg-overlay #cfg-panel-appearance .cfg-genre-color-swatch
 body.tvair-guide-page #cfg-overlay .cfg-genre-color-swatch{display:inline-block;width:18px;height:14px;border:1px solid var(--tvair-settings-display-swatch-border);border-radius:2px;vertical-align:middle;margin:0;box-sizing:border-box;}
 body.tvair-guide-page #cfg-overlay #cfg-panel-appearance .cfg-genre-color-button .cfg-genre-color-swatch,
 body.tvair-guide-page #cfg-overlay .cfg-genre-color-button .cfg-genre-color-swatch{width:var(--tvair-settings-genre-editor-swatch-width);height:var(--tvair-settings-genre-editor-swatch-height);margin:0;border:1px solid var(--tvair-settings-display-button-swatch-border);background:var(--genre-preview-color,var(--genre-color-preview,var(--tvair-settings-display-button-swatch-fallback)));}
-body.tvair-guide-page .cfg-genre-palette{position:fixed;z-index:var(--tvair-modal-z,1000);display:none;width:190px;background:var(--tvair-settings-display-palette-bg);border:1px solid var(--tvair-settings-display-palette-border);box-shadow:var(--tvair-settings-display-palette-shadow);padding:8px;font-size:12px;color:var(--tvair-settings-display-palette-fg);box-sizing:border-box;}
+body.tvair-guide-page .cfg-genre-palette{position:fixed;z-index:var(--tvair-settings-display-palette-z);display:none;width:190px;background:var(--tvair-settings-display-palette-bg);border:1px solid var(--tvair-settings-display-palette-border);box-shadow:var(--tvair-settings-display-palette-shadow);padding:8px;font-size:12px;color:var(--tvair-settings-display-palette-fg);box-sizing:border-box;}
 body.tvair-guide-page .cfg-genre-palette.open{display:block;}
 body.tvair-guide-page .cfg-genre-palette-title{font-weight:bold;margin:0 0 6px;color:var(--tvair-settings-display-palette-title-fg);}
 body.tvair-guide-page .cfg-genre-palette-grid{display:grid;grid-template-columns:repeat(4,32px);gap:6px;margin-bottom:8px;}

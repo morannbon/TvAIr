@@ -2562,10 +2562,10 @@ static IResult RenderPluginVersionInfoPage(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-notification.css?v=1.0.9">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.1.0">
 </head>
 <body>
-<script src="/tvair-notification.js?v=1.0.9"></script>
+<script src="/tvair-notification.js?v=1.1.0"></script>
 <script>
 document.addEventListener('DOMContentLoaded',function(){
   if(window.TvAIrNotify){ TvAIrNotify({ title:'{{safeTitle}}', message:'バージョン: {{safeVersion}}', onOk:function(){ location.replace('{{safeReturn}}'); } }); }
@@ -3761,20 +3761,20 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'">
 <title>{{safeTitle}} - TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.0.9">
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.0.9">
-<link rel="stylesheet" href="/tvair-notification.css?v=1.0.9">
-<link rel="stylesheet" href="/tvair-epg-panel.css?v=1.0.9">
-<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.0.9">
-<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.0.9">
-<script src="/tvair-theme.js?v=1.0.9"></script>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.1.0">
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.1.0">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.1.0">
+<link rel="stylesheet" href="/tvair-epg-panel.css?v=1.1.0">
+<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.1.0">
+<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.1.0">
+<script src="/tvair-theme.js?v=1.1.0"></script>
 
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{width:100%;height:100%}
 body{font-family:'Meiryo',sans-serif;font-size:12px;background:var(--tvair-bg-page,#f0f0f0);color:var(--tvair-text-main,#222);overflow:hidden;height:100vh;display:flex;flex-direction:column}
 #nav{background:var(--nav-bg);display:flex;align-items:center;gap:4px;padding:3px 6px;flex-shrink:0;height:30px;position:relative;z-index:1000;isolation:isolate}
-#nav .nav-btn{background:var(--nav-btn-bg);color:var(--tvair-nav-button-text,#222);border:none;padding:3px 0;cursor:pointer;font-size:12px;border-radius:2px;white-space:nowrap;min-width:110px;text-align:center;display:inline-flex;align-items:center;justify-content:center;height:24px}.nav-btn,.nav-btn:link,.nav-btn:visited,.nav-btn:hover,.nav-btn:active,.nav-btn:focus{color:var(--tvair-nav-button-text,#222) !important;text-decoration:none}
+#nav .nav-btn{background:var(--nav-btn-bg);color:var(--tvair-nav-button-text,#222);border:none;padding:3px 0;cursor:pointer;font-size:12px;border-radius:2px;white-space:nowrap;min-width:110px;text-align:center;display:inline-flex;align-items:center;justify-content:center;height:24px}.nav-btn,.nav-btn:link,.nav-btn:visited,.nav-btn:hover,.nav-btn:active,.nav-btn:focus{color:var(--tvair-nav-button-text,#222);text-decoration:none}
 #nav .nav-btn:hover{background:var(--nav-btn-hover)}
 #nav .spacer{flex:1}
 
@@ -3803,7 +3803,7 @@ body{font-family:'Meiryo',sans-serif;font-size:12px;background:var(--tvair-bg-pa
 #nav .nav-btn,#menu-wrap{position:relative;z-index:20}
 .plugin-shell-content{flex:1;min-height:0;overflow:auto;background:var(--tvair-bg-page,#f4f6f8)}
 .plugin-shell-inner{min-height:100%;box-sizing:border-box}
-.tvair-plugin-toolwindow-content-only #nav{display:none !important}
+.tvair-plugin-toolwindow-content-only #nav{display:none}
 .tvair-plugin-toolwindow-content-only .plugin-shell-content{height:100vh;min-height:0;overflow:auto;background:#fff}
 .tvair-plugin-toolwindow-content-only .plugin-shell-inner{min-height:100%;background:#fff}
 </style>
@@ -3827,11 +3827,11 @@ body{font-family:'Meiryo',sans-serif;font-size:12px;background:var(--tvair-bg-pa
 {{pluginBody}}
   </main>
 </div>
-<script src="/tvair-notification.js?v=1.0.9"></script>
-<script src="/tvair-epg-run-contract.js?v=1.0.9"></script>
-<script src="/tvair-epg-widget.js?v=1.0.9"></script>
-<script src="/tvair-safe-event-host.js?v=1.0.9"></script>
-<script src="/tvair-menu-spine.js?v=1.0.9"></script>
+<script src="/tvair-notification.js?v=1.1.0"></script>
+<script src="/tvair-epg-run-contract.js?v=1.1.0"></script>
+<script src="/tvair-epg-widget.js?v=1.1.0"></script>
+<script src="/tvair-safe-event-host.js?v=1.1.0"></script>
+<script src="/tvair-menu-spine.js?v=1.1.0"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -3988,7 +3988,7 @@ button,input,select,textarea{font-family:inherit;font-size:inherit}
 <div class="tvair-toolwindow-content-root">
 {{pluginContent}}
 </div>
-<script src="/tvair-safe-event-host.js?v=1.0.9"></script>
+<script src="/tvair-safe-event-host.js?v=1.1.0"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -4750,7 +4750,7 @@ static void EmitTvAIrRuntimeIdentityAudit(LogRepository log)
         log.Add("APP_BINARY_IDENTITY", "START",
             $"tvairVersion={GetTvAIrAppVersion()} tvairExe={Path.GetFileName(tvairExe)} tvairFile={Stamp(tvairExe)} " +
             $"workerFileName={Path.GetFileName(workerPath)} workerFile={Stamp(workerPath)} {releaseNotesAudit} " +
-            $"baseDir=app_base rule=release_contract rollbackPoint=True rollbackBase=release_contract timePolicy=BROADCAST_CLOCK_PASSIVE_ONLY ntp=removed broadcastClock=observe_only_no_internal_offset titleQuality=record_filename_event_name_nfkc_guard pluginUiAction=host_action_dispatch_value_contract logPolicy=release_candidate_noise_reduce");
+            $"baseDir=app_base rule=release_contract rollbackPoint=True rollbackBase=release_contract timePolicy=BROADCAST_CLOCK_PASSIVE_ONLY ntp=removed broadcastClock=observe_only_no_internal_offset recordFileName=tvtest_ini_template pluginUiAction=host_action_dispatch_value_contract logPolicy=release_candidate_noise_reduce");
     }
     catch (Exception ex)
     {

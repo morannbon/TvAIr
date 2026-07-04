@@ -1323,7 +1323,7 @@ internal static class Program
             .Where(x => !string.IsNullOrWhiteSpace(x.OutputPath))
             .Select(x =>
             {
-                x.OutputPath = RecordingFileNameNormalizer.NormalizeOutputPathFileName(x.OutputPath);
+                x.OutputPath = x.OutputPath.Trim();
                 return x;
             })
             .OrderBy(x => x.SwitchAt == default ? x.StartTime : x.SwitchAt)

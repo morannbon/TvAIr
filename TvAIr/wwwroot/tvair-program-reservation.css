@@ -37,10 +37,7 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
 .dow-check-all{background:var(--tvair-surface-soft);border:1px solid var(--tvair-line-soft);color:var(--tvair-action-lite-text)}
 .dow-check-all:hover{background:var(--tvair-surface-soft-hover)}
 
-/* 時刻セレクト */
-.time-wrap{display:flex;align-items:center;gap:6px}
-.time-wrap select{width:70px;flex-shrink:0}
-.time-sep{color:var(--tvair-action-lite-text);font-size:13px}
+/* release_contract: time-wrap geometry, select paint and separator text are owned by tvair-list-module.css. */
 
 /* フォームアクション */
 #form-actions{flex-shrink:0;padding:10px 12px;border-top:1px solid var(--tvair-line-soft);display:flex;gap:8px;justify-content:flex-end;background:var(--tvair-surface-raised)}
