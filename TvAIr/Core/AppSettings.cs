@@ -1,4 +1,4 @@
-namespace TvAIr.Core;
+﻿namespace TvAIr.Core;
 
 /// <summary>
 /// アプリ全体の設定。appsettings.json の各セクションにバインドされる。
@@ -6,7 +6,7 @@ namespace TvAIr.Core;
 public sealed class AppSettings
 {
     /// <summary>Webサーバーのリッスンポート</summary>
-    public int Port { get; set; } = 55884;
+    public int Port { get; set; } = SettingsDefaults.Port;
 
     /// <summary>データファイル（DB・ログ等）の保存先ディレクトリ。未設定時は実行ファイルと同じ場所の data フォルダ。</summary>
     public string DataDirectory { get; set; } = "data";
@@ -33,14 +33,14 @@ public sealed class TvTestSettings
     /// /min オプション: タスクバー最小化起動。
     /// true の場合 /min を付加する（デフォルト: true）。
     /// </summary>
-    public bool UseMinOption { get; set; } = true;
+    public bool UseMinOption { get; set; } = SettingsDefaults.UseMinOption;
 
     /// <summary>
     /// /nodshow オプション: DirectShow無効化（CPU負荷軽減）。
     /// true の場合 /nodshow を付加する（デフォルト: true）。
     /// 視聴用映像表示を必要としない起動での負荷軽減に使う。
     /// </summary>
-    public bool UseNodshowOption { get; set; } = true;
+    public bool UseNodshowOption { get; set; } = SettingsDefaults.UseNodshowOption;
 }
 
 /// <summary>
@@ -146,6 +146,12 @@ public sealed class TunerProfile
 
     /// <summary>用途。Recording=録画/EPG用、Viewing=視聴用。</summary>
     public string Role { get; set; } = "";
+
+    /// <summary>本体設定画面で各放送波内に割り当てたデバイス番号。地上波1/BS・CS4等の番号をそのまま保持する。</summary>
+    public int DeviceNumber { get; set; }
+
+    /// <summary>設定行ごとに一度発行して保持する永続論理ID。名称・順序・BonDriver変更では変えない。</summary>
+    public string LogicalViewerSlotId { get; set; } = "";
 }
 
 /// <summary>
@@ -154,13 +160,13 @@ public sealed class TunerProfile
 public sealed class EpgSettings
 {
     /// <summary>EPG取得機能の有効/無効</summary>
-    public bool Enabled { get; set; } = true;
+    public bool Enabled { get; set; } = SettingsDefaults.EpgEnabled;
 
     /// <summary>毎日自動取得する時刻（時）</summary>
-    public int DailyRefreshHour { get; set; } = 3;
+    public int DailyRefreshHour { get; set; } = SettingsDefaults.EpgHour;
 
     /// <summary>毎日自動取得する時刻（分）</summary>
-    public int DailyRefreshMinute { get; set; } = 0;
+    public int DailyRefreshMinute { get; set; } = SettingsDefaults.EpgMinute;
 
     /// <summary>TSファイルの一時保存ディレクトリ。空の場合はDataDirectory配下のts-recを使用。</summary>
     public string TsRecordDirectory { get; set; } = "";
@@ -169,7 +175,7 @@ public sealed class EpgSettings
     /// EPG取得深度。shallow=120秒/TS、medium=180秒/TS、deep=240秒/TS、deeper=300秒/TS。
     /// この値から PerChannelWaitSeconds が算出される。
     /// </summary>
-    public string EpgDepth { get; set; } = "medium";
+    public string EpgDepth { get; set; } = SettingsDefaults.EpgDepth;
     /// <summary>
     /// 1TSあたりの録画待機秒数。EpgDepthから自動算出される（読み取り専用）。
     /// shallow=120、medium=180、deep=240、deeper=300。
@@ -197,9 +203,9 @@ public sealed class EpgSettings
 
     /// <summary>
     /// 録画開始何分前に直前EPG確認を行うか。時間追従（延長・繰り上げ対応）に使用。
-    /// デフォルト10分。設定メニューから変更可能。
+    /// 既定値は設定正本に従う。設定メニューから変更可能。
     /// </summary>
-    public int EpgPreRecordMinutes { get; set; } = 15;
+    public int EpgPreRecordMinutes { get; set; } = SettingsDefaults.EpgPreRecordMinutes;
 }
 
 /// <summary>
@@ -220,59 +226,3 @@ public sealed class ChannelMapSettings
     public string BscsChSetFilePath { get; set; } = "";
 }
 
-/// <summary>
-/// 予約・録画の設定
-/// </summary>
-public sealed class ReservationSettings
-{
-    /// <summary>録画開始マージン（秒）。番組開始時刻のN秒前にTVTestを起動する。</summary>
-    public int PreStartMarginSeconds { get; set; } = 30;
-
-    /// <summary>録画終了マージン（秒）。番組終了時刻のN秒後にTVTestを停止する。</summary>
-    public int PostEndMarginSeconds { get; set; } = 30;
-
-    /// <summary>チャンネルロック待ち秒数（/recdelay）。CSのサービス確定待ちを考慮し既定10秒。</summary>
-    public int RecDelaySeconds { get; set; } = 10;
-
-    /// <summary>スリープ復帰のためにタスクスケジューラーへ登録する録画開始前の分数。(現在は内部未使用、互換のため残置)</summary>
-    public int WakeMinutesBefore { get; set; } = 10;
-
-    /// <summary>
-    /// スリープ復帰の余裕秒数(新設)。EPG確認起床と録画起床の両方に加算される。
-    /// Wake①時刻 = StartTime − EpgPreRecordMinutes分 − WakeAdditionalSeconds秒
-    /// Wake②時刻 = StartTime − PreStartMarginSeconds秒 − WakeAdditionalSeconds秒
-    /// </summary>
-    public int WakeAdditionalSeconds { get; set; } = 30;
-
-    /// <summary>Windowsスタートアップ登録（起動時に自動起動）。</summary>
-    public bool StartupEnabled { get; set; } = false;
-
-    /// <summary>
-    /// チューナー競合時の優先設定。
-    /// false = 前番組優先（後番組を failed にする）
-    /// true  = 後番組優先（前番組を終了させて後番組を録画する）
-    /// </summary>
-    public bool LaterProgramPriority { get; set; } = false;
-
-    /// <summary>
-    /// 疑似チューナー引き継ぎ機能の有効/無効。
-    /// 同局の連続番組を1チューナーで録画する。前番組を前倒し終了し、
-    /// 同じチューナーで後番組を通常の前マージンから録画開始する。
-    /// 番組間に PseudoContinuousMarginSeconds 分の空白が生じる。
-    /// </summary>
-    public bool PseudoContinuousRecording { get; set; } = false;
-
-    /// <summary>
-    /// 疑似チューナー引き継ぎ時の前番組前倒し終了マージン（秒）。
-    /// 後番組開始時刻のN秒前に前番組を終了させる。
-    /// TVTest終了＋再起動の余裕を確保するため PreStartMarginSeconds より大きい値を推奨。
-    /// デフォルト60秒。
-    /// </summary>
-    public int PseudoContinuousMarginSeconds { get; set; } = 60;
-
-    /// <summary>最後の録画が正常終了した後のWindows電源操作。none/sleep/shutdown。</summary>
-    public string RecordingAfterAction { get; set; } = "none";
-
-    /// <summary>録画プロセス終了後、録画終了後アクションを実行するまでの待機分数。1〜5分。</summary>
-    public int RecordingAfterActionDelayMinutes { get; set; } = 1;
-}

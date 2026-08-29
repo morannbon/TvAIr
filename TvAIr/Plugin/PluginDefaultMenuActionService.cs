@@ -1,12 +1,13 @@
-namespace TvAIr.Plugin;
+﻿namespace TvAIr.Plugin;
 
 using TvAIr.Core;
 using TvAIrPlugin;
+using TvAIrPlugin.Runtime;
 
 /// <summary>
 /// release_contract: Plugin Menu Action Contract spine.
 /// TvAIr本体はプラグイン名・プラグインkind・現在存在する3プラグインから挙動を推測しない。
-/// manifest / descriptor の宣言を正規化し、未宣言互換だけを compat alias source として隔離する。
+/// Runtime descriptor の MenuActions を正本として正規化し、他の情報からメニュー動作を推測しない。
 /// </summary>
 public sealed class PluginDefaultMenuActionService
 {
@@ -24,20 +25,25 @@ public sealed class PluginDefaultMenuActionService
     public IReadOnlyList<PluginDefaultMenuActionInfo> ResolveActions(string source = "api")
     {
         var actions = new List<PluginDefaultMenuActionInfo>();
-        foreach (var plugin in _registry.GetAll())
+        foreach (var plugin in _registry.GetRuntimePlugins())
         {
-            var action = ResolveAction(plugin);
-            if (action.Kind.Equals(PluginMenuActionKinds.None, StringComparison.OrdinalIgnoreCase))
+            foreach (var action in ResolveRuntimeActions(plugin))
             {
-                _log.Add("PLUGIN_MENU_ACTION_RESOLVE", action.Name, $"result=SKIPPED kind=none source={Safe(source)} declaredSource={Safe(action.Source)} route={Safe(action.RouteSegment)} reason={Safe(action.Reason)} contract={ContractVersion} rule={TvAIrVersionContract.PublicContractName}");
-                continue;
+                if (action.Kind.Equals(PluginMenuActionKinds.None, StringComparison.OrdinalIgnoreCase))
+                {
+                    _log.Add("PLUGIN_MENU_ACTION_RESOLVE", action.Name,
+                        $"result=SKIPPED kind=none source={Safe(source)} declaredSource={Safe(action.Source)} route={Safe(action.RouteSegment)} reason={Safe(action.Reason)} contract={ContractVersion} rule=runtime_descriptor_menu_contract");
+                    continue;
+                }
+                actions.Add(action);
+                _log.Add("PLUGIN_MENU_ACTION_RESOLVE", action.Name,
+                    $"result=OK kind={Safe(action.Kind)} source={Safe(action.Source)} caller={Safe(source)} route={Safe(action.RouteSegment)} label={Safe(action.Label)} showInTaskbar={action.ShowInTaskbar} declared=true contract={ContractVersion} rule=runtime_descriptor_menu_contract");
             }
-
-            actions.Add(action);
-            _log.Add("PLUGIN_MENU_ACTION_RESOLVE", action.Name, $"result=OK kind={Safe(action.Kind)} source={Safe(action.Source)} caller={Safe(source)} route={Safe(action.RouteSegment)} label={Safe(action.Label)} showInTaskbar={action.ShowInTaskbar} compatAlias={action.CompatibilityAlias} declared={action.Declared} contract={ContractVersion} rule={TvAIrVersionContract.PublicContractName}");
         }
 
         return actions
+            .GroupBy(BuildMenuIdentityKey, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.OrderBy(x => x.Priority).First())
             .OrderBy(x => x.Priority)
             .ThenBy(x => x.Label, StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -50,82 +56,57 @@ public sealed class PluginDefaultMenuActionService
             .FirstOrDefault(x => string.Equals(NormalizeRoute(x.RouteSegment), normalized, StringComparison.OrdinalIgnoreCase));
     }
 
-    private PluginDefaultMenuActionInfo ResolveAction(ITvAIrPlugin plugin)
+
+    private static string BuildMenuIdentityKey(PluginDefaultMenuActionInfo action)
+        => string.Join("|", NormalizePluginId(action.PluginId), NormalizeRoute(action.RouteSegment), (action.Label ?? string.Empty).Trim().ToLowerInvariant());
+
+
+
+    private IEnumerable<PluginDefaultMenuActionInfo> ResolveRuntimeActions(ITvAirRuntimeCapabilityPlugin plugin)
     {
-        var manifest = (plugin as IManifestPlugin)?.Manifest;
-        var ui = (plugin as IUiPlugin)?.Ui;
-
-        var route = NormalizeRoute(ui?.RouteSegment ?? manifest?.Route ?? string.Empty);
-        if (route.StartsWith("plugin/", StringComparison.OrdinalIgnoreCase)) route = route[7..];
-        if (route.StartsWith("plugin-ui/", StringComparison.OrdinalIgnoreCase)) route = route[10..];
-        if (string.IsNullOrWhiteSpace(route)) route = NormalizeRoute(manifest?.Id ?? plugin.Name);
-
-        var displayName = string.IsNullOrWhiteSpace(manifest?.Name) ? plugin.Name : manifest!.Name;
-        var label = manifest?.DefaultMenuActionLabel ?? ui?.DefaultMenuActionLabel ?? string.Empty;
-        var declaredKindRaw = manifest?.DefaultMenuActionKind ?? ui?.DefaultMenuActionKind ?? string.Empty;
-        var preferredRaw = manifest?.PreferredOpenMode ?? ui?.PreferredOpenMode ?? string.Empty;
-        var kind = NormalizeKind(declaredKindRaw);
-        var source = "manifest.defaultMenuAction";
-        var declared = !string.IsNullOrWhiteSpace(kind);
-        var compatibilityAlias = false;
-        var priority = manifest?.DefaultMenuActionPriority ?? ui?.DefaultMenuActionPriority ?? 1000;
-        var showInTaskbar = manifest?.ToolWindowShowInTaskbar ?? ui?.ToolWindowShowInTaskbar ?? false;
-
-        if (string.IsNullOrWhiteSpace(kind))
+        var descriptor = plugin.Descriptor;
+        var pluginId = PluginIdentity.Normalize(descriptor.PluginId, descriptor.DisplayName);
+        foreach (var definition in descriptor.MenuActions ?? Array.Empty<PluginMenuActionDefinition>())
         {
-            kind = NormalizeKind(preferredRaw);
-            if (!string.IsNullOrWhiteSpace(kind))
+            if (!definition.ShowInMenu) continue;
+            var route = NormalizeRoute(definition.Route);
+            if (string.IsNullOrWhiteSpace(route)) route = NormalizeRoute(pluginId);
+            yield return new PluginDefaultMenuActionInfo
             {
-                source = "compat_alias_preferredOpenMode";
-                compatibilityAlias = true;
-            }
+                PluginId = pluginId,
+                Name = string.IsNullOrWhiteSpace(descriptor.DisplayName) ? pluginId : descriptor.DisplayName,
+                Version = descriptor.Version,
+                RouteSegment = route,
+                Kind = NormalizeRuntimeKind(definition.Kind),
+                Label = string.IsNullOrWhiteSpace(definition.Label) ? descriptor.DisplayName : definition.Label,
+                Description = string.Empty,
+                Priority = definition.Priority,
+                ShowInTaskbar = definition.ShowInTaskbar,
+                Source = "runtime.descriptor.menuAction",
+                Reason = definition.Kind == PluginMenuActionKind.None ? "runtime_descriptor_none" : string.Empty,
+                Declared = true,
+                CompatibilityAlias = false,
+                ContractVersion = ContractVersion,
+                ActionId = definition.ActionId,
+                WindowDefinitionId = definition.WindowDefinitionId,
+                SurfaceDefinitionId = definition.SurfaceDefinitionId
+            };
         }
+    }
 
-        if (string.IsNullOrWhiteSpace(kind))
+    private static string NormalizeRuntimeKind(PluginMenuActionKind kind)
+        => kind switch
         {
-            // 未宣言互換の補助だけをここに閉じ込める。
-            // これは正式なプラグイン意思決定ではないため、ログ/APIに互換aliasとして出す。
-            kind = plugin is IUiPlugin ? PluginMenuActionKinds.Page : PluginMenuActionKinds.VersionDialog;
-            source = plugin is IUiPlugin ? "compat_alias_ui_page" : "compat_alias_non_ui_versionDialog";
-            compatibilityAlias = true;
-        }
-
-        if (string.IsNullOrWhiteSpace(label))
-        {
-            label = displayName;
-        }
-
-        return new PluginDefaultMenuActionInfo
-        {
-            PluginId = string.IsNullOrWhiteSpace(manifest?.Id) ? route : manifest!.Id,
-            Name = displayName,
-            Version = string.IsNullOrWhiteSpace(manifest?.Version) ? plugin.Version : manifest!.Version,
-            RouteSegment = route,
-            Kind = kind,
-            Label = label,
-            Description = manifest?.Description ?? ui?.Description ?? string.Empty,
-            Priority = priority,
-            ShowInTaskbar = showInTaskbar,
-            Source = source,
-            Reason = kind.Equals(PluginMenuActionKinds.None, StringComparison.OrdinalIgnoreCase) ? source : string.Empty,
-            Declared = declared,
-            CompatibilityAlias = compatibilityAlias,
-            ContractVersion = ContractVersion
+            PluginMenuActionKind.ToolWindow => PluginMenuActionKinds.ToolWindow,
+            PluginMenuActionKind.Page => PluginMenuActionKinds.Page,
+            PluginMenuActionKind.Settings => PluginMenuActionKinds.Settings,
+            PluginMenuActionKind.VersionDialog => PluginMenuActionKinds.VersionDialog,
+            PluginMenuActionKind.StatusDialog => PluginMenuActionKinds.StatusDialog,
+            _ => PluginMenuActionKinds.None
         };
-    }
 
-    private static string NormalizeKind(string? value)
-    {
-        var v = (value ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(v)) return string.Empty;
-        if (v.Equals("tool", StringComparison.OrdinalIgnoreCase) || v.Equals("toolWindow", StringComparison.OrdinalIgnoreCase) || v.Equals("openToolWindow", StringComparison.OrdinalIgnoreCase)) return PluginMenuActionKinds.ToolWindow;
-        if (v.Equals("settings", StringComparison.OrdinalIgnoreCase) || v.Equals("openSettings", StringComparison.OrdinalIgnoreCase)) return PluginMenuActionKinds.Settings;
-        if (v.Equals("page", StringComparison.OrdinalIgnoreCase) || v.Equals("openPage", StringComparison.OrdinalIgnoreCase) || v.Equals("browser", StringComparison.OrdinalIgnoreCase)) return PluginMenuActionKinds.Page;
-        if (v.Equals("info", StringComparison.OrdinalIgnoreCase) || v.Equals("showInfo", StringComparison.OrdinalIgnoreCase) || v.Equals("version", StringComparison.OrdinalIgnoreCase) || v.Equals("versionInfo", StringComparison.OrdinalIgnoreCase) || v.Equals("versionDialog", StringComparison.OrdinalIgnoreCase)) return PluginMenuActionKinds.VersionDialog;
-        if (v.Equals("status", StringComparison.OrdinalIgnoreCase) || v.Equals("statusDialog", StringComparison.OrdinalIgnoreCase)) return PluginMenuActionKinds.StatusDialog;
-        if (v.Equals("none", StringComparison.OrdinalIgnoreCase) || v.Equals("hidden", StringComparison.OrdinalIgnoreCase)) return PluginMenuActionKinds.None;
-        return v;
-    }
+    private static string NormalizePluginId(string? value)
+        => string.IsNullOrWhiteSpace(value) ? string.Empty : PluginIdentity.Normalize(value).ToLowerInvariant();
 
     private static string NormalizeRoute(string? value)
         => (value ?? string.Empty).Trim().Trim('/').ToLowerInvariant();
@@ -160,4 +141,7 @@ public sealed class PluginDefaultMenuActionInfo
     public bool Declared { get; set; }
     public bool CompatibilityAlias { get; set; }
     public string ContractVersion { get; set; } = string.Empty;
+    public string ActionId { get; set; } = string.Empty;
+    public string WindowDefinitionId { get; set; } = string.Empty;
+    public string SurfaceDefinitionId { get; set; } = string.Empty;
 }

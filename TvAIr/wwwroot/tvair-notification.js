@@ -34,6 +34,42 @@
     });
     return overlay;
   }
+
+  const STATUS_ID = 'toast';
+  let statusTimer = null;
+  let statusHideTimer = null;
+  function ensureStatus(){
+    let status = byId(STATUS_ID);
+    if(status) return status;
+    status = document.createElement('div');
+    status.id = STATUS_ID;
+    document.body.appendChild(status);
+    return status;
+  }
+  function normalizeStatusKind(kind){
+    const value = String(kind || 'success').toLowerCase();
+    return value === 'error' || value === 'warning' || value === 'info' ? value : 'success';
+  }
+  function showStatus(message, kind='success', durationMs=2800){
+    const status = ensureStatus();
+    const text = String(message || '').trim();
+    if(!text) return;
+    clearTimeout(statusTimer);
+    clearTimeout(statusHideTimer);
+    status.classList.remove('show','leaving','status-success','status-info','status-warning','status-error');
+    status.textContent = text;
+    status.setAttribute('role', normalizeStatusKind(kind) === 'error' ? 'alert' : 'status');
+    status.setAttribute('aria-live', normalizeStatusKind(kind) === 'error' ? 'assertive' : 'polite');
+    status.classList.add('status-' + normalizeStatusKind(kind));
+    // Force a style boundary so repeated updates restart the same shared transition.
+    void status.offsetWidth;
+    status.classList.add('show');
+    statusTimer = setTimeout(()=>{
+      status.classList.add('leaving');
+      status.classList.remove('show');
+      statusHideTimer = setTimeout(()=>status.classList.remove('leaving'), 180);
+    }, Math.max(600, Number(durationMs) || 2800));
+  }
   function hide(result){
     const overlay = byId(OVERLAY_ID);
     if(overlay){ overlay.classList.remove('show'); overlay.setAttribute('aria-hidden','true'); }
@@ -86,19 +122,7 @@
       show(Object.assign({}, opts, { mode:'confirm', confirm:true, onOk:()=>resolve(true), onCancel:()=>resolve(false) }));
     });
   }
-  async function confirmEpgCancelBeforeReservation(){
-    try{
-      const res = await fetch('/api/epg/run-state', { cache:'no-store' });
-      const state = await res.json();
-      if(!state || !state.isRunning) return false;
-      return await confirm({
-        message:'EPG取得中です',
-        subMessage:'予約を優先する場合はEPG取得をキャンセルします。継続する場合はEPG取得を続けたまま予約します。',
-        okText:'EPGをキャンセル',
-        cancelText:'継続'
-      });
-    }catch(_){ return false; }
-  }
-  window.TvAIrNotification = { show, confirm, confirmEpgCancelBeforeReservation, hide: ()=>hide('cancel') };
+  window.TvAIrNotification = { show, showStatus, confirm, hide: ()=>hide('cancel') };
   window.TvAIrNotify = show;
+  window.showToast = function(message, durationMs, kind){ showStatus(message, kind || 'success', durationMs); };
 })();

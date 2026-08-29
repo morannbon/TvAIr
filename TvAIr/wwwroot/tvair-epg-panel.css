@@ -1,4 +1,4 @@
-/* TvAIr release_contract EPGProgressPanelThemeRoleRebuild
+﻿/* TvAIr EPG progress panel ownership contract
    Owner: EPG progress panel only.
    Purpose: keep EPG progress panel structure, role-based colors, progress bar and actions out of index.html,
    tvair-ui-modules.css and tvair-theme-contract.css. EPG panel colors must be dialog/progress/action roles, not fixed navy tokens. */
@@ -17,7 +17,7 @@
   color:var(--tvair-epg-panel-fg,var(--tvair-role-dialog-fg));
   border:1px solid var(--tvair-epg-panel-border,var(--tvair-role-border-soft));
   border-radius:6px;
-  box-shadow:var(--tvair-theme-shadow,0 12px 28px rgba(0,0,0,.28));
+  box-shadow:var(--tvair-theme-shadow);
   overflow:hidden;
 }
 #epg-box-head{
@@ -112,12 +112,12 @@
 }
 .epg-btn-stop{
   display:none;
-  background:var(--tvair-action-stop-bg,var(--tvair-program-action-stop-bg,var(--tvair-role-control-bg)));
+  background:var(--tvair-action-stop-bg);
   color:var(--tvair-action-stop-fg,var(--tvair-role-control-active-fg));
   border-color:var(--tvair-action-stop-border,var(--tvair-role-control-border));
 }
 .epg-btn-stop:hover{
-  background:var(--tvair-action-stop-hover-bg,var(--tvair-program-action-stop-hover-bg,var(--tvair-role-control-hover-bg)));
+  background:var(--tvair-action-stop-hover-bg);
 }
 .epg-btn-close{
   background:var(--tvair-role-action-secondary-bg,var(--tvair-role-control-bg));

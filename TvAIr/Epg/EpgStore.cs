@@ -3,20 +3,19 @@ using TvAIr.Core;
 
 namespace TvAIr.Epg;
 
-public sealed record EpgUpsertMergeStats(
+public sealed record EpgUpsertStorageStats(
     int Incoming,
-    int ExistingRows,
-    int IncomingRawShortBlankExistingRawShortPresent,
-    int IncomingRawExtendedBlankExistingRawExtendedPresent,
-    int IncomingRawContentBlankExistingRawContentPresent,
-    int IncomingExtendedOnlyExistingRawShortPresent,
-    int SameEventExtendedMergedPreservingExistingTitle,
-    int TableMetadataPreservedForExistingTitle,
     int IncomingRawShortPresent,
-    int IncomingRawExtendedPresent)
-{
-    public static readonly EpgUpsertMergeStats Empty = new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-}
+    int IncomingRawExtendedPresent,
+    int IncomingRawContentPresent);
+
+public sealed record EpgUpsertResult(
+    int Count,
+    EpgUpsertStorageStats Stats);
+
+public sealed record EpgCaptureCommitResult(
+    EpgUpsertResult Upsert,
+    EpgStaleRetireStats StaleRetire);
 
 public sealed record EpgStaleRetireStats(
     int Services,
@@ -35,7 +34,13 @@ public sealed record EpgStaleRetireStats(
 public sealed class EpgStore
 {
     private readonly Database db;
-    public EpgUpsertMergeStats LastUpsertMergeStats { get; private set; } = EpgUpsertMergeStats.Empty;
+    private long projectionRevision;
+
+    /// <summary>
+    /// DB由来番組投影の世代。epg_events の確定変更後だけ進み、
+    /// DbProgramEventSource が同一DB正本の基底投影を安全に再利用するために使う。
+    /// </summary>
+    public long ProjectionRevision => Interlocked.Read(ref projectionRevision);
 
     public EpgStore(Database db)
     {
@@ -45,156 +50,152 @@ public sealed class EpgStore
     // ─── 書き込み ────────────────────────────────────────────────
 
     /// <summary>イベント一覧を UPSERT する。</summary>
-    public int Upsert(IEnumerable<EpgEvent> events)
+    public EpgUpsertResult Upsert(IEnumerable<EpgEvent> events)
     {
         using var con = db.Open();
-        using var tx  = con.BeginTransaction();
-        var now   = DateTime.Now.ToString("O");
+        using var tx = con.BeginTransaction();
+        var result = UpsertCore(con, tx, events);
+        tx.Commit();
+        if (result.Count > 0)
+            Interlocked.Increment(ref projectionRevision);
+        return result;
+    }
+
+    /// <summary>
+    /// 1回のEPG取得で得たイベント更新と、完全取得時のstale退場を同一トランザクションで確定する。
+    /// stale退場を許可しない取得では、retireEventsにnullを渡して更新だけをcommitする。
+    /// </summary>
+    public EpgCaptureCommitResult CommitCapture(
+        IEnumerable<EpgEvent> upsertEvents,
+        IEnumerable<EpgEvent>? retireEvents)
+    {
+        using var con = db.Open();
+        using var tx = con.BeginTransaction();
+        var upsert = UpsertCore(con, tx, upsertEvents);
+        var staleRetire = retireEvents is null
+            ? EpgStaleRetireStats.Empty
+            : RetireStaleEventsForCapturedScopeCore(con, tx, retireEvents);
+        tx.Commit();
+        if (upsert.Count > 0 || staleRetire.DeletedRows > 0)
+            Interlocked.Increment(ref projectionRevision);
+        return new EpgCaptureCommitResult(upsert, staleRetire);
+    }
+
+    private static EpgUpsertResult UpsertCore(
+        SqliteConnection con,
+        SqliteTransaction tx,
+        IEnumerable<EpgEvent> events)
+    {
+        var now = DateTime.Now.ToString("O");
         var count = 0;
-        var existingRows = 0;
-        var incomingRawShortBlankExistingRawShortPresent = 0;
-        var incomingRawExtendedBlankExistingRawExtendedPresent = 0;
-        var incomingRawContentBlankExistingRawContentPresent = 0;
-        var incomingExtendedOnlyExistingRawShortPresent = 0;
-        var sameEventExtendedMergedPreservingExistingTitle = 0;
-        var tableMetadataPreservedForExistingTitle = 0;
         var incomingRawShortPresent = 0;
         var incomingRawExtendedPresent = 0;
+        var incomingRawContentPresent = 0;
+
+        using var cmd = con.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = """
+            INSERT INTO epg_events (
+                network_id, transport_stream_id, service_id, event_id,
+                service_name, title, description,
+                genre, genre_codes, table_id, section_number, version_number,
+                raw_descriptor_loop, raw_short_event_descriptor, raw_extended_event_descriptor, raw_content_descriptor,
+                duration_seconds, start_time, end_time, updated_at)
+            VALUES (
+                $nid, $tsid, $sid, $eid,
+                $svc, $title, $desc,
+                $genre, $genreCodes, $tableId, $sectionNumber, $versionNumber,
+                $rawDescriptorLoop, $rawShortEventDescriptor, $rawExtendedEventDescriptor, $rawContentDescriptor,
+                $dur, $start, $end, $updAt)
+            ON CONFLICT(network_id, transport_stream_id, service_id, event_id) DO UPDATE SET
+                service_name = excluded.service_name,
+                title = excluded.title,
+                description = excluded.description,
+                genre = excluded.genre,
+                genre_codes = excluded.genre_codes,
+                table_id = excluded.table_id,
+                section_number = excluded.section_number,
+                version_number = excluded.version_number,
+                raw_descriptor_loop = excluded.raw_descriptor_loop,
+                raw_short_event_descriptor = excluded.raw_short_event_descriptor,
+                raw_extended_event_descriptor = excluded.raw_extended_event_descriptor,
+                raw_content_descriptor = excluded.raw_content_descriptor,
+                duration_seconds = excluded.duration_seconds,
+                start_time = excluded.start_time,
+                end_time = excluded.end_time,
+                updated_at = excluded.updated_at;
+            """;
+
+        var pNid = cmd.Parameters.Add("$nid", SqliteType.Integer);
+        var pTsid = cmd.Parameters.Add("$tsid", SqliteType.Integer);
+        var pSid = cmd.Parameters.Add("$sid", SqliteType.Integer);
+        var pEid = cmd.Parameters.Add("$eid", SqliteType.Integer);
+        var pSvc = cmd.Parameters.Add("$svc", SqliteType.Text);
+        var pTitle = cmd.Parameters.Add("$title", SqliteType.Text);
+        var pDesc = cmd.Parameters.Add("$desc", SqliteType.Text);
+        var pGenre = cmd.Parameters.Add("$genre", SqliteType.Text);
+        var pGenreCodes = cmd.Parameters.Add("$genreCodes", SqliteType.Text);
+        var pTableId = cmd.Parameters.Add("$tableId", SqliteType.Integer);
+        var pSectionNumber = cmd.Parameters.Add("$sectionNumber", SqliteType.Integer);
+        var pVersionNumber = cmd.Parameters.Add("$versionNumber", SqliteType.Integer);
+        var pRawDescriptorLoop = cmd.Parameters.Add("$rawDescriptorLoop", SqliteType.Text);
+        var pRawShort = cmd.Parameters.Add("$rawShortEventDescriptor", SqliteType.Text);
+        var pRawExtended = cmd.Parameters.Add("$rawExtendedEventDescriptor", SqliteType.Text);
+        var pRawContent = cmd.Parameters.Add("$rawContentDescriptor", SqliteType.Text);
+        var pDuration = cmd.Parameters.Add("$dur", SqliteType.Integer);
+        var pStart = cmd.Parameters.Add("$start", SqliteType.Text);
+        var pEnd = cmd.Parameters.Add("$end", SqliteType.Text);
+        var pUpdatedAt = cmd.Parameters.Add("$updAt", SqliteType.Text);
 
         foreach (var rawEvent in events)
         {
             var ev = NormalizeEventForStorage(rawEvent);
             if (!string.IsNullOrWhiteSpace(ev.RawShortEventDescriptorHex)) incomingRawShortPresent++;
             if (!string.IsNullOrWhiteSpace(ev.RawExtendedEventDescriptorHex)) incomingRawExtendedPresent++;
+            if (!string.IsNullOrWhiteSpace(ev.RawContentDescriptorHex)) incomingRawContentPresent++;
 
-            var existingRawShort = string.Empty;
-            var existingRawExtended = string.Empty;
-            var existingRawContent = string.Empty;
-            using (var existingCmd = con.CreateCommand())
-            {
-                existingCmd.Transaction = tx;
-                existingCmd.CommandText = """
-                    SELECT raw_short_event_descriptor, raw_extended_event_descriptor, raw_content_descriptor
-                    FROM epg_events
-                    WHERE network_id = $nid AND transport_stream_id = $tsid AND service_id = $sid AND event_id = $eid
-                    LIMIT 1;
-                    """;
-                existingCmd.Parameters.AddWithValue("$nid", ev.NetworkId);
-                existingCmd.Parameters.AddWithValue("$tsid", ev.TransportStreamId);
-                existingCmd.Parameters.AddWithValue("$sid", ev.ServiceId);
-                existingCmd.Parameters.AddWithValue("$eid", ev.EventId);
-                using var existingReader = existingCmd.ExecuteReader();
-                if (existingReader.Read())
-                {
-                    existingRows++;
-                    existingRawShort = existingReader.IsDBNull(0) ? string.Empty : existingReader.GetString(0);
-                    existingRawExtended = existingReader.IsDBNull(1) ? string.Empty : existingReader.GetString(1);
-                    existingRawContent = existingReader.IsDBNull(2) ? string.Empty : existingReader.GetString(2);
-                }
-            }
-
-            var incomingRawShortBlank = string.IsNullOrWhiteSpace(ev.RawShortEventDescriptorHex);
-            var incomingRawExtendedBlank = string.IsNullOrWhiteSpace(ev.RawExtendedEventDescriptorHex);
-            var incomingRawContentBlank = string.IsNullOrWhiteSpace(ev.RawContentDescriptorHex);
-            var existingRawShortPresent = !string.IsNullOrWhiteSpace(existingRawShort);
-            var existingRawExtendedPresent = !string.IsNullOrWhiteSpace(existingRawExtended);
-            var existingRawContentPresent = !string.IsNullOrWhiteSpace(existingRawContent);
-            if (incomingRawShortBlank && existingRawShortPresent)
-            {
-                incomingRawShortBlankExistingRawShortPresent++;
-                tableMetadataPreservedForExistingTitle++;
-                if (!incomingRawExtendedBlank)
-                {
-                    incomingExtendedOnlyExistingRawShortPresent++;
-                    sameEventExtendedMergedPreservingExistingTitle++;
-                }
-            }
-            if (incomingRawExtendedBlank && existingRawExtendedPresent) incomingRawExtendedBlankExistingRawExtendedPresent++;
-            if (incomingRawContentBlank && existingRawContentPresent) incomingRawContentBlankExistingRawContentPresent++;
-
-            using var cmd = con.CreateCommand();
-            cmd.Transaction = tx;
-            cmd.CommandText = """
-                INSERT INTO epg_events (
-                    network_id, transport_stream_id, service_id, event_id,
-                    service_name, title, description,
-                    genre, genre_codes, table_id, section_number, version_number,
-                    raw_descriptor_loop, raw_short_event_descriptor, raw_extended_event_descriptor, raw_content_descriptor,
-                    duration_seconds, start_time, end_time, updated_at)
-                VALUES (
-                    $nid, $tsid, $sid, $eid,
-                    $svc, $title, $desc,
-                    $genre, $genreCodes, $tableId, $sectionNumber, $versionNumber,
-                    $rawDescriptorLoop, $rawShortEventDescriptor, $rawExtendedEventDescriptor, $rawContentDescriptor,
-                    $dur, $start, $end, $updAt)
-                ON CONFLICT(network_id, transport_stream_id, service_id, event_id) DO UPDATE SET
-                    service_name = excluded.service_name,
-                    title = excluded.title,
-                    description = excluded.description,
-                    genre = excluded.genre,
-                    genre_codes = excluded.genre_codes,
-                    table_id = excluded.table_id,
-                    section_number = excluded.section_number,
-                    version_number = excluded.version_number,
-                    raw_descriptor_loop = excluded.raw_descriptor_loop,
-                    raw_short_event_descriptor = excluded.raw_short_event_descriptor,
-                    raw_extended_event_descriptor = excluded.raw_extended_event_descriptor,
-                    raw_content_descriptor = excluded.raw_content_descriptor,
-                    duration_seconds = excluded.duration_seconds,
-                    start_time = excluded.start_time,
-                    end_time = excluded.end_time,
-                    updated_at = excluded.updated_at;
-                """;
-
-            cmd.Parameters.AddWithValue("$nid",        ev.NetworkId);
-            cmd.Parameters.AddWithValue("$tsid",       ev.TransportStreamId);
-            cmd.Parameters.AddWithValue("$sid",        ev.ServiceId);
-            cmd.Parameters.AddWithValue("$eid",        ev.EventId);
-            cmd.Parameters.AddWithValue("$svc",        ev.ServiceName);
-            cmd.Parameters.AddWithValue("$title",      ev.Title);
-            cmd.Parameters.AddWithValue("$desc",       ev.Description);
-            cmd.Parameters.AddWithValue("$genre",      ev.Genre);
-            cmd.Parameters.AddWithValue("$genreCodes", ev.GenreCodes);
-            cmd.Parameters.AddWithValue("$tableId", ev.TableId);
-            cmd.Parameters.AddWithValue("$sectionNumber", ev.SectionNumber);
-            cmd.Parameters.AddWithValue("$versionNumber", ev.VersionNumber);
-            cmd.Parameters.AddWithValue("$rawDescriptorLoop", ev.RawDescriptorLoopHex);
-            cmd.Parameters.AddWithValue("$rawShortEventDescriptor", ev.RawShortEventDescriptorHex);
-            cmd.Parameters.AddWithValue("$rawExtendedEventDescriptor", ev.RawExtendedEventDescriptorHex);
-            cmd.Parameters.AddWithValue("$rawContentDescriptor", ev.RawContentDescriptorHex);
-            cmd.Parameters.AddWithValue("$dur",        ev.DurationSeconds);
-            cmd.Parameters.AddWithValue("$start",      ev.Start.ToString("O"));
-            cmd.Parameters.AddWithValue("$end",        ev.End.ToString("O"));
-            cmd.Parameters.AddWithValue("$updAt",      now);
+            pNid.Value = (int)ev.NetworkId;
+            pTsid.Value = (int)ev.TransportStreamId;
+            pSid.Value = (int)ev.ServiceId;
+            pEid.Value = (int)ev.EventId;
+            pSvc.Value = ev.ServiceName;
+            pTitle.Value = ev.Title;
+            pDesc.Value = ev.Description;
+            pGenre.Value = ev.Genre;
+            pGenreCodes.Value = ev.GenreCodes;
+            pTableId.Value = (int)ev.TableId;
+            pSectionNumber.Value = (int)ev.SectionNumber;
+            pVersionNumber.Value = (int)ev.VersionNumber;
+            pRawDescriptorLoop.Value = ev.RawDescriptorLoopHex;
+            pRawShort.Value = ev.RawShortEventDescriptorHex;
+            pRawExtended.Value = ev.RawExtendedEventDescriptorHex;
+            pRawContent.Value = ev.RawContentDescriptorHex;
+            pDuration.Value = ev.DurationSeconds;
+            pStart.Value = ev.Start.ToString("O");
+            pEnd.Value = ev.End.ToString("O");
+            pUpdatedAt.Value = now;
             cmd.ExecuteNonQuery();
             count++;
         }
 
-        LastUpsertMergeStats = new EpgUpsertMergeStats(
+        var stats = new EpgUpsertStorageStats(
             count,
-            existingRows,
-            incomingRawShortBlankExistingRawShortPresent,
-            incomingRawExtendedBlankExistingRawExtendedPresent,
-            incomingRawContentBlankExistingRawContentPresent,
-            incomingExtendedOnlyExistingRawShortPresent,
-            sameEventExtendedMergedPreservingExistingTitle,
-            tableMetadataPreservedForExistingTitle,
             incomingRawShortPresent,
-            incomingRawExtendedPresent);
-
-        tx.Commit();
-        return count;
+            incomingRawExtendedPresent,
+            incomingRawContentPresent);
+        return new EpgUpsertResult(count, stats);
     }
 
-    /// <summary>
-    /// 今回取得に成功した service/time range を正本として、同一取得スコープ内に残る旧 event 行を退場させる。
-    /// 値の補完・タイトル合成・予約タイトル借用は行わない。
-    /// </summary>
-    public EpgStaleRetireStats RetireStaleEventsForCapturedScope(IEnumerable<EpgEvent> capturedEvents)
+    private static EpgStaleRetireStats RetireStaleEventsForCapturedScopeCore(
+        SqliteConnection con,
+        SqliteTransaction tx,
+        IEnumerable<EpgEvent> capturedEvents)
     {
+        // Stale retirement is an identity/time-range operation only. Do not normalize or
+        // mutate the caller-owned event instances here; the same capture objects are still
+        // consumed by post-import logging and notification paths after this method returns.
         var normalized = capturedEvents
             .Where(e => e.Start != DateTime.MinValue && e.End != DateTime.MinValue && e.End > e.Start)
-            .Select(NormalizeEventForStorage)
             .ToList();
         if (normalized.Count == 0) return EpgStaleRetireStats.Empty;
 
@@ -202,8 +203,6 @@ public sealed class EpgStore
             .GroupBy(e => new { e.NetworkId, e.TransportStreamId, e.ServiceId })
             .ToList();
 
-        using var con = db.Open();
-        using var tx = con.BeginTransaction();
         var deleted = 0;
         DateTime? scopeStart = null;
         DateTime? scopeEnd = null;
@@ -247,21 +246,37 @@ public sealed class EpgStore
             deleted += cmd.ExecuteNonQuery();
         }
 
-        tx.Commit();
         return new EpgStaleRetireStats(groups.Count, normalized.Count, deleted, scopeStart, scopeEnd);
     }
 
     private static EpgEvent NormalizeEventForStorage(EpgEvent source)
     {
-        source.Title = string.Empty;
-        source.Description = string.Empty;
-        source.Genre = source.Genre ?? string.Empty;
-        source.GenreCodes = source.GenreCodes ?? string.Empty;
-        source.RawDescriptorLoopHex = source.RawDescriptorLoopHex ?? string.Empty;
-        source.RawShortEventDescriptorHex = source.RawShortEventDescriptorHex ?? string.Empty;
-        source.RawExtendedEventDescriptorHex = source.RawExtendedEventDescriptorHex ?? string.Empty;
-        source.RawContentDescriptorHex = source.RawContentDescriptorHex ?? string.Empty;
-        return source;
+        // Storage normalization must never mutate the capture-owned event instance.
+        // The same raw event collection is consumed after Upsert by stale-authority
+        // selection, diagnostics and post-import notification paths.
+        return new EpgEvent
+        {
+            NetworkId = source.NetworkId,
+            TransportStreamId = source.TransportStreamId,
+            ServiceId = source.ServiceId,
+            EventId = source.EventId,
+            ServiceName = source.ServiceName ?? string.Empty,
+            Title = string.Empty,
+            Description = string.Empty,
+            Genre = source.Genre ?? string.Empty,
+            GenreCodes = source.GenreCodes ?? string.Empty,
+            TableId = source.TableId,
+            SectionNumber = source.SectionNumber,
+            VersionNumber = source.VersionNumber,
+            RawDescriptorLoopHex = source.RawDescriptorLoopHex ?? string.Empty,
+            RawShortEventDescriptorHex = source.RawShortEventDescriptorHex ?? string.Empty,
+            RawExtendedEventDescriptorHex = source.RawExtendedEventDescriptorHex ?? string.Empty,
+            RawContentDescriptorHex = source.RawContentDescriptorHex ?? string.Empty,
+            DurationSeconds = source.DurationSeconds,
+            Start = source.Start,
+            End = source.End,
+            UpdatedAt = source.UpdatedAt
+        };
     }
 
     // ─── 読み取り ────────────────────────────────────────────────
@@ -327,6 +342,50 @@ public sealed class EpgStore
         cmd.Parameters.AddWithValue("$sid",  serviceId);
         cmd.Parameters.AddWithValue("$eid",  eventId);
         return ReadEvents(cmd).FirstOrDefault();
+    }
+
+    /// <summary>指定された放送イベントキーをまとめて取得する。SQLiteのパラメータ上限を避けるため分割実行する。</summary>
+    public IReadOnlyList<EpgEvent> GetByEventKeys(
+        IReadOnlyCollection<(ushort NetworkId, ushort TransportStreamId, ushort ServiceId, ushort EventId)> keys)
+    {
+        if (keys.Count == 0) return Array.Empty<EpgEvent>();
+
+        const int keysPerQuery = 200; // 4 parameters/key; safely below SQLite's common 999 parameter limit.
+        var uniqueKeys = keys.Distinct().ToArray();
+        var result = new List<EpgEvent>(uniqueKeys.Length);
+
+        for (var offset = 0; offset < uniqueKeys.Length; offset += keysPerQuery)
+        {
+            var batch = uniqueKeys.Skip(offset).Take(keysPerQuery).ToArray();
+            using var con = db.Open();
+            using var cmd = con.CreateCommand();
+
+            var predicates = new string[batch.Length];
+            for (var i = 0; i < batch.Length; i++)
+            {
+                var key = batch[i];
+                predicates[i] = $"(network_id = $nid{i} AND transport_stream_id = $tsid{i} AND service_id = $sid{i} AND event_id = $eid{i})";
+                cmd.Parameters.AddWithValue($"$nid{i}", key.NetworkId);
+                cmd.Parameters.AddWithValue($"$tsid{i}", key.TransportStreamId);
+                cmd.Parameters.AddWithValue($"$sid{i}", key.ServiceId);
+                cmd.Parameters.AddWithValue($"$eid{i}", key.EventId);
+            }
+
+            cmd.CommandText = $"""
+                SELECT network_id, transport_stream_id, service_id, event_id,
+                       service_name, title, description,
+                       genre, genre_codes, table_id, section_number, version_number,
+                       raw_descriptor_loop, raw_short_event_descriptor, raw_extended_event_descriptor, raw_content_descriptor,
+                       duration_seconds, start_time, end_time, updated_at
+                FROM epg_events
+                WHERE {string.Join(" OR ", predicates)}
+                ORDER BY start_time;
+                """;
+
+            result.AddRange(ReadEvents(cmd));
+        }
+
+        return result;
     }
 
     /// <summary>キーワード・チャンネル・曜日・時間帯で番組を検索する。</summary>
@@ -427,7 +486,10 @@ public sealed class EpgStore
         using var cmd = con.CreateCommand();
         cmd.CommandText = "DELETE FROM epg_events WHERE end_time < $before;";
         cmd.Parameters.AddWithValue("$before", before.ToString("O"));
-        return cmd.ExecuteNonQuery();
+        var deleted = cmd.ExecuteNonQuery();
+        if (deleted > 0)
+            Interlocked.Increment(ref projectionRevision);
+        return deleted;
     }
 
 

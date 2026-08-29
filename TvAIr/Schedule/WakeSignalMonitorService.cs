@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using TvAIr.Core;
 using TvAIr.Epg;
@@ -14,17 +14,30 @@ public sealed class WakeSignalMonitorService : BackgroundService
     private readonly LogRepository _log;
     private readonly EpgScheduler _epgScheduler;
     private readonly ReservationAllocationRouteService _allocationRoute;
+    private readonly SystemSleepInhibitionService _sleepInhibition;
     private readonly string _signalDir;
     private readonly HashSet<string> _processed = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _systemEpgHandoffGate = new();
+    private IDisposable? _systemEpgHandoffLease;
+    private string _systemEpgHandoffSlotId = string.Empty;
+    private DateTime _systemEpgHandoffDeadline;
+    private DateTime _systemEpgHandoffScheduledStart;
+
+    // The handoff is intentionally short-lived.  Once Scheduler.Daily has acquired its own
+    // SystemRequired lease we release immediately; if it never starts, this deadline guarantees
+    // that a stale wake signal can never keep the PC awake indefinitely.
+    private static readonly TimeSpan SystemEpgHandoffGrace = TimeSpan.FromMinutes(2);
 
     public WakeSignalMonitorService(
         LogRepository log,
         EpgScheduler epgScheduler,
-        ReservationAllocationRouteService allocationRoute)
+        ReservationAllocationRouteService allocationRoute,
+        SystemSleepInhibitionService sleepInhibition)
     {
         _log = log;
         _epgScheduler = epgScheduler;
         _allocationRoute = allocationRoute;
+        _sleepInhibition = sleepInhibition;
         _signalDir = Path.Combine(AppContext.BaseDirectory, "runtime", "wake-signals");
     }
 
@@ -36,7 +49,12 @@ public sealed class WakeSignalMonitorService : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            try { ProcessPendingSignals(); }
+            try
+            {
+                MaintainSystemEpgWakeHandoff();
+                ProcessPendingSignals();
+                MaintainSystemEpgWakeHandoff();
+            }
             catch (Exception ex)
             {
                 _log.Add("WAKE_SIGNAL", "MONITOR_ERROR",
@@ -46,11 +64,18 @@ public sealed class WakeSignalMonitorService : BackgroundService
             try { await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken); }
             catch (OperationCanceledException) { break; }
         }
+
+        ReleaseSystemEpgWakeHandoff("monitor_stopping");
     }
 
     private void ProcessPendingSignals()
     {
         if (!Directory.Exists(_signalDir)) return;
+
+        // Long-run ownership: _processed only suppresses duplicate handling while a signal file still exists.
+        // Successfully deleted signal paths are no longer live ownership and must not accumulate for the
+        // lifetime of the host process. This does not change signal cadence, validation, or allocation.
+        _processed.RemoveWhere(path => !File.Exists(path));
 
         foreach (var file in Directory.EnumerateFiles(_signalDir, "*.signal").OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
         {
@@ -90,6 +115,11 @@ public sealed class WakeSignalMonitorService : BackgroundService
             _log.Add("WAKE_SIGNAL", "RECEIVED",
                 $"kind={kind} at={signal.AtText} generation={ValueOrLegacy(signal.Generation)} slotId={signal.SlotId} reservationId={signal.ReservationId} sourcePid={signal.SourcePid} file={Path.GetFileName(file)} action=merge_existing_instance rule=release_contract");
 
+            // A WAKE task may cover REC/PRE_EPG/SYSTEM_EPG together.  Only an active slot whose
+            // authoritative coverage explicitly contains SYSTEM_EPG may bridge wake -> scheduled
+            // EPG.  This prevents ordinary recording wake signals from acquiring this lease.
+            TryAcquireSystemEpgWakeHandoff(signal);
+
             try
             {
                 _epgScheduler.NotifyWakeSignal(kind, signal.AtText, "WakeSignalMonitor");
@@ -124,6 +154,167 @@ public sealed class WakeSignalMonitorService : BackgroundService
             }
         }
     }
+
+    private void TryAcquireSystemEpgWakeHandoff(WakeSignal signal)
+    {
+        var coverage = ReadSystemEpgCoverage(signal.SlotId);
+        if (coverage is null)
+            return;
+
+        var now = DateTime.Now;
+        var deadline = coverage.ScheduledStart + SystemEpgHandoffGrace;
+        if (now >= deadline)
+        {
+            _log.Add("SYSTEM_EPG_WAKE_HANDOFF", "SKIPPED",
+                $"result=SKIPPED slotId={Safe(signal.SlotId)} scheduledStart={coverage.ScheduledStart:O} deadline={deadline:O} reason=deadline_already_passed rule=scheduled_epg_wake_power_handoff_contract");
+            return;
+        }
+
+        lock (_systemEpgHandoffGate)
+        {
+            if (_systemEpgHandoffLease is not null
+                && string.Equals(_systemEpgHandoffSlotId, signal.SlotId, StringComparison.OrdinalIgnoreCase))
+            {
+                _systemEpgHandoffDeadline = deadline;
+                _systemEpgHandoffScheduledStart = coverage.ScheduledStart;
+                return;
+            }
+
+            ReleaseSystemEpgWakeHandoffLocked("superseded_by_active_system_epg_slot");
+
+            var generation = coverage.ScheduledStart.Ticks;
+            if (!_sleepInhibition.TryAcquire(
+                    owner: "WakeSignalMonitor.SYSTEM_EPG",
+                    operation: "SYSTEM_EPG_WAKE_HANDOFF",
+                    generation: generation,
+                    out var lease,
+                    out var error)
+                || lease is null)
+            {
+                _log.Add("SYSTEM_EPG_WAKE_HANDOFF", "ACQUIRE_FAILED",
+                    $"result=FAILED slotId={Safe(signal.SlotId)} scheduledStart={coverage.ScheduledStart:O} deadline={deadline:O} reason={Safe(error)} action=leave_existing_scheduler_contract_unchanged rule=scheduled_epg_wake_power_handoff_contract");
+                return;
+            }
+
+            _systemEpgHandoffLease = lease;
+            _systemEpgHandoffSlotId = signal.SlotId;
+            _systemEpgHandoffScheduledStart = coverage.ScheduledStart;
+            _systemEpgHandoffDeadline = deadline;
+            _log.Add("SYSTEM_EPG_WAKE_HANDOFF", "ACQUIRED",
+                $"result=ACQUIRED slotId={Safe(signal.SlotId)} scheduledStart={coverage.ScheduledStart:O} deadline={deadline:O} release=scheduled_daily_power_owner_or_deadline_or_plan_change scope=SYSTEM_EPG_only rule=scheduled_epg_wake_power_handoff_contract");
+        }
+    }
+
+    private void MaintainSystemEpgWakeHandoff()
+    {
+        lock (_systemEpgHandoffGate)
+        {
+            if (_systemEpgHandoffLease is null)
+                return;
+
+            if (_epgScheduler.HasActiveScheduledDailyPowerOwner())
+            {
+                ReleaseSystemEpgWakeHandoffLocked("scheduled_daily_power_owner_active");
+                return;
+            }
+
+            var currentCoverage = ReadSystemEpgCoverage(_systemEpgHandoffSlotId);
+            if (currentCoverage is null
+                || currentCoverage.ScheduledStart != _systemEpgHandoffScheduledStart)
+            {
+                ReleaseSystemEpgWakeHandoffLocked("active_wake_plan_changed");
+                return;
+            }
+
+            if (DateTime.Now >= _systemEpgHandoffDeadline)
+                ReleaseSystemEpgWakeHandoffLocked("deadline_elapsed_without_scheduled_run");
+        }
+    }
+
+    private void ReleaseSystemEpgWakeHandoff(string reason)
+    {
+        lock (_systemEpgHandoffGate)
+            ReleaseSystemEpgWakeHandoffLocked(reason);
+    }
+
+    private void ReleaseSystemEpgWakeHandoffLocked(string reason)
+    {
+        var lease = _systemEpgHandoffLease;
+        if (lease is null)
+            return;
+
+        var slotId = _systemEpgHandoffSlotId;
+        var scheduledStart = _systemEpgHandoffScheduledStart;
+        var deadline = _systemEpgHandoffDeadline;
+        _systemEpgHandoffLease = null;
+        _systemEpgHandoffSlotId = string.Empty;
+        _systemEpgHandoffScheduledStart = default;
+        _systemEpgHandoffDeadline = default;
+
+        try { lease.Dispose(); }
+        finally
+        {
+            _log.Add("SYSTEM_EPG_WAKE_HANDOFF", "RELEASED",
+                $"result=RELEASED slotId={Safe(slotId)} scheduledStart={(scheduledStart == default ? "-" : scheduledStart.ToString("O"))} deadline={(deadline == default ? "-" : deadline.ToString("O"))} reason={Safe(reason)} rule=scheduled_epg_wake_power_handoff_contract");
+        }
+    }
+
+    private static SystemEpgWakeCoverage? ReadSystemEpgCoverage(string? slotId)
+    {
+        var normalizedSlotId = (slotId ?? string.Empty).Trim();
+        if (normalizedSlotId.Length == 0)
+            return null;
+
+        try
+        {
+            var file = Path.Combine(AppContext.BaseDirectory, "runtime", "wake-active-coverage.txt");
+            if (!File.Exists(file))
+                return null;
+
+            foreach (var line in File.ReadLines(file))
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                    continue;
+
+                string? task = null;
+                string? systemEpgStart = null;
+                string? covers = null;
+                foreach (var rawPart in line.Split(';'))
+                {
+                    var part = rawPart.Trim();
+                    var eq = part.IndexOf('=');
+                    if (eq <= 0) continue;
+                    var key = part[..eq].Trim();
+                    var value = part[(eq + 1)..].Trim();
+                    if (key.Equals("task", StringComparison.OrdinalIgnoreCase)) task = value;
+                    else if (key.Equals("systemEpgStart", StringComparison.OrdinalIgnoreCase)) systemEpgStart = value;
+                    else if (key.Equals("covers", StringComparison.OrdinalIgnoreCase)) covers = value;
+                }
+
+                if (!string.Equals(task, normalizedSlotId, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (string.IsNullOrWhiteSpace(covers)
+                    || !covers.Contains(":SYSTEM_EPG:", StringComparison.OrdinalIgnoreCase))
+                    return null;
+                if (string.IsNullOrWhiteSpace(systemEpgStart)
+                    || systemEpgStart == "-"
+                    || !DateTime.TryParse(systemEpgStart, null, System.Globalization.DateTimeStyles.RoundtripKind, out var scheduledStart))
+                    return null;
+
+                return new SystemEpgWakeCoverage(scheduledStart);
+            }
+        }
+        catch { }
+
+        return null;
+    }
+
+    private static string Safe(string? value)
+        => string.IsNullOrWhiteSpace(value)
+            ? "-"
+            : value.Replace('\r', ' ').Replace('\n', ' ').Replace(' ', '_');
+
+    private sealed record SystemEpgWakeCoverage(DateTime ScheduledStart);
 
     private static WakeSignal ReadSignal(string file)
     {

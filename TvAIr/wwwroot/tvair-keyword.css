@@ -1,25 +1,38 @@
-/*
+﻿/*
  * TvAIr page CSS module - release_contract
  * Source: keyword.html
  * Scope: page-local form/help/list styles extracted from inline <style>.
  * Safety: exact CSS relocation only; no layout/property changes intended.
  */
 
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:var(--app-bg);color:var(--text-main);height:100vh;display:flex;flex-direction:column;overflow:hidden}
 
-/* TopNav is owned by tvair-style-system.css (release_contract). */
+/* release_contract KeywordResultTableSemanticContract: keyword-result colors are page-owned; table schema, cell typography and geometry are owned by tvair-list-module.css. */
+body.tvair-keyword-page{
+  --tvair-list-page-table-min:560px;
+  --tvair-list-page-head-bg:var(--tvair-role-table-header-bg);
+  --tvair-list-page-head-fg:var(--tvair-role-table-header-fg);
+  --tvair-list-page-head-border-bottom:none;
+  --tvair-list-page-head-border-right:1px solid var(--nav-border);
+  --tvair-list-page-row-border:1px solid var(--row-border);
+  --tvair-list-page-row-hover-bg:var(--row-hover);
+  --tvair-list-page-row-disabled-bg:var(--tvair-role-action-danger-soft-bg);
+  --tvair-list-page-row-disabled-hover-bg:var(--row-hover);
+  --tvair-list-page-cell-fg:var(--tvair-content-primary);
+  --tvair-list-page-disabled-fg:var(--tvair-content-muted);
+}
+
+/* TopNav is owned by tvair-ui-modules.css (release_contract). */
 /* release_contract: list-page shell (#page-scroll/#page-menu-wrap/html/body sizing) is owned by tvair-ui-modules.css + tvair-list-module.css. This page file keeps page-local form/table content only. */
 /* ── レイアウト */
-#body{position:static;inset:auto;transform:none;width:100%;max-width:none;min-width:0;height:calc(100vh - var(--tvair-top-nav-height));margin:0;display:grid;grid-template-columns:var(--tvair-keyword-form-pane,var(--tvair-split-form-pane,340px)) minmax(0,1fr);gap:0;overflow:hidden;background:var(--app-bg)}
+#body{position:static;inset:auto;transform:none;width:100%;max-width:none;min-width:0;height:calc(100vh - var(--tvair-top-nav-height));margin:0;display:grid;grid-template-columns:var(--tvair-keyword-form-pane) minmax(0,1fr);gap:0;overflow:hidden;background:var(--app-bg)}
 
 /* ── 検索フォームパネル */
 #form-panel{width:auto;min-width:0;flex:initial;background:var(--tvair-surface-raised);border-right:1px solid var(--tvair-line-default);display:flex;flex-direction:column;overflow-y:auto;padding:10px;box-sizing:border-box}
 #form-panel::-webkit-scrollbar{width:5px}
-#form-panel::-webkit-scrollbar-thumb{background:var(--scrollbar-thumb);border-radius:3px}
+#form-panel::-webkit-scrollbar-thumb{background:var(--tvair-role-border);border-radius:3px}
 
 .form-section{margin-bottom:10px}
-.form-section-title{font-size:11px;font-weight:bold;color:var(--nav-bg);border-bottom:1px solid var(--panel-border);padding-bottom:3px;margin-bottom:6px;letter-spacing:.04em;text-transform:uppercase}
+.form-section-title{font-size:11px;font-weight:bold;color:var(--tvair-role-section-label-fg);border-bottom:1px solid var(--panel-border);padding-bottom:3px;margin-bottom:6px;letter-spacing:.04em;text-transform:uppercase}
 
 .form-row{margin-bottom:6px}
 .form-row label{display:block;font-size:11px;color:var(--tvair-content-subtle);margin-bottom:2px;font-weight:bold}
@@ -39,10 +52,10 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
 
 /* チャンネルリスト */
 /* release_contract: channel list/item geometry is owned by tvair-list-module.css. */
-.ch-list{background:var(--ch-list-bg);border:1px solid var(--ch-list-border)}
-.ch-list::-webkit-scrollbar-thumb{background:var(--scrollbar-thumb)}
+.ch-list{background:var(--tvair-role-shell-bg);border:1px solid var(--tvair-role-border)}
+.ch-list::-webkit-scrollbar-thumb{background:var(--tvair-role-border)}
 .ch-item{color:var(--text-body)}
-.ch-item:hover{background:var(--ch-hover-bg)}
+.ch-item:hover{background:var(--tvair-role-control-hover-bg)}
 .ch-item.selected{background:var(--tvair-action-primary-bg);color:var(--tvair-content-inverse)}
 
 /* 期間 */
@@ -50,30 +63,30 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
 .date-row{color:var(--label-color)}
 
 #search-btn{background:var(--tvair-action-primary-bg);color:var(--tvair-content-inverse);border:none}
-#search-btn:hover{background:var(--nav-btn-hover)}
-#search-btn:disabled{background:var(--scrollbar-thumb)}
+#search-btn:hover{background:var(--tvair-role-control-hover-bg)}
+#search-btn:disabled{background:var(--tvair-role-border)}
 
 /* ── 結果パネル */
 /* release_contract: keyword result panel/wrap/init/empty geometry and scrollbar shape are owned by tvair-list-module.css. */
 #result-summary{color:var(--tvair-content-subtle);background:var(--tvair-surface-raised);border:1px solid var(--tvair-line-default)}
 #result-summary span{color:var(--nav-bg);font-weight:bold}
 #result-wrap{background:var(--tvair-surface-raised);border:1px solid var(--tvair-line-default)}
-#result-wrap::-webkit-scrollbar-thumb{background:var(--scrollbar-thumb)}
+#result-wrap::-webkit-scrollbar-thumb{background:var(--tvair-role-border)}
 
 /* release_contract: #result-table geometry/header/row-state/cell base ownership is centralized in tvair-list-module.css. */
 
-.td-date{color:var(--tvair-content-subtle);white-space:nowrap;font-size:11px}
-.td-time{color:var(--text-dark);font-size:12px;font-weight:bold;white-space:nowrap}
-.td-ch{color:var(--label-color);white-space:nowrap;max-width:120px;overflow:hidden;text-overflow:ellipsis}
-.td-title{color:var(--list-text-strong);font-weight:bold}
-.td-title .sub{font-weight:normal;font-size:11px;color:var(--tvair-content-muted);margin-top:2px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
-.td-dur{color:var(--tvair-content-muted);font-size:11px;white-space:nowrap}
+.td-date{color:var(--tvair-content-subtle)}
+.td-time{color:var(--tvair-role-text-fg)}
+.td-ch{color:var(--label-color)}
+.td-title{color:var(--tvair-role-text-fg)}
+.td-title .sub{color:var(--tvair-content-muted)}
+.td-dur{color:var(--tvair-content-muted)}
 
 /* release_contract: .rsv-btn and keyword form utility button geometry are owned by tvair-list-module.css. */
 .rsv-btn{border:none}
-.rsv-btn-new{background:var(--rsv-new-btn);color:var(--tvair-content-inverse)}
-.rsv-btn-new:hover{background:var(--rsv-new-btn-hover)}
-.rsv-btn-done{background:var(--rsv-done-bg);color:var(--rsv-done-text);border:1px solid var(--rsv-done-border);cursor:default}
+.rsv-btn-new{background:var(--tvair-role-control-active-bg);color:var(--tvair-content-inverse)}
+.rsv-btn-new:hover{background:var(--tvair-role-action-primary-hover-bg)}
+.rsv-btn-done{background:var(--tvair-role-action-danger-soft-bg);color:var(--rsv-done-text);border:1px solid var(--tvair-role-border);cursor:default}
 
 /* 初期・空状態 */
 /* release_contract: init/empty result-state geometry is owned by tvair-list-module.css. */

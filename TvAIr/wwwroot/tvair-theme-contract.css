@@ -1,3 +1,1050 @@
+﻿/* Theme ownership
+   Shared theme values and transitional projections are owned here. */
+/* TvAIr UI foundation
+   Active UI color foundation. Page-local CSS must not own theme values.
+   Edit light/dark colors here, not page-local CSS. */
+
+/* Program-cell title accent palette
+   Final title accent palette: light keeps the earlier readable blue, dark uses a restrained
+   intermediate blue so titles stay distinct from summary/detail without the strong cyan glare. */
+
+/* Theme aliases are projections only and must not own palette values.
+   Light/dark theme selection must be explicit. Do not use broad body:not(.theme-dark)
+   selectors because implicit light matching can leak light tokens into dark modules. */
+:root,
+html[data-theme="light"],
+body.theme-light,
+body[data-theme="light"]{
+  --tvair-text-link:#0b63ce;
+  --tvair-accent-a-hover:var(--tvair-role-action-primary-hover-bg);
+  --tvair-danger-a:var(--tvair-role-action-danger-bg,#dc2626);
+  --tvair-danger-hover:var(--tvair-role-action-danger-hover-bg,#b91c1c);
+  --tvair-danger-soft:var(--tvair-role-action-danger-soft-bg,#fee2e2);
+  --tvair-success-a:#15803d;
+  --tvair-warning-a:#b45309;
+  --tvair-shadow-a:0 6px 18px rgba(15,23,42,.16);
+  --tvair-radius-a:6px;
+  --tvair-radius-b:4px;
+  color-scheme:light;
+}
+html[data-theme="dark"],
+body.theme-dark,
+body[data-theme="dark"]{
+  --tvair-danger-a:var(--tvair-role-action-danger-bg,#ef4444);
+  --tvair-danger-hover:var(--tvair-role-action-danger-hover-bg,#f87171);
+  --tvair-success-a:#22c55e;
+  --tvair-warning-a:#f59e0b;
+  --tvair-radius-a:6px;
+  --tvair-radius-b:4px;
+  color-scheme:dark;
+}
+
+/* Menu geometry roles
+   Shared geometry and z-order for hamburger, page, context, and flyout menus.
+   Visual colors remain theme-specific; modules only project these stable role values. */
+:root{
+  --tvair-role-menu-min-width:210px;
+  --tvair-role-menu-item-min-height:26px;
+  --tvair-role-menu-item-line-height:16px;
+  --tvair-role-menu-padding-y:3px;
+  --tvair-role-menu-item-pad-x:12px;
+  --tvair-role-menu-summary-pad-right:24px;
+  --tvair-role-menu-flyout-offset-y:-4px;
+  --tvair-role-menu-z:10000;
+  --tvair-role-context-menu-z:12000;
+  --tvair-role-menu-flyout-z:12010;
+}
+
+/* Semantic role tokens
+   Modules consume these role tokens. Literal color tuning stays here, never in page-local selectors. */
+:root{
+  /* Page width roles */
+
+  /* DataView column roles */
+
+  /* ProgramGuide cell text roles
+     Program-cell title accents use these semantic roles.
+     Program titles are titles first and links second.  The title uses a theme-owned
+     blue-accent title token, while summary/detail stays on subordinate text tokens. */
+  --tvair-color-program-action-fg:var(--tvair-color-action-secondary-fg);
+  --tvair-color-program-action-bg:var(--tvair-color-action-secondary-bg);
+
+}
+
+/* Foundation theme ownership
+   Variable-only theme projections moved from foundation.
+   Semantic roles are authoritative. */
+:root{
+  --tvair-module-button-primary-hover-bg:var(--tvair-role-action-primary-hover-bg,var(--tvair-accent-a-hover));
+  --tvair-module-button-primary-border:var(--tvair-role-action-primary-border,var(--tvair-module-button-primary-bg));
+  --tvair-module-button-secondary-hover-bg:var(--tvair-role-action-secondary-hover-bg,var(--tvair-bg-hover));
+  --tvair-module-button-secondary-border:var(--tvair-role-action-secondary-border,var(--tvair-border-a));
+  --tvair-module-button-danger-hover-bg:var(--tvair-role-action-danger-hover-bg,var(--tvair-danger-hover));
+  --tvair-module-button-danger-border:var(--tvair-role-action-danger-border,var(--tvair-module-button-danger-bg));
+  --tvair-module-button-disabled-border:var(--tvair-role-action-disabled-border,var(--tvair-border-b));
+}
+
+/* Transitional compatibility values still used by unresolved consumers.
+   Exact semantic-role aliases are migrated at the consumer and removed here; only values whose
+   meaning still needs a dedicated role remain until that contract is established. */
+:root{
+--nav-btn-bg:var(--tvair-bg-c);
+  
+  /* Genre standard palettes are owned by IniSettingsService. CSS only provides a neutral bootstrap until saved/default settings are projected. */
+  --genre-news:var(--tvair-role-card-bg,#f0f0f0);--genre-sports:var(--tvair-role-card-bg,#f0f0f0);--genre-info:var(--tvair-role-card-bg,#f0f0f0);--genre-drama:var(--tvair-role-card-bg,#f0f0f0);--genre-music:var(--tvair-role-card-bg,#f0f0f0);--genre-variety:var(--tvair-role-card-bg,#f0f0f0);--genre-movie:var(--tvair-role-card-bg,#f0f0f0);--genre-anime:var(--tvair-role-card-bg,#f0f0f0);--genre-docu:var(--tvair-role-card-bg,#f0f0f0);--genre-other:var(--tvair-role-card-bg,#f0f0f0);
+  /* Native WinForms dialogs use the same theme contract source; values preserve the existing native appearance. */
+  --tvair-native-dialog-panel:#FFFFFF;
+  --tvair-native-dialog-border:#C6CCD5;
+  --tvair-native-dialog-text:#20262E;
+  --tvair-native-dialog-text-sub:#48505B;
+  --tvair-native-dialog-accent:#5B6776;
+  --tvair-native-dialog-button-primary:#586270;
+  --tvair-native-dialog-button-primary-text:#FFFFFF;
+  --tvair-native-dialog-button-secondary:#F6F7F9;
+  --tvair-native-dialog-focus:#707B8A;
+  --tvair-native-dialog-menu-selected:#485260;
+  --prog-padding-v:3px;--prog-padding-h:4px;--prog-title-font-size:11px;--prog-title-lh:1.35;--prog-time-font-size:11px;--prog-time-lh:1.25;--prog-desc-font-size:10px;--prog-desc-lh:16px;--prog-title-outline-gap-rate:.7;--prog-title-outline-gap:calc(var(--prog-desc-lh) * var(--prog-title-outline-gap-rate));--prog-desc-fit-safe:6px;--prog-desc-safe:9px;--prog-footer-pad-top:3px;--prog-footer-pad-bottom:2px;--prog-btn-gap:3px;--prog-btn-h:20px;--prog-btn-min-w:42px;--tvair-program-action-guide-width:calc((var(--tvair-guide-col-w) - (2 * var(--prog-padding-h)) - var(--prog-btn-gap)) / 2);
+  --list-row-disabled:var(--tvair-bg-disabled);--list-row-disabled-hover:var(--tvair-bg-d);
+--rsv-done-text:var(--tvair-success-a);--btn-lite-bg:var(--tvair-bg-c);--btn-lite-border:var(--tvair-border-a);--btn-lite-text:var(--tvair-text-b);--btn-lite-hover:var(--tvair-bg-hover);
+}
+
+/* Color groups
+   This defines the stable group spine that modules must consume.
+   Page/local text selectors must not define ad-hoc colors; route changes through these groups. */
+:root{
+  /* Text groups */
+  --tvair-color-text-inverse:var(--tvair-text-inverse);
+  --tvair-color-text-link:var(--tvair-text-link);
+
+  /* Surface groups */
+  --tvair-color-surface-app:var(--tvair-bg-a);
+  --tvair-color-surface-subpanel:var(--tvair-bg-c);
+  --tvair-color-surface-control:var(--tvair-bg-b);
+  --tvair-color-surface-overlay:var(--tvair-bg-b);
+  --tvair-color-surface-disabled:var(--tvair-bg-disabled);
+
+  /* Border groups */
+  --tvair-color-border-strong:var(--tvair-border-a);
+  --tvair-color-border-focus:var(--tvair-focus-a);
+
+  /* Action groups */
+  --tvair-color-action-primary-bg:var(--tvair-role-action-primary-bg,var(--tvair-accent-a));
+  --tvair-color-action-primary-fg:var(--tvair-role-action-primary-fg,var(--tvair-text-inverse));
+  --tvair-color-action-primary-hover-bg:var(--tvair-role-action-primary-hover-bg,var(--tvair-accent-a-hover));
+  --tvair-color-action-secondary-bg:var(--tvair-role-action-secondary-bg,var(--tvair-bg-c));
+  --tvair-color-action-secondary-fg:var(--tvair-role-action-secondary-fg,var(--tvair-text-a));
+  --tvair-color-action-danger-bg:var(--tvair-role-action-danger-bg,var(--tvair-danger-a));
+  --tvair-color-action-danger-fg:var(--tvair-role-action-danger-fg,var(--tvair-text-inverse));
+  --tvair-color-action-danger-soft-bg:var(--tvair-role-action-danger-soft-bg,var(--tvair-danger-soft));
+  --tvair-color-action-disabled-bg:var(--tvair-role-action-disabled-bg,var(--tvair-bg-disabled));
+  --tvair-color-action-disabled-fg:var(--tvair-role-action-disabled-fg,var(--tvair-text-disabled));
+
+  /* State groups */
+  --tvair-color-state-hover-bg:var(--tvair-bg-hover);
+  --tvair-color-state-selected-bg:var(--tvair-bg-selected);
+  --tvair-color-state-active-bg:var(--tvair-accent-a);
+  --tvair-color-state-focus:var(--tvair-focus-a);
+  --tvair-color-state-disabled-bg:var(--tvair-bg-disabled);
+  --tvair-color-state-disabled-fg:var(--tvair-text-disabled);
+
+  /* Reservation state layer.
+     Reserved is a red state overlay, not a genre. The structure is theme-common; values are theme tokens. */
+  --tvair-state-reserved-overlay:rgba(255,76,76,.78);
+  --tvair-state-reserved-accent:#FF1744;
+  --tvair-state-reserved-border:#C4001A;
+  --tvair-state-reserved-surface:#FFD1D1;
+  --tvair-state-reserved-surface-hover:#FFC1C1;
+  --tvair-state-reserved-text:#230000;
+  --tvair-state-reserved-subtext:#410000;
+
+  /* Data groups */
+  --tvair-color-data-header-bg:var(--tvair-role-table-header-bg);
+  --tvair-color-data-header-fg:var(--tvair-role-table-header-fg);
+  --tvair-role-panel-header-bg:var(--tvair-role-table-header-bg);
+  --tvair-role-panel-header-fg:var(--tvair-role-table-header-fg);
+  --tvair-color-data-group-header-bg:var(--tvair-bg-d);
+  --tvair-color-data-border:var(--tvair-border-b);
+
+  /* Genre role groups.
+     base = persisted user/TvRock color, guide = ProgramGuide cell, row = list/table rows, chip = filter buttons/badges.
+     Light theme intentionally keeps the current TvRock-style standard colors for every visible genre surface. */
+  --tvair-genre-news-base:var(--genre-news);
+  --tvair-genre-sports-base:var(--genre-sports);
+  --tvair-genre-info-base:var(--genre-info);
+  --tvair-genre-drama-base:var(--genre-drama);
+  --tvair-genre-music-base:var(--genre-music);
+  --tvair-genre-variety-base:var(--genre-variety);
+  --tvair-genre-movie-base:var(--genre-movie);
+  --tvair-genre-anime-base:var(--genre-anime);
+  --tvair-genre-docu-base:var(--genre-docu);
+  --tvair-genre-other-base:var(--genre-other);
+  --tvair-genre-news-guide:var(--tvair-genre-news-base);       --tvair-genre-news-row:var(--tvair-genre-news-base);       --tvair-genre-news-chip:var(--tvair-genre-news-base);
+  --tvair-genre-sports-guide:var(--tvair-genre-sports-base);   --tvair-genre-sports-row:var(--tvair-genre-sports-base);   --tvair-genre-sports-chip:var(--tvair-genre-sports-base);
+  --tvair-genre-info-guide:var(--tvair-genre-info-base);       --tvair-genre-info-row:var(--tvair-genre-info-base);       --tvair-genre-info-chip:var(--tvair-genre-info-base);
+  --tvair-genre-drama-guide:var(--tvair-genre-drama-base);     --tvair-genre-drama-row:var(--tvair-genre-drama-base);     --tvair-genre-drama-chip:var(--tvair-genre-drama-base);
+  --tvair-genre-music-guide:var(--tvair-genre-music-base);     --tvair-genre-music-row:var(--tvair-genre-music-base);     --tvair-genre-music-chip:var(--tvair-genre-music-base);
+  --tvair-genre-variety-guide:var(--tvair-genre-variety-base); --tvair-genre-variety-row:var(--tvair-genre-variety-base); --tvair-genre-variety-chip:var(--tvair-genre-variety-base);
+  --tvair-genre-movie-guide:var(--tvair-genre-movie-base);     --tvair-genre-movie-row:var(--tvair-genre-movie-base);     --tvair-genre-movie-chip:var(--tvair-genre-movie-base);
+  --tvair-genre-anime-guide:var(--tvair-genre-anime-base);     --tvair-genre-anime-row:var(--tvair-genre-anime-base);     --tvair-genre-anime-chip:var(--tvair-genre-anime-base);
+  --tvair-genre-docu-guide:var(--tvair-genre-docu-base);       --tvair-genre-docu-row:var(--tvair-genre-docu-base);       --tvair-genre-docu-chip:var(--tvair-genre-docu-base);
+  --tvair-genre-other-guide:var(--tvair-genre-other-base);     --tvair-genre-other-row:var(--tvair-genre-other-base);     --tvair-genre-other-chip:var(--tvair-genre-other-base);
+
+  /* Genre editor geometry. */
+  --tvair-settings-genre-editor-column-min:220px;
+  --tvair-settings-genre-editor-row-gap:6px;
+  --tvair-settings-genre-editor-column-gap:18px;
+  --tvair-settings-genre-editor-row-min-height:30px;
+  --tvair-settings-genre-editor-row-padding-y:4px;
+  --tvair-settings-genre-editor-row-padding-x:6px;
+  --tvair-settings-genre-editor-label-min-width:112px;
+  --tvair-settings-genre-editor-button-width:44px;
+  --tvair-settings-genre-editor-button-height:28px;
+  --tvair-settings-genre-editor-swatch-width:34px;
+  --tvair-settings-genre-editor-swatch-height:18px;
+
+
+  /* Module bindings. Modules consume these; pages must not bypass them. */
+  --tvair-module-input-readonly-bg:var(--tvair-color-surface-subpanel);
+  --tvair-module-button-primary-bg:var(--tvair-color-action-primary-bg);
+  --tvair-module-button-primary-fg:var(--tvair-color-action-primary-fg);
+  --tvair-module-button-secondary-bg:var(--tvair-color-action-secondary-bg);
+  --tvair-module-button-secondary-fg:var(--tvair-color-action-secondary-fg);
+  --tvair-module-button-danger-bg:var(--tvair-color-action-danger-bg);
+  --tvair-module-button-danger-fg:var(--tvair-color-action-danger-fg);
+  --tvair-module-button-disabled-bg:var(--tvair-color-action-disabled-bg);
+  --tvair-module-button-disabled-fg:var(--tvair-color-action-disabled-fg);
+  --tvair-module-menu-bg:var(--tvair-color-surface-overlay);
+  --tvair-module-menu-fg:var(--tvair-color-text-main);
+  --tvair-module-menu-hover-bg:var(--tvair-color-state-hover-bg);
+  --tvair-module-menu-hover-fg:var(--tvair-color-text-main);
+}
+
+/* Module semantic roles
+   Theme values remain grouped; modules consume these roles instead of per-text color patches. */
+:root{
+  --tvair-role-page-width-full:calc(100vw - 12px);
+  --tvair-role-page-width-wide:min(1720px, calc(100vw - 18px));
+  --tvair-role-page-width-standard:min(1440px, calc(100vw - 20px));
+  --tvair-role-page-width-split:calc(100vw - 12px);
+  --tvair-color-app-notice-bg:var(--tvair-color-surface-subpanel);
+  --tvair-color-app-notice-fg:var(--tvair-color-text-main);
+  --tvair-color-app-notice-border:var(--tvair-color-border-soft);
+
+  /* List theme roles
+     Page-local list/editor CSS must consume shared dialog/list theme tokens instead
+     of embedding fallback rgba paints. Values preserve the current light/dark meaning. */
+}
+
+/* Column geometry roles */
+:root{
+  --rsv-col-channel:var(--tvair-col-service);
+  --tvair-col-service:150px;
+}
+
+/* Reservation and rule-list roles
+   Fixed columns are computed here; service is measured at runtime; title/content/keyword absorb remaining width. */
+:root{
+  --tvair-col-index:42px;
+  --tvair-col-toggle:58px;
+  --tvair-col-priority:64px;
+  --tvair-col-date:130px;
+  --tvair-col-source:84px;
+  --tvair-col-action:88px;
+  --tvair-col-result:80px;
+  --tvair-col-target:150px;
+  --rsv-col-channel-min:128px;
+
+  /* List theme roles
+     List-family width consumers use these aliases. They resolve to existing
+     column roles, so current geometry is preserved while metadata/action/state
+     ownership is explicit. */
+  --tvair-list-col-state:var(--tvair-col-toggle);
+  --tvair-list-col-action:var(--tvair-col-action);
+}
+
+/* Work-area shell roles
+   The successful ReservationArea 80vw shell is promoted to a shared work-area contract.
+   Reservation/list/search/form pages consume this; page-local width logic must not own the root width. */
+:root{
+  --tvair-work-area-width:80vw;
+  --tvair-work-area-max-width:80vw;
+  --tvair-work-area-min-width:720px;
+  --tvair-work-area-edge-fallback:calc(100vw - 8px);
+  --tvair-work-area-margin-inline:auto;
+
+  --tvair-reservation-area-width:var(--tvair-work-area-width);
+  --tvair-reservation-area-max-width:var(--tvair-work-area-max-width);
+  --tvair-reservation-area-min-width:var(--tvair-work-area-min-width);
+  --tvair-reservation-area-edge-fallback:var(--tvair-work-area-edge-fallback);
+
+  --tvair-split-form-pane:minmax(300px, 430px);
+  --tvair-program-form-pane:var(--tvair-split-form-pane);
+  --tvair-keyword-form-pane:var(--tvair-split-form-pane);
+}
+
+/* Notification geometry roles
+   Short status labels use one shared geometry contract. Page CSS may only override
+   the page-specific padding role; position and default padding remain canonical here. */
+:root{
+  --tvair-status-label-bottom:28px;
+  --tvair-list-toast-pad:9px 16px;
+}
+
+/* List density roles
+   Layout/readability contract only. Theme color tuning can replace these role values later. */
+:root{
+  --tvair-toggle-enabled-bg:var(--tvair-color-action-primary-bg);
+  --tvair-toggle-disabled-bg:var(--tvair-color-action-danger-soft-bg);
+  --tvair-toggle-border:var(--tvair-color-border-strong);
+  --tvair-col-time:132px;
+}
+
+/* Program-reservation toggle theme
+   Program Reservation keeps its enabled toggle aligned with the active tab in dark mode.
+   Theme selection owns the value; component CSS consumes only --tvair-toggle-enabled-bg. */
+html[data-theme="dark"] body.tvair-program-reservation-page,
+body.theme-dark.tvair-program-reservation-page,
+body[data-theme="dark"].tvair-program-reservation-page{
+  --tvair-toggle-enabled-bg:var(--tvair-role-tab-active-bg);
+}
+
+/* List-row theme roles
+   List rows are basic list surfaces.  Odd/even/hover are theme fundamentals, not reservation-state colors.
+   Table modules consume this list-row set so row colors have one owner. */
+:root{
+  --tvair-color-data-row-bg:var(--tvair-list-row-odd-bg);
+  --tvair-color-data-row-alt-bg:var(--tvair-list-row-even-bg);
+  --tvair-color-data-row-hover-bg:var(--tvair-list-row-hover-bg);
+}
+
+/* ProgramGuide daypart/date/broadcast-wave roles.
+   Light/dark switch at the theme root; ProgramGuide selectors only consume these tokens.
+   Broadcast wave tokens are shared by wave filter buttons and service headers. */
+:root,
+html[data-theme="light"],
+body.theme-light,
+body[data-theme="light"]{
+  --tvair-guide-wave-gr-bg:#3f638f;
+  --tvair-guide-wave-gr-border:#2f527d;
+  --tvair-guide-wave-gr-fg:#ffffff;
+  --tvair-guide-wave-bs-bg:#2f7a4f;
+  --tvair-guide-wave-bs-border:#24643f;
+  --tvair-guide-wave-bs-fg:#ffffff;
+  --tvair-guide-wave-cs-bg:#66568c;
+  --tvair-guide-wave-cs-border:#514272;
+  --tvair-guide-wave-cs-fg:#ffffff;
+  --tvair-guide-wave-off-bg:#eef2f7;
+  --tvair-guide-wave-off-border:#cbd5e1;
+  --tvair-guide-wave-off-fg:#475569;
+  --tvair-guide-grid-border:var(--tvair-overlay-scrim-weak);
+  --tvair-programguide-timeaxis-secondary-border:var(--tvair-guide-grid-border);
+}
+
+html[data-theme="dark"],
+body.theme-dark,
+body[data-theme="dark"]{
+  --tvair-guide-wave-gr-bg:#27486f;
+  --tvair-guide-wave-gr-border:#4d78a8;
+  --tvair-guide-wave-gr-fg:#f8fbff;
+  --tvair-guide-wave-bs-bg:#1f6a44;
+  --tvair-guide-wave-bs-border:#4ca76f;
+  --tvair-guide-wave-bs-fg:#f3fbfd;
+  --tvair-guide-wave-cs-bg:#493c68;
+  --tvair-guide-wave-cs-border:#7664a2;
+  --tvair-guide-wave-cs-fg:#fbf8ff;
+  --tvair-guide-wave-off-bg:#172033;
+  --tvair-guide-wave-off-border:#334155;
+  --tvair-guide-wave-off-fg:#94a3b8;
+}
+
+/* Light-theme reservation/event state colors
+   Reservation/recording/disabled/unknown are state layers, not genres.
+   Modules consume these tokens; light/dark changes only values here. */
+:root,
+html[data-theme="light"],
+body.theme-light,
+body[data-theme="light"]{
+  --tvair-reservation-scheduled-bg:#d97984;
+  --tvair-reservation-scheduled-fg:#fff7f2;
+  --tvair-reservation-scheduled-border:#b85d69;
+
+  --tvair-reservation-recording-bg:#c95f6f;
+  --tvair-reservation-recording-fg:#fff8f4;
+  --tvair-reservation-recording-border:#a74a59;
+
+
+  --tvair-event-unknown-bg:#e4e7eb;
+  --tvair-event-unknown-fg:#3f4a57;
+  --tvair-event-unknown-border:#c6ccd4;
+}
+
+html[data-theme="dark"],
+body.theme-dark,
+body[data-theme="dark"]{
+  --tvair-reservation-scheduled-bg:#6f2d38;
+  --tvair-reservation-scheduled-fg:#fff3ee;
+  --tvair-reservation-scheduled-border:#a24b5a;
+
+  --tvair-reservation-recording-bg:#823241;
+  --tvair-reservation-recording-fg:#fff7f3;
+  --tvair-reservation-recording-border:#b75666;
+
+  --tvair-event-unknown-bg:#1e2935;
+  --tvair-event-unknown-fg:#cbd5e1;
+  --tvair-event-unknown-border:#3c4858;
+}
+
+:root{  --tvair-program-gap-bg:var(--tvair-event-unknown-bg);
+}
+
+/* Theme entry points
+   Every UI module consumes this single theme entrance. Modules stay light/dark agnostic;
+   light/dark change only these role token values, not module CSS structure. */
+:root{
+  /* canonical entry aliases */
+  --tvair-theme-text-main:var(--tvair-role-page-fg);
+  --tvair-theme-text-sub:var(--tvair-role-text-soft-fg);
+  --tvair-theme-text-muted:var(--tvair-role-text-muted-fg);
+  --tvair-theme-text-disabled:var(--tvair-color-text-disabled);
+  --tvair-theme-text-inverse:var(--tvair-role-control-active-fg);
+  --tvair-theme-text-link:var(--tvair-color-text-link);
+  --tvair-theme-surface-app:var(--tvair-color-surface-app);
+  --tvair-theme-surface-page:var(--tvair-color-surface-page);
+  --tvair-theme-surface-panel:var(--tvair-role-shell-bg);
+  --tvair-theme-surface-subpanel:var(--tvair-role-panel-bg);
+  --tvair-theme-surface-control:var(--tvair-color-surface-control);
+  --tvair-theme-surface-overlay:var(--tvair-color-surface-overlay);
+  --tvair-theme-border-default:var(--tvair-role-border);
+  --tvair-theme-border-soft:var(--tvair-role-border-soft);
+  --tvair-theme-border-strong:var(--tvair-color-border-strong);
+  --tvair-theme-focus:var(--tvair-role-focus);
+  --tvair-theme-action-primary-bg:var(--tvair-color-action-primary-bg);
+  --tvair-theme-action-primary-fg:var(--tvair-color-action-primary-fg);
+  --tvair-theme-action-primary-hover-bg:var(--tvair-color-action-primary-hover-bg);
+  --tvair-theme-action-secondary-bg:var(--tvair-color-action-secondary-bg);
+  --tvair-theme-action-secondary-fg:var(--tvair-color-action-secondary-fg);
+  --tvair-theme-action-danger-bg:var(--tvair-color-action-danger-bg);
+  --tvair-theme-action-danger-fg:var(--tvair-color-action-danger-fg);
+  --tvair-theme-hover-bg:var(--tvair-role-control-hover-bg);
+  --tvair-theme-selected-bg:var(--tvair-color-state-selected-bg);
+  --tvair-theme-shadow:var(--tvair-shadow-a);
+
+  /* module entry roles: pages must consume these instead of raw colors */
+  --tvair-dialog-bg:var(--tvair-theme-surface-panel);
+  --tvair-dialog-fg:var(--tvair-theme-text-main);
+  --tvair-dialog-border:var(--tvair-role-dialog-border);
+  --tvair-dialog-head-bg:var(--tvair-role-dialog-header-bg);
+  --tvair-dialog-head-fg:var(--tvair-role-dialog-header-fg);
+  --tvair-dialog-backdrop:var(--tvair-role-dialog-backdrop);
+  --tvair-input-bg:var(--tvair-theme-surface-control);
+  --tvair-input-fg:var(--tvair-theme-text-main);
+  --tvair-input-border:var(--tvair-theme-border-default);
+  --tvair-input-disabled-bg:var(--tvair-color-state-disabled-bg);
+  --tvair-input-disabled-fg:var(--tvair-color-state-disabled-fg);
+  --tvair-program-continuation-shadow:rgba(53,90,184,.32);
+  --tvair-program-progress-bg:rgba(0,0,0,.35);
+  --tvair-guide-now-line:#ff4444;
+  --tvair-guide-now-button-bg:#2f8f6f;
+  --tvair-guide-now-button-hover-bg:#3da983;
+  --tvair-guide-now-button-border:#237456;
+  --tvair-guide-now-button-fg:#f3fff8;
+  /* ProgramGuide time-range overlays: color ownership stays theme-local. */
+  --tvair-guide-program-range-overlay:rgba(217,119,6,.16);
+  --tvair-guide-program-range-border:rgba(180,83,9,.62);
+  --tvair-guide-daily-epg-range-overlay:rgba(2,132,199,.12);
+  --tvair-guide-daily-epg-range-border:rgba(3,105,161,.52);
+
+  /* Program-cell state theme
+     ProgramGuide cells are time-axis cells, not reservation-list rows.
+     State backgrounds and semantic text roles are paired here; reservation-list tokens must not be reused. */
+  --tvair-programcell-reserved-bg:var(--tvair-state-reserved-surface);
+  --tvair-programcell-reserved-overlay:var(--tvair-state-reserved-overlay);
+  --tvair-programcell-reserved-hover-bg:var(--tvair-state-reserved-surface-hover);
+  --tvair-programcell-reserved-border:var(--tvair-state-reserved-border);
+  --tvair-programcell-reserved-accent:var(--tvair-state-reserved-accent);
+  --tvair-programcell-reserved-time-fg:var(--tvair-state-reserved-text);
+  --tvair-programcell-reserved-title-fg:var(--tvair-state-reserved-text);
+  --tvair-programcell-reserved-summary-fg:var(--tvair-state-reserved-subtext);
+  --tvair-programcell-reserved-detail-fg:var(--tvair-state-reserved-subtext);
+
+  --tvair-programcell-recording-bg:#c95f6f;
+  --tvair-programcell-recording-hover-bg:#bd5365;
+  --tvair-programcell-recording-border:#a74a59;
+  --tvair-programcell-recording-time-fg:#fffdf8;
+  --tvair-programcell-recording-title-fg:#fffdf8;
+  --tvair-programcell-recording-summary-fg:#fff1ea;
+  --tvair-programcell-recording-detail-fg:#f8d6cf;
+
+  --tvair-programcell-disabled-bg:#d5dae1;
+  --tvair-programcell-disabled-hover-bg:#cbd2dc;
+  --tvair-programcell-disabled-border:#9aa5b1;
+  --tvair-programcell-disabled-time-fg:#253044;
+  --tvair-programcell-disabled-title-fg:#172033;
+  --tvair-programcell-disabled-summary-fg:#475569;
+  --tvair-programcell-disabled-detail-fg:#64748b;
+
+  /* Program-cell projections remain internal to ProgramCell. */
+
+  /* EPG progress-panel roles
+     EPG progress panel is a tool/dialog surface. Keep panel tokens as role aliases only;
+     do not let the old fixed navy palette override light theme dialogs. */
+  --tvair-epg-panel-bg:var(--tvair-role-dialog-bg);
+  --tvair-epg-panel-head-bg:var(--tvair-role-header-bg);
+  --tvair-epg-panel-fg:var(--tvair-role-dialog-fg);
+  --tvair-epg-panel-head-fg:var(--tvair-role-header-fg);
+  --tvair-epg-panel-sub-fg:var(--tvair-role-dialog-muted-fg);
+  --tvair-epg-panel-border:var(--tvair-role-border-soft);
+  --tvair-epg-progress-track:var(--tvair-role-control-disabled-bg);
+  --tvair-epg-progress-fill:var(--tvair-role-control-active-bg);
+
+}
+
+html[data-theme="dark"],
+body.theme-dark,
+body[data-theme="dark"],
+html[data-tvair-selected-theme="dark"] body,
+body[data-tvair-selected-theme="dark"],
+body.tvair-theme-dark{
+  --tvair-dialog-backdrop:var(--tvair-role-dialog-backdrop);    --tvair-program-gap-bg:var(--tvair-event-unknown-bg);
+  --tvair-program-continuation-shadow:rgba(147,197,253,.28);
+  --tvair-program-progress-bg:rgba(255,255,255,.28);
+  --tvair-guide-now-line:#ff6b6b;
+  --tvair-guide-now-button-bg:#1e6f57;
+  --tvair-guide-now-button-hover-bg:#2a866b;
+  --tvair-guide-now-button-border:#3aa982;
+  --tvair-guide-now-button-fg:#ecfff6;
+  --tvair-guide-program-range-overlay:rgba(251,191,36,.14);
+  --tvair-guide-program-range-border:rgba(245,158,11,.58);
+  --tvair-guide-daily-epg-range-overlay:rgba(56,189,248,.12);
+  --tvair-guide-daily-epg-range-border:rgba(14,165,233,.52);
+
+
+  /* Program-cell state theme dark values */
+
+  --tvair-programcell-recording-bg:#823241;
+  --tvair-programcell-recording-hover-bg:#913a4a;
+  --tvair-programcell-recording-border:#b75666;
+  --tvair-programcell-recording-time-fg:#fff7f3;
+  --tvair-programcell-recording-title-fg:#fff7f3;
+  --tvair-programcell-recording-summary-fg:#f9d8d1;
+  --tvair-programcell-recording-detail-fg:#dfb8b0;
+
+  --tvair-programcell-disabled-bg:#26313d;
+  --tvair-programcell-disabled-hover-bg:#303c4a;
+  --tvair-programcell-disabled-border:#64748b;
+  --tvair-programcell-disabled-time-fg:#e2e8f0;
+  --tvair-programcell-disabled-title-fg:#f8fafc;
+  --tvair-programcell-disabled-summary-fg:#cbd5e1;
+  --tvair-programcell-disabled-detail-fg:#94a3b8;
+
+  --tvair-epg-panel-bg:var(--tvair-role-dialog-bg);
+  --tvair-epg-panel-head-bg:var(--tvair-role-header-bg);
+  --tvair-epg-panel-fg:var(--tvair-role-dialog-fg);
+  --tvair-epg-panel-head-fg:var(--tvair-role-header-fg);
+  --tvair-epg-panel-sub-fg:var(--tvair-role-dialog-muted-fg);
+  --tvair-epg-panel-border:var(--tvair-role-border-soft);
+  --tvair-epg-progress-track:#334155;
+  --tvair-epg-progress-fill:var(--tvair-role-focus);
+}
+
+:root{--tvair-aux-label-text:var(--tvair-theme-text-sub)}
+
+/* List, action, and log roles
+   The list module stays common; role tokens define log vs reservation behavior and remain theme-swappable. */
+:root,
+html[data-theme="light"],
+body.theme-light,
+body[data-theme="light"]{
+  --tvair-log-action-bg:var(--tvair-reservation-toolbar-bg);
+  --tvair-log-action-hover-bg:var(--tvair-reservation-toolbar-hover-bg);
+  --tvair-log-action-border:var(--tvair-reservation-toolbar-border);
+  --tvair-log-action-fg:var(--tvair-reservation-toolbar-text);
+  --tvair-log-action-danger-bg:var(--tvair-danger-soft);
+  --tvair-log-action-danger-hover-bg:#f8c7c7;
+  --tvair-log-action-danger-border:var(--tvair-danger-a);
+  --tvair-log-action-danger-fg:#7f1d1d;
+
+  --tvair-reservation-action-button-min-width:64px;
+}
+
+html[data-theme="dark"],
+body.theme-dark,
+body[data-theme="dark"]{
+  --tvair-log-action-danger-bg:#3f1d1d;
+  --tvair-log-action-danger-hover-bg:#5b2323;
+  --tvair-log-action-danger-border:#d16a7b;
+  --tvair-log-action-danger-fg:#ffe3e8;
+}
+
+/* ProgramGuide toolbar/action roles
+   One button module, role/context tokens only. */
+:root,
+html[data-theme="light"],
+body.theme-light,
+body[data-theme="light"]{
+  --tvair-program-action-state-bg:#eef2f7;
+  --tvair-program-action-state-hover-bg:#e2e8f0;
+  --tvair-program-action-state-border:#cbd5e1;
+  --tvair-program-action-state-fg:#475569;
+}
+
+html[data-theme="dark"],
+body.theme-dark,
+body[data-theme="dark"]{
+  --tvair-program-action-state-bg:#243044;
+  --tvair-program-action-state-hover-bg:#2f3d55;
+  --tvair-program-action-state-border:#55657d;
+  --tvair-program-action-state-fg:#cbd5e1;
+}
+
+/* release_contract Light theme completion role tokens.
+   Page modules consume these tokens; literal color values stay in this foundation layer. */
+:root{
+  --tvair-log-error-fg:var(--tvair-danger-a);
+  --tvair-log-warn-fg:var(--tvair-warning-a);
+  --tvair-overlay-scrim:rgba(15,23,42,.30);
+  --tvair-overlay-scrim-weak:rgba(15,23,42,.16);
+  --tvair-control-inset-highlight:rgba(255,255,255,.18);
+}
+
+/* release_contract ProgramGuideTimeAxisRole token fallbacks */
+:root{--tvair-programguide-timeaxis-primary-font-size:11px;--tvair-programguide-timeaxis-secondary-font-size:11px;}
+
+/* release_contract LightThemeRoleFinish
+   Light-theme host roles. Compatibility projections keep existing page code
+   on semantic role tokens so later dark-theme work changes values here, not per page. */
+:root{
+  --tvair-guide-date-active-bg:var(--tvair-color-state-selected-bg);
+  --tvair-guide-time-button-bg:var(--tvair-guide-timeband-late-bg);
+  --tvair-guide-time-button-fg:var(--tvair-guide-timeband-late-fg);
+  --tvair-list-row-cancelled-bg:#ded6cc;
+  --tvair-list-row-cancelled-hover-bg:#d1c7ba;
+  --tvair-list-row-cancelled-fg:#5f564e;
+  --tvair-list-row-cancelled-strong-fg:#493f37;
+  --tvair-plugin-host-bg:var(--tvair-role-plugin-host-bg);
+  --tvair-plugin-host-fg:var(--tvair-role-plugin-host-fg);
+  --tvair-plugin-host-border:var(--tvair-role-plugin-host-border);
+  --tvair-plugin-host-muted-fg:var(--tvair-role-plugin-host-muted-fg);
+  --tvair-status-info-bg:var(--tvair-color-surface-subpanel);
+  --tvair-status-info-fg:var(--tvair-color-text-sub);
+  --tvair-status-info-border:var(--tvair-color-border-soft);
+  
+  
+  --prog-state-text:var(--tvair-color-text-main);
+  --prog-state-start:var(--tvair-color-text-sub);
+  
+  
+  
+}
+
+/* release_contract DarkThemeTokenSet
+   Dark theme is a token-set swap for TvAIr host UI.  Modules must consume role tokens;
+   ProgramCell state tokens and ReservationList row tokens remain separated. */
+html[data-theme="dark"],
+body.theme-dark,
+body[data-theme="dark"]{
+  /* Common host surfaces */
+  --tvair-text-link:#93c5fd;
+  /* Program-cell title accent palette
+     Dark ProgramGuide titles stay on the ProgramCell title token path.  Generic link
+     tokens must not own the base title color even when the title is rendered as <a>. */
+  --tvair-accent-a-hover:var(--tvair-role-action-primary-hover-bg);
+  --tvair-danger-soft:var(--tvair-role-action-danger-soft-bg,#3f1d1d);
+  --tvair-shadow-a:0 8px 22px rgba(0,0,0,.42);
+
+  /* Basic list/table surfaces.  Reservation lists are lists, not ProgramGuide cells. */
+  --tvair-color-data-row-bg:var(--tvair-list-row-odd-bg);
+  --tvair-color-data-row-alt-bg:var(--tvair-list-row-even-bg);
+  --tvair-color-data-row-hover-bg:var(--tvair-list-row-hover-bg);
+  --tvair-color-data-border:var(--tvair-list-row-border);
+
+  /* ReservationList state rows: list-domain state tokens only. */
+  --tvair-list-row-cancelled-bg:#302a24;
+  --tvair-list-row-cancelled-hover-bg:#3a312a;
+  --tvair-list-row-cancelled-fg:#d9c7b7;
+  --tvair-list-row-cancelled-strong-fg:#f0dfcf;
+
+  /* ProgramGuide chrome */
+  --tvair-guide-grid-border:var(--tvair-border-a);
+  --tvair-guide-date-active-bg:#1f3653;
+  --tvair-guide-time-button-bg:#242640;
+  --tvair-guide-time-button-fg:#c8cbef;
+  --tvair-programguide-timeaxis-secondary-border:var(--tvair-guide-grid-border);
+
+  /* ProgramCell state sets: time/title remain immediately legible; body text is readable but subordinate. */
+  --tvair-state-reserved-overlay:rgba(255,72,72,.52);
+  --tvair-state-reserved-accent:#FF4F64;
+  --tvair-state-reserved-border:#FF7A8A;
+  --tvair-state-reserved-surface:#5C232C;
+  --tvair-state-reserved-surface-hover:#6A2B35;
+  --tvair-state-reserved-text:#FFF0F0;
+  --tvair-state-reserved-subtext:#FFD8D8;
+
+  /* Host shell / dialog / status surfaces */
+  --tvair-plugin-host-bg:var(--tvair-role-plugin-host-bg);
+  --tvair-plugin-host-fg:var(--tvair-role-plugin-host-fg);
+  --tvair-plugin-host-border:var(--tvair-role-plugin-host-border);
+  --tvair-plugin-host-muted-fg:var(--tvair-role-plugin-host-muted-fg);
+  --tvair-status-info-bg:var(--tvair-color-surface-subpanel);
+  --tvair-status-info-fg:var(--tvair-color-text-sub);
+  --tvair-status-info-border:var(--tvair-color-border-soft);
+  --tvair-dialog-bg:var(--tvair-color-surface-panel);
+  --tvair-dialog-fg:var(--tvair-color-text-main);
+  --tvair-dialog-border:var(--tvair-role-dialog-border);
+  --tvair-dialog-head-bg:var(--tvair-role-dialog-header-bg);
+  --tvair-dialog-head-fg:var(--tvair-role-dialog-header-fg);
+
+  
+  
+  
+  
+}
+
+/* release_contract ReservationColorContract
+   Explicit light/dark values. Row paint is owned by tvair-list-module.css;
+   subtab geometry/paint is owned by tvair-list-module.css; reservation actions and log controls remain page-owned. */
+:root,
+html[data-theme="light"],
+body.theme-light,
+body[data-theme="light"]{
+  --tvair-reservation-tab-bg:var(--tvair-role-tab-bg);
+  --tvair-reservation-tab-text:var(--tvair-role-tab-fg);
+  --tvair-reservation-tab-hover-bg:var(--tvair-role-tab-hover-bg);
+  --tvair-reservation-tab-hover-text:var(--tvair-role-tab-fg);
+  --tvair-reservation-tab-active-bg:#1769b5;
+  --tvair-reservation-tab-active-text:#ffffff;
+  --tvair-reservation-tab-border:var(--tvair-role-tab-border);
+
+  /* Reservation subtab theme roles
+     Reservation-list sub tabs use dedicated theme tokens so their selected
+     state is owned by the dedicated reservation-subtab component and does not depend on generic navigation-button repaint rules. */
+  --tvair-reservation-subtab-bg:var(--tvair-role-tab-bg);
+  --tvair-reservation-subtab-fg:var(--tvair-role-tab-fg);
+  --tvair-reservation-subtab-border:var(--tvair-role-tab-border);
+  --tvair-reservation-subtab-hover-bg:var(--tvair-role-tab-hover-bg);
+  --tvair-reservation-subtab-hover-fg:var(--tvair-role-tab-fg);
+  --tvair-reservation-subtab-active-bg:#1769b5;
+  --tvair-reservation-subtab-active-fg:#ffffff;
+  --tvair-reservation-subtab-active-border:#0f4f8d;
+  --tvair-reservation-subtab-active-underline:#f6c244;
+
+  --tvair-reservation-list-row-odd-bg:var(--tvair-role-table-row-bg);
+  --tvair-reservation-list-row-even-bg:var(--tvair-role-table-row-alt-bg);
+  --tvair-reservation-list-row-hover-bg:var(--tvair-role-table-row-hover-bg);
+  --tvair-reservation-list-row-disabled-bg:#d8d1c6;
+  --tvair-reservation-list-row-disabled-hover-bg:#cdc4b8;
+  --tvair-reservation-list-row-cancelled-bg:#e8dfd6;
+  --tvair-reservation-list-row-cancelled-hover-bg:#ddd1c6;
+  --tvair-reservation-row-conflict-bg:#edf0f4;
+  --tvair-reservation-row-conflict-hover-bg:#e1e7ef;
+  --tvair-reservation-row-conflict-text:#b4232a;
+  --tvair-reservation-row-conflict-border:#d86b72;
+  --tvair-reservation-row-missing-duplicate-conflict-bg:#eff3f7;
+  --tvair-reservation-row-missing-duplicate-conflict-hover-bg:#dbe7f3;
+  --tvair-reservation-row-missing-duplicate-conflict-text:#0f172a;
+  --tvair-reservation-row-missing-duplicate-conflict-border:#4f83b7;
+  --tvair-reservation-conflict-label-tuner-fg:#b4232a;
+  --tvair-reservation-conflict-label-missing-duplicate-fg:#1769b5;
+  --tvair-reservation-disabled-bg:var(--tvair-role-reservation-disabled-bg);
+  --tvair-reservation-disabled-border:var(--tvair-role-border);
+  --tvair-reservation-cancelled-text:#6f5b4b;
+  --tvair-reservation-cancelled-strong-text:#4f3f35;
+  --tvair-reservation-cancelled-left-border:#b08968;
+
+
+}
+
+html[data-theme="dark"],
+body.theme-dark,
+body[data-theme="dark"],
+html[data-tvair-selected-theme="dark"] body,
+body[data-tvair-selected-theme="dark"],
+body.tvair-theme-dark{
+  --tvair-reservation-tab-bg:var(--tvair-role-tab-bg);
+  --tvair-reservation-tab-text:var(--tvair-role-tab-fg);
+  --tvair-reservation-tab-hover-bg:var(--tvair-role-tab-hover-bg);
+  --tvair-reservation-tab-hover-text:var(--tvair-role-tab-fg);
+  --tvair-reservation-tab-active-bg:#2563eb;
+  --tvair-reservation-tab-active-text:#ffffff;
+  --tvair-reservation-tab-border:var(--tvair-role-tab-border);
+
+  /* Reservation subtab theme roles */
+  --tvair-reservation-subtab-bg:var(--tvair-role-tab-bg);
+  --tvair-reservation-subtab-fg:var(--tvair-role-tab-fg);
+  --tvair-reservation-subtab-border:var(--tvair-role-tab-border);
+  --tvair-reservation-subtab-hover-bg:var(--tvair-role-tab-hover-bg);
+  --tvair-reservation-subtab-hover-fg:var(--tvair-role-tab-fg);
+  --tvair-reservation-subtab-active-bg:#2f7db2;
+  --tvair-reservation-subtab-active-fg:#ffffff;
+  --tvair-reservation-subtab-active-border:#6aa4d1;
+  --tvair-reservation-subtab-active-underline:#f6c244;
+
+  --tvair-reservation-list-row-odd-bg:var(--tvair-role-table-row-bg);
+  --tvair-reservation-list-row-even-bg:var(--tvair-role-table-row-alt-bg);
+  --tvair-reservation-list-row-hover-bg:var(--tvair-role-table-row-hover-bg);
+  --tvair-reservation-list-row-disabled-bg:#354155;
+  --tvair-reservation-list-row-disabled-hover-bg:#425069;
+  --tvair-reservation-list-row-cancelled-bg:#302a24;
+  --tvair-reservation-list-row-cancelled-hover-bg:#3a312a;
+  --tvair-reservation-row-conflict-bg:#222a36;
+  --tvair-reservation-row-conflict-hover-bg:#2a3342;
+  --tvair-reservation-row-conflict-text:#ff8a8a;
+  --tvair-reservation-row-conflict-border:#b94a55;
+  --tvair-reservation-row-missing-duplicate-conflict-bg:#182234;
+  --tvair-reservation-row-missing-duplicate-conflict-hover-bg:#22334d;
+  --tvair-reservation-row-missing-duplicate-conflict-text:#f8fafc;
+  --tvair-reservation-row-missing-duplicate-conflict-border:#60a5fa;
+  --tvair-reservation-conflict-label-tuner-fg:#ff8a8a;
+  --tvair-reservation-conflict-label-missing-duplicate-fg:#93c5fd;
+  --tvair-reservation-disabled-bg:var(--tvair-role-reservation-disabled-bg);
+  --tvair-reservation-disabled-border:var(--tvair-role-border);
+  --tvair-reservation-cancelled-text:#d9c7b7;
+  --tvair-reservation-cancelled-strong-text:#f0dfcf;
+  --tvair-reservation-cancelled-left-border:#b08968;
+
+
+}
+
+/* release_contract ActionColorContract
+   Operation semantics only: reserve/start=blue, cancel=rose, stop=strong red,
+   enable=green, disable=neutral gray. ProgramGuide and ReservationList share this owner. */
+:root,
+html[data-theme="light"],
+body.theme-light,
+body[data-theme="light"]{
+  --tvair-reservation-action-empty-fg:#667085;
+
+  /* release_contract LightThemeActionButtonLuminanceTuning
+     Light action buttons sit on bright surfaces and genre-colored cells. Keep semantic hue,
+     reduce harsh saturation, and keep hover/active as the stronger visual step. */
+  --tvair-action-reserve-bg:#2563A8;
+  --tvair-action-reserve-hover-bg:#1D5594;
+  --tvair-action-reserve-border:#174A82;
+  --tvair-action-reserve-fg:#ffffff;
+
+  --tvair-action-record-now-live-bg:#1F7A4D;
+  --tvair-action-record-now-live-hover-bg:#166A40;
+  --tvair-action-record-now-live-border:#14532D;
+  --tvair-action-record-now-live-fg:#FFFFFF;
+  --tvair-action-record-now-bg:var(--tvair-action-record-now-live-bg);
+  --tvair-action-record-now-hover-bg:var(--tvair-action-record-now-live-hover-bg);
+  --tvair-action-record-now-border:var(--tvair-action-record-now-live-border);
+  --tvair-action-record-now-fg:var(--tvair-action-record-now-live-fg);
+
+  --tvair-action-chain-bg:#16746D;
+  --tvair-action-chain-hover-bg:#12635D;
+  --tvair-action-chain-border:#0E524D;
+  --tvair-action-chain-fg:#ffffff;
+
+  --tvair-action-cancel-bg:#FFF4F5;
+  --tvair-action-cancel-hover-bg:#FFE4E6;
+  --tvair-action-cancel-border:#E11D48;
+  --tvair-action-cancel-fg:#7F1D1D;
+
+  --tvair-action-stop-bg:#A11D3B;
+  --tvair-action-stop-hover-bg:#BE2948;
+  --tvair-action-stop-border:#7F1D1D;
+  --tvair-action-stop-fg:#ffffff;
+
+  --tvair-action-enable-bg:#1F7A3F;
+  --tvair-action-enable-hover-bg:#166534;
+  --tvair-action-enable-border:#14532D;
+  --tvair-action-enable-fg:#ffffff;
+
+  --tvair-action-disable-bg:#E6EBF2;
+  --tvair-action-disable-hover-bg:#D4DCE8;
+  --tvair-action-disable-border:#A7B3C3;
+  --tvair-action-disable-fg:#374151;
+
+  --tvair-action-disabled-bg:#D7DEE8;
+  --tvair-action-disabled-border:#AEB8C4;
+  --tvair-action-disabled-fg:#667085;
+
+  /* release_contract ProgramCellActionTokenContract.
+     Program-guide cell buttons have their own semantic tokens because they sit on genre-colored cells,
+     stay compact, and may appear side by side. Most actions inherit generic action tokens; enable/disable
+     use the approved theme-specific two-color pair with background/foreground reversed. CSS consumes these. */
+  --tvair-programcell-button-reserve-bg:var(--tvair-action-reserve-bg);
+  --tvair-programcell-button-reserve-hover-bg:var(--tvair-action-reserve-hover-bg);
+  --tvair-programcell-button-reserve-border:var(--tvair-action-reserve-border);
+  --tvair-programcell-button-reserve-fg:var(--tvair-action-reserve-fg);
+  --tvair-programcell-button-record-now-bg:var(--tvair-action-record-now-bg);
+  --tvair-programcell-button-record-now-hover-bg:var(--tvair-action-record-now-hover-bg);
+  --tvair-programcell-button-record-now-border:var(--tvair-action-record-now-border);
+  --tvair-programcell-button-record-now-fg:var(--tvair-action-record-now-fg);
+  --tvair-programcell-button-chain-bg:var(--tvair-action-chain-bg);
+  --tvair-programcell-button-chain-hover-bg:var(--tvair-action-chain-hover-bg);
+  --tvair-programcell-button-chain-border:var(--tvair-action-chain-border);
+  --tvair-programcell-button-chain-fg:var(--tvair-action-chain-fg);
+  --tvair-programcell-button-cancel-bg:var(--tvair-action-cancel-bg);
+  --tvair-programcell-button-cancel-hover-bg:var(--tvair-action-cancel-hover-bg);
+  --tvair-programcell-button-cancel-border:var(--tvair-action-cancel-border);
+  --tvair-programcell-button-cancel-fg:var(--tvair-action-cancel-fg);
+  /* Light: disable = charcoal ground / ivory text; enable = the same pair reversed. */
+  --tvair-programcell-button-disable-bg:#4E454A;
+  --tvair-programcell-button-disable-hover-bg:#4E454A;
+  --tvair-programcell-button-disable-border:#F8F4E6;
+  --tvair-programcell-button-disable-fg:#F8F4E6;
+  --tvair-programcell-button-enable-bg:#F8F4E6;
+  --tvair-programcell-button-enable-hover-bg:#F8F4E6;
+  --tvair-programcell-button-enable-border:#4E454A;
+  --tvair-programcell-button-enable-fg:#4E454A;
+  --tvair-programcell-button-stop-bg:var(--tvair-action-stop-bg);
+  --tvair-programcell-button-stop-hover-bg:var(--tvair-action-stop-hover-bg);
+  --tvair-programcell-button-stop-border:var(--tvair-action-stop-border);
+  --tvair-programcell-button-stop-fg:var(--tvair-action-stop-fg);
+  --tvair-programcell-button-conflict-bg:#f59e0b;
+  --tvair-programcell-button-conflict-hover-bg:#d97706;
+  --tvair-programcell-button-conflict-border:#92400e;
+  --tvair-programcell-button-conflict-fg:#1f2937;
+  --tvair-programcell-button-state-bg:var(--tvair-program-action-state-bg);
+  --tvair-programcell-button-state-hover-bg:var(--tvair-program-action-state-hover-bg);
+  --tvair-programcell-button-state-border:var(--tvair-program-action-state-border);
+  --tvair-programcell-button-state-fg:var(--tvair-program-action-state-fg);
+
+  --tvair-reservation-action-disabled-bg:var(--tvair-action-disabled-bg);
+  --tvair-reservation-action-disabled-border:var(--tvair-action-disabled-border);
+  --tvair-reservation-action-disabled-fg:var(--tvair-action-disabled-fg);
+}
+
+html[data-theme="dark"],
+body.theme-dark,
+body[data-theme="dark"],
+html[data-tvair-selected-theme="dark"] body,
+body[data-tvair-selected-theme="dark"],
+body.tvair-theme-dark{
+  --tvair-reservation-action-empty-fg:#a8b4c7;
+
+  /* release_contract DarkThemeActionButtonLuminanceTuning
+     Dark action buttons sit on saturated ProgramGuide cells. Keep semantic hue, lower resting luminance,
+     and reserve the brighter step for hover/focus instead of the normal state. */
+  --tvair-action-reserve-bg:#1D4F91;
+  --tvair-action-reserve-hover-bg:#2566B3;
+  --tvair-action-reserve-border:#5B8FC8;
+  --tvair-action-reserve-fg:#F3F8FF;
+
+  --tvair-action-record-now-live-bg:#0F5F46;
+  --tvair-action-record-now-live-hover-bg:#14785A;
+  --tvair-action-record-now-live-border:#3BAA80;
+  --tvair-action-record-now-live-fg:#ECFFF6;
+  --tvair-action-record-now-bg:var(--tvair-action-record-now-live-bg);
+  --tvair-action-record-now-hover-bg:var(--tvair-action-record-now-live-hover-bg);
+  --tvair-action-record-now-border:var(--tvair-action-record-now-live-border);
+  --tvair-action-record-now-fg:var(--tvair-action-record-now-live-fg);
+
+  --tvair-action-chain-bg:#0F5F59;
+  --tvair-action-chain-hover-bg:#11746C;
+  --tvair-action-chain-border:#52B7AA;
+  --tvair-action-chain-fg:#ECFEFF;
+
+  --tvair-action-cancel-bg:#431721;
+  --tvair-action-cancel-hover-bg:#5A1D2B;
+  --tvair-action-cancel-border:#D36B7A;
+  --tvair-action-cancel-fg:#FFE4E6;
+
+  --tvair-action-stop-bg:#7F1D1D;
+  --tvair-action-stop-hover-bg:#991B1B;
+  --tvair-action-stop-border:#D45D5D;
+  --tvair-action-stop-fg:#FFF5F5;
+
+  --tvair-action-enable-bg:#14532D;
+  --tvair-action-enable-hover-bg:#166534;
+  --tvair-action-enable-border:#43A365;
+  --tvair-action-enable-fg:#DCFCE7;
+
+  --tvair-action-disable-bg:#1f2937;
+  --tvair-action-disable-hover-bg:#374151;
+  --tvair-action-disable-border:#64748b;
+  --tvair-action-disable-fg:#e5e7eb;
+
+  --tvair-action-disabled-bg:#263244;
+  --tvair-action-disabled-border:#526073;
+  --tvair-action-disabled-fg:#a8b4c7;
+
+  /* release_contract ProgramCellActionTokenContract.
+     Program-guide cell buttons have their own semantic tokens because they sit on genre-colored cells,
+     stay compact, and may appear side by side. Most actions inherit generic action tokens; enable/disable
+     use the approved theme-specific two-color pair with background/foreground reversed. CSS consumes these. */
+  --tvair-programcell-button-reserve-bg:var(--tvair-action-reserve-bg);
+  --tvair-programcell-button-reserve-hover-bg:var(--tvair-action-reserve-hover-bg);
+  --tvair-programcell-button-reserve-border:var(--tvair-action-reserve-border);
+  --tvair-programcell-button-reserve-fg:var(--tvair-action-reserve-fg);
+  --tvair-programcell-button-record-now-bg:var(--tvair-action-record-now-bg);
+  --tvair-programcell-button-record-now-hover-bg:var(--tvair-action-record-now-hover-bg);
+  --tvair-programcell-button-record-now-border:var(--tvair-action-record-now-border);
+  --tvair-programcell-button-record-now-fg:var(--tvair-action-record-now-fg);
+  --tvair-programcell-button-chain-bg:var(--tvair-action-chain-bg);
+  --tvair-programcell-button-chain-hover-bg:var(--tvair-action-chain-hover-bg);
+  --tvair-programcell-button-chain-border:var(--tvair-action-chain-border);
+  --tvair-programcell-button-chain-fg:var(--tvair-action-chain-fg);
+  --tvair-programcell-button-cancel-bg:var(--tvair-action-cancel-bg);
+  --tvair-programcell-button-cancel-hover-bg:var(--tvair-action-cancel-hover-bg);
+  --tvair-programcell-button-cancel-border:var(--tvair-action-cancel-border);
+  --tvair-programcell-button-cancel-fg:var(--tvair-action-cancel-fg);
+  /* Dark: disable = pistachio ground / cream text; enable = the same pair reversed. */
+  --tvair-programcell-button-disable-bg:#93C572;
+  --tvair-programcell-button-disable-hover-bg:#93C572;
+  --tvair-programcell-button-disable-border:#FFFDD0;
+  --tvair-programcell-button-disable-fg:#FFFDD0;
+  --tvair-programcell-button-enable-bg:#FFFDD0;
+  --tvair-programcell-button-enable-hover-bg:#FFFDD0;
+  --tvair-programcell-button-enable-border:#93C572;
+  --tvair-programcell-button-enable-fg:#93C572;
+  --tvair-programcell-button-stop-bg:var(--tvair-action-stop-bg);
+  --tvair-programcell-button-stop-hover-bg:var(--tvair-action-stop-hover-bg);
+  --tvair-programcell-button-stop-border:var(--tvair-action-stop-border);
+  --tvair-programcell-button-stop-fg:var(--tvair-action-stop-fg);
+  --tvair-programcell-button-conflict-bg:#b45309;
+  --tvair-programcell-button-conflict-hover-bg:#d97706;
+  --tvair-programcell-button-conflict-border:#fbbf24;
+  --tvair-programcell-button-conflict-fg:#fffbeb;
+  --tvair-programcell-button-state-bg:var(--tvair-program-action-state-bg);
+  --tvair-programcell-button-state-hover-bg:var(--tvair-program-action-state-hover-bg);
+  --tvair-programcell-button-state-border:var(--tvair-program-action-state-border);
+  --tvair-programcell-button-state-fg:var(--tvair-program-action-state-fg);
+
+  --tvair-reservation-action-disabled-bg:var(--tvair-action-disabled-bg);
+  --tvair-reservation-action-disabled-border:var(--tvair-action-disabled-border);
+  --tvair-reservation-action-disabled-fg:var(--tvair-action-disabled-fg);
+}
+
+/* ProgramGuide next-day floating action theme contract.
+   Dedicated role tokens are owned here. */
+:root,
+html[data-tvair-selected-theme="light"],
+body[data-tvair-selected-theme="light"],
+html.tvair-theme-light,
+body.tvair-theme-light,
+html[data-theme="light"],
+body[data-theme="light"],
+body.theme-light,
+body[data-tvair-effective-theme="light"]{
+  --tvair-guide-next-day-floating-bg:#1f6feb;
+  --tvair-guide-next-day-floating-fg:#ffffff;
+  --tvair-guide-next-day-floating-border:#1557c0;
+  --tvair-guide-next-day-floating-hover-bg:#1557c0;
+  --tvair-guide-next-day-floating-hover-fg:#ffffff;
+  --tvair-guide-next-day-floating-hover-border:#0f459b;
+  --tvair-guide-next-day-floating-shadow:0 8px 22px rgba(15,23,42,.22), 0 1px 2px rgba(15,23,42,.25);
+}
+
+html[data-tvair-selected-theme="dark"],
+body[data-tvair-selected-theme="dark"],
+html.tvair-theme-dark,
+body.tvair-theme-dark,
+html[data-theme="dark"],
+body[data-theme="dark"],
+body.theme-dark,
+body[data-tvair-effective-theme="dark"]{
+  --tvair-guide-next-day-floating-bg:#60cdff;
+  --tvair-guide-next-day-floating-fg:#101010;
+  --tvair-guide-next-day-floating-border:#8ad7ff;
+  --tvair-guide-next-day-floating-hover-bg:#8ad7ff;
+  --tvair-guide-next-day-floating-hover-fg:#101010;
+  --tvair-guide-next-day-floating-hover-border:#b7e7ff;
+  --tvair-guide-next-day-floating-shadow:0 10px 26px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.08);
+}
+
 /* TvAIr Theme Contract release_contract
    Final lightweight cascade layer.
    Goal: keep theme source in one file, use Windows/WinUI-style semantic brush aliases,
@@ -11,83 +1058,151 @@ html.tvair-theme-light,
 body.tvair-theme-light,
 html[data-theme="light"],
 body[data-theme="light"]{
-  /* WinUI-style semantic brush aliases */
   /* release_contract LightThemeActionButtonLuminanceTuning
      Match the dark-theme button tuning: keep primary action readable, but reduce the high-luminance stock blue. */
-  --winui-system-accent-color:#2563A8;
-  --winui-system-accent-color-hover:#1D5594;
-  --winui-system-accent-color-pressed:#174A82;
-  --winui-accent-soft:#E6F0FA;
-
-  --winui-text-fill-color-primary:#1A1A1A;
-  --winui-text-fill-color-secondary:#3A3A3A;
-  --winui-text-fill-color-tertiary:#6B6B6B;
-  --winui-text-fill-color-disabled:#9A9A9A;
-  --winui-text-on-accent-fill-color-primary:#FFFFFF;
-
-  --winui-control-fill-color-default:#FFFFFF;
-  --winui-control-fill-color-secondary:#F9F9F9;
-  --winui-control-fill-color-tertiary:#F3F3F3;
-  --winui-control-fill-color-hover:#F5F5F5;
-  --winui-control-fill-color-pressed:#EDEDED;
-  --winui-control-fill-color-disabled:#F3F3F3;
-  --winui-control-stroke-color-default:#8A8A8A;
-  --winui-control-stroke-color-secondary:#D1D1D1;
-
-  --winui-card-background-fill-color-default:#FFFFFF;
-  --winui-card-background-fill-color-secondary:#F9F9F9;
-  --winui-layer-fill-color-default:#FFFFFF;
-  --winui-layer-fill-color-alt:#FAFAFA;
-  --winui-layer-on-acrylic-fill-color-default:#FFFFFF;
-  --winui-solid-background-fill-color-base:#F3F3F3;
-  --winui-solid-background-fill-color-secondary:#EEEEEE;
-  --winui-solid-background-fill-color-tertiary:#F9F9F9;
-  --winui-focus-stroke-color-outer:#005FB8;
-
   /* TvAIr roles */
-  --tvair-role-page-bg:var(--winui-solid-background-fill-color-base);
-  --tvair-role-page-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-shell-bg:var(--winui-layer-fill-color-default);
-  --tvair-role-shell-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-panel-bg:var(--winui-card-background-fill-color-default);
-  --tvair-role-subpanel-bg:var(--winui-card-background-fill-color-secondary);
-  --tvair-role-toolbar-bg:var(--winui-solid-background-fill-color-secondary);
-  --tvair-role-toolbar-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-header-bg:var(--winui-solid-background-fill-color-secondary);
-  --tvair-role-header-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-label-fg:var(--winui-text-fill-color-secondary);
-  --tvair-role-text-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-text-soft-fg:var(--winui-text-fill-color-secondary);
-  --tvair-role-text-muted-fg:var(--winui-text-fill-color-tertiary);
-  --tvair-role-border:var(--winui-control-stroke-color-default);
-  --tvair-role-border-soft:var(--winui-control-stroke-color-secondary);
-  --tvair-role-focus:var(--winui-focus-stroke-color-outer);
+  --tvair-role-page-bg:#F3F3F3;
+  --tvair-role-page-fg:var(--tvair-role-text-fg);
+  --tvair-role-shell-bg:#FFFFFF;
+  --tvair-role-shell-fg:var(--tvair-role-text-fg);
+  --tvair-role-panel-bg:var(--tvair-role-card-bg);
+  --tvair-role-subpanel-bg:#F9F9F9;
+  --tvair-role-toolbar-bg:#EEEEEE;
+  --tvair-role-toolbar-fg:var(--tvair-role-text-fg);
+  --tvair-role-header-bg:var(--tvair-role-toolbar-bg);
+  --tvair-role-header-fg:var(--tvair-role-text-fg);
+  --tvair-role-label-fg:var(--tvair-role-text-soft-fg);
+  --tvair-role-text-fg:#1A1A1A;
+  --tvair-role-text-soft-fg:#3A3A3A;
+  --tvair-role-text-muted-fg:#6B6B6B;
+  --tvair-role-border:var(--tvair-role-control-border);
+  --tvair-role-border-soft:#D1D1D1;
+  --tvair-role-focus:#005FB8;
 
-  --tvair-role-control-bg:var(--winui-control-fill-color-default);
-  --tvair-role-control-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-control-border:var(--winui-control-stroke-color-default);
-  --tvair-role-control-hover-bg:var(--winui-control-fill-color-hover);
-  --tvair-role-control-pressed-bg:var(--winui-control-fill-color-pressed);
-  --tvair-role-control-active-bg:var(--winui-system-accent-color);
-  --tvair-role-control-active-fg:var(--winui-text-on-accent-fill-color-primary);
-  --tvair-role-control-disabled-bg:var(--winui-control-fill-color-disabled);
-  --tvair-role-control-disabled-fg:var(--winui-text-fill-color-disabled);
+  --tvair-role-control-bg:#FFFFFF;
+  --tvair-role-control-fg:var(--tvair-role-text-fg);
+  --tvair-role-control-border:#8A8A8A;
+  --tvair-role-control-hover-bg:#F5F5F5;
+  --tvair-role-control-hover-fg:#1A1A1A;
+  --tvair-role-control-hover-border:#8A8A8A;
+  --tvair-role-control-pressed-bg:#EDEDED;
+  --tvair-role-control-active-bg:var(--tvair-role-focus);
+  --tvair-role-control-active-fg:#FFFFFF;
+  --tvair-role-control-disabled-bg:#F3F3F3;
+  --tvair-role-control-disabled-fg:#9A9A9A;
 
-  --tvair-role-table-header-bg:var(--winui-solid-background-fill-color-secondary);
-  --tvair-role-table-header-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-table-row-bg:var(--winui-layer-fill-color-default);
-  --tvair-role-table-row-alt-bg:var(--winui-solid-background-fill-color-tertiary);
-  --tvair-role-table-row-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-table-row-muted-fg:var(--winui-text-fill-color-tertiary);
-  --tvair-role-table-row-border:var(--winui-control-stroke-color-secondary);
+  /* Action role source of truth. Generic buttons consume these through foundation aliases. */
+  --tvair-role-action-primary-bg:#2563A8;
+  --tvair-role-action-primary-fg:#FFFFFF;
+  --tvair-role-action-primary-hover-bg:#1D5594;
+  --tvair-role-action-primary-pressed-bg:#174A82;
+  --tvair-role-action-primary-border:#174A82;
+  --tvair-role-action-secondary-bg:#F9F9F9;
+  --tvair-role-action-secondary-fg:#1A1A1A;
+  --tvair-role-action-secondary-hover-bg:#F5F5F5;
+  --tvair-role-action-secondary-pressed-bg:#EDEDED;
+  --tvair-role-action-secondary-border:#8A8A8A;
+  --tvair-role-action-danger-bg:#DC2626;
+  --tvair-role-action-danger-hover-bg:#B91C1C;
+  --tvair-role-action-danger-pressed-bg:#991B1B;
+  --tvair-role-action-danger-fg:#FFFFFF;
+  --tvair-role-action-danger-border:#DC2626;
+  --tvair-role-action-danger-soft-bg:#FEE2E2;
+  --tvair-role-action-disabled-bg:#F3F3F3;
+  --tvair-role-action-disabled-fg:#9A9A9A;
+  --tvair-role-action-disabled-border:#D1D1D1;
+  --tvair-role-action-focus:#005FB8;
 
-  --tvair-role-dialog-bg:var(--winui-layer-on-acrylic-fill-color-default);
-  --tvair-role-dialog-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-dialog-muted-fg:var(--winui-text-fill-color-tertiary);
-  --tvair-role-menu-bg:var(--winui-card-background-fill-color-default);
-  --tvair-role-menu-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-menu-hover-bg:var(--winui-control-fill-color-hover);
-  --tvair-role-menu-border:var(--winui-control-stroke-color-secondary);
+  --tvair-role-table-header-bg:var(--tvair-role-toolbar-bg);
+  --tvair-role-table-header-fg:var(--tvair-role-text-fg);
+  --tvair-role-section-label-fg:var(--tvair-role-text-soft-fg);
+  --tvair-role-status-processing-fg:var(--tvair-role-text-soft-fg);
+  --tvair-role-table-row-bg:var(--tvair-role-shell-bg);
+  --tvair-role-table-row-alt-bg:var(--tvair-role-subpanel-bg);
+  --tvair-role-table-row-fg:var(--tvair-role-text-fg);
+  --tvair-role-table-row-muted-fg:var(--tvair-role-text-muted-fg);
+  --tvair-role-table-row-border:var(--tvair-role-border-soft);
+  --tvair-role-table-row-hover-bg:#F5F5F5;
+  --tvair-role-table-row-selected-bg:#2563A8;
+  --tvair-role-table-row-selected-fg:#FFFFFF;
+
+  /* List/table/tab state source of truth. Compatibility projections terminate here. */
+  --tvair-role-tab-bg:#FFFFFF;
+  --tvair-role-tab-fg:#1A1A1A;
+  --tvair-role-tab-border:#8A8A8A;
+  --tvair-role-tab-hover-bg:#F5F5F5;
+  --tvair-role-tab-pressed-bg:#EDEDED;
+  --tvair-role-tab-active-bg:#2563A8;
+  --tvair-role-tab-active-fg:#FFFFFF;
+  --tvair-role-tab-disabled-bg:#F3F3F3;
+  --tvair-role-tab-disabled-fg:#9A9A9A;
+
+  --tvair-role-dialog-bg:#FFFFFF;
+  --tvair-role-dialog-fg:var(--tvair-role-text-fg);
+  --tvair-role-dialog-muted-fg:var(--tvair-role-text-muted-fg);
+  /* Dialog, overlay, and toast source of truth. Current effective appearance is preserved. */
+  --tvair-role-dialog-border:#D1D1D1;
+  --tvair-role-dialog-header-bg:#2563A8;
+  --tvair-role-dialog-header-fg:#FFFFFF;
+  --tvair-role-dialog-sub-bg:#F9F9F9;
+  --tvair-role-dialog-backdrop:rgba(0,0,0,.45);
+  --tvair-role-dialog-shadow:none;
+  --tvair-role-toast-bg:var(--tvair-role-dialog-bg);
+  --tvair-role-toast-fg:var(--tvair-role-dialog-fg);
+  --tvair-role-toast-border:var(--tvair-role-dialog-border);
+  --tvair-role-toast-shadow:none;
+  /* Dialog controls, settings cards, and plugin host chrome share the theme-state spine. */
+  --tvair-role-dialog-close-hover-bg:#F5F5F5;
+  --tvair-role-dialog-close-hover-border:#8A8A8A;
+  --tvair-role-dialog-close-pressed-bg:#EDEDED;
+  --tvair-role-dialog-close-focus:#005FB8;
+  --tvair-role-toast-action-bg:var(--tvair-role-action-secondary-bg);
+  --tvair-role-toast-action-fg:var(--tvair-role-action-secondary-fg);
+  --tvair-role-toast-action-border:var(--tvair-role-action-secondary-border);
+  --tvair-role-toast-action-hover-bg:var(--tvair-role-action-secondary-hover-bg);
+  --tvair-role-toast-action-pressed-bg:var(--tvair-role-action-secondary-pressed-bg);
+  --tvair-role-toast-action-disabled-bg:var(--tvair-role-action-disabled-bg);
+  --tvair-role-toast-action-disabled-fg:var(--tvair-role-action-disabled-fg);
+  --tvair-role-toast-action-disabled-border:var(--tvair-role-action-disabled-border);
+  --tvair-role-card-bg:#FFFFFF;
+  --tvair-role-card-fg:#1A1A1A;
+  --tvair-role-card-muted-fg:#6B6B6B;
+  --tvair-role-card-border:#D1D1D1;
+  --tvair-role-card-hover-bg:#F5F5F5;
+  --tvair-role-card-selected-bg:#F9F9F9;
+  --tvair-role-card-selected-border:#2563A8;
+  --tvair-role-card-disabled-bg:#F3F3F3;
+  --tvair-role-card-disabled-fg:#9A9A9A;
+  --tvair-role-plugin-host-bg:var(--tvair-role-card-bg);
+  --tvair-role-plugin-host-fg:var(--tvair-role-card-fg);
+  --tvair-role-plugin-host-muted-fg:var(--tvair-role-card-muted-fg);
+  --tvair-role-plugin-host-border:var(--tvair-role-card-border);
+  --tvair-role-comment-card-shadow:0 1px 2px rgba(0,0,0,.08);
+  --tvair-role-comment-row-border:rgba(128,128,128,.25);
+  --tvair-role-program-rules-required-fg:var(--tvair-role-text-fg);
+  --tvair-role-program-rules-pill-bg:transparent;
+  --tvair-role-program-rules-pill-fg:var(--tvair-role-text-fg);
+  --tvair-role-program-rules-pill-border:var(--tvair-role-border-soft);
+  --tvair-role-program-rules-pill-reserved-bg:transparent;
+  --tvair-role-program-rules-pill-reserved-fg:var(--tvair-role-text-fg);
+  --tvair-role-program-rules-pill-reserved-border:var(--tvair-role-action-danger-border);
+  --tvair-role-program-rules-success-bg:transparent;
+  --tvair-role-program-rules-success-hover-bg:transparent;
+  --tvair-role-program-rules-success-fg:var(--tvair-role-control-active-fg);
+  /* Menu surfaces are shared by hamburger, page menu, Web context menu, and flyouts.
+     Keep every visual state on this single role spine; modules only project these values. */
+  --tvair-role-menu-bg:var(--tvair-role-card-bg);
+  --tvair-role-menu-fg:var(--tvair-role-text-fg);
+  --tvair-role-menu-border:var(--tvair-role-border-soft);
+  --tvair-role-menu-hover-bg:var(--tvair-role-control-hover-bg);
+  --tvair-role-menu-hover-fg:#1A1A1A;
+  --tvair-role-menu-focus-bg:#F5F5F5;
+  --tvair-role-menu-focus-fg:#1A1A1A;
+  --tvair-role-menu-selected-bg:#F5F5F5;
+  --tvair-role-menu-selected-fg:#1A1A1A;
+  --tvair-role-menu-disabled-fg:#9A9A9A;
+  --tvair-role-menu-separator:#D1D1D1;
+  --tvair-role-menu-shadow:0 6px 18px rgba(15,23,42,.16);
 
   --tvair-role-time-axis-bg:#EAEAEA;
   --tvair-role-time-axis-fg:#1A1A1A;
@@ -98,12 +1213,65 @@ body[data-theme="light"]{
   --tvair-role-timeband-golden-bg:#FFF4CC;  --tvair-role-timeband-golden-fg:#3B2500;
   --tvair-role-timeband-core-bg:#FFE9C7;    --tvair-role-timeband-core-fg:#3B2500;
   --tvair-role-timeband-late-bg:#F5E3FF;    --tvair-role-timeband-late-fg:#3B1248;
-  --tvair-role-date-dow-sat-fg:#0067B8;
-  --tvair-role-date-dow-sun-fg:#C42B1C;
+  --tvair-role-date-nav-bg:#F3F3F3;
+  --tvair-role-date-button-bg:#FFFFFF;
+  --tvair-role-date-button-fg:#1A1A1A;
+  --tvair-role-date-button-border:#8A8A8A;
+  --tvair-role-date-button-hover-bg:var(--tvair-role-control-hover-bg);
+  --tvair-role-date-button-hover-fg:var(--tvair-role-date-button-fg);
+  --tvair-role-date-button-hover-border:var(--tvair-role-date-button-border);
+  --tvair-role-date-active-bg:#0078D4;
+  --tvair-role-date-active-fg:#FFFFFF;
+  --tvair-role-date-active-border:var(--tvair-role-focus);
+  --tvair-role-date-active-hover-bg:#006CBE;
+  --tvair-role-date-active-hover-fg:var(--tvair-role-date-active-fg);
+  --tvair-role-date-active-hover-border:var(--tvair-role-date-active-border);
 
   --tvair-role-reservation-disabled-bg:#E8E8E8;
   --tvair-role-reservation-disabled-fg:#5E5E5E;
   --tvair-role-reservation-disabled-strong-fg:#2B2B2B;
+
+  /* Date, rule-list, and disabled-row roles are owned by this theme block. */
+  --tvair-date-weekday-sat-fg:#0067B8;
+  --tvair-date-weekday-sun-fg:#C42B1C;
+  --tvair-date-weekday-sat-selected-fg:#BFEFFF;
+  --tvair-date-weekday-sun-selected-fg:#FFCDD2;
+  --tvair-role-date-dow-sat-fg:var(--tvair-date-weekday-sat-fg);
+  --tvair-role-date-dow-sun-fg:var(--tvair-date-weekday-sun-fg);
+  --tvair-role-date-dow-sat-active-fg:var(--tvair-date-weekday-sat-selected-fg);
+  --tvair-role-date-dow-sun-active-fg:var(--tvair-date-weekday-sun-selected-fg);
+  --tvair-role-date-pending-bg:#E7F3FF;
+  --tvair-role-date-pending-fg:#0F172A;
+  --tvair-role-date-pending-border:#0067B8;
+  --tvair-role-date-pending-hover-bg:#D9ECFF;
+  --tvair-role-date-pending-hover-fg:var(--tvair-role-date-pending-fg);
+  --tvair-role-date-pending-hover-border:var(--tvair-role-date-pending-border);
+  --tvair-role-date-dow-sat-pending-fg:#004F8C;
+  --tvair-role-date-dow-sun-pending-fg:#A4262C;
+  --tvair-rule-list-chip-bg:#E7F3FF;
+  --tvair-rule-list-chip-fg:#0B4A6F;
+  --tvair-rule-list-chip-border:#8EC5E8;
+  --tvair-role-reservation-row-disabled-fg:#8A8279;
+  --tvair-role-reservation-row-disabled-strong-fg:#5F5953;
+  --tvair-role-reservation-row-disabled-muted-fg:#8A837B;
+  --tvair-list-row-disabled-bg:#d8dee8;
+  --tvair-list-row-disabled-hover-bg:#cbd5e1;
+  --tvair-guide-timeband-late-bg:#e8e9f7;
+  --tvair-guide-timeband-late-fg:#343a68;
+
+  /* Compatibility roles still consumed by modules. Values are owned here only. */
+  --tvair-role-app-bg:#f5f8fc;
+  --tvair-role-surface:#ffffff;
+  --tvair-role-panel:#f8fbff;
+  --tvair-role-subpanel:#eef4fb;
+  --tvair-role-text:#0f172a;
+  --tvair-role-text-soft:#334155;
+  --tvair-role-text-muted:#64748b;
+  --tvair-role-action-bg:#2563eb;
+  --tvair-role-action-fg:#ffffff;
+  --tvair-role-disabled-bg:#d9e1ec;
+  --tvair-role-disabled-fg:#475569;
+  --tvair-role-disabled-strong-fg:#1e293b;
 }
 
 html[data-tvair-selected-theme="dark"],
@@ -114,83 +1282,161 @@ html[data-theme="dark"],
 body[data-theme="dark"],
 body.theme-dark,
 body[data-tvair-effective-theme="dark"]{
-  /* WinUI-style semantic brush aliases */
   /* release_contract DarkThemeActionButtonLuminanceTuning
      Keep dark-theme controls readable without the high-luminance neon accent used by generic WinUI dark samples. */
-  --winui-system-accent-color:#2F7DB2;
-  --winui-system-accent-color-hover:#3D91C9;
-  --winui-system-accent-color-pressed:#1F5F8E;
-  --winui-accent-soft:#123B52;
-
-  --winui-text-fill-color-primary:#FFFFFF;
-  --winui-text-fill-color-secondary:#EDEDED;
-  --winui-text-fill-color-tertiary:#CFCFCF;
-  --winui-text-fill-color-disabled:#8A8A8A;
-  --winui-text-on-accent-fill-color-primary:#FFFFFF;
-
-  --winui-control-fill-color-default:#2B2B2B;
-  --winui-control-fill-color-secondary:#333333;
-  --winui-control-fill-color-tertiary:#3A3A3A;
-  --winui-control-fill-color-hover:#333333;
-  --winui-control-fill-color-pressed:#3A3A3A;
-  --winui-control-fill-color-disabled:#2B2B2B;
-  --winui-control-stroke-color-default:#6B6B6B;
-  --winui-control-stroke-color-secondary:#3A3A3A;
-
-  --winui-card-background-fill-color-default:#2B2B2B;
-  --winui-card-background-fill-color-secondary:#252525;
-  --winui-layer-fill-color-default:#1B1B1B;
-  --winui-layer-fill-color-alt:#252525;
-  --winui-layer-on-acrylic-fill-color-default:#2B2B2B;
-  --winui-solid-background-fill-color-base:#202020;
-  --winui-solid-background-fill-color-secondary:#1B1B1B;
-  --winui-solid-background-fill-color-tertiary:#252525;
-  --winui-focus-stroke-color-outer:#6AB6E6;
-
   /* TvAIr roles */
-  --tvair-role-page-bg:var(--winui-solid-background-fill-color-base);
-  --tvair-role-page-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-shell-bg:var(--winui-layer-fill-color-default);
-  --tvair-role-shell-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-panel-bg:var(--winui-card-background-fill-color-default);
-  --tvair-role-subpanel-bg:var(--winui-card-background-fill-color-secondary);
-  --tvair-role-toolbar-bg:var(--winui-solid-background-fill-color-secondary);
-  --tvair-role-toolbar-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-header-bg:var(--winui-solid-background-fill-color-secondary);
-  --tvair-role-header-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-label-fg:var(--winui-text-fill-color-secondary);
-  --tvair-role-text-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-text-soft-fg:var(--winui-text-fill-color-secondary);
-  --tvair-role-text-muted-fg:var(--winui-text-fill-color-tertiary);
-  --tvair-role-border:var(--winui-control-stroke-color-default);
-  --tvair-role-border-soft:var(--winui-control-stroke-color-secondary);
-  --tvair-role-focus:var(--winui-focus-stroke-color-outer);
+  --tvair-role-page-bg:#202020;
+  --tvair-role-page-fg:#FFFFFF;
+  --tvair-role-shell-bg:#1B1B1B;
+  --tvair-role-shell-fg:#FFFFFF;
+  --tvair-role-panel-bg:#2B2B2B;
+  --tvair-native-dialog-panel:#26292E;
+  --tvair-native-dialog-border:#525862;
+  --tvair-native-dialog-text:#EEF0F3;
+  --tvair-native-dialog-text-sub:#CBD0D7;
+  --tvair-native-dialog-accent:#9BA6B5;
+  --tvair-native-dialog-button-primary:#687382;
+  --tvair-native-dialog-button-primary-text:#FFFFFF;
+  --tvair-native-dialog-button-secondary:#2F3339;
+  --tvair-native-dialog-focus:#7E8A9A;
+  --tvair-native-dialog-menu-selected:#525D6C;
+  --tvair-role-subpanel-bg:#252525;
+  --tvair-role-toolbar-bg:#1B1B1B;
+  --tvair-role-toolbar-fg:#FFFFFF;
+  --tvair-role-header-bg:#1B1B1B;
+  --tvair-role-header-fg:#FFFFFF;
+  --tvair-role-label-fg:#EDEDED;
+  --tvair-role-text-fg:#FFFFFF;
+  --tvair-role-text-soft-fg:#EDEDED;
+  --tvair-role-text-muted-fg:#CFCFCF;
+  --tvair-role-border:#6B6B6B;
+  --tvair-role-border-soft:#3A3A3A;
+  --tvair-role-focus:#6AB6E6;
 
-  --tvair-role-control-bg:var(--winui-control-fill-color-default);
-  --tvair-role-control-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-control-border:var(--winui-control-stroke-color-default);
-  --tvair-role-control-hover-bg:var(--winui-control-fill-color-hover);
-  --tvair-role-control-pressed-bg:var(--winui-control-fill-color-pressed);
+  --tvair-role-control-bg:#2B2B2B;
+  --tvair-role-control-fg:#FFFFFF;
+  --tvair-role-control-border:#6B6B6B;
+  --tvair-role-control-hover-bg:#333333;
+  --tvair-role-control-hover-fg:#FFFFFF;
+  --tvair-role-control-hover-border:#6B6B6B;
+  --tvair-role-control-pressed-bg:#3A3A3A;
   --tvair-role-control-active-bg:#1F5F8E;
   --tvair-role-control-active-fg:#F3FAFF;
-  --tvair-role-control-disabled-bg:var(--winui-control-fill-color-disabled);
-  --tvair-role-control-disabled-fg:var(--winui-text-fill-color-disabled);
+  --tvair-role-control-disabled-bg:#2B2B2B;
+  --tvair-role-control-disabled-fg:#8A8A8A;
 
-  --tvair-role-table-header-bg:var(--winui-card-background-fill-color-default);
-  --tvair-role-table-header-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-table-row-bg:var(--winui-layer-fill-color-default);
-  --tvair-role-table-row-alt-bg:var(--winui-layer-fill-color-alt);
-  --tvair-role-table-row-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-table-row-muted-fg:var(--winui-text-fill-color-tertiary);
-  --tvair-role-table-row-border:var(--winui-control-stroke-color-secondary);
+  /* Action role source of truth. Values preserve the current dark-theme rendering. */
+  --tvair-role-action-primary-bg:#1F5F8E;
+  --tvair-role-action-primary-fg:#F3FAFF;
+  --tvair-role-action-primary-hover-bg:#3D91C9;
+  --tvair-role-action-primary-pressed-bg:#1F5F8E;
+  --tvair-role-action-primary-border:#1F5F8E;
+  --tvair-role-action-secondary-bg:#333333;
+  --tvair-role-action-secondary-fg:#FFFFFF;
+  --tvair-role-action-secondary-hover-bg:#333333;
+  --tvair-role-action-secondary-pressed-bg:#3A3A3A;
+  --tvair-role-action-secondary-border:#6B6B6B;
+  --tvair-role-action-danger-bg:#EF4444;
+  --tvair-role-action-danger-hover-bg:#F87171;
+  --tvair-role-action-danger-pressed-bg:#DC2626;
+  --tvair-role-action-danger-fg:#F3FAFF;
+  --tvair-role-action-danger-border:#EF4444;
+  --tvair-role-action-danger-soft-bg:#3F1D1D;
+  --tvair-role-action-disabled-bg:#2B2B2B;
+  --tvair-role-action-disabled-fg:#8A8A8A;
+  --tvair-role-action-disabled-border:#3A3A3A;
+  --tvair-role-action-focus:#6AB6E6;
 
-  --tvair-role-dialog-bg:var(--winui-layer-on-acrylic-fill-color-default);
-  --tvair-role-dialog-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-dialog-muted-fg:var(--winui-text-fill-color-tertiary);
-  --tvair-role-menu-bg:var(--winui-card-background-fill-color-default);
-  --tvair-role-menu-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-menu-hover-bg:var(--winui-control-fill-color-secondary);
-  --tvair-role-menu-border:var(--winui-control-stroke-color-secondary);
+
+  --tvair-role-table-header-bg:#2B2B2B;
+  --tvair-role-table-header-fg:#FFFFFF;
+  --tvair-role-section-label-fg:#EDEDED;
+  --tvair-role-status-processing-fg:#EDEDED;
+  --tvair-role-table-row-bg:#1B1B1B;
+  --tvair-role-table-row-alt-bg:#252525;
+  --tvair-role-table-row-fg:#FFFFFF;
+  --tvair-role-table-row-muted-fg:#CFCFCF;
+  --tvair-role-table-row-border:#3A3A3A;
+  --tvair-role-table-row-hover-bg:#333333;
+  --tvair-role-table-row-selected-bg:#2F7DB2;
+  --tvair-role-table-row-selected-fg:#FFFFFF;
+
+  /* List/table/tab state source of truth. Compatibility projections terminate here. */
+  --tvair-role-tab-bg:#2B2B2B;
+  --tvair-role-tab-fg:#FFFFFF;
+  --tvair-role-tab-border:#6B6B6B;
+  --tvair-role-tab-hover-bg:#333333;
+  --tvair-role-tab-pressed-bg:#3A3A3A;
+  --tvair-role-tab-active-bg:#2F7DB2;
+  --tvair-role-tab-active-fg:#FFFFFF;
+  --tvair-role-tab-disabled-bg:#2B2B2B;
+  --tvair-role-tab-disabled-fg:#8A8A8A;
+
+  --tvair-role-dialog-bg:#2B2B2B;
+  --tvair-role-dialog-fg:#FFFFFF;
+  --tvair-role-dialog-muted-fg:#CFCFCF;
+  /* Dark theme preserves the current overlay density and dialog colors. */
+  --tvair-role-dialog-border:#3A3A3A;
+  --tvair-role-dialog-header-bg:#162033;
+  --tvair-role-dialog-header-fg:#FFFFFF;
+  --tvair-role-dialog-sub-bg:#111827;
+  --tvair-role-dialog-backdrop:rgba(0,0,0,.62);
+  --tvair-role-dialog-shadow:none;
+  --tvair-role-toast-bg:var(--tvair-role-dialog-bg);
+  --tvair-role-toast-fg:var(--tvair-role-dialog-fg);
+  --tvair-role-toast-border:var(--tvair-role-dialog-border);
+  --tvair-role-toast-shadow:none;
+  /* Dialog controls, settings cards, and plugin host chrome share the theme-state spine. */
+  --tvair-role-dialog-close-hover-bg:#333333;
+  --tvair-role-dialog-close-hover-border:#6B6B6B;
+  --tvair-role-dialog-close-pressed-bg:#3A3A3A;
+  --tvair-role-dialog-close-focus:#6AB6E6;
+  --tvair-role-toast-action-bg:var(--tvair-role-action-secondary-bg);
+  --tvair-role-toast-action-fg:var(--tvair-role-action-secondary-fg);
+  --tvair-role-toast-action-border:var(--tvair-role-action-secondary-border);
+  --tvair-role-toast-action-hover-bg:var(--tvair-role-action-secondary-hover-bg);
+  --tvair-role-toast-action-pressed-bg:var(--tvair-role-action-secondary-pressed-bg);
+  --tvair-role-toast-action-disabled-bg:var(--tvair-role-action-disabled-bg);
+  --tvair-role-toast-action-disabled-fg:var(--tvair-role-action-disabled-fg);
+  --tvair-role-toast-action-disabled-border:var(--tvair-role-action-disabled-border);
+  --tvair-role-card-bg:#1B1B1B;
+  --tvair-role-card-fg:#FFFFFF;
+  --tvair-role-card-muted-fg:#CFCFCF;
+  --tvair-role-card-border:#3A3A3A;
+  --tvair-role-card-hover-bg:#333333;
+  --tvair-role-card-selected-bg:#333333;
+  --tvair-role-card-selected-border:#2F7DB2;
+  --tvair-role-card-disabled-bg:#2B2B2B;
+  --tvair-role-card-disabled-fg:#8A8A8A;
+  --tvair-role-plugin-host-bg:var(--tvair-role-card-bg);
+  --tvair-role-plugin-host-fg:var(--tvair-role-card-fg);
+  --tvair-role-plugin-host-muted-fg:var(--tvair-role-card-muted-fg);
+  --tvair-role-plugin-host-border:var(--tvair-role-card-border);
+  --tvair-role-comment-card-shadow:0 1px 2px rgba(0,0,0,.08);
+  --tvair-role-comment-row-border:rgba(128,128,128,.25);
+  --tvair-role-program-rules-required-fg:var(--tvair-role-text-fg);
+  --tvair-role-program-rules-pill-bg:transparent;
+  --tvair-role-program-rules-pill-fg:var(--tvair-role-text-fg);
+  --tvair-role-program-rules-pill-border:var(--tvair-role-border-soft);
+  --tvair-role-program-rules-pill-reserved-bg:transparent;
+  --tvair-role-program-rules-pill-reserved-fg:var(--tvair-role-text-fg);
+  --tvair-role-program-rules-pill-reserved-border:var(--tvair-role-action-danger-border);
+  --tvair-role-program-rules-success-bg:transparent;
+  --tvair-role-program-rules-success-hover-bg:transparent;
+  --tvair-role-program-rules-success-fg:var(--tvair-role-control-active-fg);
+  /* Dark theme keeps the current menu appearance while using the same state contract. */
+  --tvair-role-menu-bg:#2B2B2B;
+  --tvair-role-menu-fg:#FFFFFF;
+  --tvair-role-menu-border:#3A3A3A;
+  --tvair-role-menu-hover-bg:#333333;
+  --tvair-role-menu-hover-fg:#FFFFFF;
+  --tvair-role-menu-focus-bg:#333333;
+  --tvair-role-menu-focus-fg:#FFFFFF;
+  --tvair-role-menu-selected-bg:#333333;
+  --tvair-role-menu-selected-fg:#FFFFFF;
+  --tvair-role-menu-disabled-fg:#8A8A8A;
+  --tvair-role-menu-separator:#3A3A3A;
+  --tvair-role-menu-shadow:0 8px 22px rgba(0,0,0,.42);
 
   --tvair-role-time-axis-bg:#2B2B2B;
   --tvair-role-time-axis-fg:#FFFFFF;
@@ -201,67 +1447,113 @@ body[data-tvair-effective-theme="dark"]{
   --tvair-role-timeband-golden-bg:#4A3F28;  --tvair-role-timeband-golden-fg:#FFF7D6;
   --tvair-role-timeband-core-bg:#513B25;    --tvair-role-timeband-core-fg:#FFE9C7;
   --tvair-role-timeband-late-bg:#3D3149;    --tvair-role-timeband-late-fg:#F8EAFF;
-  --tvair-role-date-dow-sat-fg:#60CDFF;
-  --tvair-role-date-dow-sun-fg:#FFB3B3;
+  --tvair-role-date-nav-bg:#202020;
+  --tvair-role-date-button-bg:#2B2B2B;
+  --tvair-role-date-button-fg:#FFFFFF;
+  --tvair-role-date-button-border:#5A5A5A;
+  --tvair-role-date-button-hover-bg:var(--tvair-role-control-hover-bg);
+  --tvair-role-date-button-hover-fg:var(--tvair-role-date-button-fg);
+  --tvair-role-date-button-hover-border:var(--tvair-role-date-button-border);
+  --tvair-role-date-active-bg:#0078D4;
+  --tvair-role-date-active-fg:#FFFFFF;
+  --tvair-role-date-active-border:var(--tvair-role-focus);
+  --tvair-role-date-active-hover-bg:#1484D8;
+  --tvair-role-date-active-hover-fg:var(--tvair-role-date-active-fg);
+  --tvair-role-date-active-hover-border:var(--tvair-role-date-active-border);
 
   --tvair-role-reservation-disabled-bg:#3A3A3A;
-  --tvair-role-reservation-disabled-fg:#E6E6E6;
-  --tvair-role-reservation-disabled-strong-fg:#FFFFFF;
+
+  /* Date, rule-list, and disabled-row roles are owned by this theme block. */
+  --tvair-date-weekday-sat-fg:#7DD3FC;
+  --tvair-date-weekday-sun-fg:#FCA5A5;
+  --tvair-date-weekday-sat-selected-fg:#BFEFFF;
+  --tvair-date-weekday-sun-selected-fg:#FFCDD2;
+  --tvair-role-date-dow-sat-fg:var(--tvair-date-weekday-sat-fg);
+  --tvair-role-date-dow-sun-fg:var(--tvair-date-weekday-sun-fg);
+  --tvair-role-date-dow-sat-active-fg:var(--tvair-date-weekday-sat-selected-fg);
+  --tvair-role-date-dow-sun-active-fg:var(--tvair-date-weekday-sun-selected-fg);
+  --tvair-role-date-pending-bg:var(--tvair-role-control-hover-bg);
+  --tvair-role-date-pending-fg:var(--tvair-role-date-button-fg);
+  --tvair-role-date-pending-border:var(--tvair-role-focus);
+  --tvair-role-date-pending-hover-bg:#3A3A3A;
+  --tvair-role-date-pending-hover-fg:var(--tvair-role-date-pending-fg);
+  --tvair-role-date-pending-hover-border:var(--tvair-role-date-pending-border);
+  --tvair-role-date-dow-sat-pending-fg:var(--tvair-role-date-dow-sat-fg);
+  --tvair-role-date-dow-sun-pending-fg:var(--tvair-role-date-dow-sun-fg);
+  --tvair-rule-list-chip-bg:var(--tvair-color-surface-subpanel);
+  --tvair-rule-list-chip-fg:var(--tvair-color-text-main);
+  --tvair-rule-list-chip-border:var(--tvair-color-border-soft);
+  --tvair-role-reservation-disabled-fg:#AEB7C4;
+  --tvair-role-reservation-disabled-strong-fg:#C2CBD8;
+  --tvair-role-reservation-row-disabled-fg:#7F8B9C;
+  --tvair-role-reservation-row-disabled-strong-fg:#B2BDCC;
+  --tvair-role-reservation-row-disabled-muted-fg:#8793A5;
+
+  /* Compatibility roles still consumed by modules. Values are owned here only. */
+  --tvair-role-app-bg:#050b14;
+  --tvair-role-surface:#0b1422;
+  --tvair-role-panel:#111c2d;
+  --tvair-role-subpanel:#172335;
+  --tvair-role-text:#f8fafc;
+  --tvair-role-text-soft:#dbeafe;
+  --tvair-role-text-muted:#a8b4c7;
+  --tvair-role-action-bg:#2563eb;
+  --tvair-role-action-fg:#f8fafc;
+  --tvair-role-disabled-bg:#111827;
+  --tvair-role-disabled-fg:#7f8da3;
+  --tvair-role-disabled-strong-fg:#aebbd0;
+
+  /* Disabled-row and late-timeband projections terminate on the final dark theme owner. */
+  --tvair-list-row-disabled-bg:var(--tvair-role-reservation-disabled-bg);
+  --tvair-list-row-disabled-hover-bg:#3b485b;
+  --tvair-guide-timeband-late-bg:var(--tvair-role-timeband-late-bg);
+  --tvair-guide-timeband-late-fg:var(--tvair-role-timeband-late-fg);
+
+  /* Settings dark values preserve the current rendering without an earlier repair layer. */
+  --tvair-settings-page-bg:#050b14;
+  --tvair-settings-panel-bg:#0b1422;
+  --tvair-settings-subpanel-bg:#111c2d;
+  --tvair-settings-text:#f8fafc;
+  --tvair-settings-text-sub:#dbeafe;
+  --tvair-settings-text-muted:#a8b4c7;
+  --tvair-settings-accent-soft:#1f3656;
+  --tvair-settings-button-primary-bg:#2563eb;
+  --tvair-settings-button-primary-fg:#ffffff;
+  --tvair-settings-button-secondary-bg:#172335;
+  --tvair-settings-button-secondary-fg:#f8fafc;
 }
 
-/* Legacy aliases point to the final contract only. */
+/* Final list-state projections resolve from the current theme role. */
+:root{
+  --tvair-list-row-disabled-accent:#64748b;
+}
 :root,body{
-  --app-bg:var(--tvair-role-page-bg);
-  --panel-bg:var(--tvair-role-shell-bg);
-  --text-main:var(--tvair-role-page-fg);
-  --nav-bg:var(--tvair-role-toolbar-bg);
-  --nav-sub-bg:var(--tvair-role-toolbar-bg);
-  --nav-time-bg:var(--tvair-role-toolbar-bg);
-  --nav-border:var(--tvair-role-border-soft);
-  --nav-btn-bg:var(--tvair-role-control-bg);
-  --nav-btn-hover:var(--tvair-role-control-hover-bg);
-  --nav-text:var(--tvair-role-toolbar-fg);
-  --nav-button-text:var(--tvair-role-control-fg);
-  --date-active-bg:var(--tvair-role-control-active-bg);
-  --grid-border:var(--tvair-role-table-row-border);
-  --timecol-bg:var(--tvair-role-time-axis-bg);
-  --timecol-text:var(--tvair-role-time-axis-fg);
+  --tvair-list-row-disabled-fg:var(--tvair-role-reservation-row-disabled-fg);
+  --tvair-list-row-disabled-strong-fg:var(--tvair-role-reservation-row-disabled-strong-fg);
+}
+body.theme-light{
+  --tvair-list-row-disabled-fg:#334155;
+  --tvair-list-row-disabled-strong-fg:#0f172a;
+}
+html[data-theme="dark"],
+body.theme-dark,
+body[data-theme="dark"]{
+  --tvair-list-row-disabled-accent:#94a3b8;
+}
 
-  --tvair-bg-a:var(--tvair-role-page-bg);
-  --tvair-bg-b:var(--tvair-role-shell-bg);
-  --tvair-bg-c:var(--tvair-role-panel-bg);
-  --tvair-bg-d:var(--tvair-role-subpanel-bg);
-  --tvair-text-a:var(--tvair-role-page-fg);
-  --tvair-text-b:var(--tvair-role-text-soft-fg);
-  --tvair-text-c:var(--tvair-role-text-muted-fg);
-  --tvair-text-disabled:var(--tvair-role-control-disabled-fg);
-  --tvair-border-a:var(--tvair-role-border);
-  --tvair-border-b:var(--tvair-role-border-soft);
-  --tvair-bg-hover:var(--tvair-role-control-hover-bg);
-  --tvair-bg-disabled:var(--tvair-role-control-disabled-bg);
+/* Compatibility projections point only to semantic roles. */
+:root,body{
+  --nav-btn-bg:var(--tvair-role-control-bg);
+  
+  
+  
+
   --tvair-accent-a:var(--tvair-role-control-active-bg);
-  --tvair-accent-soft:var(--winui-accent-soft);
-  --tvair-focus-a:var(--tvair-role-focus);
+  --tvair-accent-soft:var(--tvair-role-action-danger-soft-bg);
 
   --tvair-theme-page-bg:var(--tvair-role-page-bg);
-  --tvair-theme-surface-panel:var(--tvair-role-shell-bg);
-  --tvair-theme-surface-subpanel:var(--tvair-role-panel-bg);
-  --tvair-theme-text-main:var(--tvair-role-page-fg);
-  --tvair-theme-text-sub:var(--tvair-role-text-soft-fg);
-  --tvair-theme-text-muted:var(--tvair-role-text-muted-fg);
-  --tvair-theme-text-inverse:var(--tvair-role-control-active-fg);
-  --tvair-theme-border-default:var(--tvair-role-border);
-  --tvair-theme-border-soft:var(--tvair-role-border-soft);
-  --tvair-theme-hover-bg:var(--tvair-role-control-hover-bg);
   --tvair-theme-border-focus:var(--tvair-role-focus);
-  --tvair-theme-focus:var(--tvair-role-focus);
 
-  --tvair-list-row-odd-bg:var(--tvair-role-table-row-bg);
-  --tvair-list-row-even-bg:var(--tvair-role-table-row-alt-bg);
-  --tvair-list-row-hover-bg:var(--tvair-role-control-hover-bg);
-  --tvair-list-row-fg:var(--tvair-role-table-row-fg);
-  --tvair-list-row-muted-fg:var(--tvair-role-table-row-muted-fg);
-  --tvair-list-row-border:var(--tvair-role-table-row-border);
 
   --tvair-settings-page-bg:var(--tvair-role-page-bg);
   --tvair-settings-panel-bg:var(--tvair-role-dialog-bg);
@@ -273,26 +1565,26 @@ body[data-tvair-effective-theme="dark"]{
   --tvair-settings-text:var(--tvair-role-page-fg);
   --tvair-settings-text-sub:var(--tvair-role-text-soft-fg);
   --tvair-settings-text-muted:var(--tvair-role-text-muted-fg);
-  --tvair-settings-accent:var(--winui-system-accent-color);
-  --tvair-settings-accent-soft:var(--winui-accent-soft);
+  --tvair-settings-accent:var(--tvair-role-focus);
+  --tvair-settings-accent-soft:var(--tvair-role-action-danger-soft-bg);
   --tvair-settings-button-primary-bg:var(--tvair-role-control-active-bg);
   --tvair-settings-button-primary-fg:var(--tvair-role-control-active-fg);
   --tvair-settings-button-secondary-bg:var(--tvair-role-control-bg);
   --tvair-settings-button-secondary-fg:var(--tvair-role-control-fg);
-  --tvair-settings-slider-active:var(--tvair-settings-accent,var(--winui-system-accent-color,#0078d4));
-  --tvair-settings-slider-rest:var(--tvair-settings-border-soft,#d7dde5);
-  --tvair-settings-slider-thumb:var(--tvair-settings-panel-bg,#ffffff);
+  --tvair-settings-slider-active:var(--tvair-settings-accent);
+  --tvair-settings-slider-rest:var(--tvair-settings-border-soft);
+  --tvair-settings-slider-thumb:var(--tvair-settings-panel-bg);
 
   /* release_contract SettingsThemeCommonChoiceDisabledTokenAuditContract
      Settings modal input/select/field semantic tokens are owned by the theme contract so field chrome follows
      the same settings-wide token contract as panels, buttons, sliders, and display-tab surfaces. */
   --tvair-settings-field-label-fg:var(--tvair-settings-text-muted);
-  --tvair-settings-input-bg:var(--tvair-input-bg,var(--tvair-role-control-bg));
-  --tvair-settings-input-fg:var(--tvair-input-fg,var(--tvair-role-control-fg));
-  --tvair-settings-input-border:var(--tvair-input-border,var(--tvair-settings-border));
+  --tvair-settings-input-bg:var(--tvair-role-field-bg);
+  --tvair-settings-input-fg:var(--tvair-role-field-fg);
+  --tvair-settings-input-border:var(--tvair-role-field-border);
   --tvair-settings-input-focus:var(--tvair-settings-accent);
-  --tvair-settings-input-disabled-bg:var(--tvair-input-disabled-bg,var(--tvair-role-control-disabled-bg));
-  --tvair-settings-input-disabled-fg:var(--tvair-input-disabled-fg,var(--tvair-role-control-disabled-fg));
+  --tvair-settings-input-disabled-bg:var(--tvair-role-field-disabled-bg);
+  --tvair-settings-input-disabled-fg:var(--tvair-role-field-disabled-fg);
 
   /* release_contract SettingsThemeCommonChoiceDisabledTokenAuditContract
      Checkbox/radio accent and disabled-control semantics are settings common tokens so control state chrome
@@ -304,7 +1596,7 @@ body[data-tvair-effective-theme="dark"]{
   --tvair-settings-choice-disabled-accent:var(--tvair-settings-disabled-fg);
 
   /* release_contract SettingsThemeCommonChoiceDisabledTokenAuditContract
-     The appearance-tab container/options/card/button/sample/editor/palette surface tokens, including legacy card,
+     The appearance-tab container/options/card/button/sample/editor/palette surface tokens, including compatibility card,
      sample-meaning, sample, palette aliases, and sample geometry aliases, are owned by the theme contract.
      Settings modules consume display aliases; they do not define local paints or sample geometry aliases. */
   --tvair-settings-display-panel-bg:var(--tvair-settings-panel-bg);
@@ -317,14 +1609,6 @@ body[data-tvair-effective-theme="dark"]{
   --tvair-settings-display-card-selected-border:var(--tvair-settings-accent);
   --tvair-settings-display-card-shadow:none;
   --tvair-settings-display-card-selected-shadow:var(--tvair-settings-display-card-selected-border);
-  --tvair-settings-theme-options-bg:var(--tvair-settings-display-options-bg);
-  --tvair-settings-theme-card-bg:var(--tvair-settings-display-card-bg);
-  --tvair-settings-theme-card-fg:var(--tvair-settings-display-card-fg);
-  --tvair-settings-theme-card-border:var(--tvair-settings-display-card-border);
-  --tvair-settings-theme-card-hover-bg:var(--tvair-settings-display-card-hover-bg);
-  --tvair-settings-theme-card-selected-border:var(--tvair-settings-display-card-selected-border);
-  --tvair-settings-theme-card-shadow:var(--tvair-settings-display-card-shadow);
-  --tvair-settings-theme-card-selected-shadow:var(--tvair-settings-display-card-selected-shadow);
   --tvair-settings-display-row-border:var(--tvair-settings-border-soft);
   --tvair-settings-display-row-fg:var(--tvair-settings-display-card-fg);
   --tvair-settings-display-label-fg:var(--tvair-settings-text);
@@ -373,258 +1657,29 @@ body[data-tvair-effective-theme="dark"]{
   --tvair-settings-display-palette-action-hover-bg:var(--tvair-settings-accent-soft);
   --tvair-settings-display-palette-close-bg:transparent;
   --tvair-settings-display-palette-close-fg:var(--tvair-settings-text-muted);
-  --tvair-settings-palette-bg:var(--tvair-settings-display-palette-bg);
-  --tvair-settings-palette-fg:var(--tvair-settings-display-palette-fg);
-  --tvair-settings-palette-border:var(--tvair-settings-display-palette-border);
-  --tvair-settings-palette-shadow:var(--tvair-settings-display-palette-shadow);
-  --tvair-settings-palette-divider:var(--tvair-settings-display-palette-divider);
-  --tvair-settings-palette-title-fg:var(--tvair-settings-display-palette-title-fg);
-  --tvair-settings-palette-swatch-bg:var(--tvair-settings-display-palette-swatch-bg);
-  --tvair-settings-palette-swatch-border:var(--tvair-settings-display-palette-swatch-border);
-  --tvair-settings-palette-swatch-hover-ring:var(--tvair-settings-display-palette-swatch-hover-ring);
-  --tvair-settings-palette-swatch-selected-ring:var(--tvair-settings-display-palette-swatch-selected-ring);
-  --tvair-settings-palette-action-bg:var(--tvair-settings-display-palette-action-bg);
-  --tvair-settings-palette-action-fg:var(--tvair-settings-display-palette-action-fg);
-  --tvair-settings-palette-action-border:var(--tvair-settings-display-palette-action-border);
-  --tvair-settings-palette-action-hover-bg:var(--tvair-settings-display-palette-action-hover-bg);
-  --tvair-settings-palette-close-bg:var(--tvair-settings-display-palette-close-bg);
-  --tvair-settings-palette-close-fg:var(--tvair-settings-display-palette-close-fg);
 
-  --menu-bg:var(--tvair-role-menu-bg);
-  --menu-fg:var(--tvair-role-menu-fg);
-  --menu-hover-bg:var(--tvair-role-menu-hover-bg);
-  --menu-hover-fg:var(--tvair-role-menu-fg);
-  --menu-border:var(--tvair-role-menu-border);
 }
 
 /* Host module binding. Keep this narrow: no plugin-internal selectors. */
-html,body{
-  background:var(--tvair-role-page-bg);
-  color:var(--tvair-role-page-fg);
-}
-body:not(.tvair-guide-page) .tvair-topnav,body:not(.tvair-guide-page) #nav,body:not(.tvair-guide-page) #filter-tabs,
-body:not(.tvair-guide-page) .toolbar,body:not(.tvair-guide-page) .filter-bar,body:not(.tvair-guide-page) .sub-panel,body:not(.tvair-guide-page) .summary,body:not(.tvair-guide-page) .status-box,body:not(.tvair-guide-page) .keyword-group-head{
-  background:var(--tvair-role-toolbar-bg);
-  color:var(--tvair-role-toolbar-fg);
-  border-color:var(--tvair-role-border-soft);
-}
-body:not(.tvair-guide-page) .nav-btn,body:not(.tvair-guide-page) .ftab,body:not(.tvair-guide-page) .reservation-toolbar-action,body:not(.tvair-guide-page) .tvair-log-action-button,
-body:not(.tvair-guide-page) input[type="button"],body:not(.tvair-guide-page) input[type="submit"]{
-  background:var(--tvair-role-control-bg);
-  color:var(--tvair-role-control-fg);
-  border:1px solid var(--tvair-role-control-border);
-  box-shadow:none;
-}
-body:not(.tvair-guide-page) .nav-btn:hover,body:not(.tvair-guide-page) .ftab:hover,body:not(.tvair-guide-page) .reservation-toolbar-action:hover,body:not(.tvair-guide-page) .tvair-log-action-button:hover{
-  background:var(--tvair-role-control-hover-bg);
-}
-body:not(.tvair-guide-page) .nav-btn:active,body:not(.tvair-guide-page) .ftab:active,body:not(.tvair-guide-page) .reservation-toolbar-action:active,body:not(.tvair-guide-page) .tvair-log-action-button:active{
-  background:var(--tvair-role-control-pressed-bg);
-}
-body:not(.tvair-guide-page) .nav-btn.active,body:not(.tvair-guide-page) .ftab.active{
-  background:var(--tvair-role-control-active-bg);
-  color:var(--tvair-role-control-active-fg);
-  border-color:var(--tvair-role-focus);
-}
-button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{
-  outline:2px solid var(--tvair-role-focus);
-  outline-offset:1px;
-}
-body:not(.tvair-guide-page) .card,body:not(.tvair-guide-page) .panel,body:not(.tvair-guide-page) .section,body:not(.tvair-guide-page) .settings-card,body:not(.tvair-guide-page) .form-card,body:not(.tvair-guide-page) .filter-panel,body:not(.tvair-guide-page) .left-pane,body:not(.tvair-guide-page) .side-panel,body:not(.tvair-guide-page) .content-panel,
-body:not(.tvair-guide-page) .modal-content,body:not(.tvair-guide-page) .dialog,body:not(.tvair-guide-page) .group-box,body:not(.tvair-guide-page):not(.tvair-reservation-page) #main,body:not(.tvair-guide-page):not(.tvair-reservation-page) #content-region,body:not(.tvair-guide-page):not(.tvair-reservation-page) #content-inner,body:not(.tvair-guide-page):not(.tvair-reservation-page) #table-wrap,body:not(.tvair-guide-page):not(.tvair-reservation-page) #keyword-wrap,
-body:not(.tvair-guide-page) .help-modal-box,body:not(.tvair-guide-page) .ver-box{
-  background:var(--tvair-role-shell-bg);
-  color:var(--tvair-role-shell-fg);
-  border-color:var(--tvair-role-border-soft);
-}
-body:not(.tvair-guide-page) .modal-head,body:not(.tvair-guide-page) .dialog-head{
-  background:var(--tvair-role-header-bg);
-  color:var(--tvair-role-header-fg);
-}
-body:not(.tvair-guide-page) input,body:not(.tvair-guide-page) select,body:not(.tvair-guide-page) textarea,body:not(.tvair-guide-page) .input,body:not(.tvair-guide-page) .select,body:not(.tvair-guide-page) .listbox{
-  background:var(--tvair-role-control-bg);
-  color:var(--tvair-role-control-fg);
-  border-color:var(--tvair-role-control-border);
-}
-body:not(.tvair-guide-page) input:disabled,body:not(.tvair-guide-page) select:disabled,body:not(.tvair-guide-page) textarea:disabled,body:not(.tvair-guide-page) button:disabled:not(.epg-btn):not(.program-cell-action-btn),body:not(.tvair-guide-page) .disabled:not(.program-cell-action-btn),body:not(.tvair-guide-page) .is-disabled:not(.program-cell-action-btn){
-  background:var(--tvair-role-control-disabled-bg);
-  color:var(--tvair-role-control-disabled-fg);
-  opacity:1;
-}
-body:not(.tvair-guide-page):not(.tvair-reservation-page) table thead th{
-  background:var(--tvair-role-table-header-bg);
-  color:var(--tvair-role-table-header-fg);
-}
-body:not(.tvair-guide-page):not(.tvair-reservation-page) tbody tr:not(.disabled-row):not(.cancelled-row):not(.conflicted):not([data-genre-row="1"]):nth-child(odd)>td{
-  background:var(--tvair-role-table-row-bg);
-  color:var(--tvair-role-table-row-fg);
-}
-body:not(.tvair-guide-page):not(.tvair-reservation-page) tbody tr:not(.disabled-row):not(.cancelled-row):not(.conflicted):not([data-genre-row="1"]):nth-child(even)>td{
-  background:var(--tvair-role-table-row-alt-bg);
-  color:var(--tvair-role-table-row-fg);
-}
-body:not(.tvair-guide-page) small,body:not(.tvair-guide-page) .help,body:not(.tvair-guide-page) .hint,body:not(.tvair-guide-page) .muted,body:not(.tvair-guide-page) .description,body:not(.tvair-guide-page) .field-help,body:not(.tvair-guide-page) .subtext,body:not(.tvair-guide-page) .caption,body:not(.tvair-guide-page) .note,body:not(.tvair-guide-page) .source-label{
-  color:var(--tvair-role-text-muted-fg);
-}
-.tvair-notification,.toast,#toast{
-  background:var(--tvair-role-menu-bg);
-  color:var(--tvair-role-menu-fg);
-  border-color:var(--tvair-role-menu-border);
-}
-
 
 
 /* Theme contract stabilizer: deterministic current-theme selectors for host pages. */
 
-/* Effective/current theme selectors. */
-html[data-tvair-effective-theme="light"],
-body[data-tvair-effective-theme="light"],
-html[data-theme-effective="light"],
-body[data-theme-effective="light"],
-body.theme-light{
-  --winui-system-accent-color:#0078D4;
-  --winui-system-accent-color-hover:#106EBE;
-  --winui-system-accent-color-pressed:#005A9E;
-  --winui-accent-soft:#DFF3FF;
-
-  --winui-text-fill-color-primary:#1A1A1A;
-  --winui-text-fill-color-secondary:#3A3A3A;
-  --winui-text-fill-color-tertiary:#6B6B6B;
-  --winui-text-fill-color-disabled:#9A9A9A;
-  --winui-text-on-accent-fill-color-primary:#FFFFFF;
-
-  --winui-control-fill-color-default:#FFFFFF;
-  --winui-control-fill-color-secondary:#F9F9F9;
-  --winui-control-fill-color-tertiary:#F3F3F3;
-  --winui-control-fill-color-hover:#F5F5F5;
-  --winui-control-fill-color-pressed:#EDEDED;
-  --winui-control-fill-color-disabled:#F3F3F3;
-  --winui-control-stroke-color-default:#8A8A8A;
-  --winui-control-stroke-color-secondary:#D1D1D1;
-
-  --winui-card-background-fill-color-default:#FFFFFF;
-  --winui-card-background-fill-color-secondary:#F9F9F9;
-  --winui-layer-fill-color-default:#FFFFFF;
-  --winui-layer-fill-color-alt:#FAFAFA;
-  --winui-layer-on-acrylic-fill-color-default:#FFFFFF;
-  --winui-solid-background-fill-color-base:#F3F3F3;
-  --winui-solid-background-fill-color-secondary:#EEEEEE;
-  --winui-solid-background-fill-color-tertiary:#F9F9F9;
-  --winui-focus-stroke-color-outer:#005FB8;
-
-  --tvair-role-page-bg:var(--winui-solid-background-fill-color-base);
-  --tvair-role-page-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-shell-bg:var(--winui-layer-fill-color-default);
-  --tvair-role-shell-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-panel-bg:var(--winui-card-background-fill-color-default);
-  --tvair-role-subpanel-bg:var(--winui-card-background-fill-color-secondary);
-  --tvair-role-toolbar-bg:var(--winui-solid-background-fill-color-secondary);
-  --tvair-role-toolbar-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-header-bg:var(--winui-solid-background-fill-color-secondary);
-  --tvair-role-header-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-label-fg:var(--winui-text-fill-color-secondary);
-  --tvair-role-text-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-text-soft-fg:var(--winui-text-fill-color-secondary);
-  --tvair-role-text-muted-fg:var(--winui-text-fill-color-tertiary);
-  --tvair-role-border:var(--winui-control-stroke-color-default);
-  --tvair-role-border-soft:var(--winui-control-stroke-color-secondary);
-  --tvair-role-focus:var(--winui-focus-stroke-color-outer);
-
-  --tvair-role-control-bg:var(--winui-control-fill-color-default);
-  --tvair-role-control-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-control-border:var(--winui-control-stroke-color-default);
-  --tvair-role-control-hover-bg:var(--winui-control-fill-color-hover);
-  --tvair-role-control-pressed-bg:var(--winui-control-fill-color-pressed);
-  --tvair-role-control-active-bg:var(--winui-system-accent-color);
-  --tvair-role-control-active-fg:var(--winui-text-on-accent-fill-color-primary);
-  --tvair-role-control-disabled-bg:var(--winui-control-fill-color-disabled);
-  --tvair-role-control-disabled-fg:var(--winui-text-fill-color-disabled);
-
-  --tvair-role-table-header-bg:var(--winui-solid-background-fill-color-secondary);
-  --tvair-role-table-header-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-table-row-bg:var(--winui-layer-fill-color-default);
-  --tvair-role-table-row-alt-bg:var(--winui-solid-background-fill-color-tertiary);
-  --tvair-role-table-row-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-table-row-muted-fg:var(--winui-text-fill-color-tertiary);
-  --tvair-role-table-row-border:var(--winui-control-stroke-color-secondary);
-
-  --tvair-role-dialog-bg:var(--winui-layer-on-acrylic-fill-color-default);
-  --tvair-role-dialog-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-dialog-muted-fg:var(--winui-text-fill-color-tertiary);
-  --tvair-role-menu-bg:var(--winui-card-background-fill-color-default);
-  --tvair-role-menu-fg:var(--winui-text-fill-color-primary);
-  --tvair-role-menu-hover-bg:var(--winui-control-fill-color-hover);
-  --tvair-role-menu-border:var(--winui-control-stroke-color-secondary);
-}
-
-/* Required fallbacks for selector paths not explicitly set by role tokens. */
-:root,body{
-  --tvair-role-panel-bg:var(--tvair-role-panel-bg, var(--tvair-role-shell-bg));
-  --tvair-role-subpanel-bg:var(--tvair-role-subpanel-bg, var(--tvair-role-toolbar-bg));
-  --tvair-role-text-fg:var(--tvair-role-text-fg, var(--tvair-role-page-fg));
-  --tvair-role-text-soft-fg:var(--tvair-role-text-soft-fg, var(--tvair-role-page-fg));
-  --tvair-role-text-muted-fg:var(--tvair-role-text-muted-fg, var(--tvair-role-table-row-muted-fg));
-  --tvair-role-control-pressed-bg:var(--tvair-role-control-pressed-bg, var(--tvair-role-control-hover-bg));
-}
+/* Effective theme values are owned by the canonical light/dark role blocks above. */
 
 /* Browser chrome defaults for controls that do not respect inherited color consistently. */
-::selection{
-  background:var(--tvair-role-control-active-bg);
-  color:var(--tvair-role-control-active-fg);
-}
-::-webkit-scrollbar{
-  width:12px;
-  height:12px;
-}
-::-webkit-scrollbar-track{
-  background:var(--tvair-role-page-bg);
-}
-::-webkit-scrollbar-thumb{
-  background:var(--tvair-role-border);
-  border:2px solid var(--tvair-role-page-bg);
-  border-radius:8px;
-}
-::-webkit-scrollbar-thumb:hover{
-  background:var(--tvair-role-control-border);
-}
+
 
 /* Link/action text: keep accent links visible on dark backgrounds.
-   release_contract ProgramCellTitleAccentPaletteFinalize: ProgramGuide title anchors are titles first,
+   ProgramGuide title anchors use the title role rather than generic link colors,
    so they are excluded from the generic link/accent owner. */
-a:not(.program-cell-title-link),
-.tvair-link,
-.link-like{
-  color:var(--winui-system-accent-color);
-}
-a:not(.program-cell-title-link):hover,
-.tvair-link:hover,
-.link-like:hover{
-  color:var(--winui-system-accent-color-hover);
-}
-body.tvair-guide-page .prog-title a.program-cell-title-link,
-body.tvair-guide-page .prog-title a.program-cell-title-link:visited{
-  color:var(--tvair-programcell-title-fg);
-}
-body.tvair-guide-page .prog-title a.program-cell-title-link:hover,
-body.tvair-guide-page .prog-title a.program-cell-title-link:focus-visible{
-  color:var(--tvair-programcell-title-hover-fg,var(--tvair-programcell-title-fg));
-  text-decoration:underline;
-}
+
 
 /* Keep program-cell action buttons isolated from generic UI controls; focus only.
    ProgramCellActionTokenContract owns enabled/disabled visual colors. */
-.program-cell-action-btn:focus-visible,
-.prog-btn:focus-visible,
-.act-btn:focus-visible{
-  outline:2px solid var(--tvair-role-focus);
-  outline-offset:1px;
-}
+
 
 /* Contract stamp. */
-html::before{
-  content:"";
-  display:none;
-}
 
 
 /* release_contract: reservation-list geometry and row paint are excluded here and owned by tvair-list-module.css. */
@@ -633,202 +1688,205 @@ html::before{
  * Scope: non-program form pages. These classes are semantic UI attributes shared by
  * keyword search, auto-search rules, program reservations, and settings-style forms.
  * They intentionally live after generic button rules so selectable chips keep state. */
-body:not(.tvair-guide-page) .tvair-choice-row{
-  display:flex;
-  align-items:center;
-  flex-wrap:wrap;
-  gap:5px;
-}
-body:not(.tvair-guide-page) .tvair-control-strip{
-  display:flex;
-  align-items:center;
-  flex-wrap:wrap;
-  gap:6px;
-}
-body:not(.tvair-guide-page) .tvair-time-row{
-  display:flex;
-  align-items:center;
-  flex-wrap:wrap;
-  gap:6px;
-}
-body:not(.tvair-guide-page) .tvair-choice-chip,
-body:not(.tvair-guide-page) .tvair-check-chip{
-  min-height:24px;
-  display:inline-flex;
-  align-items:center;
-  justify-content:center;
-  gap:4px;
-  padding:2px 8px;
-  border:1px solid var(--tvair-role-control-border);
-  border-radius:3px;
-  background:var(--tvair-role-control-bg);
-  color:var(--tvair-role-control-fg);
-  font-family:"Meiryo","メイリオ",sans-serif;
-  font-size:12px;
-  line-height:1.2;
-  font-weight:600;
-  cursor:pointer;
-  user-select:none;
-  box-shadow:none;
-}
-body:not(.tvair-guide-page) .tvair-weekday-chip{
-  min-width:30px;
-  padding-left:8px;
-  padding-right:8px;
-}
-body:not(.tvair-guide-page) .tvair-choice-chip:hover,
-body:not(.tvair-guide-page) .tvair-check-chip:hover{
-  background:var(--tvair-role-control-hover-bg);
-}
-body:not(.tvair-guide-page) .tvair-choice-chip:focus-visible,
-body:not(.tvair-guide-page) .tvair-check-chip:focus-within,
-body:not(.tvair-guide-page) .tvair-check-chip:focus-visible,
-body:not(.tvair-guide-page) .tvair-mini-action:focus-visible{
-  outline:2px solid var(--tvair-role-focus);
-  outline-offset:1px;
-}
-body:not(.tvair-guide-page) .tvair-choice-chip[aria-pressed="true"],
-body:not(.tvair-guide-page) .tvair-choice-chip.checked,
-body:not(.tvair-guide-page) .tvair-check-chip.checked,
-body:not(.tvair-guide-page) .tvair-check-chip:has(input:checked){
-  background:var(--tvair-role-control-active-bg);
-  color:var(--tvair-role-control-active-fg);
-  border-color:var(--tvair-role-control-active-bg);
-}
-body:not(.tvair-guide-page) .tvair-choice-chip[aria-pressed="true"] span,
-body:not(.tvair-guide-page) .tvair-choice-chip.checked span,
-body:not(.tvair-guide-page) .tvair-check-chip.checked span,
-body:not(.tvair-guide-page) .tvair-check-chip:has(input:checked) span{
-  color:var(--tvair-role-control-active-fg);
-}
-body:not(.tvair-guide-page) .tvair-check-chip input[type="checkbox"]{
-  margin:0;
-  flex:0 0 auto;
-}
-body:not(.tvair-guide-page) .tvair-check-chip:has(input:disabled),
-body:not(.tvair-guide-page) .tvair-choice-chip:disabled{
-  opacity:.55;
-  cursor:default;
-}
-body:not(.tvair-guide-page) .tvair-mini-action{
-  min-height:24px;
-  padding:3px 10px;
-  border:1px solid var(--tvair-role-control-border);
-  border-radius:3px;
-  background:var(--tvair-role-control-bg);
-  color:var(--tvair-role-control-fg);
-  font-size:11px;
-  font-family:"Meiryo","メイリオ",sans-serif;
-  cursor:pointer;
-}
-body:not(.tvair-guide-page) .tvair-mini-action:hover{
-  background:var(--tvair-role-control-hover-bg);
-}
 
 
-/* release_contract ReservationSubtabThemeTokenContract
+/* Reservation subtab theme roles
    Reservation-list child tabs are a separate surface from the global top nav.
    Keep the active state visible through reservation subtab tokens across light/dark themes. */
-body.tvair-reservation-page #filter-tabs{
-  background:var(--tvair-reservation-subtab-strip-bg,var(--tvair-reservation-tab-strip-bg,var(--tvair-role-toolbar-bg)));
-  border-bottom-color:var(--tvair-reservation-subtab-active-border,var(--tvair-role-focus));
-}
-body.tvair-reservation-page #filter-tabs .ftab{
-  background:var(--tvair-reservation-subtab-bg,var(--tvair-role-control-bg));
-  color:var(--tvair-reservation-subtab-fg,var(--tvair-role-control-fg));
-  border-color:var(--tvair-reservation-subtab-border,var(--tvair-role-control-border));
-  border-bottom-color:transparent;
-  box-shadow:none;
-}
-body.tvair-reservation-page #filter-tabs .ftab:hover{
-  background:var(--tvair-reservation-subtab-hover-bg,var(--tvair-role-control-hover-bg));
-  color:var(--tvair-reservation-subtab-hover-fg,var(--tvair-role-control-fg));
-}
-body.tvair-reservation-page #filter-tabs .ftab.active{
-  background:var(--tvair-reservation-subtab-active-bg,var(--tvair-role-control-active-bg));
-  color:var(--tvair-reservation-subtab-active-fg,var(--tvair-role-control-active-fg));
-  border-color:var(--tvair-reservation-subtab-active-border,var(--tvair-role-focus));
-  box-shadow:inset 0 -3px 0 var(--tvair-reservation-subtab-active-underline,var(--tvair-reservation-subtab-active-fg,var(--tvair-role-control-active-fg)));
-}
 
 
-/* release_contract ReleaseSurfaceTokenSpineRootRepair
-   Owner: theme token macro layer.
-   Scope: date weekday semantic colors and record-now action color spine only.
-   Non-scope: reservation-list disabled row tokens are unchanged. */
+/* Date, disabled-row, rule-list, and record-now roles are owned by their canonical theme/action blocks. */
+
+/* Semantic theme projection spine
+   Theme colors are owned by semantic roles across the entire host UI.
+   The effective theme attribute is the authoritative CSS input. Compatibility names remain projections only,
+   so modules cannot create a second light/dark palette or reverse text hierarchy independently. */
 :root,
-html[data-tvair-selected-theme="light"],
-body[data-tvair-selected-theme="light"],
-html.tvair-theme-light,
-body.tvair-theme-light,
-html[data-theme="light"],
-body[data-theme="light"],
-body.theme-light,
-body[data-tvair-effective-theme="light"]{
-  --tvair-date-weekday-sat-fg:#0067B8;
-  --tvair-date-weekday-sun-fg:#C42B1C;
-  --tvair-date-weekday-sat-selected-fg:#BFEFFF;
-  --tvair-date-weekday-sun-selected-fg:#FFCDD2;
-  --tvair-role-date-dow-sat-fg:var(--tvair-date-weekday-sat-fg);
-  --tvair-role-date-dow-sun-fg:var(--tvair-date-weekday-sun-fg);
-  --tvair-role-date-dow-sat-active-fg:var(--tvair-date-weekday-sat-selected-fg);
-  --tvair-role-date-dow-sun-active-fg:var(--tvair-date-weekday-sun-selected-fg);
-  --tvair-action-record-now-live-bg:#1F7A4D;
-  --tvair-action-record-now-live-hover-bg:#166A40;
-  --tvair-action-record-now-live-border:#14532D;
-  --tvair-action-record-now-live-fg:#FFFFFF;
-  --tvair-action-record-now-bg:var(--tvair-action-record-now-live-bg);
-  --tvair-action-record-now-hover-bg:var(--tvair-action-record-now-live-hover-bg);
-  --tvair-action-record-now-border:var(--tvair-action-record-now-live-border);
-  --tvair-action-record-now-fg:var(--tvair-action-record-now-live-fg);
-  --tvair-programcell-button-record-now-bg:var(--tvair-action-record-now-bg);
-  --tvair-programcell-button-record-now-hover-bg:var(--tvair-action-record-now-hover-bg);
-  --tvair-programcell-button-record-now-border:var(--tvair-action-record-now-border);
-  --tvair-programcell-button-record-now-fg:var(--tvair-action-record-now-fg);
-  --tvair-program-action-record-now-bg:var(--tvair-programcell-button-record-now-bg);
-  --tvair-program-action-record-now-hover-bg:var(--tvair-programcell-button-record-now-hover-bg);
-  --tvair-program-action-record-now-border:var(--tvair-programcell-button-record-now-border);
-  --tvair-program-action-record-now-fg:var(--tvair-programcell-button-record-now-fg);
-}
-html[data-tvair-selected-theme="dark"],
-body[data-tvair-selected-theme="dark"],
-html.tvair-theme-dark,
-body.tvair-theme-dark,
-html[data-theme="dark"],
-body[data-theme="dark"],
-body.theme-dark,
+body,
+html[data-tvair-effective-theme="light"],
+body[data-tvair-effective-theme="light"],
+html[data-tvair-effective-theme="dark"],
 body[data-tvair-effective-theme="dark"]{
-  --tvair-date-weekday-sat-fg:#7DD3FC;
-  --tvair-date-weekday-sun-fg:#FCA5A5;
-  --tvair-date-weekday-sat-selected-fg:#BFEFFF;
-  --tvair-date-weekday-sun-selected-fg:#FFCDD2;
-  --tvair-role-date-dow-sat-fg:var(--tvair-date-weekday-sat-fg);
-  --tvair-role-date-dow-sun-fg:var(--tvair-date-weekday-sun-fg);
-  --tvair-role-date-dow-sat-active-fg:var(--tvair-date-weekday-sat-selected-fg);
-  --tvair-role-date-dow-sun-active-fg:var(--tvair-date-weekday-sun-selected-fg);
-  --tvair-role-reservation-disabled-fg:#AEB7C4;
-  --tvair-role-reservation-disabled-strong-fg:#C2CBD8;
-  --tvair-role-reservation-row-disabled-fg:#AEB7C4;
-  --tvair-role-reservation-row-disabled-strong-fg:#C2CBD8;
-  --tvair-role-reservation-row-disabled-muted-fg:#99A5B5;
-  --tvair-list-row-disabled-fg:var(--tvair-role-reservation-row-disabled-fg);
-  --tvair-list-row-disabled-strong-fg:var(--tvair-role-reservation-row-disabled-strong-fg);
-  --tvair-reservation-disabled-fg:var(--tvair-role-reservation-disabled-fg);
-  --tvair-reservation-disabled-strong-fg:var(--tvair-role-reservation-disabled-strong-fg);
-  --tvair-action-record-now-live-bg:#0F5F46;
-  --tvair-action-record-now-live-hover-bg:#14785A;
-  --tvair-action-record-now-live-border:#3BAA80;
-  --tvair-action-record-now-live-fg:#ECFFF6;
-  --tvair-action-record-now-bg:var(--tvair-action-record-now-live-bg);
-  --tvair-action-record-now-hover-bg:var(--tvair-action-record-now-live-hover-bg);
-  --tvair-action-record-now-border:var(--tvair-action-record-now-live-border);
-  --tvair-action-record-now-fg:var(--tvair-action-record-now-live-fg);
-  --tvair-programcell-button-record-now-bg:var(--tvair-action-record-now-bg);
-  --tvair-programcell-button-record-now-hover-bg:var(--tvair-action-record-now-hover-bg);
-  --tvair-programcell-button-record-now-border:var(--tvair-action-record-now-border);
-  --tvair-programcell-button-record-now-fg:var(--tvair-action-record-now-fg);
-  --tvair-program-action-record-now-bg:var(--tvair-programcell-button-record-now-bg);
-  --tvair-program-action-record-now-hover-bg:var(--tvair-programcell-button-record-now-hover-bg);
-  --tvair-program-action-record-now-border:var(--tvair-programcell-button-record-now-border);
-  --tvair-program-action-record-now-fg:var(--tvair-programcell-button-record-now-fg);
+  --tvair-bg-a:var(--tvair-role-page-bg);
+  --tvair-bg-b:var(--tvair-role-shell-bg);
+  --tvair-bg-c:var(--tvair-role-subpanel-bg);
+  --tvair-bg-d:var(--tvair-role-toolbar-bg);
+  --tvair-bg-hover:var(--tvair-role-control-hover-bg);
+  --tvair-bg-selected:var(--tvair-role-control-active-bg);
+  --tvair-bg-disabled:var(--tvair-role-control-disabled-bg);
+  --tvair-text-a:var(--tvair-role-text-fg);
+  --tvair-text-b:var(--tvair-role-text-soft-fg);
+  --tvair-text-c:var(--tvair-role-text-muted-fg);
+  --tvair-text-disabled:var(--tvair-role-control-disabled-fg);
+  --tvair-text-inverse:var(--tvair-role-control-active-fg);
+  --tvair-border-a:var(--tvair-role-border);
+  --tvair-border-b:var(--tvair-role-border-soft);
+  --tvair-focus-a:var(--tvair-role-focus);
+
+  --tvair-module-page-bg:var(--tvair-role-page-bg);
+  --tvair-module-panel-bg:var(--tvair-role-panel-bg);
+  --tvair-module-subpanel-bg:var(--tvair-role-subpanel-bg);
+  --tvair-module-input-bg:var(--tvair-role-control-bg);
+  --tvair-module-text:var(--tvair-role-text-fg);
+  --tvair-module-text-sub:var(--tvair-role-text-soft-fg);
+  --tvair-module-text-muted:var(--tvair-role-text-muted-fg);
+  --tvair-module-text-disabled:var(--tvair-role-control-disabled-fg);
+  --tvair-module-border:var(--tvair-role-border);
+  --tvair-module-border-soft:var(--tvair-role-border-soft);
+
+  --tvair-content-subtle:var(--tvair-role-text-soft-fg);
+  --tvair-content-muted:var(--tvair-role-text-muted-fg);
+  --tvair-muted-text:var(--tvair-role-text-muted-fg);
+  --text-main:var(--tvair-role-text-fg);
+  --text-body:var(--tvair-role-text-soft-fg);
+  --label-color:var(--tvair-role-label-fg);
+  --label-sub-color:var(--tvair-role-text-muted-fg);
+
+  --panel-bg:var(--tvair-role-panel-bg);
+  --app-bg:var(--tvair-role-page-bg);
+  --nav-bg:var(--tvair-role-toolbar-bg);
+  --nav-border:var(--tvair-role-border);
+  --nav-text:var(--tvair-role-toolbar-fg);
+  --nav-button-text:var(--tvair-role-control-fg);
+  --table-head-bg:var(--tvair-role-table-header-bg);
+  --row-border:var(--tvair-role-table-row-border);
+  --row-hover:var(--tvair-role-table-row-hover-bg);
+  --input-border:var(--tvair-role-control-border);
+  --panel-border:var(--tvair-role-border-soft);
+
+  --tvair-color-text-main:var(--tvair-role-text-fg);
+  --tvair-color-text-sub:var(--tvair-role-text-soft-fg);
+  --tvair-color-text-muted:var(--tvair-role-text-muted-fg);
+  --tvair-color-text-disabled:var(--tvair-role-control-disabled-fg);
+  --tvair-color-border-default:var(--tvair-role-border);
+  --tvair-color-border-soft:var(--tvair-role-border-soft);
+  --tvair-color-surface-page:var(--tvair-role-page-bg);
+  --tvair-color-surface-panel:var(--tvair-role-panel-bg);
+  --tvair-color-surface-subtle:var(--tvair-role-subpanel-bg);
+
+  --tvair-content-primary:var(--tvair-role-text-fg);
+  --tvair-reservation-page-bg:var(--tvair-role-page-bg);
+  --tvair-reservation-tab-strip-bg:var(--tvair-role-toolbar-bg);
+  --tvair-reservation-subtab-strip-bg:var(--tvair-role-toolbar-bg);
+  --tvair-reservation-toolbar-bg:var(--tvair-role-toolbar-bg);
+  --tvair-reservation-toolbar-border:var(--tvair-role-border);
+  --tvair-reservation-toolbar-text:var(--tvair-role-toolbar-fg);
+  --tvair-reservation-toolbar-hover-bg:var(--tvair-role-control-hover-bg);
+  --tvair-reservation-table-head-bg:var(--tvair-role-table-header-bg);
+  --tvair-reservation-table-head-text:var(--tvair-role-table-header-fg);
+  --tvair-reservation-table-head-border:var(--tvair-role-table-row-border);
+  --tvair-reservation-list-border:var(--tvair-role-table-row-border);
+  --tvair-reservation-list-text-strong:var(--tvair-role-table-row-fg);
+  --tvair-reservation-list-text-soft:var(--tvair-role-text-soft-fg);
+  --tvair-reservation-list-text-muted:var(--tvair-role-table-row-muted-fg);
+  --tvair-reservation-genre-row-hover-bg:var(--tvair-role-table-row-hover-bg);
+
+  --tvair-list-row-odd-bg:var(--tvair-role-table-row-bg);
+  --tvair-list-row-even-bg:var(--tvair-role-table-row-alt-bg);
+  --tvair-list-row-hover-bg:var(--tvair-role-table-row-hover-bg);
+  --tvair-list-row-fg:var(--tvair-role-table-row-fg);
+  --tvair-list-row-muted-fg:var(--tvair-role-table-row-muted-fg);
+  --tvair-list-row-border:var(--tvair-role-table-row-border);
+
+  --tvair-color-program-time:var(--tvair-role-text-soft-fg);
+  --tvair-color-program-title:var(--tvair-role-text-fg);
+  --tvair-color-program-title-hover:var(--tvair-role-text-fg);
+  --tvair-color-program-description:var(--tvair-role-text-soft-fg);
+  --tvair-color-program-detail:var(--tvair-role-text-muted-fg);
+  --tvair-programcell-time-fg:var(--tvair-role-text-soft-fg);
+  --tvair-programcell-title-fg:var(--tvair-role-text-fg);
+  --tvair-programcell-title-hover-fg:var(--tvair-role-text-fg);
+  --tvair-programcell-desc-fg:var(--tvair-role-text-soft-fg);
+  --tvair-programcell-summary-fg:var(--tvair-role-text-soft-fg);
+  --tvair-programcell-detail-fg:var(--tvair-role-text-muted-fg);
 }
+
+/* release_contract ThemeAllModulesCompoundStateSpine
+   Input/choice/settings controls keep one semantic state path across light/dark themes.
+   Compound states reuse the existing current effective role values; no page-local paint is introduced. */
+:root{
+  --tvair-role-field-bg:var(--tvair-role-control-bg);
+  --tvair-role-field-fg:var(--tvair-role-control-fg);
+  --tvair-role-field-border:var(--tvair-role-control-border);
+  --tvair-role-field-hover-bg:var(--tvair-role-control-hover-bg);
+  --tvair-role-field-hover-border:var(--tvair-role-control-border);
+  --tvair-role-field-focus-bg:var(--tvair-role-control-bg);
+  --tvair-role-field-focus-fg:var(--tvair-role-control-fg);
+  --tvair-role-field-focus-border:var(--tvair-role-control-focus-border,var(--tvair-role-focus));
+  --tvair-role-field-focus-ring:var(--tvair-role-control-focus-ring,none);
+  --tvair-role-field-disabled-bg:var(--tvair-role-control-disabled-bg);
+  --tvair-role-field-disabled-fg:var(--tvair-role-control-disabled-fg);
+  --tvair-role-field-disabled-border:var(--tvair-role-control-border);
+  --tvair-role-choice-bg:var(--tvair-role-control-bg);
+  --tvair-role-choice-fg:var(--tvair-role-control-fg);
+  --tvair-role-choice-border:var(--tvair-role-control-border);
+  --tvair-role-choice-hover-bg:var(--tvair-role-control-hover-bg);
+  --tvair-role-choice-hover-fg:var(--tvair-role-control-hover-fg);
+  --tvair-role-choice-hover-border:var(--tvair-role-control-hover-border);
+  --tvair-role-choice-checked-bg:var(--tvair-role-control-active-bg);
+  --tvair-role-choice-checked-fg:var(--tvair-role-control-active-fg);
+  --tvair-role-choice-checked-border:var(--tvair-role-control-active-bg);
+  --tvair-role-choice-focus:var(--tvair-role-focus);
+  --tvair-role-choice-disabled-bg:var(--tvair-role-control-disabled-bg);
+  --tvair-role-choice-disabled-fg:var(--tvair-role-control-disabled-fg);
+  --tvair-role-choice-disabled-border:var(--tvair-role-control-border);
+  --tvair-role-choice-disabled-accent:var(--tvair-role-control-disabled-fg);
+}
+
+
+/* release_contract ThemeModuleProjectionClosure
+   Transitional module names terminate at semantic roles here; page selectors own no paint values. */
+:root,body{
+  --tvair-action-primary-bg:var(--tvair-role-action-primary-bg);
+  --tvair-action-primary-hover-bg:var(--tvair-role-action-primary-hover-bg);
+  --tvair-action-lite-bg:var(--tvair-role-action-secondary-bg);
+  --tvair-action-lite-hover-bg:var(--tvair-role-action-secondary-hover-bg);
+  --tvair-action-lite-text:var(--tvair-role-action-secondary-fg);
+  --tvair-action-lite-border:var(--tvair-role-action-secondary-border);
+  --tvair-action-edit-border:var(--tvair-role-action-secondary-border);
+  --tvair-content-inverse:var(--tvair-role-action-primary-fg);
+  --tvair-content-link:var(--tvair-role-action-primary-bg);
+  --tvair-content-strong:var(--tvair-role-text-fg);
+  --tvair-text-muted:var(--tvair-role-text-muted-fg);
+
+  --tvair-surface-raised:var(--tvair-role-panel-bg);
+  --tvair-surface-soft:var(--tvair-role-subpanel-bg);
+  --tvair-surface-soft-hover:var(--tvair-role-control-hover-bg);
+  --tvair-surface-subtle:var(--tvair-role-page-bg);
+  --tvair-surface-overlay:var(--tvair-role-dialog-backdrop);
+  --tvair-line-default:var(--tvair-role-border);
+  --tvair-line-soft:var(--tvair-role-border-soft);
+  --tvair-line-strong:var(--tvair-role-border);
+
+  --tvair-role-table-bg:var(--tvair-role-table-row-bg);
+  --tvair-role-table-head-bg:var(--tvair-role-table-header-bg);
+  --tvair-row-hover-bg:var(--tvair-role-table-row-hover-bg);
+  --tvair-role-control-focus-border:var(--tvair-role-focus);
+  --tvair-role-control-focus-ring:0 0 0 2px color-mix(in srgb,var(--tvair-role-focus) 30%,transparent);
+  --tvair-reservation-group-head-bg:var(--tvair-role-table-header-bg);
+  --tvair-reservation-group-head-border:var(--tvair-role-table-row-border);
+  --tvair-reservation-action-empty-bg:transparent;
+  --tvair-reservation-action-empty-border:transparent;
+  --tvair-scrollbar-track:var(--tvair-role-subpanel-bg);
+  --tvair-scrollbar-thumb:var(--tvair-role-border);
+
+  --tvair-status-scheduled-text:var(--tvair-role-action-primary-bg);
+  --tvair-status-recording-text:var(--tvair-role-action-danger-bg);
+  --tvair-status-completed-text:var(--tvair-role-text-soft-fg);
+  --tvair-status-cancelled-text:var(--tvair-role-text-muted-fg);
+  --tvair-status-failed-text:var(--tvair-role-action-danger-bg);
+  --tvair-status-processing-text:var(--tvair-role-status-processing-fg);
+  --tvair-state-conflict-text:var(--tvair-role-action-danger-bg);
+  --tvair-state-warning-text:var(--tvair-role-action-danger-hover-bg);
+
+  --tvair-role-danger-soft-bg:var(--tvair-role-action-danger-soft-bg);
+  --tvair-role-danger-border:var(--tvair-role-action-danger-border);
+  --tvair-role-danger-fg:var(--tvair-role-action-danger-bg);
+  --tvair-role-warning-soft-bg:var(--tvair-role-subpanel-bg);
+  --tvair-role-warning-border:var(--tvair-role-action-primary-border);
+  --tvair-role-warning-fg:var(--tvair-role-text-fg);
+
+  --tvair-help-card-shadow:var(--tvair-role-comment-card-shadow);
+  --tvair-programcell-default-bg:transparent;
+}
+

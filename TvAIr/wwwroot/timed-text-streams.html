@@ -1,0 +1,162 @@
+﻿<!DOCTYPE html>
+
+<html lang="ja">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width,initial-scale=1" name="viewport"/>
+<title>コメント表示 — TvAIr</title>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.0"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.0"/>
+
+<link href="/tvair-ui-foundation.css?v=1.2.0" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.0-theme206" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.0-modules251" rel="stylesheet"/>
+<link rel="stylesheet" href="/tvair-timed-text-streams.css?v=1.2.0-owner203">
+<link href="/tvair-notification.css?v=1.2.0-owner203" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.0" rel="stylesheet"/>
+
+
+<script src="/tvair-theme.js?v=1.2.0"></script>
+<script src="/tvair-action-button-state.js?v=1.2.0"></script>
+
+
+
+
+
+</head>
+<body class="tvair-non-program-page tvair-page-width-wide tvair-timed-text-page">
+<div class="tvair-topnav" id="nav">
+<a class="nav-btn" href="/">番組表</a>
+<a class="nav-btn" href="/reservations.html">予約リスト</a>
+<a class="nav-btn" href="/keyword.html">キーワード検索</a>
+<a class="nav-btn" href="/program-rules.html">自動検索予約</a>
+<a class="nav-btn" href="/new-reservation.html">プログラム予約</a>
+<div class="spacer"></div>
+<span id="nav-title">TvAIr</span>
+<div id="page-menu-wrap">
+<button aria-label="メニュー" id="page-menu-btn" data-tvair-menu-entry="page" aria-controls="page-menu-dropdown" type="button">☰</button>
+<div data-tvair-menu-host="1" id="page-menu-dropdown"></div>
+</div>
+</div>
+<div id="main">
+<div class="header-row">
+<h1>コメント表示</h1>
+<span class="status" id="status">コメント受信待機中</span>
+</div>
+<div class="toolbar">
+<label>予約ID <input autocomplete="off" id="reservation-id" type="text"/></label>
+<button id="apply-filter" type="button">表示更新</button>
+<label class="auto-scroll"><input checked="" id="auto-scroll" type="checkbox"/> 自動スクロール</label>
+</div>
+<div class="comment-grid" id="comments"></div>
+</div>
+<script>
+/* Page menu behavior is owned by tvair-menu-spine.js. */
+const commentsRoot = document.getElementById('comments');
+const statusEl = document.getElementById('status');
+const reservationInput = document.getElementById('reservation-id');
+const autoScroll = document.getElementById('auto-scroll');
+document.getElementById('apply-filter').addEventListener('click', async function(){ const state=window.TvAirActionButtonState.begin(this); try{ await requestComments(true); } finally{ window.TvAirActionButtonState.finish(this,state,'表示更新'); } });
+let lastSignature = '';
+let commentsLoadPromise = null;
+let commentsForceQueued = false;
+function esc(value){
+  return String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+}
+function formatTime(value){
+  const d = value ? new Date(value) : null;
+  if(!d || Number.isNaN(d.getTime())) return '';
+  return d.toLocaleTimeString('ja-JP', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+}
+async function performCommentsLoad(force){
+  const rid = reservationInput.value.trim();
+  const streamId = 'recording-comments';
+  const url = rid ? `/api/timed-text-streams?streamId=${encodeURIComponent(streamId)}&groupId=${encodeURIComponent(rid)}&count=100` : `/api/timed-text-streams/groups?streamId=${encodeURIComponent(streamId)}&count=100`;
+  try{
+    const res = await fetch(url, { cache:'no-store' });
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const signature = JSON.stringify(data);
+    if(!force && signature === lastSignature) return;
+    lastSignature = signature;
+    if(rid){
+      renderGroups([{ reservationId: rid, items: data.items || [], count: data.count || 0 }]);
+    }else{
+      renderGroups(data.groups || []);
+    }
+  }catch(ex){
+    statusEl.textContent = `コメント取得エラー: ${ex.message}`;
+  }
+}
+
+async function requestComments(force){
+  if(commentsLoadPromise){
+    commentsForceQueued = commentsForceQueued || force;
+    return commentsLoadPromise;
+  }
+  commentsLoadPromise = (async () => {
+    let nextForce = force;
+    do{
+      commentsForceQueued = false;
+      await performCommentsLoad(nextForce);
+      nextForce = commentsForceQueued;
+    }while(nextForce && !document.hidden);
+  })();
+  try{ await commentsLoadPromise; }
+  finally{ commentsLoadPromise = null; }
+}
+function renderGroups(groups){
+  if(!groups.length){
+    commentsRoot.innerHTML = '<div class="empty">コメント受信待機中</div>';
+    statusEl.textContent = 'コメント受信待機中';
+    return;
+  }
+  commentsRoot.innerHTML = groups.map(group => {
+    const comments = group.items || [];
+    const latest = comments[comments.length - 1] || {};
+    const title = group.title || latest.title || '録画中コメント';
+    const service = group.subtitle || latest.subtitle || '';
+    const jk = latest.attributes?.jkChannel || '';
+    return `<section class="comment-card">
+      <div class="comment-card-head">
+        <div class="program-title">${esc(title)}</div>
+        <div class="program-meta">${esc(group.groupId || latest.groupId || '')} / ${esc(service)} / jk${esc(jk)} / ${comments.length}件</div>
+      </div>
+      <div class="comment-list">
+        ${comments.length ? comments.map(c => `<div class="comment-row"><div class="comment-time">${esc(formatTime(c.occurredAt))}</div><div class="comment-body">${esc(c.text)}</div></div>`).join('') : '<div class="empty">コメント受信待機中</div>'}
+      </div>
+    </section>`;
+  }).join('');
+  statusEl.textContent = 'コメント表示中';
+  if(autoScroll.checked){
+    document.querySelectorAll('.comment-list').forEach(el => { el.scrollTop = el.scrollHeight; });
+  }
+}
+let commentsPollTimer = 0;
+const commentsPollIntervalMs = 1500;
+function scheduleCommentsPoll(immediate = false){
+  clearTimeout(commentsPollTimer);
+  if(document.hidden) return;
+  commentsPollTimer = setTimeout(runCommentsPoll, immediate ? 0 : commentsPollIntervalMs);
+}
+async function runCommentsPoll(){
+  if(document.hidden){
+    scheduleCommentsPoll(false);
+    return;
+  }
+  try{ await requestComments(false); }
+  finally{ scheduleCommentsPoll(false); }
+}
+document.addEventListener('visibilitychange', () => {
+  if(document.hidden) clearTimeout(commentsPollTimer);
+  else scheduleCommentsPoll(true);
+});
+window.addEventListener('focus', () => scheduleCommentsPoll(true));
+requestComments(true).finally(() => scheduleCommentsPoll(false));
+</script>
+<script src="/tvair-notification.js?v=1.2.0"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.0"></script>
+<script src="/tvair-settings-host.js?v=1.2.0"></script>
+<script src="/tvair-menu-spine.js?v=1.2.0"></script>
+</body>
+</html>

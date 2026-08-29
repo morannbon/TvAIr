@@ -1,0 +1,259 @@
+/* TvAIr-generated surfaces: structure is selected by body class; theme values flow from the shared contract when present. */
+
+body.tvair-generated-login {
+    font-family: "Yu Gothic UI", sans-serif;
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    background: Canvas;
+    color: CanvasText;
+    color-scheme: light dark;
+}
+body.tvair-generated-login main {
+    width: min(360px, calc(100% - 32px));
+    padding: 24px;
+    border: 1px solid GrayText;
+    border-radius: 10px;
+    background: Canvas;
+}
+body.tvair-generated-login h1 { font-size: 20px; margin: 0 0 18px; }
+body.tvair-generated-login label { display: block; margin-bottom: 8px; }
+body.tvair-generated-login input,
+body.tvair-generated-login button {
+    box-sizing: border-box;
+    width: 100%;
+    font: inherit;
+    padding: 10px;
+    border-radius: 6px;
+    border: 1px solid GrayText;
+}
+body.tvair-generated-login button { margin-top: 14px; cursor: pointer; }
+body.tvair-generated-login .message { min-height: 1.5em; margin-top: 12px; }
+
+body.tvair-plugin-window-page {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--tvair-plugin-host-bg);
+    color: var(--tvair-plugin-host-fg);
+    font-family: system-ui, "Segoe UI", sans-serif;
+}
+body.tvair-plugin-window-page * { box-sizing: border-box; }
+body.tvair-plugin-window-page .tvair-plugin-window-host {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--tvair-role-panel-bg);
+    overflow: hidden;
+}
+body.tvair-plugin-window-page .tvair-plugin-window-title {
+    flex: 0 0 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    padding: 0 10px;
+    font-size: 13px;
+    background: var(--tvair-role-toolbar-bg);
+    color: var(--tvair-role-toolbar-fg);
+    border-bottom: 1px solid var(--tvair-role-border);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+body.tvair-plugin-window-page .tvair-plugin-window-title-hidden { display: none; }
+body.tvair-plugin-window-page .tvair-plugin-window-frame {
+    display: block;
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+    border: 0;
+    width: 100%;
+    height: 100%;
+    background: var(--tvair-role-panel-bg);
+    overflow: auto;
+}
+body.tvair-plugin-window-page .tvair-plugin-window-host-tool .tvair-plugin-window-frame { position: absolute; inset: 0; }
+
+body.tvair-plugin-info-page,
+body.tvair-message-page {
+    font-family: Meiryo, "Yu Gothic UI", system-ui, sans-serif;
+    margin: 24px;
+    line-height: 1.6;
+    background: var(--tvair-role-page-bg);
+    color: var(--tvair-role-text-fg);
+}
+body.tvair-plugin-info-page .card,
+body.tvair-message-page .card {
+    border: 1px solid var(--tvair-role-border);
+    background: var(--tvair-role-panel-bg);
+    border-radius: 12px;
+    padding: 18px;
+}
+body.tvair-plugin-info-page .card {
+    max-width: 560px;
+    box-shadow: var(--tvair-shadow-a);
+}
+body.tvair-message-page .card { max-width: 720px; }
+body.tvair-plugin-info-page h1,
+body.tvair-message-page h1 { font-size: 20px; margin: 0 0 14px; }
+body.tvair-plugin-info-page .row { display: flex; gap: 12px; margin: 8px 0; }
+body.tvair-plugin-info-page .k { width: 110px; color: var(--tvair-role-text-muted-fg); }
+body.tvair-plugin-info-page .v { font-weight: 600; }
+body.tvair-plugin-info-page .button,
+body.tvair-message-page a.button {
+    display: inline-block;
+    margin-top: 12px;
+    padding: 8px 12px;
+    border: 1px solid var(--tvair-role-control-border);
+    border-radius: 8px;
+    color: var(--tvair-role-text-fg);
+    text-decoration: none;
+    background: var(--tvair-role-control-bg);
+}
+
+body.tvair-plugin-shell-page {
+    font-family: Meiryo, sans-serif;
+    font-size: 12px;
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--tvair-role-page-bg);
+    color: var(--tvair-role-text-fg);
+}
+body.tvair-plugin-shell-page * { box-sizing: border-box; }
+body.tvair-plugin-shell-page #nav {
+    background: var(--tvair-role-toolbar-bg);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 6px;
+    flex-shrink: 0;
+    height: 30px;
+    position: relative;
+    z-index: 1000;
+    isolation: isolate;
+}
+body.tvair-plugin-shell-page #nav .nav-btn {
+    background: var(--tvair-role-control-bg);
+    color: var(--tvair-role-control-fg);
+    border: 0;
+    padding: 3px 0;
+    cursor: pointer;
+    font-size: 12px;
+    border-radius: 2px;
+    white-space: nowrap;
+    min-width: 110px;
+    text-align: center;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 24px;
+    text-decoration: none;
+}
+body.tvair-plugin-shell-page #nav .nav-btn:hover { background: var(--tvair-role-control-hover-bg); }
+body.tvair-plugin-shell-page #nav .spacer { flex: 1; }
+body.tvair-plugin-shell-page #menu-wrap { position: relative; z-index: 20; }
+body.tvair-plugin-shell-page #menu-btn {
+    background: var(--tvair-role-control-bg);
+    color: var(--tvair-role-control-fg);
+    border: 0;
+    padding: 3px 10px;
+    cursor: pointer;
+    font-size: 15px;
+    border-radius: 2px;
+    line-height: 1;
+    letter-spacing: 1px;
+}
+body.tvair-plugin-shell-page #menu-btn:hover { background: var(--tvair-role-control-hover-bg); }
+body.tvair-plugin-shell-page #menu-dropdown { display: none; position: absolute; top: 100%; right: 0; z-index: 500; min-width: 160px; margin-top: 2px; }
+body.tvair-plugin-shell-page #menu-dropdown.open { display: block; }
+body.tvair-plugin-shell-page .menu-item { display: block; width: 100%; padding: 8px 14px; background: transparent; border: 0; text-align: left; font-size: 12px; cursor: pointer; color: var(--tvair-role-text-fg); white-space: nowrap; text-decoration: none; }
+body.tvair-plugin-shell-page .menu-item:hover { background: var(--tvair-role-control-hover-bg); color: var(--tvair-role-action-primary-bg); }
+body.tvair-plugin-shell-page .menu-sep { height: 1px; background: var(--tvair-role-time-axis-bg); margin: 3px 0; }
+body.tvair-plugin-shell-page .menu-group { margin: 0; padding: 0; }
+body.tvair-plugin-shell-page .menu-group > summary { list-style: none; }
+body.tvair-plugin-shell-page .menu-group > summary::-webkit-details-marker { display: none; }
+body.tvair-plugin-shell-page .menu-summary { position: relative; user-select: none; }
+body.tvair-plugin-shell-page .menu-summary::after { content: '▸'; float: right; opacity: .72; }
+body.tvair-plugin-shell-page .menu-group[open] > .menu-summary::after { content: '▾'; }
+body.tvair-plugin-shell-page .menu-subitem { padding-left: 26px; font-size: 11.5px; background: var(--tvair-role-page-bg); }
+body.tvair-plugin-shell-page .menu-subitem:hover { background: var(--tvair-role-control-hover-bg); }
+body.tvair-plugin-shell-page .nav-brand-text { font-weight: 700; color: var(--tvair-role-toolbar-fg); letter-spacing: .03em; margin-right: 6px; white-space: nowrap; position: relative; z-index: 20; }
+body.tvair-plugin-shell-page .plugin-shell-content { flex: 1; min-height: 0; overflow: auto; background: var(--tvair-role-page-bg); }
+body.tvair-plugin-shell-page .plugin-shell-inner { min-height: 100%; box-sizing: border-box; }
+
+body.tvair-plugin-toolwindow-content-only {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    min-width: 0;
+    min-height: 100%;
+    overflow: auto;
+    background: transparent;
+    color: inherit;
+}
+body.tvair-plugin-toolwindow-content-only * { box-sizing: border-box; }
+body.tvair-plugin-toolwindow-content-only .tvair-toolwindow-content-root { position: relative; width: 100%; min-width: 0; min-height: 100%; background: transparent; }
+body.tvair-plugin-toolwindow-content-only img { max-width: 100%; }
+
+body.tvair-plugin-shell-page .tvair-plugin-render-error,
+body.tvair-plugin-toolwindow-content-only .tvair-plugin-render-error {
+    padding: 12px;
+    font-family: system-ui, "Segoe UI", sans-serif;
+    color: var(--tvair-plugin-host-fg);
+    background: var(--tvair-plugin-host-bg);
+}
+body.tvair-plugin-shell-page .tvair-plugin-render-error h2,
+body.tvair-plugin-toolwindow-content-only .tvair-plugin-render-error h2 { font-size: 15px; margin: 0 0 8px; }
+body.tvair-plugin-shell-page .tvair-plugin-render-error p,
+body.tvair-plugin-toolwindow-content-only .tvair-plugin-render-error p { margin: 0 0 6px; }
+body.tvair-plugin-shell-page .tvair-plugin-render-error pre,
+body.tvair-plugin-toolwindow-content-only .tvair-plugin-render-error pre { white-space: pre-wrap; font-size: 12px; background: var(--tvair-role-panel-bg); border: 1px solid var(--tvair-role-border); padding: 8px; }
+
+body.tvair-plugin-shell-page .tvair-floating-buttons,
+body.tvair-plugin-toolwindow-content-only .tvair-floating-buttons { position: fixed; z-index: 2147483000; display: flex; gap: 8px; pointer-events: none; max-width: calc(100vw - 24px); }
+body.tvair-plugin-shell-page .tvair-floating-buttons.br,
+body.tvair-plugin-toolwindow-content-only .tvair-floating-buttons.br { right: 12px; bottom: 12px; flex-direction: column-reverse; align-items: flex-end; }
+body.tvair-plugin-shell-page .tvair-floating-buttons.bl,
+body.tvair-plugin-toolwindow-content-only .tvair-floating-buttons.bl { left: 12px; bottom: 12px; flex-direction: column-reverse; align-items: flex-start; }
+body.tvair-plugin-shell-page .tvair-floating-buttons.tr,
+body.tvair-plugin-toolwindow-content-only .tvair-floating-buttons.tr { right: 12px; top: 12px; flex-direction: column; align-items: flex-end; }
+body.tvair-plugin-shell-page .tvair-floating-buttons.tl,
+body.tvair-plugin-toolwindow-content-only .tvair-floating-buttons.tl { left: 12px; top: 12px; flex-direction: column; align-items: flex-start; }
+body.tvair-plugin-shell-page .tvair-floating-button,
+body.tvair-plugin-toolwindow-content-only .tvair-floating-button { pointer-events: auto; min-height: 38px; max-width: min(280px, calc(100vw - 32px)); padding: 8px 12px; border: 1px solid var(--tvair-role-border); border-radius: 999px; background: var(--tvair-role-panel-bg); color: var(--tvair-role-text-fg); box-shadow: var(--tvair-shadow-a); font: inherit; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+body.tvair-plugin-shell-page .tvair-floating-button[hidden],
+body.tvair-plugin-toolwindow-content-only .tvair-floating-button[hidden] { display: none; }
+body.tvair-plugin-shell-page .tvair-floating-button:disabled,
+body.tvair-plugin-toolwindow-content-only .tvair-floating-button:disabled { opacity: .58; cursor: default; }
+@media (max-width: 420px), (max-height: 260px) {
+    body.tvair-plugin-shell-page .tvair-floating-button,
+body.tvair-plugin-toolwindow-content-only .tvair-floating-button { min-height: 34px; padding: 6px 9px; font-size: .9em; }
+    body.tvair-plugin-shell-page .tvair-floating-button .tvair-floating-label-text,
+    body.tvair-plugin-toolwindow-content-only .tvair-floating-button .tvair-floating-label-text { display: none; }
+}
+
+body.tvair-plugin-shell-page .tvair-host-floating-label,
+body.tvair-plugin-toolwindow-content-only .tvair-host-floating-label { position: fixed; left: 50%; top: 48%; transform: translate(-50%, -50%); z-index: 2147483000; max-width: min(80vw, 36rem); padding: .65rem 1rem; border-radius: .55rem; box-shadow: var(--tvair-shadow-a); font: 600 14px/1.45 sans-serif; text-align: center; pointer-events: none; opacity: 0; transition: opacity 120ms ease; background: var(--tvair-role-panel-bg); color: var(--tvair-role-text-fg); border: 1px solid var(--tvair-role-border); }
+body.tvair-plugin-shell-page .tvair-host-floating-label.is-visible,
+body.tvair-plugin-toolwindow-content-only .tvair-host-floating-label.is-visible { opacity: 1; }
+body.tvair-plugin-shell-page .tvair-host-floating-label[data-tvair-feedback-kind="success"],
+body.tvair-plugin-toolwindow-content-only .tvair-host-floating-label[data-tvair-feedback-kind="success"] { background: var(--tvair-accent-soft); color: var(--tvair-success-a); border-color: var(--tvair-success-a); }
+body.tvair-plugin-shell-page .tvair-host-floating-label[data-tvair-feedback-kind="warning"],
+body.tvair-plugin-toolwindow-content-only .tvair-host-floating-label[data-tvair-feedback-kind="warning"] { background: var(--tvair-role-warning-soft-bg); color: var(--tvair-role-warning-fg); border-color: var(--tvair-role-warning-border); }
+body.tvair-plugin-shell-page .tvair-host-floating-label[data-tvair-feedback-kind="error"],
+body.tvair-plugin-toolwindow-content-only .tvair-host-floating-label[data-tvair-feedback-kind="error"] { background: var(--tvair-role-danger-soft-bg); color: var(--tvair-role-danger-fg); border-color: var(--tvair-role-danger-border); }

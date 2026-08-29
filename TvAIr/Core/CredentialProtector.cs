@@ -4,13 +4,13 @@ using System.Text;
 namespace TvAIr.Core;
 
 /// <summary>
-/// Windows DPAPI（Data Protection API）を使用してパスワードを暗号化・復号するヘルパー。
+/// Windows DPAPI（Data Protection API）を使用してTvAIrが保持する資格情報を暗号化・復号するヘルパー。
 /// DataProtectionScope.CurrentUser により、同一Windowsユーザーセッション内でのみ復号可能。
 /// 暗号化データはBase64文字列としてiniファイルに保存する。
 /// </summary>
 public static class CredentialProtector
 {
-    // エントロピー（追加のランダム性）：アプリ固有の値で第三者による総当たりを困難にする
+    // エントロピー（追加のランダム性）：既存のWindowsログインパスワードと互換性を維持するアプリ固有値
     private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("TvAIr.TaskScheduler.v1");
 
     /// <summary>平文パスワードをDPAPIで暗号化してBase64文字列として返す。</summary>

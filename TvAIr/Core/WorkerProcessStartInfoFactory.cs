@@ -37,6 +37,23 @@ public static class WorkerProcessStartInfoFactory
         };
     }
 
+
+    /// <summary>
+    /// BonDriver_PTx は物理DIDをjob JSONからは認識せず、workerプロセスの生コマンドライン上の /DID を参照する。
+    /// TvAIrEpgRecがBonDriverを直接LoadLibraryする全物理Tuner経路は、この共通入口からjobと同じDIDを投影する。
+    /// </summary>
+    public static void AppendPhysicalTunerDidArgument(ProcessStartInfo startInfo, string? did)
+    {
+        if (startInfo is null) throw new ArgumentNullException(nameof(startInfo));
+        var normalized = (did ?? string.Empty).Trim().ToUpperInvariant();
+        if (string.IsNullOrWhiteSpace(normalized)) return;
+
+        // BonDriver側がGetCommandLineを読む契約のため、TvAIrEpgRec独自の --did ではなく
+        // TVTest互換の単一スラッシュ形式をそのままプロセス引数へ載せる。
+        startInfo.ArgumentList.Add("/DID");
+        startInfo.ArgumentList.Add(normalized);
+    }
+
     public static string GetWindowPolicy(TvAIrEpgRecLaunchKind launchKind, bool showTaskbarIconSetting)
     {
         return launchKind switch

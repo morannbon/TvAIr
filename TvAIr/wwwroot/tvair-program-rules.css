@@ -1,57 +1,70 @@
-/*
+﻿/*
  * TvAIr page CSS module - release_contract
  * Source: program-rules.html
  * Scope: page-local form/help/list styles extracted from inline <style>.
  * Safety: exact CSS relocation only; no layout/property changes intended.
  */
 
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:var(--app-bg);color:var(--text-main);height:100vh;display:flex;flex-direction:column;overflow:hidden}
+
+/* release_contract RuleListTableSchemaContract: auto-search list tokens, column alignment and widths are page-owned. */
+body.tvair-rule-list-page{
+  --tvair-list-page-table-min:860px;
+  --tvair-list-page-head-bg:var(--tvair-role-table-header-bg);
+  --tvair-list-page-head-fg:var(--tvair-role-table-header-fg);
+  --tvair-list-page-head-border-bottom:none;
+  --tvair-list-page-head-border-right:1px solid var(--nav-border);
+  --tvair-list-page-row-border:1px solid var(--list-row-disabled);
+  --tvair-list-page-row-hover-bg:var(--tvair-role-table-row-hover-bg);
+  --tvair-list-page-row-disabled-bg:var(--list-row-disabled);
+  --tvair-list-page-row-disabled-hover-bg:var(--list-row-disabled-hover);
+  --tvair-list-page-cell-fg:var(--tvair-role-table-row-fg);
+  --tvair-list-page-disabled-fg:var(--tvair-role-control-disabled-fg);
+}
+body.tvair-rule-list-page #rules-table th.col-order,
+body.tvair-rule-list-page #rules-table td:nth-child(4),
+body.tvair-rule-list-page #rules-table th.col-actions,
+body.tvair-rule-list-page #rules-table td:nth-child(5){text-align:center}
 /* release_contract: program rule list panel/toolbar/table-wrap/empty-state geometry is owned by tvair-list-module.css. */
 #main{background:var(--tvair-surface-subtle);border:0}
 #toolbar{background:var(--panel-bg);border:1px solid var(--panel-border)}
-#summary{color:var(--list-text-strong);font-weight:bold}
+#summary{color:var(--tvair-role-text-fg);font-weight:bold}
 .toolbar-btn{background:var(--tvair-action-primary-bg);color:var(--tvair-content-inverse);border:none}
-.toolbar-btn:hover{background:var(--nav-btn-hover)}
+.toolbar-btn:hover{background:var(--tvair-role-control-hover-bg)}
 #table-wrap{background:var(--panel-bg);border:1px solid var(--panel-border)}
-#table-wrap::-webkit-scrollbar-thumb{background:var(--scrollbar-thumb)}
+#table-wrap::-webkit-scrollbar-thumb{background:var(--tvair-role-border)}
 /* release_contract: #rules-table geometry/header/row-state/cell base ownership is centralized in tvair-list-module.css. */
 .col-enabled{width:50px;text-align:center}.col-order{width:86px}.col-state{width:160px}.col-actions{width:140px}
-.keyword-main{display:block;font-weight:bold;color:var(--list-text-strong);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:980px;font-size:13px;line-height:1.5}
-.keyword-sub{margin-top:2px;font-size:11px;color:var(--required-color);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:980px}
-.meta{margin-top:2px;font-size:11px;color:var(--list-text-soft)}
-.hit-meta{margin-top:2px;font-size:11px;color:var(--list-text-strong);font-weight:bold}
-.badge{display:inline-block;padding:1px 6px;border-radius:999px;border:1px solid var(--ch-list-border);background:var(--list-subhead-bg);color:var(--list-text-soft);font-size:11px;margin-right:4px;margin-bottom:2px}
+.keyword-main{display:block;font-weight:bold;color:var(--tvair-role-text-fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:980px;font-size:13px;line-height:1.5}
+.keyword-sub{margin-top:2px;font-size:11px;color:var(--tvair-role-program-rules-required-fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:980px}
+.meta{margin-top:2px;font-size:11px;color:var(--tvair-role-text-soft-fg)}
+.hit-meta{margin-top:2px;font-size:11px;color:var(--tvair-role-text-fg);font-weight:bold}
+.badge{display:inline-block;padding:1px 6px;border-radius:999px;border:1px solid var(--tvair-role-border);background:var(--tvair-role-subpanel-bg);color:var(--tvair-role-text-soft-fg);font-size:11px;margin-right:4px;margin-bottom:2px}
 /* release_contract: .order-btn/.action-btn geometry is owned by tvair-list-module.css. */
 .order-btn,.action-btn{border-radius:2px}
-.order-btn{background:var(--btn-lite-bg);color:var(--nav-bg);border:1px solid var(--scrollbar-thumb)}.order-btn:hover{background:var(--ch-hover-bg)}.order-btn:disabled{opacity:.35;cursor:default}
-.action-btn.edit{background:var(--btn-lite-bg);color:var(--nav-bg);border:1px solid var(--scrollbar-thumb)}.action-btn.edit:hover{background:var(--ch-hover-bg)}
-.action-btn.del{background:var(--del-btn-bg);color:var(--del-btn-text);border:1px solid var(--del-btn-border)}.action-btn.del:hover{background:var(--del-btn-hover)}
+.order-btn{background:var(--btn-lite-bg);color:var(--nav-bg);border:1px solid var(--tvair-role-border)}.order-btn:hover{background:var(--tvair-role-control-hover-bg)}.order-btn:disabled{opacity:.35;cursor:default}
+.action-btn.edit{background:var(--btn-lite-bg);color:var(--nav-bg);border:1px solid var(--tvair-role-border)}.action-btn.edit:hover{background:var(--tvair-role-control-hover-bg)}
+.action-btn.del{background:var(--tvair-role-action-danger-soft-bg);color:var(--tvair-role-action-danger-bg);border:1px solid var(--tvair-role-action-danger-bg)}.action-btn.del:hover{background:var(--tvair-role-action-danger-soft-bg)}
 /* release_contract: #empty geometry is owned by tvair-list-module.css. */
 #empty{color:var(--tvair-content-muted)}
 /* release_contract ListThemeTokenCleanupContract: auto-search rule modal consumes shared dialog/list theme tokens; page-local direct paints are not owned here. */
 :root{
-  --tvair-rule-modal-backdrop:var(--tvair-list-dialog-backdrop,var(--tvair-dialog-backdrop));
-  --tvair-rule-modal-bg:var(--tvair-role-dialog-bg,var(--tvair-dialog-bg,var(--panel-bg)));
-  --tvair-rule-modal-fg:var(--tvair-role-dialog-fg,var(--tvair-dialog-fg,var(--text-main)));
-  --tvair-rule-modal-muted-fg:var(--tvair-role-dialog-muted-fg,var(--tvair-dialog-muted-fg,var(--tvair-content-muted)));
-  --tvair-rule-modal-border:var(--tvair-dialog-border,var(--panel-border));
-  --tvair-rule-modal-head-bg:var(--tvair-dialog-head-bg,var(--table-head-bg));
-  --tvair-rule-modal-head-fg:var(--tvair-dialog-head-fg,var(--tvair-content-inverse));
-  --tvair-rule-modal-body-bg:var(--tvair-dialog-sub-bg,var(--tvair-surface-subtle));
-  --tvair-rule-modal-panel-bg:var(--tvair-dialog-bg,var(--tvair-surface-raised));
-  --tvair-rule-modal-panel-border:var(--tvair-dialog-border,var(--ch-list-border));
-  --tvair-rule-modal-shadow:var(--tvair-list-dialog-shadow,var(--modal-shadow));
-  /* release_contract: collapsed former trailing :root dark-preview tokens into the owning root block. */
+  --tvair-rule-modal-backdrop:var(--tvair-role-dialog-backdrop);
+  --tvair-rule-modal-bg:var(--tvair-role-dialog-bg);
+  --tvair-rule-modal-fg:var(--tvair-role-dialog-fg);
+  --tvair-rule-modal-muted-fg:var(--tvair-role-dialog-muted-fg);
+  --tvair-rule-modal-border:var(--tvair-role-dialog-border);
+  --tvair-rule-modal-head-bg:var(--tvair-role-dialog-header-bg);
+  --tvair-rule-modal-head-fg:var(--tvair-role-dialog-header-fg);
+  --tvair-rule-modal-body-bg:var(--tvair-role-dialog-sub-bg);
+  --tvair-rule-modal-panel-bg:var(--tvair-role-dialog-bg);
+  --tvair-rule-modal-panel-border:var(--tvair-role-dialog-border);
+  --tvair-rule-modal-shadow:var(--tvair-role-dialog-shadow);
+  /* Dark-preview tokens are defined in the owning :root block. */
   --tvair-program-rules-dark-main-text: var(--tvair-color-text-main);
   --tvair-program-rules-dark-strong-text: var(--tvair-color-text-inverse);
   --tvair-program-rules-dark-muted-text: var(--tvair-color-text-muted);
-  --tvair-program-rules-dark-soft-text: var(--tvair-color-text-sub);
   --tvair-program-rules-dark-disabled-text: var(--tvair-color-text-disabled);
   --tvair-program-rules-dark-exclude-text: var(--tvair-color-action-danger-bg);
-  --tvair-program-rules-dark-badge-bg: var(--tvair-color-surface-subpanel);
-  --tvair-program-rules-dark-badge-text: var(--tvair-color-text-main);
-  --tvair-program-rules-dark-badge-border: var(--tvair-color-border-soft);
 }
 #modal-overlay{
   display:none;
@@ -100,7 +113,9 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
   cursor:pointer;
   padding:2px 6px;
 }
-#modal-close:hover{background:var(--tvair-list-dialog-close-hover-bg);border-color:var(--tvair-list-dialog-close-hover-border)}
+#modal-close:hover{background:var(--tvair-role-dialog-close-hover-bg);border-color:var(--tvair-role-dialog-close-hover-border)}
+#modal-close:active{background:var(--tvair-role-dialog-close-pressed-bg)}
+#modal-close:focus-visible{outline:2px solid var(--tvair-role-dialog-close-focus);outline-offset:1px}
 #modal-body{
   min-height:0;
   overflow:hidden;
@@ -139,7 +154,7 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
   flex-direction:column;
   overflow:hidden;
 }
-.panel-title{font-weight:bold;color:var(--table-head-bg);margin-bottom:8px}
+.panel-title{font-weight:bold;color:var(--tvair-role-section-label-fg);margin-bottom:8px}
 /* release_contract: modal field/row/check layout is owned by tvair-list-module.css. */
 .field label{color:var(--label-sub-color);font-weight:bold}
 .check{color:var(--label-color)}
@@ -147,13 +162,13 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
 /* release_contract: .multi control geometry/paint is owned by tvair-list-module.css. */
 /* release_contract: modal choice/action button geometry is owned by tvair-list-module.css. */
 .btn-lite{background:var(--btn-lite-bg);border:1px solid var(--btn-lite-border);color:var(--btn-lite-text)}.btn-lite:hover{background:var(--btn-lite-hover)}
-.day{border:1px solid var(--ch-list-border);background:var(--ch-list-bg);color:var(--label-color)}
-.genre{border:1px solid var(--ch-list-border);background:var(--ch-list-bg);color:var(--label-color)}
+.day{border:1px solid var(--tvair-role-border);background:var(--tvair-role-shell-bg);color:var(--label-color)}
+.genre{border:1px solid var(--tvair-role-border);background:var(--tvair-role-shell-bg);color:var(--label-color)}
 /* release_contract: .actions-inline layout is owned by tvair-list-module.css. */
 .actions-inline{white-space:nowrap}
 /* release_contract: #toast geometry/paint/animation is owned by tvair-notification.css. */
-.note{font-size:11px;color:var(--tvair-rule-modal-muted-fg)}.required{color:var(--required-color)}
-.preview-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:8px;flex:0 0 auto}.preview-summary{font-weight:bold;color:var(--table-head-bg)}.preview-sub{font-size:11px;color:var(--tvair-rule-modal-muted-fg)}
+.note{font-size:11px;color:var(--tvair-rule-modal-muted-fg)}.required{color:var(--tvair-role-program-rules-required-fg)}
+.preview-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:8px;flex:0 0 auto}.preview-summary{font-weight:bold;color:var(--tvair-role-section-label-fg)}.preview-sub{font-size:11px;color:var(--tvair-rule-modal-muted-fg)}
 .result-wrap{
   flex:1 1 auto;
   min-height:0;
@@ -162,7 +177,7 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
   border:1px solid var(--tvair-rule-modal-panel-border);
   border-radius:3px;
 }
-.result-table{width:100%;border-collapse:collapse;min-width:700px}.result-table thead tr{background:var(--ch-list-bg);position:sticky;top:0;z-index:3}.result-table th{color:var(--text-body);border-right:1px solid var(--ch-list-border)}.result-table td,.result-table th{padding:6px 8px;font-size:12px;border-bottom:1px solid var(--row-border);vertical-align:top}.result-title{font-weight:bold;color:var(--list-text-strong)}.pill{display:inline-block;padding:1px 6px;border-radius:999px;font-size:11px;border:1px solid var(--ch-list-border);background:var(--pill-bg);color:var(--label-color)}.pill.reserved{border-color:var(--del-btn-border);background:var(--pill-reserved-bg);color:var(--pill-reserved-text)}.empty-preview{padding:32px 20px;text-align:center;color:var(--tvair-rule-modal-muted-fg);line-height:1.8}/* release_contract: #btn-secondary owns an explicit border below; keep border reset scoped to buttons that actually consume it. */.btn-primary,.btn-success{border:none}.btn-primary{background:var(--tvair-action-primary-bg);color:var(--tvair-content-inverse)}.btn-primary:hover{background:var(--nav-btn-hover)}.btn-success{background:var(--success-btn-bg);color:var(--tvair-content-inverse)}.btn-success:hover{background:var(--success-btn-hover)}.btn-secondary{background:var(--btn-lite-bg);color:var(--label-color);border:1px solid var(--scrollbar-thumb)}.btn-secondary:hover{background:var(--ch-hover-bg)}.footer-bar{padding:10px 14px;border-top:1px solid var(--tvair-rule-modal-border);display:flex;align-items:center;justify-content:space-between;gap:8px;background:var(--tvair-rule-modal-panel-bg);min-height:44px}
+.result-table{width:100%;border-collapse:collapse;min-width:700px}.result-table thead tr{background:var(--tvair-role-table-header-bg);position:sticky;top:0;z-index:3}.result-table th{color:var(--tvair-role-table-header-fg);border-right:1px solid var(--tvair-role-table-row-border)}.result-table td,.result-table th{padding:6px 8px;font-size:12px;border-bottom:1px solid var(--row-border);vertical-align:top}.result-title{font-weight:bold;color:var(--tvair-role-text-fg)}.pill{display:inline-block;padding:1px 6px;border-radius:999px;font-size:11px;border:1px solid var(--tvair-role-program-rules-pill-border);background:var(--tvair-role-program-rules-pill-bg);color:var(--tvair-role-program-rules-pill-fg)}.pill.reserved{border-color:var(--tvair-role-program-rules-pill-reserved-border);background:var(--tvair-role-program-rules-pill-reserved-bg);color:var(--tvair-role-program-rules-pill-reserved-fg)}.empty-preview{padding:32px 20px;text-align:center;color:var(--tvair-rule-modal-muted-fg);line-height:1.8}/* #btn-secondary owns its explicit border; border reset stays scoped to the buttons that consume it. */.btn-primary,.btn-success{border:none}.btn-primary{background:var(--tvair-action-primary-bg);color:var(--tvair-content-inverse)}.btn-primary:hover{background:var(--tvair-role-control-hover-bg)}.btn-success{background:var(--tvair-role-program-rules-success-bg);color:var(--tvair-role-program-rules-success-fg)}.btn-success:hover{background:var(--tvair-role-program-rules-success-hover-bg)}.btn-secondary{background:var(--btn-lite-bg);color:var(--label-color);border:1px solid var(--tvair-role-border)}.btn-secondary:hover{background:var(--tvair-role-control-hover-bg)}.footer-bar{padding:10px 14px;border-top:1px solid var(--tvair-rule-modal-border);display:flex;align-items:center;justify-content:space-between;gap:8px;background:var(--tvair-rule-modal-panel-bg);min-height:44px}
 @media (max-width: 980px){
   #modal-box{height:calc(100vh - 24px);width:calc(100vw - 24px);max-height:calc(100vh - 24px);max-width:calc(100vw - 24px)}
   #modal-body{grid-template-columns:1fr;grid-template-rows:minmax(260px,1fr) minmax(240px,1fr)}
@@ -173,7 +188,7 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
 
 
 /*
- * release_contract: Program-rules dark preview text contrast fix.
+ * Program-rules dark preview text contrast contract.
  *
  * Scope:
  * - program-rules.html only, via #rules-table and this page's local classes.
@@ -181,7 +196,7 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
  *
  * Reason:
  * - release_contract/release_contract darkened the page background, but the auto-search rule
- *   list still inherited legacy dark/black text tokens in several rule-body fields.
+ *   Rule-body fields use the shared semantic text roles.
  * - This made keyword text, hit counts, and search-target helper text hard to read.
  *
  * Safety:
@@ -190,54 +205,48 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
  *   grid, flex, overflow, or z-index changes.
  * - Program guide cells and reservation/new/final list genre color handling are not targeted.
  *
- * release_contract: The dark-preview token declarations are owned by the primary :root block above;
+ * Dark-preview token declarations are owned by the primary :root block above;
  * this section keeps only the scoped dark-theme consumers.
  */
 
-html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #rules-table tbody td {
+html[data-tvair-effective-theme="dark"] body.tvair-rule-list-page #rules-table tbody td {
   color: var(--tvair-program-rules-dark-main-text);
 }
 
-html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #rules-table .keyword-main,
-html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #rules-table .hit-meta {
+html[data-tvair-effective-theme="dark"] body.tvair-rule-list-page #rules-table .keyword-main,
+html[data-tvair-effective-theme="dark"] body.tvair-rule-list-page #rules-table .hit-meta {
   color: var(--tvair-program-rules-dark-strong-text);
 }
 
-html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #rules-table .meta {
+html[data-tvair-effective-theme="dark"] body.tvair-rule-list-page #rules-table .meta {
   color: var(--tvair-program-rules-dark-muted-text);
 }
 
-html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #rules-table .keyword-sub {
+html[data-tvair-effective-theme="dark"] body.tvair-rule-list-page #rules-table .keyword-sub {
   color: var(--tvair-program-rules-dark-exclude-text);
 }
 
-html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #rules-table tbody tr.disabled-row td,
-html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #rules-table tbody tr.disabled-row .keyword-main,
-html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #rules-table tbody tr.disabled-row .hit-meta,
-html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #rules-table tbody tr.disabled-row .meta {
+html[data-tvair-effective-theme="dark"] body.tvair-rule-list-page #rules-table tbody tr.disabled-row td,
+html[data-tvair-effective-theme="dark"] body.tvair-rule-list-page #rules-table tbody tr.disabled-row .keyword-main,
+html[data-tvair-effective-theme="dark"] body.tvair-rule-list-page #rules-table tbody tr.disabled-row .hit-meta,
+html[data-tvair-effective-theme="dark"] body.tvair-rule-list-page #rules-table tbody tr.disabled-row .meta {
   color: var(--tvair-program-rules-dark-disabled-text);
 }
 
-html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #rules-table .badge {
-  background: var(--tvair-program-rules-dark-badge-bg);
-  color: var(--tvair-program-rules-dark-badge-text);
-  border-color: var(--tvair-program-rules-dark-badge-border);
-}
-
-html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #modal-box .panel-title,
-html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #modal-box .preview-summary,
-html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #modal-box .result-title {
+html[data-tvair-effective-theme="dark"] body.tvair-rule-list-page #modal-box .panel-title,
+html[data-tvair-effective-theme="dark"] body.tvair-rule-list-page #modal-box .preview-summary,
+html[data-tvair-effective-theme="dark"] body.tvair-rule-list-page #modal-box .result-title {
   color: var(--tvair-program-rules-dark-strong-text);
 }
 
-html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #modal-box .note,
-html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #modal-box .preview-sub,
-html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #modal-box .empty-preview {
+html[data-tvair-effective-theme="dark"] body.tvair-rule-list-page #modal-box .note,
+html[data-tvair-effective-theme="dark"] body.tvair-rule-list-page #modal-box .preview-sub,
+html[data-tvair-effective-theme="dark"] body.tvair-rule-list-page #modal-box .empty-preview {
   color: var(--tvair-program-rules-dark-muted-text);
 }
 
-html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #modal-box .check,
-html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #modal-box .day,
-html[data-tvair-effective-theme="dark"][data-tvair-theme-scope="non-program"] body.tvair-non-program-page #modal-box .genre {
+html[data-tvair-effective-theme="dark"] body.tvair-rule-list-page #modal-box .check,
+html[data-tvair-effective-theme="dark"] body.tvair-rule-list-page #modal-box .day,
+html[data-tvair-effective-theme="dark"] body.tvair-rule-list-page #modal-box .genre {
   color: var(--tvair-program-rules-dark-main-text);
 }

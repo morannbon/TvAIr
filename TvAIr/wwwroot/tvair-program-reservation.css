@@ -5,23 +5,52 @@
  * Safety: exact CSS relocation only; no layout/property changes intended.
  */
 
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:var(--app-bg);color:var(--text-main);height:100vh;display:flex;flex-direction:column;overflow:hidden}
 
-/* TopNav is owned by tvair-style-system.css (release_contract). */
+/* release_contract ProgramReservationTableSchemaContract: program-rule list tokens and columns are page-owned. */
+body.tvair-program-reservation-page{
+  --tvair-list-page-table-min:500px;
+  --tvair-list-page-head-bg:var(--tvair-role-table-header-bg);
+  --tvair-list-page-head-fg:var(--tvair-role-table-header-fg);
+  --tvair-list-page-head-border-bottom:2px solid var(--tvair-line-strong);
+  --tvair-list-page-head-border-right:none;
+  --tvair-list-page-row-border:1px solid var(--tvair-line-soft);
+  --tvair-list-page-row-hover-bg:var(--tvair-row-hover-bg);
+  --tvair-list-page-row-disabled-bg:var(--tvair-list-row-even-bg);
+  --tvair-list-page-row-disabled-hover-bg:var(--tvair-list-row-even-bg);
+  --tvair-list-page-cell-fg:var(--tvair-content-primary);
+  --tvair-list-page-disabled-fg:var(--tvair-content-muted);
+}
+body.tvair-program-reservation-page #program-rules-table th:nth-child(1),
+body.tvair-program-reservation-page #program-rules-table td:nth-child(1){width:var(--tvair-list-program-no-col);text-align:center}
+body.tvair-program-reservation-page #program-rules-table th:nth-child(2),
+body.tvair-program-reservation-page #program-rules-table td:nth-child(2){width:var(--tvair-list-enabled-col);text-align:center}
+body.tvair-program-reservation-page #program-rules-table th:nth-child(3),
+body.tvair-program-reservation-page #program-rules-table td:nth-child(3){width:auto;min-width:var(--tvair-list-program-rule-min)}
+body.tvair-program-reservation-page #program-rules-table th:nth-child(4),
+body.tvair-program-reservation-page #program-rules-table td:nth-child(4){width:76px;text-align:center}
+body.tvair-program-reservation-page #program-rules-table th:nth-child(5),
+body.tvair-program-reservation-page #program-rules-table td:nth-child(5){width:var(--tvair-list-time-col);text-align:center}
+body.tvair-program-reservation-page #program-rules-table th:nth-child(6),
+body.tvair-program-reservation-page #program-rules-table td:nth-child(6){width:var(--tvair-list-expire-col);text-align:center}
+body.tvair-program-reservation-page #program-rules-table th:nth-child(7),
+body.tvair-program-reservation-page #program-rules-table td:nth-child(7){width:132px;text-align:center}
+body.tvair-program-reservation-page #program-rules-table .td-name,
+body.tvair-program-reservation-page #program-rules-table .td-ch{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* TopNav is owned by tvair-ui-modules.css (release_contract). */
 /* release_contract: list-page shell (#page-scroll/#page-menu-wrap/html/body sizing) is owned by tvair-ui-modules.css + tvair-list-module.css. This page file keeps page-local form/table content only. */
 /* ── メイン */
-#main{width:100%;max-width:none;min-width:0;margin:0;background:var(--tvair-surface-subtle);border:0;border-radius:0;padding:var(--tvair-layout-page-pad,8px);display:grid;grid-template-columns:var(--tvair-program-form-pane,var(--tvair-split-form-pane,340px)) minmax(0,1fr);gap:var(--tvair-layout-gap,8px);min-height:0;flex:1 1 auto;overflow:hidden}
+#main{width:100%;max-width:none;min-width:0;margin:0;background:var(--tvair-surface-subtle);border:0;border-radius:0;padding:var(--tvair-layout-page-pad,8px);display:grid;grid-template-columns:var(--tvair-program-form-pane) minmax(0,1fr);gap:var(--tvair-layout-gap,8px);min-height:0;flex:1 1 auto;overflow:hidden}
 
 /* ── 左: 登録フォーム */
 #form-panel{width:auto;min-width:0;max-width:none;display:flex;flex-direction:column;gap:0;background:var(--panel-bg);border:1px solid var(--panel-border);border-radius:3px;overflow:hidden;box-sizing:border-box}
-#form-head{background:var(--table-head-bg);color:var(--tvair-content-inverse);padding:7px 12px;font-size:13px;font-weight:bold;flex-shrink:0}
+#form-head{background:var(--tvair-role-panel-header-bg);color:var(--tvair-role-panel-header-fg);padding:7px 12px;font-size:13px;font-weight:bold;flex-shrink:0}
 #form-body{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px}
 #form-body::-webkit-scrollbar{width:5px}
-#form-body::-webkit-scrollbar-thumb{background:var(--scrollbar-thumb);border-radius:3px}
+#form-body::-webkit-scrollbar-thumb{background:var(--tvair-role-border);border-radius:3px}
 
 .f-section{background:var(--tvair-surface-soft);border:1px solid var(--tvair-line-soft);border-radius:3px;padding:10px 12px}
-.f-section-title{font-size:11px;font-weight:bold;color:var(--tvair-content-link);border-bottom:1px solid var(--tvair-line-soft);padding-bottom:4px;margin-bottom:8px;text-transform:uppercase;letter-spacing:.04em}
+.f-section-title{font-size:11px;font-weight:bold;color:var(--tvair-role-section-label-fg);border-bottom:1px solid var(--tvair-line-soft);padding-bottom:4px;margin-bottom:8px;text-transform:uppercase;letter-spacing:.04em}
 .f-row{display:flex;flex-direction:column;gap:3px;margin-bottom:7px}
 .f-row:last-child{margin-bottom:0}
 .f-row label{font-size:11px;color:var(--tvair-content-subtle);font-weight:bold}
@@ -29,13 +58,12 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
 
 /* 曜日チェック */
 .dow-wrap{display:flex;gap:4px;flex-wrap:wrap;margin-top:2px}
-/* release_contract: weekday chip/button geometry is owned by tvair-list-module.css. */
-.dow-chip{background:var(--tvair-surface-soft);border:1px solid var(--tvair-line-soft);color:var(--tvair-action-lite-text)}
-.dow-chip:hover{background:var(--tvair-surface-soft-hover)}
-.dow-chip:focus-visible{outline:2px solid var(--tvair-focus-a);outline-offset:1px}
-.dow-chip.checked,.dow-chip[aria-pressed="true"]{background:var(--tvair-action-primary-bg);color:var(--tvair-content-inverse);border-color:var(--tvair-content-link)}
+/* release_contract HoverStateSemanticPreservation:
+   weekday chip normal/hover/checked/focus/disabled paint is owned only by tvair-list-module.css.
+   Do not reintroduce page-local hover paint here: a later page stylesheet must not replace
+   checked/selected semantic colors from the shared state contract. */
 .dow-check-all{background:var(--tvair-surface-soft);border:1px solid var(--tvair-line-soft);color:var(--tvair-action-lite-text)}
-.dow-check-all:hover{background:var(--tvair-surface-soft-hover)}
+.dow-check-all:hover{background:var(--tvair-surface-soft-hover);color:var(--tvair-action-lite-text)}
 
 /* release_contract: time-wrap geometry, select paint and separator text are owned by tvair-list-module.css. */
 
@@ -49,11 +77,9 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
 
 /* ── 右: ルール一覧 */
 #list-panel{flex:1;display:flex;flex-direction:column;background:var(--panel-bg);border:1px solid var(--panel-border);border-radius:3px;overflow:hidden}
-#list-head{background:var(--table-head-bg);color:var(--tvair-content-inverse);padding:7px 12px;font-size:13px;font-weight:bold;flex-shrink:0;display:flex;align-items:center;justify-content:space-between}
+#list-head{background:var(--tvair-role-panel-header-bg);color:var(--tvair-role-panel-header-fg);padding:7px 12px;font-size:13px;font-weight:bold;flex-shrink:0;display:flex;align-items:center;justify-content:space-between}
 #list-count{font-size:12px;opacity:.85}
-#table-wrap{flex:1;overflow-y:auto;overflow-x:auto}
-#table-wrap::-webkit-scrollbar{width:6px}
-#table-wrap::-webkit-scrollbar-thumb{background:var(--scrollbar-thumb);border-radius:3px}
+/* release_contract: #table-wrap geometry and scrollbar ownership are centralized in tvair-list-module.css. */
 
 /* release_contract: table/header/row-state/cell base ownership is centralized in tvair-list-module.css. */
 
@@ -71,8 +97,8 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
 .act-wrap{white-space:nowrap}
 .btn-edit{background:var(--tvair-surface-soft);color:var(--tvair-content-link);border:1px solid var(--tvair-action-edit-border)}
 .btn-edit:hover{background:var(--tvair-surface-soft-hover)}
-.btn-del{background:var(--del-btn-bg, var(--tvair-color-action-danger-soft-bg));color:var(--del-btn-text, var(--tvair-color-action-danger-bg));border:1px solid var(--del-btn-border, var(--tvair-color-action-danger-bg))}
-.btn-del:hover{background:var(--del-btn-hover, var(--tvair-color-action-danger-soft-bg))}
+.btn-del{background:var(--tvair-role-action-danger-soft-bg);color:var(--tvair-role-action-danger-bg);border:1px solid var(--tvair-role-action-danger-bg)}
+.btn-del:hover{background:var(--tvair-role-action-danger-soft-bg)}
 
 /* 空状態 */
 #empty{display:none;padding:40px;text-align:center;color:var(--tvair-content-muted);font-size:13px}
@@ -80,16 +106,14 @@ body{font-family:'Meiryo','メイリオ',sans-serif;font-size:12px;background:va
 /* 編集モーダル */
 #modal-overlay{display:none;position:fixed;inset:0;background:var(--tvair-surface-overlay);z-index:1000;align-items:center;justify-content:center}
 #modal-overlay.open{display:flex}
-#modal-box{background:var(--tvair-surface-raised);border-radius:3px;width:440px;max-width:95vw;max-height:90vh;display:flex;flex-direction:column;box-shadow:var(--tvair-shadow-modal);overflow:hidden}
-#modal-head{background:var(--table-head-bg);color:var(--tvair-content-inverse);padding:8px 14px;font-size:13px;font-weight:bold;flex-shrink:0;display:flex;align-items:center;justify-content:space-between}
+#modal-box{background:var(--tvair-surface-raised);border-radius:3px;width:440px;max-width:95vw;max-height:90vh;display:flex;flex-direction:column;box-shadow:var(--tvair-role-dialog-shadow);overflow:hidden}
+#modal-head{background:var(--tvair-role-panel-header-bg);color:var(--tvair-role-panel-header-fg);padding:8px 14px;font-size:13px;font-weight:bold;flex-shrink:0;display:flex;align-items:center;justify-content:space-between}
 /* release_contract: modal close button geometry is owned by tvair-list-module.css. */
-#modal-close{background:none;border:none;color:var(--tvair-content-inverse)}
+#modal-close{background:none;border:none;color:var(--tvair-role-panel-header-fg)}
 #modal-body{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:8px}
 #modal-footer{padding:10px 14px;border-top:1px solid var(--tvair-line-soft);display:flex;gap:8px;justify-content:flex-end;background:var(--tvair-surface-raised)}
 /* release_contract: modal footer button geometry reuses btn-submit/btn-reset ownership in tvair-list-module.css. */
 
 /* トースト */
 /* release_contract: #toast geometry/paint/animation is owned by tvair-notification.css. */
-
-
 

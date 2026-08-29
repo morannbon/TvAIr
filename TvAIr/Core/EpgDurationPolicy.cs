@@ -1,4 +1,4 @@
-namespace TvAIr.Core;
+﻿namespace TvAIr.Core;
 
 /// <summary>
 /// EPG深度・取得秒数の共通ポリシー。
@@ -13,7 +13,7 @@ public static class EpgDurationPolicy
     public const string Rule = "epg_duration_policy_common";
 
     public static string NormalizeDepth(string? value)
-        => value is "shallow" or "medium" or "deep" or "deeper" ? value : "medium";
+        => SettingsDefaults.NormalizeEpgDepth(value);
 
     public static int BaseSecondsForDepth(string? value) => NormalizeDepth(value) switch
     {
@@ -49,9 +49,12 @@ public static class EpgDurationPolicy
         var reason = "channel_scope_first_no_hidden_bscs_extension";
         if (isPreRecordCheck && maxCaptureSeconds.HasValue)
         {
-            // 録画前EPG確認は時間追従プローブ。通常EPGの深度を上限に、安全上限へ丸める。
-            recDuration = Math.Max(8, Math.Min(normalSeconds, maxCaptureSeconds.Value));
-            reason = "pre_record_time_follow_safety_ceiling";
+            // 録画前EPG確認の maxCaptureSeconds は、Scheduler が設定の5/10/15/20分と
+            // 本録画due・他録画占有から逆算した hard deadline。通常EPGの depth 秒数で
+            // 90/300秒へ再度切り詰めると設定窓の意味を失うため、ここではその安全予算を尊重する。
+            // workerは目的EventIdentityを観測した時点で即終了するため、予算全量を常用しない。
+            recDuration = Math.Max(8, maxCaptureSeconds.Value);
+            reason = "pre_record_setting_horizon_hard_deadline";
         }
 
         return new EpgDurationPlan(

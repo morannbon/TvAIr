@@ -1,4 +1,4 @@
-namespace TvAIr.Core;
+﻿namespace TvAIr.Core;
 
 /// <summary>
 /// TvAIr.ini を読み書きするサービス。
@@ -8,6 +8,19 @@ public sealed class IniSettingsService
 {
     private readonly string _iniPath;
     private readonly string _baseDirectory;
+
+    // SETTINGS_PERSISTED_RUNTIME_TOPOLOGY_SEPARATION
+    // Public topology properties represent the configuration currently used by the running process.
+    // These fields retain the normalized values already written to TvAIr.ini so the settings API does not
+    // overwrite a restart-pending edit with the old runtime topology.
+    private string _persistedTvTestExecutablePath = "";
+    private string _persistedViewingTvTestExecutablePath = "";
+    private string _persistedBonDriverDirectory = "";
+    private bool _persistedUseMinOption = SettingsDefaults.UseMinOption;
+    private bool _persistedUseNodshowOption = SettingsDefaults.UseNodshowOption;
+    private List<TunerProfileDto> _persistedTuners = new();
+    private string _persistedDataDirectory = "";
+    private int _persistedPort = SettingsDefaults.Port;
 
     // ── 設定値（読み込み後に公開） ──────────────────────────────────
     public string TvTestExecutablePath { get; private set; } = "";
@@ -19,61 +32,54 @@ public sealed class IniSettingsService
     public string BscsChSetFilePath    { get; private set; } = "";
     public string DataDirectory        { get; private set; } = "";
     /// <summary>UI表示テーマ。current=Windowsに合わせる、light/dark=固定。</summary>
-    public string SystemTheme          { get; private set; } = "current";
-    public int    Port                 { get; private set; } = 55884;
-    public bool   EpgEnabled           { get; private set; } = true;
-    public int    EpgHour              { get; private set; } = 3;
-    public int    EpgMinute            { get; private set; } = 0;
-    public string EpgDepth             { get; private set; } = "medium";
-    public int    EpgPreRecordMinutes       { get; private set; } = 15;
-    public bool   LaterProgramPriority  { get; private set; } = false;
-    public bool   PseudoContinuousRecording      { get; private set; } = false;
-    public int    PseudoContinuousMarginSeconds  { get; private set; } = 60;
-    public int    PreStartMarginSeconds { get; private set; } = 30;
-    public int    PostEndMarginSeconds  { get; private set; } = 30;
-    public int    RecDelaySeconds       { get; private set; } = 10;
-    public int    WakeMinutesBefore     { get; private set; } = 10;
+    public string SystemTheme          { get; private set; } = SettingsDefaults.SystemTheme;
+    public int    Port                 { get; private set; } = SettingsDefaults.Port;
+    public bool   EpgEnabled           { get; private set; } = SettingsDefaults.EpgEnabled;
+    public int    EpgHour              { get; private set; } = SettingsDefaults.EpgHour;
+    public int    EpgMinute            { get; private set; } = SettingsDefaults.EpgMinute;
+    public string EpgDepth             { get; private set; } = SettingsDefaults.EpgDepth;
+    public int    EpgPreRecordMinutes       { get; private set; } = SettingsDefaults.EpgPreRecordMinutes;
+    public bool   LaterProgramPriority  { get; private set; } = SettingsDefaults.LaterProgramPriority;
+    public bool   PseudoContinuousRecording      { get; private set; } = SettingsDefaults.PseudoContinuousRecording;
+    public int    PreStartMarginSeconds { get; private set; } = SettingsDefaults.PreStartMarginSeconds;
+    public int    PostEndMarginSeconds  { get; private set; } = SettingsDefaults.PostEndMarginSeconds;
+    public int    WakeMinutesBefore     { get; private set; } = SettingsDefaults.WakeMinutesBefore;
     /// <summary>新設: スリープ復帰の余裕秒数。EPG確認起床と録画起床の両方に加算される。</summary>
-    public int    WakeAdditionalSeconds { get; private set; } = 30;
-    /// <summary>同一物理チューナースロットを連続で確保する際の最小間隔（ミリ秒）。0で無効。
-    /// BonDriverのClose/Open競合を緩和するための TunerSlotCooldownMs。</summary>
-    public int    TunerSlotCooldownMs   { get; private set; } = 15000;
-    public bool   UseMinOption          { get; private set; } = true;
-    public bool   UseNodshowOption      { get; private set; } = true;
-    /// <summary>TVTest録画設定相当: 現在のサービスのみ保存する。デフォルトtrue。</summary>
-    public bool   TvTestRecordCurServiceOnly { get; private set; } = true;
-    /// <summary>TVTest録画設定相当: 字幕データを保存する。デフォルトtrue。</summary>
-    public bool   TvTestRecordSubtitle { get; private set; } = true;
-    /// <summary>TVTest録画設定相当: データ放送を保存する。デフォルトfalse。</summary>
-    public bool   TvTestRecordDataCarrousel { get; private set; } = false;
+    public int    WakeAdditionalSeconds { get; private set; } = SettingsDefaults.WakeAdditionalSeconds;
+    public bool   UseMinOption          { get; private set; } = SettingsDefaults.UseMinOption;
+    public bool   UseNodshowOption      { get; private set; } = SettingsDefaults.UseNodshowOption;
     /// <summary>TvAIrEpgRec worker をタスクバーに表示する。false の場合はTvAIrトレイ点滅を代表インジケータにする。</summary>
-    public bool   ShowTvAIrEpgRecTaskbarIcon { get; private set; } = true;
-    public bool   StartupEnabled        { get; private set; } = false;
-    public string RecordingAfterAction  { get; private set; } = "none";
-    public int    RecordingAfterActionDelayMinutes { get; private set; } = 1;
+    public bool   ShowTvAIrEpgRecTaskbarIcon { get; private set; } = SettingsDefaults.ShowTvAIrEpgRecTaskbarIcon;
+    public bool   StartupEnabled        { get; private set; } = SettingsDefaults.StartupEnabled;
 
-    /// <summary>番組表ジャンル別セル背景色。キーは g-news 等、値は #RRGGBB。未設定はTvRock準拠色。</summary>
-    public Dictionary<string, string> GenreColors { get; private set; } = CreateDefaultGenreColors();
+    // NETWORK_ACCESS_SETTINGS_INVARIANT
+    public bool NetworkLanAccessEnabled { get; private set; } = SettingsDefaults.NetworkLanAccessEnabled;
+    public int NetworkSessionLifetimeMinutes { get; private set; } = SettingsDefaults.NetworkSessionLifetimeMinutes;
+    /// <summary>LAN接続用パスワード。Windows DPAPIで暗号化した値を正本として保存する。</summary>
+    public string NetworkPasswordEncrypted { get; private set; } = "";
+
+    public string RecordingAfterAction  { get; private set; } = SettingsDefaults.RecordingAfterAction;
+    public int    RecordingAfterActionDelayMinutes { get; private set; } = SettingsDefaults.RecordingAfterActionDelayMinutes;
+
+    // User operation log display. Standard is always one line; detail is enabled explicitly and contains selected fields only.
+    public bool UserLogDetailEnabled { get; private set; } = SettingsDefaults.UserLogDetailEnabled;
+    public bool UserLogDetailReservationSource { get; private set; } = SettingsDefaults.UserLogDetailReservationSource;
+    public bool UserLogDetailScheduledTime { get; private set; } = SettingsDefaults.UserLogDetailScheduledTime;
+    public bool UserLogDetailActualRecordingTime { get; private set; } = SettingsDefaults.UserLogDetailActualRecordingTime;
+    public bool UserLogDetailRecordingQuality { get; private set; } = SettingsDefaults.UserLogDetailRecordingQuality;
+    public bool UserLogDetailStateChange { get; private set; } = SettingsDefaults.UserLogDetailStateChange;
+    public bool UserLogDetailEndOrFailureReason { get; private set; } = SettingsDefaults.UserLogDetailEndOrFailureReason;
 
     /// <summary>テーマ別ジャンル色。light=TvRock標準色、dark=ダークテーマ用色。</summary>
-    public Dictionary<string, Dictionary<string, string>> ThemeGenrePalettes { get; private set; } = CreateDefaultThemeGenrePalettes();
+    public Dictionary<string, Dictionary<string, string>> ThemeGenrePalettes { get; private set; } = SettingsDefaults.CreateDefaultThemeGenrePalettes();
 
-    // ─── EPG worker launch timing / tuner cooldown policy ───
+    // ─── EPG worker launch policy ───
     /// <summary>EPG用TVTestプロセスをBelowNormal優先度で起動するか（true=有効、デフォルトtrue）。
     /// LIVE視聴TVTestと同優先度競合によるカクつきを軽減。</summary>
-    public bool   EpgUseBelowNormalPriority    { get; private set; } = true;
-    /// <summary>同時並列起動するチューナー間のジョブ投入間隔（ミリ秒）。
-    /// 並列上限内であってもこの間隔ずつ起動を遅らせて初期化集中を分散。0で無効。デフォルト2000ms。</summary>
-    public int    EpgLaunchStaggerMs           { get; private set; } = 2000;
-    /// <summary>TVTest起動成功後にチャンネル安定化を待つ時間（ミリ秒）。
-    /// 起動直後の連続CmdSetCh発火を抑制。0で無効。デフォルト4000ms。</summary>
-    public int    EpgPostLaunchStabilizeMs     { get; private set; } = 4000;
-    /// <summary>LIVE視聴中(視聴用TVTest=/recなしで起動された)チューナーをEPG取得対象から除外する。
-    /// true=プロセス一覧でTVTest.exeを検出し /d と /DID から該当チューナーを除外。デフォルトtrue。</summary>
-    public bool   EpgExcludeLiveTvTest         { get; private set; } = true;
+    public bool   EpgUseBelowNormalPriority    { get; private set; } = SettingsDefaults.EpgUseBelowNormalPriority;
     /// <summary>同一TSのattempt即時リトライを無効化する。
     /// true=失敗局は再巡回パスのみで対応（即時の負荷スパイク回避）。デフォルトtrue。</summary>
-    public bool   EpgDisableImmediateRetry     { get; private set; } = true;
+    public bool   EpgDisableImmediateRetry     { get; private set; } = SettingsDefaults.EpgDisableImmediateRetry;
 
     /// <summary>タスクスケジューラー登録用ユーザー名（空=資格情報なし・InteractiveToken方式）</summary>
     public string TaskUserName          { get; private set; } = "";
@@ -86,21 +92,36 @@ public sealed class IniSettingsService
     /// <summary>ini ファイルが存在しなかった（初回起動）場合 true</summary>
     public bool IsFirstRun { get; private set; } = false;
 
-    public IniSettingsService(string baseDirectory)
+    public IniSettingsService(string baseDirectory, string? firstRunDataDirectory, int firstRunPort)
     {
         _baseDirectory = baseDirectory;
         _iniPath = Path.Combine(baseDirectory, "TvAIr.ini");
         Load();
+
+        // SETTINGS_FIRST_RUN_RUNTIME_HOST_SNAPSHOT_CONTRACT
+        // INI未作成の初回起動だけはHost/DBの稼働値をApp設定から確定する。
+        // SettingsChangeApplicationServiceの再起動判定も同じRuntime snapshotを見る必要があるため、
+        // Program側だけで別に解決せずIniSettingsServiceのRuntime正本へ取り込む。
+        if (IsFirstRun)
+        {
+            DataDirectory = NormalizePathValue(firstRunDataDirectory);
+            Port = SettingsDefaults.NormalizePort(firstRunPort);
+        }
+
+        CapturePersistedTunerTopologyFromRuntime();
+        CapturePersistedHostSettingsFromRuntime();
     }
 
     // ── BonDriver一覧取得 ────────────────────────────────────────────
     /// <summary>BonDriverDirectory 内の .dll ファイル名一覧を返す。</summary>
-    public IReadOnlyList<string> GetBonDriverList()
+    public IReadOnlyList<string> GetBonDriverList() => GetBonDriverList(BonDriverDirectory);
+
+    private static IReadOnlyList<string> GetBonDriverList(string directory)
     {
-        if (string.IsNullOrWhiteSpace(BonDriverDirectory) || !Directory.Exists(BonDriverDirectory))
+        if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory))
             return Array.Empty<string>();
 
-        return Directory.GetFiles(BonDriverDirectory, "*.dll")
+        return Directory.GetFiles(directory, "*.dll")
             .Select(Path.GetFileName)
             .Where(f => f != null)
             .Select(f => f!)
@@ -128,55 +149,60 @@ public sealed class IniSettingsService
             dict[key] = val;
         }
 
-        TvTestExecutablePath = Get(dict, "TvTestExecutablePath", TvTestExecutablePath);
-        BonDriverDirectory   = Get(dict, "BonDriverDirectory",   BonDriverDirectory);
-        ViewingTvTestExecutablePath = Get(dict, "ViewingTvTestExecutablePath", ViewingTvTestExecutablePath);
-        GrChannelFilePath    = Get(dict, "GrChannelFilePath",    GrChannelFilePath);
-        GrChSetFilePath      = Get(dict, "GrChSetFilePath",      GrChSetFilePath);
-        BscsChannelFilePath  = Get(dict, "BscsChannelFilePath",  BscsChannelFilePath);
-        BscsChSetFilePath    = Get(dict, "BscsChSetFilePath",    BscsChSetFilePath);
-        DataDirectory        = Get(dict, "DataDirectory",        DataDirectory);
+        TvTestExecutablePath = NormalizePathValue(Get(dict, "TvTestExecutablePath", TvTestExecutablePath));
+        BonDriverDirectory   = NormalizePathValue(Get(dict, "BonDriverDirectory",   BonDriverDirectory));
+        ViewingTvTestExecutablePath = NormalizePathValue(Get(dict, "ViewingTvTestExecutablePath", ViewingTvTestExecutablePath));
+        GrChannelFilePath    = NormalizePathValue(Get(dict, "GrChannelFilePath",    GrChannelFilePath));
+        GrChSetFilePath      = NormalizePathValue(Get(dict, "GrChSetFilePath",      GrChSetFilePath));
+        BscsChannelFilePath  = NormalizePathValue(Get(dict, "BscsChannelFilePath",  BscsChannelFilePath));
+        BscsChSetFilePath    = NormalizePathValue(Get(dict, "BscsChSetFilePath",    BscsChSetFilePath));
+        DataDirectory        = NormalizePathValue(Get(dict, "DataDirectory",        DataDirectory));
         SystemTheme          = NormalizeSystemTheme(GetStr(dict, "SystemTheme", SystemTheme));
-        Port                 = GetInt(dict,  "Port",                Port);
+        Port                 = SettingsDefaults.NormalizePort(GetInt(dict,  "Port", Port));
         EpgEnabled           = GetBool(dict, "EpgEnabled",          EpgEnabled);
-        EpgHour              = GetInt(dict,  "EpgHour",             EpgHour);
-        EpgMinute            = GetInt(dict,  "EpgMinute",           EpgMinute);
-        EpgDepth             = GetStr(dict,  "EpgDepth",            EpgDepth);
-        EpgPreRecordMinutes       = GetInt(dict, "EpgPreRecordMinutes",       EpgPreRecordMinutes);
+        EpgHour              = SettingsDefaults.NormalizeEpgHour(GetInt(dict,  "EpgHour", EpgHour));
+        EpgMinute            = SettingsDefaults.NormalizeEpgMinute(GetInt(dict, "EpgMinute", EpgMinute));
+        // SETTINGS_LOAD_NORMALIZATION_CONTRACT
+        // INI読込も保存/API差分判定と同じSettingsDefaults正本を通す。
+        // 古い値・手編集値をRuntime/UIへ生値のまま投影し、各利用側で再補正する別ルートを作らない。
+        EpgDepth             = SettingsDefaults.NormalizeEpgDepth(GetStr(dict, "EpgDepth", EpgDepth));
+        EpgPreRecordMinutes  = SettingsDefaults.NormalizeEpgPreRecordMinutes(GetInt(dict, "EpgPreRecordMinutes", EpgPreRecordMinutes));
         LaterProgramPriority = GetBool(dict, "LaterProgramPriority", LaterProgramPriority);
         PseudoContinuousRecording     = GetBool(dict, "PseudoContinuousRecording",     PseudoContinuousRecording);
-        PseudoContinuousMarginSeconds = GetInt(dict,  "PseudoContinuousMarginSeconds", PseudoContinuousMarginSeconds);
-        PreStartMarginSeconds = GetInt(dict,  "PreStartMarginSeconds", PreStartMarginSeconds);
-        PostEndMarginSeconds  = GetInt(dict,  "PostEndMarginSeconds",  PostEndMarginSeconds);
-        RecDelaySeconds       = GetInt(dict,  "RecDelaySeconds",       RecDelaySeconds);
-        WakeMinutesBefore     = GetInt(dict,  "WakeMinutesBefore",     WakeMinutesBefore);
-        WakeAdditionalSeconds = GetInt(dict,  "WakeAdditionalSeconds", WakeAdditionalSeconds);
-        TunerSlotCooldownMs   = GetInt(dict,  "TunerSlotCooldownMs",   TunerSlotCooldownMs);
+        PreStartMarginSeconds = SettingsDefaults.NormalizePreStartMarginSeconds(GetInt(dict, "PreStartMarginSeconds", PreStartMarginSeconds));
+        PostEndMarginSeconds  = SettingsDefaults.NormalizePostEndMarginSeconds(GetInt(dict, "PostEndMarginSeconds", PostEndMarginSeconds));
+        WakeMinutesBefore     = SettingsDefaults.NormalizeWakeMinutesBefore(GetInt(dict, "WakeMinutesBefore", WakeMinutesBefore));
+        WakeAdditionalSeconds = SettingsDefaults.NormalizeWakeAdditionalSeconds(GetInt(dict, "WakeAdditionalSeconds", WakeAdditionalSeconds));
         UseMinOption         = GetBool(dict, "UseMinOption",         UseMinOption);
         UseNodshowOption     = GetBool(dict, "UseNodshowOption",     UseNodshowOption);
-        TvTestRecordCurServiceOnly = GetBool(dict, "TvTestRecordCurServiceOnly", TvTestRecordCurServiceOnly);
-        TvTestRecordSubtitle = GetBool(dict, "TvTestRecordSubtitle", TvTestRecordSubtitle);
-        TvTestRecordDataCarrousel = GetBool(dict, "TvTestRecordDataCarrousel", TvTestRecordDataCarrousel);
         ShowTvAIrEpgRecTaskbarIcon = GetBool(dict, "ShowTvAIrEpgRecTaskbarIcon", ShowTvAIrEpgRecTaskbarIcon);
         StartupEnabled       = GetBool(dict, "StartupEnabled",       StartupEnabled);
+        NetworkLanAccessEnabled = GetBool(dict, "NetworkLanAccessEnabled", NetworkLanAccessEnabled);
+        NetworkSessionLifetimeMinutes = SettingsDefaults.NormalizeNetworkSessionLifetimeMinutes(GetInt(dict, "NetworkSessionLifetimeMinutes", NetworkSessionLifetimeMinutes));
+        NetworkPasswordEncrypted = GetStr(dict, "NetworkPasswordEncrypted", NetworkPasswordEncrypted);
         RecordingAfterAction = NormalizeRecordingAfterAction(GetStr(dict, "RecordingAfterAction", RecordingAfterAction));
         RecordingAfterActionDelayMinutes = NormalizeRecordingAfterActionDelayMinutes(GetInt(dict, "RecordingAfterActionDelayMinutes", RecordingAfterActionDelayMinutes));
+        // USER_LOG_DETAIL_SETTINGS_TOKEN_INVARIANT
+        // 詳細表示の設定正本は UserLogDetail* に統一する。旧キーは読込時の一方向移行にだけ使用し、保存・API・UIへ再投影しない。
+        UserLogDetailEnabled = GetBoolMigratingLegacy(dict, "UserLogDetailEnabled", "UserLogExtendedEnabled", UserLogDetailEnabled);
+        UserLogDetailReservationSource = GetBoolMigratingLegacy(dict, "UserLogDetailReservationSource", "UserLogShowReservationSource", UserLogDetailReservationSource);
+        UserLogDetailScheduledTime = GetBoolMigratingLegacy(dict, "UserLogDetailScheduledTime", "UserLogShowSchedule", UserLogDetailScheduledTime);
+        UserLogDetailActualRecordingTime = GetBoolMigratingLegacy(dict, "UserLogDetailActualRecordingTime", "UserLogShowActualTime", UserLogDetailActualRecordingTime);
+        UserLogDetailRecordingQuality = GetBoolMigratingLegacy(dict, "UserLogDetailRecordingQuality", "UserLogShowQuality", UserLogDetailRecordingQuality);
+        UserLogDetailStateChange = GetBoolMigratingLegacy(dict, "UserLogDetailStateChange", "UserLogShowStateChange", UserLogDetailStateChange);
+        UserLogDetailEndOrFailureReason = GetBoolMigratingLegacy(dict, "UserLogDetailEndOrFailureReason", "UserLogShowReason", UserLogDetailEndOrFailureReason);
         ThemeGenrePalettes = LoadThemeGenrePalettes(dict);
-        GenreColors = new Dictionary<string, string>(ThemeGenrePalettes["light"], StringComparer.OrdinalIgnoreCase);
 
-        // EPG worker launch timing / tuner cooldown policy
+        // EPG worker launch policy
         EpgUseBelowNormalPriority = GetBool(dict, "EpgUseBelowNormalPriority", EpgUseBelowNormalPriority);
-        EpgLaunchStaggerMs        = GetInt(dict,  "EpgLaunchStaggerMs",        EpgLaunchStaggerMs);
-        EpgPostLaunchStabilizeMs  = GetInt(dict,  "EpgPostLaunchStabilizeMs",  EpgPostLaunchStabilizeMs);
-        EpgExcludeLiveTvTest      = GetBool(dict, "EpgExcludeLiveTvTest",      EpgExcludeLiveTvTest);
         EpgDisableImmediateRetry  = GetBool(dict, "EpgDisableImmediateRetry",  EpgDisableImmediateRetry);
 
 
-        TaskUserName         = GetStr(dict,  "TaskUserName",         TaskUserName);
+        TaskUserName         = NormalizeTaskUserName(GetStr(dict,  "TaskUserName",         TaskUserName));
         TaskPasswordEncrypted = GetStr(dict, "TaskPasswordEncrypted", TaskPasswordEncrypted);
 
         // チューナー個別設定
-        // 形式: Tuner1 = 名前, BonDriverファイル名, GR/BSCS/HYBRID, DID
+        // 形式: Tuner1 = 名前, BonDriverファイル名, GR/BSCS/HYBRID, DID, Role, LogicalViewerSlotId, DeviceNumber
         Tuners = new List<TunerProfileDto>();
         var count = GetInt(dict, "TunerCount", 0);
 
@@ -190,10 +216,12 @@ public sealed class IniSettingsService
                 Tuners.Add(new TunerProfileDto
                 {
                     Name              = TunerDisplayName.ForUi(parts.Length > 0 ? parts[0] : "", parts.Length > 2 ? parts[2] : "", parts.Length > 3 ? parts[3] : ""),
-                    BonDriverFileName = parts.Length > 1 ? parts[1] : "",
+                    BonDriverFileName = NormalizeBonDriverFileName(parts.Length > 1 ? parts[1] : ""),
                     Group             = TunerDisplayName.NormalizeGroup(parts.Length > 2 ? parts[2] : ""),
                     Did               = (parts.Length > 3 ? parts[3] : "").Trim().ToUpperInvariant(),
                     Role              = NormalizeTunerRole(parts.Length > 4 ? parts[4] : ""),
+                    LogicalViewerSlotId = LogicalViewerSlotIdentity.Resolve(parts.Length > 5 ? parts[5] : "", parts.Length > 2 ? parts[2] : "", parts.Length > 3 ? parts[3] : "", parts.Length > 4 ? parts[4] : "", i),
+                    DeviceNumber      = parts.Length > 6 && int.TryParse(parts[6], out var deviceNumber) ? deviceNumber : 0,
                 });
             }
         }
@@ -207,101 +235,184 @@ public sealed class IniSettingsService
                 Tuners.Add(new TunerProfileDto
                 {
                     Name              = TunerDisplayName.ForUi(parts.Length > 0 ? parts[0] : "", parts.Length > 2 ? parts[2] : "", parts.Length > 3 ? parts[3] : ""),
-                    BonDriverFileName = parts.Length > 1 ? parts[1] : "",
+                    BonDriverFileName = NormalizeBonDriverFileName(parts.Length > 1 ? parts[1] : ""),
                     Group             = TunerDisplayName.NormalizeGroup(parts.Length > 2 ? parts[2] : ""),
                     Did               = (parts.Length > 3 ? parts[3] : "").Trim().ToUpperInvariant(),
                     Role              = NormalizeTunerRole(parts.Length > 4 ? parts[4] : ""),
+                    LogicalViewerSlotId = LogicalViewerSlotIdentity.Resolve(parts.Length > 5 ? parts[5] : "", parts.Length > 2 ? parts[2] : "", parts.Length > 3 ? parts[3] : "", parts.Length > 4 ? parts[4] : "", i),
+                    DeviceNumber      = parts.Length > 6 && int.TryParse(parts[6], out var deviceNumber) ? deviceNumber : 0,
                 });
             }
+        }
+
+        NormalizeTunerDeviceNumbers();
+        PersistMissingTunerMetadata();
+    }
+
+    private void NormalizeTunerDeviceNumbers()
+    {
+        var counters = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var tuner in Tuners)
+        {
+            var group = TunerDisplayName.NormalizeGroup(tuner.Group);
+            counters.TryGetValue(group, out var ordinal);
+            ordinal++;
+            counters[group] = ordinal;
+            tuner.DeviceNumber = ordinal;
+        }
+    }
+
+    private void PersistMissingTunerMetadata()
+    {
+        if (!File.Exists(_iniPath) || Tuners.Count == 0) return;
+        var lines = File.ReadAllLines(_iniPath).ToList();
+        var changed = false;
+        for (var i = 0; i < Tuners.Count; i++)
+        {
+            var key = $"Tuner{i + 1}";
+            for (var lineIndex = 0; lineIndex < lines.Count; lineIndex++)
+            {
+                var raw = lines[lineIndex];
+                var trimmed = raw.Trim();
+                if (!trimmed.StartsWith(key + " ", StringComparison.OrdinalIgnoreCase)
+                    && !trimmed.StartsWith(key + "=", StringComparison.OrdinalIgnoreCase)) continue;
+                var eq = raw.IndexOf('=');
+                if (eq < 0) continue;
+                var parts = raw[(eq + 1)..].Split(',', StringSplitOptions.TrimEntries).ToList();
+                while (parts.Count < 7) parts.Add(string.Empty);
+                var stableId = LogicalViewerSlotIdentity.Resolve(Tuners[i].LogicalViewerSlotId, Tuners[i].Group, Tuners[i].Did, Tuners[i].Role, i + 1);
+                Tuners[i].LogicalViewerSlotId = stableId;
+                var expectedDeviceNumber = Tuners[i].DeviceNumber;
+                var currentDeviceNumber = int.TryParse(parts[6], out var parsedDeviceNumber) ? parsedDeviceNumber : 0;
+                if (string.Equals(LogicalViewerSlotIdentity.Normalize(parts[5]), stableId, StringComparison.OrdinalIgnoreCase)
+                    && currentDeviceNumber == expectedDeviceNumber) break;
+                parts[5] = stableId;
+                parts[6] = expectedDeviceNumber.ToString();
+                lines[lineIndex] = raw[..(eq + 1)] + " " + string.Join(", ", parts.Take(7));
+                changed = true;
+                break;
+            }
+        }
+        if (changed)
+        {
+            // 既存設定にLogical Viewer Slot IDが無い場合だけ、通常設定保存と同じ原子的置換で補完する。
+            // 既存行・コメントを保持し、途中書込みでTvAIr.iniを破損させない。
+            WriteIniAtomically(lines);
         }
     }
 
     // ── 書き込み ────────────────────────────────────────────────────
-    public void Save(IniSettingsDto dto, bool applyTunerTopologyToRuntime = true)
+    // SETTINGS_SAVE_SINGLE_EXIT_CONTRACT
+    // 設定保存はSettingsChangeApplicationServiceだけが呼ぶ。既定値付き公開入口を残すと、
+    // 差分分類・再起動待ち・Runtime反映抑止・EPG/Allocation/Wake適用を迂回できるため禁止する。
+    internal void SaveFromApplicationService(IniSettingsUpdateDto dto, bool applyTunerTopologyToRuntime, bool applyHostSettingsToRuntime)
     {
+        var rollbackState = CaptureSaveState();
         var runtimeTvTestExecutablePath = TvTestExecutablePath;
         var runtimeViewingTvTestExecutablePath = ViewingTvTestExecutablePath;
         var runtimeBonDriverDirectory = BonDriverDirectory;
+        var runtimeDataDirectory = DataDirectory;
+        var runtimePort = Port;
         // release_contract: ch2/ChSet はチューナーRuntimeTopologyではなくChannelMap契約。
         // チューナー変更でRuntimeTopology反映を保留する場合でも、保存済みChannelMapはChannelFileLoader側でcache key/invalidateにより反映する。
         var runtimeUseMinOption = UseMinOption;
         var runtimeUseNodshowOption = UseNodshowOption;
+        var runtimeTunersBeforeSave = CloneTuners(Tuners);
 
-        TvTestExecutablePath = dto.TvTestExecutablePath;
-        BonDriverDirectory   = dto.BonDriverDirectory;
-        ViewingTvTestExecutablePath = dto.ViewingTvTestExecutablePath ?? "";
-        GrChannelFilePath    = dto.GrChannelFilePath;
-        GrChSetFilePath      = dto.GrChSetFilePath;
-        BscsChannelFilePath  = dto.BscsChannelFilePath;
-        BscsChSetFilePath    = dto.BscsChSetFilePath;
-        DataDirectory        = dto.DataDirectory;
+        try
+        {
+        // SETTINGS_PATH_CANONICALIZATION_CONTRACT
+        // 差分判定と永続化で同じ正規化を使う。前後空白・不要な末尾区切りだけの入力を、
+        // 別項目の保存に便乗してINIへ書き戻してはならない。ドライブ/共有ルートは保持する。
+        TvTestExecutablePath = NormalizePathValue(dto.TvTestExecutablePath);
+        BonDriverDirectory   = NormalizePathValue(dto.BonDriverDirectory);
+        ViewingTvTestExecutablePath = NormalizePathValue(dto.ViewingTvTestExecutablePath);
+        GrChannelFilePath    = NormalizePathValue(dto.GrChannelFilePath);
+        GrChSetFilePath      = NormalizePathValue(dto.GrChSetFilePath);
+        BscsChannelFilePath  = NormalizePathValue(dto.BscsChannelFilePath);
+        BscsChSetFilePath    = NormalizePathValue(dto.BscsChSetFilePath);
+        DataDirectory        = NormalizePathValue(dto.DataDirectory);
         SystemTheme          = NormalizeSystemTheme(dto.SystemTheme);
-        Port                 = dto.Port;
+        Port                 = SettingsDefaults.NormalizePort(dto.Port);
         EpgEnabled           = dto.EpgEnabled;
-        EpgHour              = Math.Clamp(dto.EpgHour, 0, 23);
-        EpgMinute            = Math.Clamp(dto.EpgMinute, 0, 59);
-        EpgDepth             = dto.EpgDepth is "shallow" or "medium" or "deep" or "deeper" ? dto.EpgDepth : "medium";
-        EpgPreRecordMinutes       = dto.EpgPreRecordMinutes is 0 or 5 or 10 or 15 or 20 ? dto.EpgPreRecordMinutes : 15;
+        EpgHour              = SettingsDefaults.NormalizeEpgHour(dto.EpgHour);
+        EpgMinute            = SettingsDefaults.NormalizeEpgMinute(dto.EpgMinute);
+        EpgDepth             = SettingsDefaults.NormalizeEpgDepth(dto.EpgDepth);
+        EpgPreRecordMinutes       = SettingsDefaults.NormalizeEpgPreRecordMinutes(dto.EpgPreRecordMinutes);
         LaterProgramPriority  = dto.LaterProgramPriority;
         PseudoContinuousRecording     = dto.PseudoContinuousRecording;
-        PseudoContinuousMarginSeconds = Math.Max(1, dto.PseudoContinuousMarginSeconds);
-        PreStartMarginSeconds = Math.Max(0, dto.PreStartMarginSeconds);
-        PostEndMarginSeconds  = Math.Max(0, dto.PostEndMarginSeconds);
-        RecDelaySeconds       = Math.Clamp(dto.RecDelaySeconds, 0, 60);
-        WakeMinutesBefore     = Math.Max(0, dto.WakeMinutesBefore);
-        WakeAdditionalSeconds = Math.Clamp(dto.WakeAdditionalSeconds, 0, 300);
-        TunerSlotCooldownMs   = Math.Clamp(dto.TunerSlotCooldownMs, 0, 60000);
+        PreStartMarginSeconds = SettingsDefaults.NormalizePreStartMarginSeconds(dto.PreStartMarginSeconds);
+        PostEndMarginSeconds  = SettingsDefaults.NormalizePostEndMarginSeconds(dto.PostEndMarginSeconds);
+        WakeMinutesBefore     = SettingsDefaults.NormalizeWakeMinutesBefore(dto.WakeMinutesBefore);
+        WakeAdditionalSeconds = SettingsDefaults.NormalizeWakeAdditionalSeconds(dto.WakeAdditionalSeconds);
         UseMinOption         = dto.UseMinOption;
         UseNodshowOption     = dto.UseNodshowOption;
-        TvTestRecordCurServiceOnly = dto.TvTestRecordCurServiceOnly;
-        TvTestRecordSubtitle = dto.TvTestRecordSubtitle;
-        TvTestRecordDataCarrousel = dto.TvTestRecordDataCarrousel;
         ShowTvAIrEpgRecTaskbarIcon = dto.ShowTvAIrEpgRecTaskbarIcon;
         StartupEnabled       = dto.StartupEnabled;
+        NetworkLanAccessEnabled = dto.NetworkLanAccessEnabled;
+        NetworkSessionLifetimeMinutes = SettingsDefaults.NormalizeNetworkSessionLifetimeMinutes(dto.NetworkSessionLifetimeMinutes);
+        if (dto.ClearNetworkPassword)
+        {
+            NetworkPasswordEncrypted = "";
+        }
+        else if (!string.IsNullOrWhiteSpace(dto.NetworkPasswordPlain))
+        {
+            NetworkPasswordEncrypted = CredentialProtector.Encrypt(dto.NetworkPasswordPlain);
+        }
         RecordingAfterAction = NormalizeRecordingAfterAction(dto.RecordingAfterAction);
         RecordingAfterActionDelayMinutes = NormalizeRecordingAfterActionDelayMinutes(dto.RecordingAfterActionDelayMinutes);
-        ThemeGenrePalettes = NormalizeThemeGenrePalettes(dto.ThemeGenrePalettes, dto.GenreColors);
-        GenreColors = new Dictionary<string, string>(ThemeGenrePalettes["light"], StringComparer.OrdinalIgnoreCase);
+        UserLogDetailEnabled = dto.UserLogDetailEnabled;
+        UserLogDetailReservationSource = dto.UserLogDetailReservationSource;
+        UserLogDetailScheduledTime = dto.UserLogDetailScheduledTime;
+        UserLogDetailActualRecordingTime = dto.UserLogDetailActualRecordingTime;
+        UserLogDetailRecordingQuality = dto.UserLogDetailRecordingQuality;
+        UserLogDetailStateChange = dto.UserLogDetailStateChange;
+        UserLogDetailEndOrFailureReason = dto.UserLogDetailEndOrFailureReason;
+        ThemeGenrePalettes = NormalizeThemeGenrePalettes(dto.ThemeGenrePalettes);
 
-        // EPG worker launch timing / tuner cooldown policy
+        // EPG worker launch policy
         EpgUseBelowNormalPriority = dto.EpgUseBelowNormalPriority;
-        EpgLaunchStaggerMs        = Math.Clamp(dto.EpgLaunchStaggerMs, 0, 10000);
-        EpgPostLaunchStabilizeMs  = Math.Clamp(dto.EpgPostLaunchStabilizeMs, 0, 30000);
-        EpgExcludeLiveTvTest      = dto.EpgExcludeLiveTvTest;
         EpgDisableImmediateRetry  = dto.EpgDisableImmediateRetry;
 
 
-        TaskUserName         = dto.TaskUserName ?? "";
-        // パスワードが平文で送られてきた場合はDPAPIで暗号化して保存
-        // 空文字の場合はそのまま（クリア）、既に暗号化済みの場合はそのまま保持
-        if (!string.IsNullOrEmpty(dto.TaskPasswordPlain))
-            TaskPasswordEncrypted = CredentialProtector.Encrypt(dto.TaskPasswordPlain);
-        else if (dto.TaskPasswordPlain == "")
+        TaskUserName         = NormalizeTaskUserName(dto.TaskUserName);
+        // パスワード更新は明示契約に統一する。
+        // UI上の空欄はClearTaskPassword=trueとして送られ、nullだけが変更なしを表す。
+        if (dto.ClearTaskPassword)
             TaskPasswordEncrypted = "";
-        // dto.TaskPasswordPlainがnullの場合は既存の暗号化済み値を保持
-        var runtimeTunersBeforeSave = Tuners.Select(t => new TunerProfileDto
-        {
-            Name = t.Name,
-            BonDriverFileName = t.BonDriverFileName,
-            Group = t.Group,
-            Did = t.Did,
-            Role = t.Role,
-        }).ToList();
-        var persistedTuners = (dto.Tuners ?? new()).Select(t =>
+        else if (!string.IsNullOrEmpty(dto.TaskPasswordPlain))
+            TaskPasswordEncrypted = CredentialProtector.Encrypt(dto.TaskPasswordPlain);
+        var deviceNumberCounters = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var persistedTuners = (dto.Tuners ?? new()).Select((t, index) =>
         {
             var group = TunerDisplayName.NormalizeGroup(t.Group);
             var did = (t.Did ?? string.Empty).Trim().ToUpperInvariant();
+            deviceNumberCounters.TryGetValue(group, out var deviceNumber);
+            deviceNumber++;
+            deviceNumberCounters[group] = deviceNumber;
             return new TunerProfileDto
             {
                 Name = TunerDisplayName.ForUi(t.Name, group, did),
-                BonDriverFileName = t.BonDriverFileName ?? string.Empty,
+                BonDriverFileName = NormalizeBonDriverFileName(t.BonDriverFileName),
                 Group = group,
                 Did = did,
                 Role = NormalizeTunerRole(t.Role),
+                LogicalViewerSlotId = LogicalViewerSlotIdentity.Resolve(t.LogicalViewerSlotId, group, did, t.Role, index + 1),
+                DeviceNumber = deviceNumber,
             };
         }).ToList();
+
+        _persistedTvTestExecutablePath = TvTestExecutablePath;
+        _persistedViewingTvTestExecutablePath = ViewingTvTestExecutablePath;
+        _persistedBonDriverDirectory = BonDriverDirectory;
+        _persistedUseMinOption = UseMinOption;
+        _persistedUseNodshowOption = UseNodshowOption;
+        _persistedTuners = CloneTuners(persistedTuners);
+        _persistedDataDirectory = DataDirectory;
+        _persistedPort = Port;
+
         // release_contract: チューナー変更は再起動必須。
-        // iniファイルへは保存するが、稼働中のRuntimeTopology(TunerPool/Wake/EPG/PluginUiContext/ExternalTuner)へは即時反映しない。
+        // iniファイルへは保存するが、稼働中のRuntimeTopology(TunerPool/Wake/EPG/RuntimeUiRenderContext/ExternalTuner)へは即時反映しない。
         Tuners = applyTunerTopologyToRuntime ? persistedTuners : runtimeTunersBeforeSave;
         IsFirstRun           = false;
 
@@ -328,16 +439,21 @@ public sealed class IniSettingsService
         for (var i = 0; i < persistedTuners.Count; i++)
         {
             var t = persistedTuners[i];
-            lines.Add($"Tuner{i + 1} = {t.Name}, {t.BonDriverFileName}, {t.Group}, {t.Did}, {NormalizeTunerRole(t.Role)}");
+            lines.Add($"Tuner{i + 1} = {t.Name}, {t.BonDriverFileName}, {t.Group}, {t.Did}, {NormalizeTunerRole(t.Role)}, {LogicalViewerSlotIdentity.Resolve(t.LogicalViewerSlotId, t.Group, t.Did, t.Role, i + 1)}, {t.DeviceNumber}");
         }
 
         lines.AddRange(new[]
         {
             "",
             "[App]",
-            $"DataDirectory        = {DataDirectory}",
+            $"DataDirectory        = {_persistedDataDirectory}",
             $"SystemTheme          = {SystemTheme}",
-            $"Port                 = {Port}",
+            $"Port                 = {_persistedPort}",
+            "",
+            "[Network]",
+            $"NetworkLanAccessEnabled = {(NetworkLanAccessEnabled ? "true" : "false")}",
+            $"NetworkSessionLifetimeMinutes = {NetworkSessionLifetimeMinutes}",
+            $"NetworkPasswordEncrypted = {NetworkPasswordEncrypted}",
             "",
             "[Epg]",
             $"EpgEnabled           = {(EpgEnabled ? "true" : "false")}",
@@ -350,29 +466,29 @@ public sealed class IniSettingsService
             $"LaterProgramPriority  = {(LaterProgramPriority ? "true" : "false")}",
             $"PreStartMarginSeconds = {PreStartMarginSeconds}",
             $"PostEndMarginSeconds  = {PostEndMarginSeconds}",
-            $"RecDelaySeconds       = {RecDelaySeconds}",
             $"WakeMinutesBefore     = {WakeMinutesBefore}",
             $"WakeAdditionalSeconds = {WakeAdditionalSeconds}",
-            $"TunerSlotCooldownMs   = {TunerSlotCooldownMs}",
             $"PseudoContinuousRecording     = {(PseudoContinuousRecording ? "true" : "false")}",
-            $"PseudoContinuousMarginSeconds = {PseudoContinuousMarginSeconds}",
             $"RecordingAfterAction = {RecordingAfterAction}",
             $"RecordingAfterActionDelayMinutes = {RecordingAfterActionDelayMinutes}",
+            "",
+            "[Log]",
+            $"UserLogDetailEnabled = {(UserLogDetailEnabled ? "true" : "false")}",
+            $"UserLogDetailReservationSource = {(UserLogDetailReservationSource ? "true" : "false")}",
+            $"UserLogDetailScheduledTime = {(UserLogDetailScheduledTime ? "true" : "false")}",
+            $"UserLogDetailActualRecordingTime = {(UserLogDetailActualRecordingTime ? "true" : "false")}",
+            $"UserLogDetailRecordingQuality = {(UserLogDetailRecordingQuality ? "true" : "false")}",
+            $"UserLogDetailStateChange = {(UserLogDetailStateChange ? "true" : "false")}",
+            $"UserLogDetailEndOrFailureReason = {(UserLogDetailEndOrFailureReason ? "true" : "false")}",
             "",
             "[TvTestOptions]",
             $"UseMinOption         = {(UseMinOption     ? "true" : "false")}",
             $"UseNodshowOption     = {(UseNodshowOption ? "true" : "false")}",
-            $"TvTestRecordCurServiceOnly = {(TvTestRecordCurServiceOnly ? "true" : "false")}",
-            $"TvTestRecordSubtitle = {(TvTestRecordSubtitle ? "true" : "false")}",
-            $"TvTestRecordDataCarrousel = {(TvTestRecordDataCarrousel ? "true" : "false")}",
             $"ShowTvAIrEpgRecTaskbarIcon = {(ShowTvAIrEpgRecTaskbarIcon ? "true" : "false")}",
             "",
             "[EpgPerformance]",
-            "; EPG worker launch timing / tuner cooldown policy",
+            "; EPG worker launch policy",
             $"EpgUseBelowNormalPriority = {(EpgUseBelowNormalPriority ? "true" : "false")}",
-            $"EpgLaunchStaggerMs        = {EpgLaunchStaggerMs}",
-            $"EpgPostLaunchStabilizeMs  = {EpgPostLaunchStabilizeMs}",
-            $"EpgExcludeLiveTvTest      = {(EpgExcludeLiveTvTest ? "true" : "false")}",
             $"EpgDisableImmediateRetry  = {(EpgDisableImmediateRetry ? "true" : "false")}",
             "",
             "[UiGenreColors]",
@@ -393,8 +509,21 @@ public sealed class IniSettingsService
             $"TaskPasswordEncrypted = {TaskPasswordEncrypted}",
         });
 
-        File.WriteAllLines(_iniPath, lines);
+        WriteIniAtomically(lines);
+        }
+        catch
+        {
+            // SETTINGS_SAVE_ROLLBACK_CONTRACT
+            // ディスク確定前に失敗した保存値をRuntime/Persisted正本へ残してはならない。
+            // topologyだけでなく、同一保存操作で更新した全設定を保存開始前へ戻す。
+            RestoreSaveState(rollbackState);
+            throw;
+        }
 
+        // SETTINGS_SAVE_COMMIT_BOUNDARY_CONTRACT
+        // WriteIniAtomically成功後はINIが新しい永続正本である。ここから旧snapshotへ戻すcatchへ入れると、
+        // ディスクだけ新値・メモリだけ旧値という逆不整合を作るため、rollback境界は書込み確定前で閉じる。
+        // 再起動待ちTopologyだけを、確定済みPersisted値とは分離して旧Runtime値へ戻す。
         if (!applyTunerTopologyToRuntime)
         {
             TvTestExecutablePath = runtimeTvTestExecutablePath;
@@ -405,28 +534,158 @@ public sealed class IniSettingsService
             UseNodshowOption = runtimeUseNodshowOption;
             Tuners = runtimeTunersBeforeSave;
         }
+
+        // SETTINGS_PERSISTED_RUNTIME_HOST_SEPARATION
+        // DataDirectory/Portは起動時にHost/DBが確定するため、保存値と稼働値を分離する。
+        // 現在Runtimeと一致する値へ戻した場合だけ保留を解消し、そうでなければ再起動まで旧稼働値を維持する。
+        if (!applyHostSettingsToRuntime)
+        {
+            DataDirectory = runtimeDataDirectory;
+            Port = runtimePort;
+        }
     }
+
+    private void WriteIniAtomically(IReadOnlyCollection<string> lines)
+    {
+        var directory = Path.GetDirectoryName(_iniPath) ?? _baseDirectory;
+        Directory.CreateDirectory(directory);
+        var tempPath = Path.Combine(directory, $".{Path.GetFileName(_iniPath)}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            File.WriteAllLines(tempPath, lines, new System.Text.UTF8Encoding(false));
+
+            // SETTINGS_INI_REPLACE_CONTRACT
+            // 既存INI更新ではFile.Replaceを使用し、置換対象が持つ属性・ACLのマージ契約を維持する。
+            // 初回作成時だけMoveする。一時ファイルは必ず同一ディレクトリへ作成しているため、
+            // 既存INIを削除してから移動する非原子的な経路へフォールバックしてはならない。
+            if (File.Exists(_iniPath))
+                File.Replace(tempPath, _iniPath, destinationBackupFileName: null, ignoreMetadataErrors: false);
+            else
+                File.Move(tempPath, _iniPath);
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+            {
+                try { File.Delete(tempPath); } catch { /* 元の保存例外を隠さない */ }
+            }
+        }
+    }
+
+    private SaveState CaptureSaveState() => new(
+        TvTestExecutablePath, BonDriverDirectory, ViewingTvTestExecutablePath,
+        GrChannelFilePath, GrChSetFilePath, BscsChannelFilePath, BscsChSetFilePath,
+        DataDirectory, SystemTheme, Port, EpgEnabled, EpgHour, EpgMinute, EpgDepth, EpgPreRecordMinutes,
+        LaterProgramPriority, PseudoContinuousRecording,
+        PreStartMarginSeconds, PostEndMarginSeconds, WakeMinutesBefore,
+        WakeAdditionalSeconds, UseMinOption, UseNodshowOption,
+        ShowTvAIrEpgRecTaskbarIcon, StartupEnabled, NetworkLanAccessEnabled,
+        NetworkSessionLifetimeMinutes, NetworkPasswordEncrypted, RecordingAfterAction,
+        RecordingAfterActionDelayMinutes, UserLogDetailEnabled, UserLogDetailReservationSource,
+        UserLogDetailScheduledTime, UserLogDetailActualRecordingTime, UserLogDetailRecordingQuality,
+        UserLogDetailStateChange, UserLogDetailEndOrFailureReason, CloneThemeGenrePalettes(ThemeGenrePalettes),
+        EpgUseBelowNormalPriority, EpgDisableImmediateRetry, TaskUserName, TaskPasswordEncrypted,
+        CloneTuners(Tuners), IsFirstRun, _persistedTvTestExecutablePath,
+        _persistedViewingTvTestExecutablePath, _persistedBonDriverDirectory, _persistedUseMinOption,
+        _persistedUseNodshowOption, CloneTuners(_persistedTuners), _persistedDataDirectory, _persistedPort);
+
+    private void RestoreSaveState(SaveState state)
+    {
+        TvTestExecutablePath = state.TvTestExecutablePath;
+        BonDriverDirectory = state.BonDriverDirectory;
+        ViewingTvTestExecutablePath = state.ViewingTvTestExecutablePath;
+        GrChannelFilePath = state.GrChannelFilePath;
+        GrChSetFilePath = state.GrChSetFilePath;
+        BscsChannelFilePath = state.BscsChannelFilePath;
+        BscsChSetFilePath = state.BscsChSetFilePath;
+        DataDirectory = state.DataDirectory;
+        SystemTheme = state.SystemTheme;
+        Port = state.Port;
+        EpgEnabled = state.EpgEnabled;
+        EpgHour = state.EpgHour;
+        EpgMinute = state.EpgMinute;
+        EpgDepth = state.EpgDepth;
+        EpgPreRecordMinutes = state.EpgPreRecordMinutes;
+        LaterProgramPriority = state.LaterProgramPriority;
+        PseudoContinuousRecording = state.PseudoContinuousRecording;
+        PreStartMarginSeconds = state.PreStartMarginSeconds;
+        PostEndMarginSeconds = state.PostEndMarginSeconds;
+        WakeMinutesBefore = state.WakeMinutesBefore;
+        WakeAdditionalSeconds = state.WakeAdditionalSeconds;
+        UseMinOption = state.UseMinOption;
+        UseNodshowOption = state.UseNodshowOption;
+        ShowTvAIrEpgRecTaskbarIcon = state.ShowTvAIrEpgRecTaskbarIcon;
+        StartupEnabled = state.StartupEnabled;
+        NetworkLanAccessEnabled = state.NetworkLanAccessEnabled;
+        NetworkSessionLifetimeMinutes = state.NetworkSessionLifetimeMinutes;
+        NetworkPasswordEncrypted = state.NetworkPasswordEncrypted;
+        RecordingAfterAction = state.RecordingAfterAction;
+        RecordingAfterActionDelayMinutes = state.RecordingAfterActionDelayMinutes;
+        UserLogDetailEnabled = state.UserLogDetailEnabled;
+        UserLogDetailReservationSource = state.UserLogDetailReservationSource;
+        UserLogDetailScheduledTime = state.UserLogDetailScheduledTime;
+        UserLogDetailActualRecordingTime = state.UserLogDetailActualRecordingTime;
+        UserLogDetailRecordingQuality = state.UserLogDetailRecordingQuality;
+        UserLogDetailStateChange = state.UserLogDetailStateChange;
+        UserLogDetailEndOrFailureReason = state.UserLogDetailEndOrFailureReason;
+        ThemeGenrePalettes = CloneThemeGenrePalettes(state.ThemeGenrePalettes);
+        EpgUseBelowNormalPriority = state.EpgUseBelowNormalPriority;
+        EpgDisableImmediateRetry = state.EpgDisableImmediateRetry;
+        TaskUserName = state.TaskUserName;
+        TaskPasswordEncrypted = state.TaskPasswordEncrypted;
+        Tuners = CloneTuners(state.Tuners);
+        IsFirstRun = state.IsFirstRun;
+        _persistedTvTestExecutablePath = state.PersistedTvTestExecutablePath;
+        _persistedViewingTvTestExecutablePath = state.PersistedViewingTvTestExecutablePath;
+        _persistedBonDriverDirectory = state.PersistedBonDriverDirectory;
+        _persistedUseMinOption = state.PersistedUseMinOption;
+        _persistedUseNodshowOption = state.PersistedUseNodshowOption;
+        _persistedTuners = CloneTuners(state.PersistedTuners);
+        _persistedDataDirectory = state.PersistedDataDirectory;
+        _persistedPort = state.PersistedPort;
+    }
+
+    private sealed record SaveState(
+        string TvTestExecutablePath, string BonDriverDirectory, string ViewingTvTestExecutablePath,
+        string GrChannelFilePath, string GrChSetFilePath, string BscsChannelFilePath, string BscsChSetFilePath,
+        string DataDirectory, string SystemTheme, int Port, bool EpgEnabled, int EpgHour, int EpgMinute,
+        string EpgDepth, int EpgPreRecordMinutes, bool LaterProgramPriority, bool PseudoContinuousRecording,
+        int PreStartMarginSeconds, int PostEndMarginSeconds,
+        int WakeMinutesBefore, int WakeAdditionalSeconds,
+        bool UseMinOption, bool UseNodshowOption, bool ShowTvAIrEpgRecTaskbarIcon, bool StartupEnabled,
+        bool NetworkLanAccessEnabled, int NetworkSessionLifetimeMinutes, string NetworkPasswordEncrypted,
+        string RecordingAfterAction, int RecordingAfterActionDelayMinutes, bool UserLogDetailEnabled,
+        bool UserLogDetailReservationSource, bool UserLogDetailScheduledTime, bool UserLogDetailActualRecordingTime,
+        bool UserLogDetailRecordingQuality, bool UserLogDetailStateChange, bool UserLogDetailEndOrFailureReason,
+        Dictionary<string, Dictionary<string, string>> ThemeGenrePalettes, bool EpgUseBelowNormalPriority,
+        bool EpgDisableImmediateRetry, string TaskUserName, string TaskPasswordEncrypted, List<TunerProfileDto> Tuners,
+        bool IsFirstRun, string PersistedTvTestExecutablePath, string PersistedViewingTvTestExecutablePath,
+        string PersistedBonDriverDirectory, bool PersistedUseMinOption, bool PersistedUseNodshowOption,
+        List<TunerProfileDto> PersistedTuners, string PersistedDataDirectory, int PersistedPort);
 
     // ── DTO変換（APIレスポンス用） ──────────────────────────────────
     public string ResolveDataDirectory(string? rawValue = null)
     {
-        var raw = string.IsNullOrWhiteSpace(rawValue) ? "data" : rawValue.Trim();
+        // rawValue省略時は、現在プロセスが使用中のRuntime設定を解決する。
+        // 設定APIが保存済み値を表示する場合だけ、ToDtoから明示的にPersisted値を渡す。
+        var source = rawValue ?? DataDirectory;
+        var raw = string.IsNullOrWhiteSpace(source) ? "data" : source.Trim();
         return Path.GetFullPath(Path.IsPathRooted(raw) ? raw : Path.Combine(_baseDirectory, raw));
     }
 
     public IniSettingsDto ToDto() => new()
     {
-        TvTestExecutablePath = TvTestExecutablePath,
-        BonDriverDirectory   = BonDriverDirectory,
-        ViewingTvTestExecutablePath = ViewingTvTestExecutablePath,
+        TvTestExecutablePath = _persistedTvTestExecutablePath,
+        BonDriverDirectory   = _persistedBonDriverDirectory,
+        ViewingTvTestExecutablePath = _persistedViewingTvTestExecutablePath,
         GrChannelFilePath    = GrChannelFilePath,
         GrChSetFilePath      = GrChSetFilePath,
         BscsChannelFilePath  = BscsChannelFilePath,
         BscsChSetFilePath    = BscsChSetFilePath,
-        DataDirectory        = DataDirectory,
+        DataDirectory        = _persistedDataDirectory,
         SystemTheme          = SystemTheme,
-        EffectiveDataDirectory = ResolveDataDirectory(DataDirectory),
-        Port                 = Port,
+        EffectiveDataDirectory = ResolveDataDirectory(_persistedDataDirectory),
+        Port                 = _persistedPort,
         EpgEnabled           = EpgEnabled,
         EpgHour              = EpgHour,
         EpgMinute            = EpgMinute,
@@ -434,84 +693,223 @@ public sealed class IniSettingsService
         EpgPreRecordMinutes       = EpgPreRecordMinutes,
         LaterProgramPriority  = LaterProgramPriority,
         PseudoContinuousRecording     = PseudoContinuousRecording,
-        PseudoContinuousMarginSeconds = PseudoContinuousMarginSeconds,
         PreStartMarginSeconds = PreStartMarginSeconds,
         PostEndMarginSeconds  = PostEndMarginSeconds,
-        RecDelaySeconds       = RecDelaySeconds,
         WakeMinutesBefore     = WakeMinutesBefore,
         WakeAdditionalSeconds = WakeAdditionalSeconds,
-        TunerSlotCooldownMs   = TunerSlotCooldownMs,
-        UseMinOption         = UseMinOption,
-        UseNodshowOption     = UseNodshowOption,
-        TvTestRecordCurServiceOnly = TvTestRecordCurServiceOnly,
-        TvTestRecordSubtitle = TvTestRecordSubtitle,
-        TvTestRecordDataCarrousel = TvTestRecordDataCarrousel,
+        UseMinOption         = _persistedUseMinOption,
+        UseNodshowOption     = _persistedUseNodshowOption,
         ShowTvAIrEpgRecTaskbarIcon = ShowTvAIrEpgRecTaskbarIcon,
         StartupEnabled       = StartupEnabled,
+        NetworkLanAccessEnabled = NetworkLanAccessEnabled,
+        NetworkSessionLifetimeMinutes = NetworkSessionLifetimeMinutes,
+        NetworkHasPassword = !string.IsNullOrWhiteSpace(NetworkPasswordEncrypted),
+        NetworkPasswordLength = GetNetworkPasswordLength(),
         RecordingAfterAction = RecordingAfterAction,
         RecordingAfterActionDelayMinutes = RecordingAfterActionDelayMinutes,
-        GenreColors = new Dictionary<string, string>(GenreColors, StringComparer.OrdinalIgnoreCase),
-        DefaultGenreColors = CreateDefaultGenreColors(),
-        LightGenreColors = new Dictionary<string, string>(ThemeGenrePalettes["light"], StringComparer.OrdinalIgnoreCase),
-        DarkGenreColors = new Dictionary<string, string>(ThemeGenrePalettes["dark"], StringComparer.OrdinalIgnoreCase),
+        UserLogDetailEnabled = UserLogDetailEnabled,
+        UserLogDetailReservationSource = UserLogDetailReservationSource,
+        UserLogDetailScheduledTime = UserLogDetailScheduledTime,
+        UserLogDetailActualRecordingTime = UserLogDetailActualRecordingTime,
+        UserLogDetailRecordingQuality = UserLogDetailRecordingQuality,
+        UserLogDetailStateChange = UserLogDetailStateChange,
+        UserLogDetailEndOrFailureReason = UserLogDetailEndOrFailureReason,
         ThemeGenrePalettes = CloneThemeGenrePalettes(ThemeGenrePalettes),
+        DefaultThemeGenrePalettes = SettingsDefaults.CreateDefaultThemeGenrePalettes(),
 
-        // EPG worker launch timing / tuner cooldown policy
+        // EPG worker launch policy
         EpgUseBelowNormalPriority = EpgUseBelowNormalPriority,
-        EpgLaunchStaggerMs        = EpgLaunchStaggerMs,
-        EpgPostLaunchStabilizeMs  = EpgPostLaunchStabilizeMs,
-        EpgExcludeLiveTvTest      = EpgExcludeLiveTvTest,
         EpgDisableImmediateRetry  = EpgDisableImmediateRetry,
 
 
         TaskUserName         = TaskUserName,
-        TaskPasswordPlain    = null, // セキュリティ上、パスワードはAPIレスポンスに含めない
         TaskHasPassword      = !string.IsNullOrEmpty(TaskPasswordEncrypted),
-        Tuners               = Tuners,
-        BonDriverList        = GetBonDriverList().ToList(),
+        TaskPasswordLength   = GetTaskPasswordLength(),
+        Tuners               = CloneTuners(_persistedTuners),
+        BonDriverList        = GetBonDriverList(_persistedBonDriverDirectory).ToList(),
         IsFirstRun           = IsFirstRun,
     };
 
-    
-    public static Dictionary<string, string> CreateDefaultGenreColors() => CreateLightGenreColors();
 
-    public static Dictionary<string, string> CreateLightGenreColors() => new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["g-news"]    = "#d3ffcb",
-        ["g-sports"]  = "#ffcbee",
-        ["g-info"]    = "#b8f0ac",
-        ["g-drama"]   = "#ffbbbb",
-        ["g-music"]   = "#b4f2ff",
-        ["g-variety"] = "#faffb4",
-        ["g-movie"]   = "#cbfcf4",
-        ["g-anime"]   = "#dcdcfe",
-        ["g-docu"]    = "#f0f0f0",
-        ["g-other"]   = "#f0f0f0",
-    };
+    public bool IsTunerTopologyRestartPending() =>
+        !MatchesRuntimeTunerTopology(
+            _persistedTvTestExecutablePath,
+            _persistedViewingTvTestExecutablePath,
+            _persistedBonDriverDirectory,
+            _persistedUseMinOption,
+            _persistedUseNodshowOption,
+            _persistedTuners);
 
-    public static Dictionary<string, string> CreateDarkGenreColors() => new(StringComparer.OrdinalIgnoreCase)
+    public WebSettingsDto ToWebDto()
     {
-        ["g-news"]    = "#1f5a45",
-        ["g-sports"]  = "#245c7a",
-        ["g-info"]    = "#2d6f61",
-        ["g-drama"]   = "#6b3341",
-        ["g-music"]   = "#286b78",
-        ["g-variety"] = "#6b5a24",
-        ["g-movie"]   = "#563a73",
-        ["g-anime"]   = "#394f95",
-        ["g-docu"]    = "#3f5366",
-        ["g-other"]   = "#4a5058",
-    };
+        var current = ToDto();
+        return new WebSettingsDto
+        {
+            TvTestExecutablePath = current.TvTestExecutablePath,
+            BonDriverDirectory = current.BonDriverDirectory,
+            ViewingTvTestExecutablePath = current.ViewingTvTestExecutablePath,
+            GrChannelFilePath = current.GrChannelFilePath,
+            GrChSetFilePath = current.GrChSetFilePath,
+            BscsChannelFilePath = current.BscsChannelFilePath,
+            BscsChSetFilePath = current.BscsChSetFilePath,
+            DataDirectory = current.DataDirectory,
+            SystemTheme = current.SystemTheme,
+            Port = current.Port,
+            EpgEnabled = current.EpgEnabled,
+            EpgHour = current.EpgHour,
+            EpgMinute = current.EpgMinute,
+            EpgDepth = current.EpgDepth,
+            EpgPreRecordMinutes = current.EpgPreRecordMinutes,
+            LaterProgramPriority = current.LaterProgramPriority,
+            PseudoContinuousRecording = current.PseudoContinuousRecording,
+            PreStartMarginSeconds = current.PreStartMarginSeconds,
+            PostEndMarginSeconds = current.PostEndMarginSeconds,
+            ShowTvAIrEpgRecTaskbarIcon = current.ShowTvAIrEpgRecTaskbarIcon,
+            StartupEnabled = current.StartupEnabled,
+            NetworkLanAccessEnabled = current.NetworkLanAccessEnabled,
+            NetworkSessionLifetimeMinutes = current.NetworkSessionLifetimeMinutes,
+            RecordingAfterAction = current.RecordingAfterAction,
+            RecordingAfterActionDelayMinutes = current.RecordingAfterActionDelayMinutes,
+            UserLogDetailEnabled = current.UserLogDetailEnabled,
+            UserLogDetailReservationSource = current.UserLogDetailReservationSource,
+            UserLogDetailScheduledTime = current.UserLogDetailScheduledTime,
+            UserLogDetailActualRecordingTime = current.UserLogDetailActualRecordingTime,
+            UserLogDetailRecordingQuality = current.UserLogDetailRecordingQuality,
+            UserLogDetailStateChange = current.UserLogDetailStateChange,
+            UserLogDetailEndOrFailureReason = current.UserLogDetailEndOrFailureReason,
+            ThemeGenrePalettes = current.ThemeGenrePalettes,
+            TaskUserName = current.TaskUserName,
+            Tuners = current.Tuners,
+            EffectiveDataDirectory = current.EffectiveDataDirectory,
+            NetworkHasPassword = current.NetworkHasPassword,
+            NetworkPasswordLength = current.NetworkPasswordLength,
+            TaskHasPassword = current.TaskHasPassword,
+            TaskPasswordLength = current.TaskPasswordLength,
+            DefaultThemeGenrePalettes = current.DefaultThemeGenrePalettes,
+            BonDriverList = current.BonDriverList,
+            IsFirstRun = current.IsFirstRun
+        };
+    }
 
-    public static Dictionary<string, Dictionary<string, string>> CreateDefaultThemeGenrePalettes() => new(StringComparer.OrdinalIgnoreCase)
+    public bool MatchesRuntimeTunerTopology(IniSettingsUpdateDto dto)
     {
-        ["light"] = CreateLightGenreColors(),
-        ["dark"] = CreateDarkGenreColors(),
-    };
+        ArgumentNullException.ThrowIfNull(dto);
+        return MatchesRuntimeTunerTopology(
+            dto.TvTestExecutablePath,
+            dto.ViewingTvTestExecutablePath,
+            dto.BonDriverDirectory,
+            dto.UseMinOption,
+            dto.UseNodshowOption,
+            dto.Tuners);
+    }
+
+    private bool MatchesRuntimeTunerTopology(
+        string? tvTestExecutablePath,
+        string? viewingTvTestExecutablePath,
+        string? bonDriverDirectory,
+        bool useMinOption,
+        bool useNodshowOption,
+        IEnumerable<TunerProfileDto>? tuners)
+    {
+        return EqualsPathValue(TvTestExecutablePath, tvTestExecutablePath)
+            && EqualsPathValue(ViewingTvTestExecutablePath, viewingTvTestExecutablePath)
+            && EqualsPathValue(BonDriverDirectory, bonDriverDirectory)
+            && UseMinOption == useMinOption
+            && UseNodshowOption == useNodshowOption
+            && string.Equals(BuildTunerTopologySignature(Tuners), BuildTunerTopologySignature(tuners), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void CapturePersistedTunerTopologyFromRuntime()
+    {
+        _persistedTvTestExecutablePath = TvTestExecutablePath;
+        _persistedViewingTvTestExecutablePath = ViewingTvTestExecutablePath;
+        _persistedBonDriverDirectory = BonDriverDirectory;
+        _persistedUseMinOption = UseMinOption;
+        _persistedUseNodshowOption = UseNodshowOption;
+        _persistedTuners = CloneTuners(Tuners);
+    }
+
+    private void CapturePersistedHostSettingsFromRuntime()
+    {
+        _persistedDataDirectory = DataDirectory;
+        _persistedPort = Port;
+    }
+
+    public bool IsHostSettingsRestartPending() =>
+        !EqualsPathValue(_persistedDataDirectory, DataDirectory) ||
+        _persistedPort != Port;
+
+    public bool MatchesRuntimeHostSettings(IniSettingsUpdateDto dto) =>
+        EqualsPathValue(dto.DataDirectory, DataDirectory) &&
+        SettingsDefaults.NormalizePort(dto.Port) == Port;
+
+    private static List<TunerProfileDto> CloneTuners(IEnumerable<TunerProfileDto>? tuners) =>
+        (tuners ?? Enumerable.Empty<TunerProfileDto>()).Select((t, index) => new TunerProfileDto
+        {
+            Name = t.Name,
+            BonDriverFileName = NormalizeBonDriverFileName(t.BonDriverFileName),
+            Group = t.Group,
+            Did = t.Did,
+            Role = t.Role,
+            LogicalViewerSlotId = LogicalViewerSlotIdentity.Resolve(t.LogicalViewerSlotId, t.Group, t.Did, t.Role, index + 1),
+            DeviceNumber = t.DeviceNumber,
+        }).ToList();
+
+    private static bool EqualsPathValue(string? left, string? right) =>
+        string.Equals(NormalizePathValue(left), NormalizePathValue(right), StringComparison.OrdinalIgnoreCase);
+
+    internal static string NormalizePathValue(string? value)
+    {
+        var trimmed = (value ?? string.Empty).Trim();
+        if (trimmed.Length == 0) return string.Empty;
+
+        // SETTINGS_PATH_COMPARISON_ROOT_CONTRACT
+        // 単純なTrimEndはWindowsドライブroot（例: C:\\）をC:へ変えて意味を変える。
+        // Path.TrimEndingDirectorySeparatorでrootを保持し、末尾区切りだけを比較上正規化する。
+        return Path.TrimEndingDirectorySeparator(trimmed);
+    }
+
+    // TUNER_TOPOLOGY_ORDERED_IDENTITY_CONTRACT
+    // Tuner配列の順序は物理slot/T1..Snの割当順であり、並べ替えて比較してはならない。
+    // LogicalViewerSlotIdもViewer profileの永続identityなので、他項目と同じTopology差分に含める。
+    internal static string BuildTunerTopologySignature(IEnumerable<TunerProfileDto>? tuners)
+    {
+        return string.Join(";", (tuners ?? Enumerable.Empty<TunerProfileDto>())
+            .Select((t, index) =>
+            {
+                var group = TunerDisplayName.NormalizeGroup(t.Group);
+                var did = (t.Did ?? string.Empty).Trim().ToUpperInvariant();
+                var role = NormalizeTunerRole(t.Role);
+                var bon = NormalizeBonDriverFileName(t.BonDriverFileName);
+                var name = TunerDisplayName.ForUi(t.Name, group, did);
+                var logicalViewerSlotId = LogicalViewerSlotIdentity.Resolve(
+                    t.LogicalViewerSlotId, group, did, role, index + 1);
+                return $"{index}|{name}|{bon}|{group}|{did}|{role}|{logicalViewerSlotId}";
+            }));
+    }
+
+    private int GetNetworkPasswordLength()
+    {
+        if (string.IsNullOrEmpty(NetworkPasswordEncrypted)) return 0;
+        return CredentialProtector.Decrypt(NetworkPasswordEncrypted)?.Length ?? 0;
+    }
+
+    private int GetTaskPasswordLength()
+    {
+        if (string.IsNullOrEmpty(TaskPasswordEncrypted)) return 0;
+        try
+        {
+            return CredentialProtector.Decrypt(TaskPasswordEncrypted)?.Length ?? 0;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
 
     private static Dictionary<string, Dictionary<string, string>> CloneThemeGenrePalettes(Dictionary<string, Dictionary<string, string>> source)
     {
-        var normalized = NormalizeThemeGenrePalettes(source, null);
+        var normalized = NormalizeThemeGenrePalettes(source);
         return new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase)
         {
             ["light"] = new Dictionary<string, string>(normalized["light"], StringComparer.OrdinalIgnoreCase),
@@ -522,6 +920,13 @@ public sealed class IniSettingsService
 
     private static readonly IReadOnlyList<Dictionary<string, string>> LegacyDarkGenreDefaults = new[]
     {
+        // 旧標準ダーク配色を互換判定用に保持する。利用者が標準値のまま使っている場合だけ、
+        // 録画中・予約済みの状態色と近かったドラマ色を現行の標準配色へ移行する。
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["g-news"] = "#1f5a45", ["g-sports"] = "#245c7a", ["g-info"] = "#2d6f61", ["g-drama"] = "#6b3341", ["g-music"] = "#286b78",
+            ["g-variety"] = "#6b5a24", ["g-movie"] = "#563a73", ["g-anime"] = "#394f95", ["g-docu"] = "#3f5366", ["g-other"] = "#4a5058",
+        },
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["g-news"] = "#2f6b3f", ["g-sports"] = "#7a3a63", ["g-info"] = "#2f6540", ["g-drama"] = "#7a3c3c", ["g-music"] = "#2f6878",
@@ -538,11 +943,11 @@ public sealed class IniSettingsService
         => LegacyDarkGenreDefaults.Any(legacy => legacy.Keys.All(key => colors.TryGetValue(key, out var v) && string.Equals(v, legacy[key], StringComparison.OrdinalIgnoreCase)));
 
     private static Dictionary<string, string> MigrateDarkGenreDefault(Dictionary<string, string> colors)
-        => IsLegacyDarkGenreDefault(colors) ? CreateDarkGenreColors() : colors;
+        => IsLegacyDarkGenreDefault(colors) ? SettingsDefaults.CreateDarkGenreColors() : colors;
 
     private static Dictionary<string, Dictionary<string, string>> LoadThemeGenrePalettes(Dictionary<string, string> dict)
     {
-        var palettes = CreateDefaultThemeGenrePalettes();
+        var palettes = SettingsDefaults.CreateDefaultThemeGenrePalettes();
         foreach (var key in palettes["light"].Keys.ToList())
         {
             if (dict.TryGetValue($"GenreColor_Light_{key}", out var lightRaw))
@@ -557,14 +962,6 @@ public sealed class IniSettingsService
         return palettes;
     }
 
-    private static Dictionary<string, string> LoadGenreColors(Dictionary<string, string> dict)
-    {
-        var palettes = LoadThemeGenrePalettes(dict);
-        return new Dictionary<string, string>(palettes["light"], StringComparer.OrdinalIgnoreCase);
-    }
-
-    private static Dictionary<string, string> NormalizeGenreColors(Dictionary<string, string>? input) => NormalizeGenreColorMap(input, CreateLightGenreColors());
-
     private static Dictionary<string, string> NormalizeGenreColorMap(Dictionary<string, string>? input, Dictionary<string, string> fallback)
     {
         var colors = new Dictionary<string, string>(fallback, StringComparer.OrdinalIgnoreCase);
@@ -577,21 +974,29 @@ public sealed class IniSettingsService
         return colors;
     }
 
-    private static Dictionary<string, Dictionary<string, string>> NormalizeThemeGenrePalettes(Dictionary<string, Dictionary<string, string>>? input, Dictionary<string, string>? legacyLight)
+    private static Dictionary<string, Dictionary<string, string>> NormalizeThemeGenrePalettes(Dictionary<string, Dictionary<string, string>>? input)
     {
-        var palettes = CreateDefaultThemeGenrePalettes();
-        if (input is not null)
-        {
-            if (input.TryGetValue("light", out var light))
-                palettes["light"] = NormalizeGenreColorMap(light, CreateLightGenreColors());
-            if (input.TryGetValue("dark", out var dark))
-                palettes["dark"] = MigrateDarkGenreDefault(NormalizeGenreColorMap(dark, CreateDarkGenreColors()));
-        }
-        else if (legacyLight is not null)
-        {
-            palettes["light"] = NormalizeGenreColorMap(legacyLight, CreateLightGenreColors());
-        }
+        var palettes = SettingsDefaults.CreateDefaultThemeGenrePalettes();
+        if (input is null) return palettes;
+        if (input.TryGetValue("light", out var light))
+            palettes["light"] = NormalizeGenreColorMap(light, SettingsDefaults.CreateLightGenreColors());
+        if (input.TryGetValue("dark", out var dark))
+            palettes["dark"] = NormalizeGenreColorMap(dark, SettingsDefaults.CreateDarkGenreColors());
         return palettes;
+    }
+
+    internal static string BuildThemeGenrePaletteSignature(Dictionary<string, Dictionary<string, string>>? input)
+    {
+        // SETTINGS_GENRE_PALETTE_CANONICAL_DIFF_CONTRACT
+        // 差分判定も保存処理と同じ正規化後の配色で比較する。
+        // 欠落テーマ／欠落ジャンル／不正色は保存時に既定値へ補完されるため、
+        // 生DTOの形だけを比較して実効値不変のINI再保存を起動してはならない。
+        var normalized = NormalizeThemeGenrePalettes(input);
+        return string.Join(";", normalized
+            .OrderBy(theme => theme.Key, StringComparer.OrdinalIgnoreCase)
+            .SelectMany(theme => theme.Value
+                .OrderBy(color => color.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(color => $"{theme.Key.Trim().ToLowerInvariant()}|{color.Key.Trim().ToLowerInvariant()}|{color.Value.Trim().ToLowerInvariant()}")));
     }
 
     private static string NormalizeGenreColor(string? raw, string fallback)
@@ -603,26 +1008,19 @@ public sealed class IniSettingsService
     }
 
     public static string NormalizeSystemTheme(string? value)
-    {
-        var v = (value ?? string.Empty).Trim().ToLowerInvariant();
-        return v is "current" or "light" or "dark" ? v : "current";
-    }
+        => SettingsDefaults.NormalizeSystemTheme(value);
 
     public static string NormalizeRecordingAfterAction(string? action)
-    {
-        var a = (action ?? string.Empty).Trim().ToLowerInvariant();
-        return a switch
-        {
-            "sleep" or "スリープ" => "sleep",
-            "shutdown" or "シャットダウン" => "shutdown",
-            _ => "none",
-        };
-    }
+        => SettingsDefaults.NormalizeRecordingAfterAction(action);
+
+    internal static string NormalizeTaskUserName(string? value)
+        => (value ?? string.Empty).Trim();
+
+    internal static string NormalizeBonDriverFileName(string? value)
+        => (value ?? string.Empty).Trim();
 
     public static int NormalizeRecordingAfterActionDelayMinutes(int minutes)
-    {
-        return Math.Clamp(minutes, 1, 5);
-    }
+        => SettingsDefaults.NormalizeRecordingAfterActionDelayMinutes(minutes);
 
     public static string NormalizeTunerRole(string? role)
     {
@@ -652,6 +1050,18 @@ public sealed class IniSettingsService
     private static bool GetBool(Dictionary<string, string> d, string key, bool def)
         => d.TryGetValue(key, out var v) ? v.Trim().ToLowerInvariant() is "true" or "1" or "yes" : def;
 
+    private static bool GetBoolMigratingLegacy(
+        Dictionary<string, string> values,
+        string canonicalKey,
+        string legacyKey,
+        bool defaultValue)
+    {
+        if (values.ContainsKey(canonicalKey))
+            return GetBool(values, canonicalKey, defaultValue);
+
+        return GetBool(values, legacyKey, defaultValue);
+    }
+
     private static string GetStr(Dictionary<string, string> d, string key, string def)
         => d.TryGetValue(key, out var v) && !string.IsNullOrWhiteSpace(v) ? v.Trim() : def;
 }
@@ -664,10 +1074,12 @@ public sealed class TunerProfileDto
     public string Group             { get; set; } = ""; // GR / BSCS / HYBRID
     public string Did               { get; set; } = "";
     public string Role              { get; set; } = "";
+    public string LogicalViewerSlotId { get; set; } = "";
+    public int DeviceNumber { get; set; }
 }
 
-/// <summary>設定値の転送オブジェクト（API入出力兼用）</summary>
-public sealed class IniSettingsDto
+/// <summary>設定の読取／保存で共有する永続化値。書込み命令や表示補助値は含めない。</summary>
+public class IniSettingsValuesDto
 {
     public string TvTestExecutablePath { get; set; } = "";
     public string BonDriverDirectory   { get; set; } = "";
@@ -677,61 +1089,123 @@ public sealed class IniSettingsDto
     public string BscsChannelFilePath  { get; set; } = "";
     public string BscsChSetFilePath    { get; set; } = "";
     public string DataDirectory        { get; set; } = "";
-    public string SystemTheme          { get; set; } = "current";
-    public string EffectiveDataDirectory { get; set; } = "";
-    public int    Port                 { get; set; } = 55884;
-    public bool   EpgEnabled           { get; set; } = true;
-    public int    EpgHour              { get; set; } = 3;
-    public int    EpgMinute            { get; set; } = 0;
-    public string EpgDepth             { get; set; } = "medium";
-    public int    EpgPreRecordMinutes       { get; set; } = 15;
-    public bool   LaterProgramPriority  { get; set; } = false;
-    public bool   PseudoContinuousRecording      { get; set; } = false;
-    public int    PseudoContinuousMarginSeconds  { get; set; } = 60;
-    public int    PreStartMarginSeconds { get; set; } = 30;
-    public int    PostEndMarginSeconds  { get; set; } = 30;
-    public int    RecDelaySeconds       { get; set; } = 10;
-    public int    WakeMinutesBefore     { get; set; } = 10;
-    /// <summary>新設: スリープ復帰の余裕秒数。</summary>
-    public int    WakeAdditionalSeconds { get; set; } = 30;
-    /// <summary>同一物理チューナースロットを連続で確保する際の最小間隔（ミリ秒）。0で無効。</summary>
-    public int    TunerSlotCooldownMs   { get; set; } = 15000;
-    public bool   UseMinOption          { get; set; } = true;
-    public bool   UseNodshowOption     { get; set; } = false;
-    public bool   TvTestRecordCurServiceOnly { get; set; } = true;
-    public bool   TvTestRecordSubtitle { get; set; } = true;
-    public bool   TvTestRecordDataCarrousel { get; set; } = false;
-    public bool   ShowTvAIrEpgRecTaskbarIcon { get; set; } = true;
-    public bool   StartupEnabled        { get; set; } = false;
-    public string RecordingAfterAction  { get; set; } = "none";
-    public int    RecordingAfterActionDelayMinutes { get; set; } = 1;
-    public Dictionary<string, string> GenreColors { get; set; } = new(StringComparer.OrdinalIgnoreCase);
-    public Dictionary<string, string> DefaultGenreColors { get; set; } = new(StringComparer.OrdinalIgnoreCase);
-    public Dictionary<string, string> LightGenreColors { get; set; } = new(StringComparer.OrdinalIgnoreCase);
-    public Dictionary<string, string> DarkGenreColors { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public string SystemTheme          { get; set; } = SettingsDefaults.SystemTheme;
+    public int    Port                 { get; set; } = SettingsDefaults.Port;
+    public bool   EpgEnabled           { get; set; } = SettingsDefaults.EpgEnabled;
+    public int    EpgHour              { get; set; } = SettingsDefaults.EpgHour;
+    public int    EpgMinute            { get; set; } = SettingsDefaults.EpgMinute;
+    public string EpgDepth             { get; set; } = SettingsDefaults.EpgDepth;
+    public int    EpgPreRecordMinutes  { get; set; } = SettingsDefaults.EpgPreRecordMinutes;
+    public bool   LaterProgramPriority { get; set; } = SettingsDefaults.LaterProgramPriority;
+    public bool   PseudoContinuousRecording { get; set; } = SettingsDefaults.PseudoContinuousRecording;
+    public int    PreStartMarginSeconds { get; set; } = SettingsDefaults.PreStartMarginSeconds;
+    public int    PostEndMarginSeconds  { get; set; } = SettingsDefaults.PostEndMarginSeconds;
+    public int    WakeMinutesBefore     { get; set; } = SettingsDefaults.WakeMinutesBefore;
+    public int    WakeAdditionalSeconds { get; set; } = SettingsDefaults.WakeAdditionalSeconds;
+    public bool   UseMinOption          { get; set; } = SettingsDefaults.UseMinOption;
+    public bool   UseNodshowOption      { get; set; } = SettingsDefaults.UseNodshowOption;
+    public bool   ShowTvAIrEpgRecTaskbarIcon { get; set; } = SettingsDefaults.ShowTvAIrEpgRecTaskbarIcon;
+    public bool   StartupEnabled        { get; set; } = SettingsDefaults.StartupEnabled;
+    public bool NetworkLanAccessEnabled { get; set; } = SettingsDefaults.NetworkLanAccessEnabled;
+    public int NetworkSessionLifetimeMinutes { get; set; } = SettingsDefaults.NetworkSessionLifetimeMinutes;
+    public string RecordingAfterAction  { get; set; } = SettingsDefaults.RecordingAfterAction;
+    public int    RecordingAfterActionDelayMinutes { get; set; } = SettingsDefaults.RecordingAfterActionDelayMinutes;
+    public bool   UserLogDetailEnabled { get; set; } = SettingsDefaults.UserLogDetailEnabled;
+    public bool   UserLogDetailReservationSource { get; set; } = SettingsDefaults.UserLogDetailReservationSource;
+    public bool   UserLogDetailScheduledTime { get; set; } = SettingsDefaults.UserLogDetailScheduledTime;
+    public bool   UserLogDetailActualRecordingTime { get; set; } = SettingsDefaults.UserLogDetailActualRecordingTime;
+    public bool   UserLogDetailRecordingQuality { get; set; } = SettingsDefaults.UserLogDetailRecordingQuality;
+    public bool   UserLogDetailStateChange { get; set; } = SettingsDefaults.UserLogDetailStateChange;
+    public bool   UserLogDetailEndOrFailureReason { get; set; } = SettingsDefaults.UserLogDetailEndOrFailureReason;
     public Dictionary<string, Dictionary<string, string>> ThemeGenrePalettes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
-
-    // EPG worker launch timing / tuner cooldown policy
-    /// <summary>EPG用TVTestをBelowNormal優先度で起動</summary>
-    public bool   EpgUseBelowNormalPriority { get; set; } = true;
-    /// <summary>並列チューナー間のジョブ投入インターバル(ms)</summary>
-    public int    EpgLaunchStaggerMs        { get; set; } = 2000;
-    /// <summary>TVTest起動後の安定化待機(ms)</summary>
-    public int    EpgPostLaunchStabilizeMs  { get; set; } = 4000;
-    /// <summary>LIVE視聴中チューナーをEPGから除外</summary>
-    public bool   EpgExcludeLiveTvTest      { get; set; } = true;
-    /// <summary>同一TS内 attempt即時リトライ無効化(再巡回パスのみ使用)</summary>
-    public bool   EpgDisableImmediateRetry  { get; set; } = true;
-
-
-    /// <summary>タスクスケジューラー用ユーザー名</summary>
-    public string TaskUserName          { get; set; } = "";
-    /// <summary>タスクスケジューラー用パスワード平文（保存時のみ使用。nullの場合は既存値を保持）</summary>
-    public string? TaskPasswordPlain    { get; set; } = null;
-    /// <summary>パスワードが設定済みかどうか（読み取り専用・UIでマスク表示用）</summary>
-    public bool   TaskHasPassword       { get; set; } = false;
+    public bool   EpgUseBelowNormalPriority { get; set; } = SettingsDefaults.EpgUseBelowNormalPriority;
+    public bool   EpgDisableImmediateRetry  { get; set; } = SettingsDefaults.EpgDisableImmediateRetry;
+    public string TaskUserName { get; set; } = "";
     public List<TunerProfileDto> Tuners { get; set; } = new();
-    /// <summary>BonDriverDirectory内の.dllファイル名一覧（読み取り専用・UI用）</summary>
-    public List<string> BonDriverList  { get; set; } = new();
-    public bool   IsFirstRun           { get; set; } = false;
 }
+
+
+/// <summary>Web設定画面が表示・編集する永続化値。画面にない内部設定は含めない。</summary>
+public class WebSettingsValuesDto
+{
+    public string TvTestExecutablePath { get; set; } = "";
+    public string BonDriverDirectory { get; set; } = "";
+    public string ViewingTvTestExecutablePath { get; set; } = "";
+    public string GrChannelFilePath { get; set; } = "";
+    public string GrChSetFilePath { get; set; } = "";
+    public string BscsChannelFilePath { get; set; } = "";
+    public string BscsChSetFilePath { get; set; } = "";
+    public string DataDirectory { get; set; } = "";
+    public string SystemTheme { get; set; } = SettingsDefaults.SystemTheme;
+    public int Port { get; set; } = SettingsDefaults.Port;
+    public bool EpgEnabled { get; set; } = SettingsDefaults.EpgEnabled;
+    public int EpgHour { get; set; } = SettingsDefaults.EpgHour;
+    public int EpgMinute { get; set; } = SettingsDefaults.EpgMinute;
+    public string EpgDepth { get; set; } = SettingsDefaults.EpgDepth;
+    public int EpgPreRecordMinutes { get; set; } = SettingsDefaults.EpgPreRecordMinutes;
+    public bool LaterProgramPriority { get; set; } = SettingsDefaults.LaterProgramPriority;
+    public bool PseudoContinuousRecording { get; set; } = SettingsDefaults.PseudoContinuousRecording;
+    public int PreStartMarginSeconds { get; set; } = SettingsDefaults.PreStartMarginSeconds;
+    public int PostEndMarginSeconds { get; set; } = SettingsDefaults.PostEndMarginSeconds;
+    public bool ShowTvAIrEpgRecTaskbarIcon { get; set; } = SettingsDefaults.ShowTvAIrEpgRecTaskbarIcon;
+    public bool StartupEnabled { get; set; } = SettingsDefaults.StartupEnabled;
+    public bool NetworkLanAccessEnabled { get; set; } = SettingsDefaults.NetworkLanAccessEnabled;
+    public int NetworkSessionLifetimeMinutes { get; set; } = SettingsDefaults.NetworkSessionLifetimeMinutes;
+    public string RecordingAfterAction { get; set; } = SettingsDefaults.RecordingAfterAction;
+    public int RecordingAfterActionDelayMinutes { get; set; } = SettingsDefaults.RecordingAfterActionDelayMinutes;
+    public bool UserLogDetailEnabled { get; set; } = SettingsDefaults.UserLogDetailEnabled;
+    public bool UserLogDetailReservationSource { get; set; } = SettingsDefaults.UserLogDetailReservationSource;
+    public bool UserLogDetailScheduledTime { get; set; } = SettingsDefaults.UserLogDetailScheduledTime;
+    public bool UserLogDetailActualRecordingTime { get; set; } = SettingsDefaults.UserLogDetailActualRecordingTime;
+    public bool UserLogDetailRecordingQuality { get; set; } = SettingsDefaults.UserLogDetailRecordingQuality;
+    public bool UserLogDetailStateChange { get; set; } = SettingsDefaults.UserLogDetailStateChange;
+    public bool UserLogDetailEndOrFailureReason { get; set; } = SettingsDefaults.UserLogDetailEndOrFailureReason;
+    public Dictionary<string, Dictionary<string, string>> ThemeGenrePalettes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public string TaskUserName { get; set; } = "";
+    public List<TunerProfileDto> Tuners { get; set; } = new();
+}
+
+/// <summary>Web設定画面の保存要求。資格情報は明示更新命令だけを追加する。</summary>
+public sealed class WebSettingsUpdateDto : WebSettingsValuesDto
+{
+    public string? NetworkPasswordPlain { get; set; } = null;
+    public bool ClearNetworkPassword { get; set; } = false;
+    public string? TaskPasswordPlain { get; set; } = null;
+    public bool ClearTaskPassword { get; set; } = false;
+}
+
+/// <summary>Web設定画面の取得応答。保存不能な表示補助情報だけを追加する。</summary>
+public sealed class WebSettingsDto : WebSettingsValuesDto
+{
+    public string EffectiveDataDirectory { get; set; } = "";
+    public bool NetworkHasPassword { get; set; } = false;
+    public int NetworkPasswordLength { get; set; } = 0;
+    public bool TaskHasPassword { get; set; } = false;
+    public int TaskPasswordLength { get; set; } = 0;
+    public Dictionary<string, Dictionary<string, string>> DefaultThemeGenrePalettes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public List<string> BonDriverList { get; set; } = new();
+    public bool IsFirstRun { get; set; } = false;
+}
+
+/// <summary>設定保存要求。永続化値に、明示的な資格情報更新命令だけを追加する。</summary>
+public sealed class IniSettingsUpdateDto : IniSettingsValuesDto
+{
+    public string? NetworkPasswordPlain { get; set; } = null;
+    public bool ClearNetworkPassword { get; set; } = false;
+    public string? TaskPasswordPlain { get; set; } = null;
+    public bool ClearTaskPassword { get; set; } = false;
+}
+
+/// <summary>設定取得応答。永続化値に読取専用の表示補助情報だけを追加する。</summary>
+public sealed class IniSettingsDto : IniSettingsValuesDto
+{
+    public string EffectiveDataDirectory { get; set; } = "";
+    public bool NetworkHasPassword { get; set; } = false;
+    public int NetworkPasswordLength { get; set; } = 0;
+    public bool TaskHasPassword { get; set; } = false;
+    public int TaskPasswordLength { get; set; } = 0;
+    public Dictionary<string, Dictionary<string, string>> DefaultThemeGenrePalettes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public List<string> BonDriverList { get; set; } = new();
+    public bool IsFirstRun { get; set; } = false;
+}
+

@@ -1,4 +1,4 @@
-﻿(function(){
+(function(){
   const DEFS = [
     {cls:'g-news', code:'0', label:'ニュース'},
     {cls:'g-sports', code:'1', label:'スポーツ'},
@@ -28,19 +28,19 @@
     'g-other':'--genre-other'
   };
 
-  // Light keeps the legacy pastel palette. Dark is a readability-first EPG palette owned here.
-  const LIGHT_COLORS = Object.freeze({
-    'g-news':'#d3ffcb','g-sports':'#ffcbee','g-info':'#b8f0ac','g-drama':'#ffbbbb','g-music':'#b4f2ff',
-    'g-variety':'#faffb4','g-movie':'#cbfcf4','g-anime':'#dcdcfe','g-docu':'#f0f0f0','g-other':'#f0f0f0'
-  });
-  const DARK_COLORS = Object.freeze({
-    'g-news':'#1f5a45','g-sports':'#245c7a','g-info':'#2d6f61','g-drama':'#6b3341','g-music':'#286b78',
-    'g-variety':'#6b5a24','g-movie':'#563a73','g-anime':'#394f95','g-docu':'#3f5366','g-other':'#4a5058'
-  });
-  const LEGACY_DARK_DEFAULTS = Object.freeze([
-    Object.freeze({'g-news':'#2f6b3f','g-sports':'#7a3a63','g-info':'#2f6540','g-drama':'#7a3c3c','g-music':'#2f6878','g-variety':'#756d2f','g-movie':'#2f6d66','g-anime':'#55579a','g-docu':'#56616d','g-other':'#4b5563'}),
-    Object.freeze({'g-news':'#244c3a','g-sports':'#204b63','g-info':'#2f5e46','g-drama':'#5a2a32','g-music':'#284e5a','g-variety':'#5a4a22','g-movie':'#4d365e','g-anime':'#343f73','g-docu':'#2f465a','g-other':'#3f4248'})
-  ]);
+  function readCssBootstrapPalette(){
+    const style=getComputedStyle(document.documentElement);
+    const result={};
+    Object.keys(VAR_BY_CLASS).forEach(cls=>{
+      const value=style.getPropertyValue(VAR_BY_CLASS[cls]).trim();
+      result[cls]=/^#[0-9a-fA-F]{6}$/.test(value) ? value.toLowerCase() : '#f0f0f0';
+    });
+    return result;
+  }
+  // CSS is only a neutral first-paint bootstrap. The server-owned default palettes replace both maps through settings.
+  const BOOTSTRAP_COLORS = readCssBootstrapPalette();
+  const LIGHT_COLORS = Object.assign({}, BOOTSTRAP_COLORS);
+  const DARK_COLORS = Object.assign({}, BOOTSTRAP_COLORS);
   const LIGHT_SAMPLE_COLORS = Object.freeze([
     '#d3ffcb','#ffcbee','#b8f0ac','#ffbbbb',
     '#b4f2ff','#faffb4','#cbfcf4','#dcdcfe',
@@ -48,7 +48,7 @@
     '#e6d0ff','#c9ffd9','#ffe1ec','#e8e8e8'
   ]);
   const DARK_SAMPLE_COLORS = Object.freeze([
-    '#1f5a45','#245c7a','#2d6f61','#6b3341',
+    '#1f5a45','#245c7a','#2d6f61','#704332',
     '#286b78','#6b5a24','#563a73','#394f95',
     '#3f5366','#7a5f2a','#704456','#2f6670',
     '#664985','#35705e','#7a3f4e','#4a5058'
@@ -76,24 +76,23 @@
     const v = String(theme || '').trim().toLowerCase();
     if(v === 'dark') return 'dark';
     if(v === 'light') return 'light';
-    const attr = (document.documentElement.getAttribute('data-theme') || document.body.getAttribute('data-theme') || '').toLowerCase();
+    const attr = (document.documentElement.getAttribute('data-tvair-effective-theme') || document.body.getAttribute('data-tvair-effective-theme') || document.documentElement.getAttribute('data-theme') || document.body.getAttribute('data-theme') || '').toLowerCase();
     if(attr === 'dark' || document.body.classList.contains('theme-dark')) return 'dark';
     return 'light';
   }
-  function paletteEquals(a, b){
-    return Object.keys(VAR_BY_CLASS).every(cls => normalizeHexColor(a && a[cls], '') === normalizeHexColor(b && b[cls], ''));
-  }
-  function migrateDarkDefaultPalette(map){
-    return LEGACY_DARK_DEFAULTS.some(legacy => paletteEquals(map, legacy)) ? Object.assign({}, DARK_COLORS) : map;
-  }
   function normalizeThemePalettes(settings){
     const src = settings || {};
+    const defaults = src.defaultThemeGenrePalettes || src.DefaultThemeGenrePalettes || null;
+    if(defaults){
+      const defaultLight = defaults.light || defaults.Light;
+      const defaultDark = defaults.dark || defaults.Dark;
+      if(defaultLight) Object.assign(LIGHT_COLORS, normalizePalette(defaultLight, LIGHT_COLORS));
+      if(defaultDark) Object.assign(DARK_COLORS, normalizePalette(defaultDark, DARK_COLORS));
+    }
     const tp = src.themeGenrePalettes || src.ThemeGenrePalettes || null;
-    const lightSrc = (tp && (tp.light || tp.Light)) || src.lightGenreColors || src.LightGenreColors || src.genreColors || src.GenreColors || src.defaultGenreColors || src.DefaultGenreColors || LIGHT_COLORS;
-    const darkSrc = (tp && (tp.dark || tp.Dark)) || src.darkGenreColors || src.DarkGenreColors || DARK_COLORS;
-    const light = normalizePalette(lightSrc, LIGHT_COLORS);
-    const dark = migrateDarkDefaultPalette(normalizePalette(darkSrc, DARK_COLORS));
-    return { light, dark };
+    const lightSrc = (tp && (tp.light || tp.Light)) || LIGHT_COLORS;
+    const darkSrc = (tp && (tp.dark || tp.Dark)) || DARK_COLORS;
+    return { light: normalizePalette(lightSrc, LIGHT_COLORS), dark: normalizePalette(darkSrc, DARK_COLORS) };
   }
   function applyPaletteForTheme(theme, palettes){
     currentTheme = normalizeThemeName(theme);
@@ -102,12 +101,6 @@
     Object.keys(VAR_BY_CLASS).forEach(cls => document.documentElement.style.setProperty(VAR_BY_CLASS[cls], colors[cls]));
     window.dispatchEvent(new CustomEvent('tvair:genre-colors-applied', { detail: { theme: currentTheme, colors: colorsSnapshot(), palettes: currentPalettes } }));
     return colors;
-  }
-  function applyGenreColors(map){
-    // Compatibility path: old callers pass a single map.  It now updates the active theme palette only.
-    const theme = normalizeThemeName(currentTheme);
-    currentPalettes = Object.assign({}, currentPalettes, { [theme]: normalizePalette(map, theme === 'dark' ? DARK_COLORS : LIGHT_COLORS) });
-    return applyPaletteForTheme(theme, currentPalettes);
   }
   function applyThemeGenrePalettes(settings, theme){
     currentPalettes = normalizeThemePalettes(settings || {});
@@ -174,7 +167,6 @@
 
   window.TvAirGenre = Object.freeze({
     DEFS: Object.freeze(DEFS.slice()),
-    DEFAULT_COLORS: LIGHT_COLORS,
     LIGHT_COLORS,
     DARK_COLORS,
     LIGHT_SAMPLE_COLORS,
@@ -191,7 +183,6 @@
     labelToClass,
     colorByClass,
     colorByCodes,
-    applyGenreColors,
     applyPaletteForTheme,
     applyThemeGenrePalettes,
     syncGenreColorsFromSettings

@@ -1,24 +1,34 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 
 <html lang="ja">
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>プログラム予約 — TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.1.0-ui2"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.1.0-ui2"/>
-<link href="/tvair-notification.css?v=1.1.0-ui2" rel="stylesheet"/>
-<script src="/tvair-theme.js?v=1.1.0-ui2"></script>
-<link href="/tvair-epg-panel.css?v=1.1.0-ui2" rel="stylesheet"/>
-<link href="/tvair-program-reservation.css?v=1.1.0-ui2" rel="stylesheet"/>
-<link href="/tvair-ui-foundation.css?v=1.1.0-ui2" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.1.0-ui2" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.1.0-ui2" rel="stylesheet"/>
-<link href="/tvair-list-module.css?v=1.1.0-ui2" rel="stylesheet"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.0-ui2"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.0-ui2"/>
+
+<link href="/tvair-ui-foundation.css?v=1.2.0-ui2" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.0-theme206" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.0-modules251" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.2.0-list206" rel="stylesheet"/>
+<link href="/tvair-program-reservation.css?v=1.2.0-owner204" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.0-owner203" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.0" rel="stylesheet"/>
+
+<script src="/tvair-theme.js?v=1.2.0-ui2"></script>
+<script src="/tvair-action-button-state.js?v=1.2.0"></script>
+
+
+
+
+
+
+
 </head>
 <body class="tvair-non-program-page tvair-program-reservation-page tvair-form-split-page">
 <div class="tvair-topnav" id="nav">
-<a class="nav-btn" href="/" title="番組表">番組表</a>
+<a class="nav-btn" href="/">番組表</a>
 <a class="nav-btn" href="/reservations.html">予約リスト</a>
 <a class="nav-btn" href="/keyword.html">キーワード検索</a>
 <a class="nav-btn" href="/program-rules.html">自動検索予約</a>
@@ -26,7 +36,7 @@
 <div class="spacer"></div>
 <span class="nav-brand-text">TvAIr</span>
 <div id="page-menu-wrap">
-<button aria-label="メニュー" id="page-menu-btn" data-tvair-menu-entry="page" aria-controls="page-menu-dropdown" title="メニュー" type="button">☰</button>
+<button aria-label="メニュー" id="page-menu-btn" data-tvair-menu-entry="page" aria-controls="page-menu-dropdown" type="button">☰</button>
 <div data-tvair-menu-host="1" id="page-menu-dropdown"></div>
 </div>
 </div>
@@ -89,7 +99,7 @@
 </div>
 <div id="form-actions">
 <button class="btn-reset" onclick="resetForm()">リセット</button>
-<button class="btn-submit" onclick="addRule()">登録</button>
+<button class="btn-submit" onclick="addRule(this)">登録</button>
 </div>
 </div>
 <!-- 右: ルール一覧 -->
@@ -178,7 +188,7 @@
 </div>
 <div id="modal-footer">
 <button class="btn-reset" onclick="closeModal()">キャンセル</button>
-<button class="btn-submit" onclick="saveEdit()">保存</button>
+<button class="btn-submit" onclick="saveEdit(this)">保存</button>
 </div>
 </div>
 </div>
@@ -193,6 +203,7 @@ const DOW_LABELS=['月','火','水','木','金','土','日'];
 // 今回は選択曜日を1ルール=1曜日として複数登録する方式を採用
 
 let rules=[];
+let programRuleLoadGeneration=0; const programRuleToggleInFlight=new Set(); const programRuleToggleActionState=new Map();
 let channels=[];
 let programGuideMissingPrefillApplied=false;
 
@@ -240,9 +251,8 @@ function applyProgramGuidePrefill(){
   const pf=readProgramGuidePrefill();
   if(!pf) return;
   document.getElementById('f-name').value=pf.title||'ProgramGuideBlank';
-  const ch=channels.find(c=>{const id=channelIdentity(c);return id.nid===pf.networkId&&id.tsid===pf.transportStreamId&&id.sid===pf.serviceId;})
-    || channels.find(c=>{const id=channelIdentity(c);return id.sid===pf.serviceId&&id.nid===pf.networkId;})
-    || channels.find(c=>{const id=channelIdentity(c);return id.sid===pf.serviceId;});
+  // Station identity is exact NID/TSID/SID. Never prefill another channel by SID-only fallback.
+  const ch=channels.find(c=>{const id=channelIdentity(c);return id.nid===pf.networkId&&id.tsid===pf.transportStreamId&&id.sid===pf.serviceId;});
   if(ch){
     document.getElementById('f-ch').value=channelOptionValue(ch);
   }
@@ -303,11 +313,6 @@ function setDowChipState(chip, checked){
 function syncDowChipFromInput(chip){
   const input=getDowChipInput(chip);
   setDowChipState(chip, !!(input && input.checked));
-}
-function toggleDowChip(chip){
-  const input=getDowChipInput(chip);
-  const next=!(input && input.checked);
-  setDowChipState(chip, next);
 }
 function buildDowWrap(wrapId){
   const wrap=document.getElementById(wrapId);
@@ -376,9 +381,12 @@ function buildChOptions(selId){
 }
 
 async function load(){
+  const generation=++programRuleLoadGeneration;
   try{
     const res=await fetch('/api/program-rules');
-    rules=await res.json();
+    const nextRules=await res.json();
+    if(generation!==programRuleLoadGeneration) return false;
+    rules=nextRules;
     render();
   }catch(e){showToast('取得エラー: '+e.message);}
 }
@@ -394,15 +402,18 @@ function render(){
 
   // チャンネル名解決
   function chName(r){
-    const ch=channels.find(c=>c.serviceId===r.serviceId&&c.networkId===r.networkId);
-    return ch?ch.name:`SID${r.serviceId}`;
+    const ch=channels.find(c=>c.serviceId===r.serviceId&&c.networkId===r.networkId&&c.transportStreamId===r.transportStreamId);
+    return ch?ch.name:(r.serviceName||`SID${r.serviceId}`);
   }
 
-  tbody.innerHTML=rules.map((r,i)=>`
+  tbody.innerHTML=rules.map((r,i)=>{
+    const actionState=programRuleToggleActionState.get(r.id);
+    const actionText=actionState ? window.TvAirActionButtonState.processingText : '';
+    return `
     <tr class="${r.enabled?'':'disabled-row'}">
       <td class="td-no" data-cell-role="list-index">${i+1}</td>
       <td class="text-center col-enabled" data-cell-role="rule-enabled-state">
-        <label class="tvair-enabled-toggle program-rule-enabled-toggle ${r.enabled?'enabled':'disabled'}" title="${r.enabled?'有効。押すと無効にします。':'無効。押すと有効にします。'}"><input type="checkbox" ${r.enabled?'checked':''} onchange="toggleEnabled(${r.id},this.checked)"><span class="tvair-enabled-toggle-track"><span class="tvair-enabled-toggle-thumb"></span></span></label>
+        <label class="tvair-enabled-toggle program-rule-enabled-toggle ${r.enabled?'enabled':'disabled'}" title="${r.enabled?'有効。押すと無効にします。':'無効。押すと有効にします。'}"><input type="checkbox" ${r.enabled?'checked':''} ${actionState?'disabled':''} onchange="toggleEnabled(${r.id},this.checked)"><span class="tvair-enabled-toggle-track"><span class="tvair-enabled-toggle-thumb"></span></span></label>${actionText?`<div class="note">${actionText}</div>`:''}
       </td>
       <td data-cell-role="rule-title-data">
         <div class="td-name">${esc(r.name||'(無名)')}</div>
@@ -414,10 +425,11 @@ function render(){
       <td data-cell-role="rule-edit-action">
         <div class="act-wrap">
           <button class="btn-edit" onclick="openEdit(${r.id})">編集</button>
-          <button class="btn-del" onclick="delRule(${r.id})">削除</button>
+          <button class="btn-del" onclick="delRule(${r.id},this)">削除</button>
         </div>
       </td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
 }
 
 function resetForm(){
@@ -431,54 +443,60 @@ function resetForm(){
   buildTimeSelects('f-eh','f-em',0,30);
 }
 
-async function addRule(){
+async function addRule(btn){
   const chVal=document.getElementById('f-ch').value;
   if(!chVal){showToast('チャンネルを選択してください。');return;}
-  const chInfo=JSON.parse(chVal);
-  const sh=document.getElementById('f-sh').value;
-  const sm=document.getElementById('f-sm').value;
-  const eh=document.getElementById('f-eh').value;
-  const em=document.getElementById('f-em').value;
-  const dows=getSelectedDow('dow-wrap'); // 空=毎日
-
-  // 曜日ごとに1ルール登録（空=毎日で1件のみ）
-  const targets=dows.length>0?dows:[0];
-  const name=document.getElementById('f-name').value.trim();
-  const expires=document.getElementById('f-expires').value||'';
-  const enabled=document.getElementById('f-enabled').checked;
-
-  let ok=0;
-  for(const dow of targets){
-    const r={
-      name: dows.length>1&&name ? `${name}（${DOW_STR[dow]}）` : name,
-      dayOfWeek:dow,
-      startTime:`${sh}:${sm}`,
-      endTime:`${eh}:${em}`,
-      networkId:chInfo.nid||0,
-      transportStreamId:chInfo.tsid||0,
-      serviceId:chInfo.sid||0,
-      expiresOn:expires,
-      enabled:enabled
-    };
-    try{
-      const res=await fetch('/api/program-rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(r)});
-      if(res.ok) ok++;
-      else{const d=await res.json();showToast(d.message||'登録に失敗しました。');return;}
-    }catch(e){showToast('通信エラー');return;}
+  const buttonState=window.TvAirActionButtonState.begin(btn);
+  try{
+    const chInfo=JSON.parse(chVal);
+    const sh=document.getElementById('f-sh').value;
+    const sm=document.getElementById('f-sm').value;
+    const eh=document.getElementById('f-eh').value;
+    const em=document.getElementById('f-em').value;
+    const dows=getSelectedDow('dow-wrap');
+    const targets=dows.length>0?dows:[0];
+    const name=document.getElementById('f-name').value.trim();
+    const expires=document.getElementById('f-expires').value||'';
+    const enabled=document.getElementById('f-enabled').checked;
+    let ok=0;
+    for(const dow of targets){
+      const r={name:dows.length>1&&name?`${name}（${DOW_STR[dow]}）`:name,dayOfWeek:dow,startTime:`${sh}:${sm}`,endTime:`${eh}:${em}`,networkId:chInfo.nid||0,transportStreamId:chInfo.tsid||0,serviceId:chInfo.sid||0,expiresOn:expires,enabled};
+      try{
+        const res=await fetch('/api/program-rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(r)});
+        if(res.ok) ok++;
+        else{const d=await res.json();showToast(d.message||'登録に失敗しました。');return;}
+      }catch(e){showToast('通信エラー');return;}
+    }
+    showToast(`${ok}件のルールを登録しました。`);
+    resetForm();
+    await load();
+  }finally{
+    window.TvAirActionButtonState.finish(btn,buttonState,'登録');
   }
-  showToast(`${ok}件のルールを登録しました。`);
-  resetForm();
-  await load();
 }
 
 async function toggleEnabled(id,enabled){
+  if(programRuleToggleInFlight.has(id)) return;
   const r=rules.find(x=>x.id===id);
   if(!r)return;
+  programRuleToggleInFlight.add(id);
+  programRuleToggleActionState.set(id,{phase:'sending',targetEnabled:!!enabled});
+  render();
   try{
     const res=await fetch(`/api/program-rules/${id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({...r,enabled})});
-    if(res.ok)await load();
-    else showToast('更新に失敗しました。');
-  }catch(e){showToast('通信エラー');}
+    const data=await res.json().catch(()=>({}));
+    if(!res.ok){showToast(data.message||'更新に失敗しました。'); return;}
+    programRuleToggleActionState.set(id,{phase:'accepted_pending',targetEnabled:!!enabled});
+    render();
+    if(!data.rule) throw new Error('updated rule is missing');
+    const index=rules.findIndex(x=>x.id===id);
+    if(index>=0) rules[index]=data.rule;
+  }catch(error){showToast(error instanceof Error && error.message==='updated rule is missing'?'更新結果を確認できませんでした。':'通信エラー');}
+  finally{
+    programRuleToggleActionState.delete(id);
+    programRuleToggleInFlight.delete(id);
+    render();
+  }
 }
 
 function openEdit(id){
@@ -490,7 +508,7 @@ function openEdit(id){
   document.getElementById('e-enabled').checked=r.enabled;
   // チャンネル
   buildChOptions('e-ch');
-  const ch=channels.find(c=>c.serviceId===r.serviceId&&c.networkId===r.networkId);
+  const ch=channels.find(c=>c.serviceId===r.serviceId&&c.networkId===r.networkId&&c.transportStreamId===r.transportStreamId);
   if(ch){
     const val=JSON.stringify({nid:ch.networkId,tsid:ch.transportStreamId,sid:ch.serviceId,name:ch.name,chArg:ch.channelArgument||''});
     document.getElementById('e-ch').value=val;
@@ -506,45 +524,45 @@ function openEdit(id){
 }
 function closeModal(){document.getElementById('modal-overlay').classList.remove('open');}
 
-async function saveEdit(){
+async function saveEdit(btn){
   const id=parseInt(document.getElementById('e-id').value);
   const r=rules.find(x=>x.id===id);
   if(!r)return;
   const chVal=document.getElementById('e-ch').value;
   if(!chVal){showToast('チャンネルを選択してください。');return;}
-  const chInfo=JSON.parse(chVal);
-  const sh=document.getElementById('e-sh').value;
-  const sm=document.getElementById('e-sm').value;
-  const eh=document.getElementById('e-eh').value;
-  const em=document.getElementById('e-em').value;
-  const dows=getSelectedDow('e-dow-wrap');
-  const dow=dows.length>0?dows[0]:0; // 編集は代表1曜日
-  const updated={
-    ...r,
-    name:document.getElementById('e-name').value.trim(),
-    dayOfWeek:dow,
-    startTime:`${sh}:${sm}`,
-    endTime:`${eh}:${em}`,
-    networkId:chInfo.nid||0,
-    transportStreamId:chInfo.tsid||0,
-    serviceId:chInfo.sid||0,
-    expiresOn:document.getElementById('e-expires').value||'',
-    enabled:document.getElementById('e-enabled').checked
-  };
+  const buttonState=window.TvAirActionButtonState.begin(btn);
   try{
-    const res=await fetch(`/api/program-rules/${id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(updated)});
-    if(res.ok){showToast('保存しました。');closeModal();await load();}
-    else showToast('保存に失敗しました。');
-  }catch(e){showToast('通信エラー');}
+    const chInfo=JSON.parse(chVal);
+    const sh=document.getElementById('e-sh').value;
+    const sm=document.getElementById('e-sm').value;
+    const eh=document.getElementById('e-eh').value;
+    const em=document.getElementById('e-em').value;
+    const dows=getSelectedDow('e-dow-wrap');
+    const dow=dows.length>0?dows[0]:0;
+    const updated={...r,name:document.getElementById('e-name').value.trim(),dayOfWeek:dow,startTime:`${sh}:${sm}`,endTime:`${eh}:${em}`,networkId:chInfo.nid||0,transportStreamId:chInfo.tsid||0,serviceId:chInfo.sid||0,expiresOn:document.getElementById('e-expires').value||'',enabled:document.getElementById('e-enabled').checked};
+    try{
+      const res=await fetch(`/api/program-rules/${id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(updated)});
+      if(res.ok){showToast('保存しました。');closeModal();await load();}
+      else showToast('保存に失敗しました。');
+    }catch(e){showToast('通信エラー');}
+  }finally{
+    window.TvAirActionButtonState.finish(btn,buttonState,'保存');
+  }
 }
 
-async function delRule(id){
+async function delRule(id,btn){
   const r=rules.find(x=>x.id===id);
+  if(!r)return;
+  const buttonState=window.TvAirActionButtonState.begin(btn);
   try{
-    const res=await fetch(`/api/program-rules/${id}`,{method:'DELETE'});
-    if(res.ok){showToast('削除しました。');await load();}
-    else showToast('削除に失敗しました。');
-  }catch(e){showToast('通信エラー');}
+    try{
+      const res=await fetch(`/api/program-rules/${id}`,{method:'DELETE'});
+      if(res.ok){showToast('削除しました。');await load();}
+      else showToast('削除に失敗しました。');
+    }catch(e){showToast('通信エラー');}
+  }finally{
+    window.TvAirActionButtonState.finish(btn,buttonState,'削除');
+  }
 }
 
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
@@ -552,12 +570,6 @@ document.getElementById('modal-overlay').addEventListener('click',e=>{
   if(e.target===document.getElementById('modal-overlay'))closeModal();
 });
 
-function showToast(msg,ms=2800){
-  const t=document.getElementById('toast');
-  t.textContent=msg;t.classList.add('show');
-  clearTimeout(t._timer);
-  t._timer=setTimeout(()=>t.classList.remove('show'),ms);
-}
 
 // 初期化
 buildDowWrap('dow-wrap');
@@ -569,13 +581,13 @@ buildTimeSelects('e-eh','e-em',0,30);
 loadChannels();
 load();
 
-/* release_contract MenuLegacyEntryCleanupContract: page menu ownership is centralized in tvair-menu-spine.js. */
+/* Page menu behavior is owned by tvair-menu-spine.js. */
 
 </script>
 
-<script src="/tvair-notification.js?v=1.1.0-ui2"></script>
-<script src="/tvair-epg-run-contract.js?v=1.1.0-ui2"></script>
-<script src="/tvair-epg-widget.js?v=1.1.0-ui2"></script>
-<script src="/tvair-menu-spine.js?v=1.1.0-ui2"></script>
+<script src="/tvair-notification.js?v=1.2.0-ui2"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.0-ui2"></script>
+<script src="/tvair-settings-host.js?v=1.2.0"></script>
+<script src="/tvair-menu-spine.js?v=1.2.0-ui2"></script>
 </body>
 </html>

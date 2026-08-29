@@ -1,11 +1,10 @@
-﻿/* release_contract epg-progress-panel-theme-role-rebuild-and-light-button-luminance-tuning: no Program.cs behavior changed; WAKE/EPG contracts remain unchanged. */
 ﻿/* release_contract gr-cdt-data-module-logo-save-bscs-no-deep: Wakeタスク起動時は --wake-task を単一インスタンス合流シグナルとして扱い、既存TvAIrがいる場合は本体二重起動せず signal ファイルを書いて終了する。 */
-/* release_contract recording-options-cleanup-worker-launch-policy: 録画オプションUIの説明文を撤去し、TvAIrEpgRec表示ON/OFFの起動ポリシーを共通ヘルパーへ集約。 */
-/* release_contract ai-rhythm-core-migration: AI-rhythm正式名・新旧URL/ID互換・旧設定移行を本体側に追加。 */
+/* TvAIrEpgRecの表示ON/OFFを含む起動ポリシーは共通ヘルパーで管理する。 */
 /* release_contract wake-plan-hash-trigger-limit: limit Wake task rebuild triggers by in-process plan hash and periodic validation. */
 /* release_contract wake-task-nochange-skip: skip full Wake task delete/register when the desired plan is unchanged and existing managed tasks match. */
 /* release_contract program-guide-reservation-diff-render: reservation state refresh updates existing program cells only, avoiding full guide rerender when EPG is unchanged. */
 using System.Globalization;
+using System.Net;
 using System.Linq;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -18,14 +17,52 @@ using Microsoft.Extensions.FileProviders;
 using TvAIr.Channel;
 using TvAIr.Core;
 using TvAIr.Epg;
+using TvAIr.Epg.Projection;
 using TvAIr.Plugin;
+using TvAIr.Plugin.RuntimeHost;
 using TvAIr.Schedule;
 using TvAIr.Tuner;
 using TvAIrPlugin;
+using TvAIrPlugin.Runtime;
+using TvAIrPlugin.Windows;
 using Microsoft.Win32;
 
 // ─── エンコーディング登録（ARIB文字コード用）───────────────────
 System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+
+// Internal Runtime Probe was used only while rebuilding the generic plugin API.
+// Release builds must remove stale probe binaries left by overlay deployment before PluginLoader scans Plugins/.
+static void RemoveInternalPluginProbeResidue()
+{
+    try
+    {
+        var pluginDir = Path.Combine(AppContext.BaseDirectory, "Plugins");
+        if (!Directory.Exists(pluginDir)) return;
+
+        var residuePaths = new[]
+        {
+            Path.Combine(pluginDir, "PluginRuntimeProbe.dll"),
+            Path.Combine(pluginDir, "PluginRuntimeProbe.pdb"),
+            Path.Combine(pluginDir, "PluginRuntimeProbe.deps.json"),
+            Path.Combine(pluginDir, "PluginRuntimeProbe.runtimeconfig.json")
+        };
+
+        foreach (var path in residuePaths)
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+
+        var residueDirectory = Path.Combine(pluginDir, "PluginRuntimeProbe");
+        if (Directory.Exists(residueDirectory))
+            Directory.Delete(residueDirectory, recursive: true);
+    }
+    catch
+    {
+        // Cleanup failure must not prevent TvAIr startup. PluginLoader will continue with remaining plugins.
+    }
+}
+
+RemoveInternalPluginProbeResidue();
 
 
 static (bool IsWakeTask, string Kind, string At, string Generation, string SlotId, string ReservationId) ParseWakeTaskArgs(string[] argv)
@@ -148,7 +185,7 @@ static void WriteStartupSignalForExistingInstance(string reason)
     {
         // 既存プロセスのトレイが見えない場合でも、二重起動側は最小限の復帰導線としてUIを開く。
         // ポート衝突や既存側未準備時は失敗しても残留しない。
-        var portText = "55884";
+        var portText = SettingsDefaults.Port.ToString(System.Globalization.CultureInfo.InvariantCulture);
         try
         {
             var ini = Path.Combine(AppContext.BaseDirectory, "TvAIr.ini");
@@ -178,9 +215,10 @@ if (!IsCurrentWakeInvocation(wakeInvocation))
 }
 // ─── 単一インスタンス保証（release_contract）────────────────────────────
 // TvAIr が二重起動すると、予約スケジューラ・チューナー割り当て・Wakeタスク再構築が
-// 別プロセスで同時に動き、録画開始要求だけ出て TVTest 起動が成立しない危険がある。
-// Web常駐coreアプリとして、同一ユーザーセッション内では必ず1プロセスに固定する。
-var singleInstanceMutex = new Mutex(initiallyOwned: true, name: @"TvAIr.SingleInstance.v1", createdNew: out var singleInstanceCreated);
+// 別プロセスで同時に動き、同じ予約DBへ別ownerから状態遷移を書き込む危険がある。
+// Password logon のWakeタスクは対話セッションとは別Windowsセッションで起動し得るため、
+// セッションローカル名では単一インスタンス保証にならない。同一PC上の全セッションで1プロセスに固定する。
+var singleInstanceMutex = new Mutex(initiallyOwned: true, name: @"Global\TvAIr.SingleInstance.v1", createdNew: out var singleInstanceCreated);
 if (!singleInstanceCreated)
 {
     // release_contract: Wakeだけでなく手動/更新後の同一インスタンス再起動も既存プロセスへ合流させる。
@@ -193,24 +231,27 @@ if (!singleInstanceCreated)
 }
 
 var builder = WebApplication.CreateBuilder(args);
+#if TVAIR_DEVELOPER_DIAGNOSTICS
 var enableRouteReplayDebugApi = builder.Configuration.GetValue<bool>("Debug:EnableRouteReplayApi");
+#endif
 
 // ─── TvAIr.ini 読み込み（appsettings.json より優先） ────────────
-var iniSettings = new IniSettingsService(AppContext.BaseDirectory);
+// SETTINGS_RUNTIME_HOST_SINGLE_SOURCE_CONTRACT
+// 初回起動のHost/DB値も、INI起動時と同じIniSettingsService Runtime正本へ確定する。
+// Port/DataDirectoryをProgram内で再読込・再解決する第二経路は作らない。
+var firstRunAppSettings = builder.Configuration.GetSection("App").Get<AppSettings>() ?? new();
+var iniSettings = new IniSettingsService(
+    AppContext.BaseDirectory,
+    firstRunAppSettings.DataDirectory,
+    firstRunAppSettings.Port);
 builder.Services.AddSingleton(iniSettings);
-
-static string ResolveDataDirectoryPath(string? configuredPath)
-{
-    var raw = string.IsNullOrWhiteSpace(configuredPath) ? "data" : configuredPath.Trim();
-    return Path.GetFullPath(Path.IsPathRooted(raw) ? raw : Path.Combine(AppContext.BaseDirectory, raw));
-}
+builder.Services.AddSingleton<NetworkAccessSecurity>();
 
 // ─── 設定バインド（ini で上書き） ────────────────────────────────
 builder.Services.Configure<AppSettings>(opt =>
 {
-    var base_ = builder.Configuration.GetSection("App").Get<AppSettings>() ?? new();
-    opt.Port          = iniSettings.IsFirstRun ? base_.Port          : iniSettings.Port;
-    opt.DataDirectory = iniSettings.IsFirstRun ? base_.DataDirectory : iniSettings.DataDirectory;
+    opt.Port          = iniSettings.Port;
+    opt.DataDirectory = iniSettings.DataDirectory;
 });
 builder.Services.Configure<TvTestSettings>(opt =>
 {
@@ -258,6 +299,8 @@ if (!iniSettings.IsFirstRun && iniSettings.Tuners.Count > 0)
             Group             = group,
             Did               = (t.Did ?? string.Empty).Trim().ToUpperInvariant(),
             Role              = role,
+            DeviceNumber      = t.DeviceNumber,
+            LogicalViewerSlotId = t.LogicalViewerSlotId,
         };
     })
     .Where(t => !string.IsNullOrWhiteSpace(t.BonDriverFileName))
@@ -281,10 +324,24 @@ else
                 Group = group,
                 Did = did,
                 Role = role,
+                DeviceNumber = t.DeviceNumber,
+                LogicalViewerSlotId = t.LogicalViewerSlotId,
             };
         })
         .Where(t => !string.IsNullOrWhiteSpace(t.BonDriverFileName))
         .ToList();
+}
+// VIEWER_DEVICE_NUMBER_SETTINGS_SOURCE_CONTRACT
+// DeviceNumberはRuntime Viewer側で再採番しない。初回appsettings fallbackに明示値が無い場合だけ、
+// 設定画面と同じ各放送波内の行順を一度適用する。INI運用では保存済みDeviceNumberが正本となる。
+var startupDeviceCounters = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+foreach (var tuner in tunerProfiles)
+{
+    var group = TunerDisplayName.NormalizeGroup(tuner.Group);
+    startupDeviceCounters.TryGetValue(group, out var ordinal);
+    ordinal++;
+    startupDeviceCounters[group] = ordinal;
+    if (tuner.DeviceNumber <= 0) tuner.DeviceNumber = ordinal;
 }
 // release_contract: 視聴/録画/EPGの隔離はBonDriver名ではなくRoleと論理リソース解決で行う。
 // BonDriver未設定行は環境固有fallbackせず、実行候補から外す。
@@ -292,11 +349,13 @@ builder.Services.AddSingleton<IReadOnlyList<TunerProfile>>(tunerProfiles.AsReadO
 
 // ─── コアサービス ────────────────────────────────────────────────
 builder.Services.AddSingleton<LogRepository>();
+builder.Services.AddSingleton<SettingsRuntimeState>();
+builder.Services.AddSingleton<ApplicationOperationGate>();
+builder.Services.AddSingleton<SettingsChangeApplicationService>();
 builder.Services.AddSingleton<UserEventLogService>();
-builder.Services.AddSingleton<Database>(sp =>
+builder.Services.AddSingleton<Database>(_ =>
 {
-    var appSettings = sp.GetRequiredService<IOptions<AppSettings>>().Value;
-    var dataDir = ResolveDataDirectoryPath(appSettings.DataDirectory);
+    var dataDir = iniSettings.ResolveDataDirectory();
     return new Database(dataDir);
 });
 
@@ -316,22 +375,34 @@ builder.Services.AddSingleton<TunerPool>(sp =>
     return new TunerPool(profiles, ini, logRepo);
 });
 builder.Services.AddSingleton<ExternalTunerLeaseService>();
+builder.Services.AddSingleton<ViewerSessionRegistry>();
+builder.Services.AddSingleton<ViewerOwnershipService>();
+builder.Services.AddSingleton<ViewerOperationService>();
 
 // ─── 予約 ────────────────────────────────────────────────────────
 builder.Services.AddSingleton<ChainDirectRecorderSessionRegistry>();
+builder.Services.AddSingleton<ReservationMutationJournal>();
+builder.Services.AddSingleton<ReservationMutationSideEffectProjection>();
+builder.Services.AddSingleton<PluginTypedEventHub>();
+builder.Services.AddSingleton<RecordingResultStore>();
+builder.Services.AddSingleton<PlaybackProgressStore>();
+builder.Services.AddSingleton<NormalEpgWaveOccupation>();
 builder.Services.AddSingleton<ReservationStore>();
+builder.Services.AddSingleton<ReservationProjectionMetadataStore>();
+builder.Services.AddSingleton<ReservationProjectionPromotionService>();
+builder.Services.AddSingleton<ProgramProjectionReservationSyncService>();
 builder.Services.AddSingleton<ReservationAllocationRouteService>();
+builder.Services.AddSingleton<SystemEpgResponsibilityPlanService>();
 builder.Services.AddSingleton<ReservationPresentationService>();
-builder.Services.AddSingleton<AirhythmProfileService>();
-builder.Services.AddSingleton<AirhythmBackupService>();
-builder.Services.AddSingleton<AirhythmDashboardService>();
-builder.Services.AddSingleton<AirhythmNotificationService>();
-builder.Services.AddSingleton<BroadcastClockService>();
 
 // ─── EPG ────────────────────────────────────────────────────────
 builder.Services.AddSingleton<EpgStore>();
+builder.Services.AddSingleton<DbProgramEventSource>();
+builder.Services.AddSingleton<ExternalEpgSourceStore>();
+builder.Services.AddSingleton<IProgramEventSource, ProgramGuideProjectionService>();
 builder.Services.AddSingleton<ServiceLogoStore>();
 builder.Services.AddSingleton<EpgLogoExtractor>();
+builder.Services.AddSingleton<SystemSleepInhibitionService>();
 // EpgCapture: IOptionsMonitor<EpgSettings>を渡し、DiagnosticMode等を再起動後も確実に反映させる（release_contract）
 builder.Services.AddSingleton<EpgCapture>(sp =>
     new EpgCapture(
@@ -344,10 +415,12 @@ builder.Services.AddSingleton<EpgCapture>(sp =>
         sp.GetRequiredService<TunerPool>(),
         sp.GetRequiredService<ReservationStore>(),
         sp.GetRequiredService<IniSettingsService>(),
+        sp.GetRequiredService<Database>(),
         sp.GetRequiredService<TvTestActivityKeeper>(),
         sp.GetRequiredService<ServiceLogoStore>(),
         sp.GetRequiredService<EpgLogoExtractor>(),
-        sp.GetRequiredService<BroadcastClockService>()));
+        sp.GetRequiredService<ReservationProjectionPromotionService>(),
+        sp.GetRequiredService<KeywordMatcher>()));
 builder.Services.AddSingleton<KeywordMatcher>();
 // EpgScheduler: AddSingleton で登録しつつ AddHostedService でバックグラウンド実行
 builder.Services.AddSingleton<EpgScheduler>(sp =>
@@ -358,11 +431,18 @@ builder.Services.AddSingleton<EpgScheduler>(sp =>
         sp.GetRequiredService<ReservationStore>(),
         sp.GetRequiredService<IReadOnlyList<TunerProfile>>(),
         sp.GetRequiredService<ChannelFileLoader>(),
-        sp.GetRequiredService<EpgStore>(),
+        sp.GetRequiredService<IProgramEventSource>(),
         sp.GetRequiredService<TunerPool>(),
         sp.GetRequiredService<LogRepository>(),
         sp.GetRequiredService<UserEventLogService>(),
-        sp.GetRequiredService<ReservationAllocationRouteService>()));
+        sp.GetRequiredService<PluginTypedEventHub>(),
+        sp.GetRequiredService<ReservationAllocationRouteService>(),
+        sp.GetRequiredService<Database>(),
+        sp.GetRequiredService<ApplicationOperationGate>(),
+        sp.GetRequiredService<SystemSleepInhibitionService>(),
+        sp.GetRequiredService<SystemEpgResponsibilityPlanService>(),
+        sp.GetRequiredService<NormalEpgWaveOccupation>(),
+        sp.GetRequiredService<PowerResumeSignalHub>()));
 builder.Services.AddHostedService(sp => sp.GetRequiredService<EpgScheduler>());
 
 // Wakeタスク合流シグナル監視: 既存TvAIrがいる状態で --wake-task 起動された子プロセスが残す signal を拾い、常駐TvAIr側へ処理を合流させる。
@@ -373,8 +453,10 @@ builder.Services.AddSingleton<TaskSchedulerService>(sp =>
     new TaskSchedulerService(
         sp.GetRequiredService<ReservationStore>(),
         sp.GetRequiredService<IniSettingsService>(),
+        sp.GetRequiredService<IReadOnlyList<TunerProfile>>(),
         sp.GetRequiredService<LogRepository>(),
-        sp.GetRequiredService<UserEventLogService>()));
+        sp.GetRequiredService<UserEventLogService>(),
+        sp.GetRequiredService<EpgScheduler>()));
 
 // ─── スタートアップ（レジストリRunキー） ─────────────────────────
 builder.Services.AddSingleton<StartupRegistryService>(sp =>
@@ -394,25 +476,45 @@ builder.Services.AddSingleton<ReservationScheduler>(sp =>
         sp.GetRequiredService<TaskSchedulerService>(),
         sp.GetRequiredService<ReservationAllocationRouteService>(),
         sp.GetRequiredService<ChannelFileLoader>(),
-        sp.GetRequiredService<EpgStore>(),
+        sp.GetRequiredService<IProgramEventSource>(),
         sp.GetRequiredService<EpgCapture>(),
         sp.GetRequiredService<TvTestActivityKeeper>(),
         sp.GetRequiredService<ChainDirectRecorderSessionRegistry>(),
         sp.GetRequiredService<ServiceLogoStore>(),
-        sp.GetRequiredService<BroadcastClockService>(),
-        sp.GetRequiredService<UserEventLogService>()));
+        sp.GetRequiredService<UserEventLogService>(),
+        sp.GetRequiredService<PluginTypedEventHub>(),
+        sp.GetRequiredService<RecordingResultStore>(),
+        sp.GetRequiredService<NormalEpgWaveOccupation>(),
+        sp.GetRequiredService<ExternalTunerLeaseService>(),
+        sp.GetRequiredService<ApplicationOperationGate>()));
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ReservationScheduler>());
+// 録画due監視と同じ正本時刻でPower Requestを先取りし、EPG等の先行owner解放との隙間を作らない。
+builder.Services.AddHostedService<RecordingPowerResponsibilityGuardService>();
+builder.Services.AddSingleton<TunerOwnershipReconciliationCoordinator>();
+builder.Services.AddSingleton<PowerResumeSignalHub>();
+builder.Services.AddHostedService<PowerResumeTunerReconciliationService>();
 
 // ─── プラグイン ──────────────────────────────────────────────────
 // Plugins/ ディレクトリの DLL を起動時に自動ロード。
 // プラグイン未配置時は何もしない。例外でも本体を停止させない。
 builder.Services.AddSingleton<PluginRegistry>();
 builder.Services.AddSingleton<PluginActionTokenStore>();
+builder.Services.AddSingleton<PluginWindowPlacementStore>();
 builder.Services.AddSingleton<PluginWindowSessionStore>();
 builder.Services.AddSingleton<PluginToolWindowHostService>();
+builder.Services.AddSingleton<PluginPathPickerHostService>();
 builder.Services.AddSingleton<PluginDefaultMenuActionService>();
-builder.Services.AddSingleton<LiveCommentStore>();
+builder.Services.AddSingleton<TimedTextStreamStore>();
 builder.Services.AddSingleton<PluginAllowListService>();
+builder.Services.AddSingleton<PluginBoundaryGate>();
+builder.Services.AddSingleton<LogPresentationStore>();
+builder.Services.AddSingleton<PluginReadModelSource>();
+builder.Services.AddSingleton<PluginReservationOperationService>();
+builder.Services.AddSingleton<PluginReservationPlanningService>();
+builder.Services.AddSingleton<PluginSystemReadService>();
+builder.Services.AddSingleton<PluginPresentationReadService>();
+builder.Services.AddSingleton<PluginOperationalReadService>();
+builder.Services.AddSingleton<PluginScopedServiceFactory>();
 builder.Services.AddHostedService<PluginLoader>();
 
 // ─── JSON ────────────────────────────────────────────────────────
@@ -425,16 +527,52 @@ builder.Services.ConfigureHttpJsonOptions(opts =>
 });
 
 // ─── ポート設定 ──────────────────────────────────────────────────
-var port = iniSettings.IsFirstRun
-    ? builder.Configuration.GetValue<int>("App:Port", 55884)
-    : iniSettings.Port;
-// バインドアドレス: 0.0.0.0（全インターフェース）でLANの他端末からもアクセス可能。
-// Kestrel直接バインドのため管理者権限・URL予約は不要。
-// 初回起動時にWindowsファイアウォールの受信許可ダイアログが出る場合あり。
+var port = iniSettings.Port;
+// NETWORK_ACCESS_IMMEDIATE_APPLY_BINDING_CONTRACT
+// LAN有効/無効を再起動なしで反映するため、待受自体は起動時から全インターフェースへ固定する。
+// 非loopback要求の許可は下段middlewareがIniSettingsServiceの現在値を要求ごとに判定する。
+// LAN無効時も外部要求は共通境界で403となり、設定変更でlistenerを再構築しない。
 builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
+bool IsNetworkLanAccessActive() =>
+    iniSettings.NetworkLanAccessEnabled &&
+    !string.IsNullOrWhiteSpace(iniSettings.NetworkPasswordEncrypted);
+
+static bool IsAllowedLoopbackHost(HostString host, int expectedPort)
+{
+    if (!host.HasValue || host.Port != expectedPort)
+        return false;
+
+    var hostName = host.Host.TrimEnd('.');
+    if (hostName.Equals("localhost", StringComparison.OrdinalIgnoreCase))
+        return true;
+
+    return IPAddress.TryParse(hostName, out var address)
+           && NetworkAccessSecurity.IsLoopback(address);
+}
+
+static bool IsAllowedLoopbackOrigin(HttpRequest request, int expectedPort)
+{
+    var origin = request.Headers.Origin.ToString();
+    if (string.IsNullOrWhiteSpace(origin))
+        return true;
+
+    if (!Uri.TryCreate(origin, UriKind.Absolute, out var originUri)
+        || !originUri.Scheme.Equals("http", StringComparison.OrdinalIgnoreCase)
+        || originUri.Port != expectedPort)
+        return false;
+
+    var hostName = originUri.Host.TrimEnd('.');
+    if (hostName.Equals("localhost", StringComparison.OrdinalIgnoreCase))
+        return true;
+
+    return IPAddress.TryParse(hostName, out var address)
+           && NetworkAccessSecurity.IsLoopback(address);
+}
+
 var app = builder.Build();
-long settingsThemeRuntimeRevision = 0;
+_ = app.Services.GetRequiredService<ReservationMutationSideEffectProjection>();
+UserLogProjectionContractTests.Run();
 
 if (wakeInvocation.IsWakeTask)
 {
@@ -446,20 +584,43 @@ if (wakeInvocation.IsWakeTask)
     catch { }
 }
 
-MigrateAirrhythmLocalSettings(app.Services.GetRequiredService<LogRepository>());
 
 // TvAIr release_contract cache guard:
-// UI差分更新高速化を維持しつつ、ブラウザが旧index.html/旧JS状態を掴んで
+// UI差分更新を維持しつつ、ブラウザが更新前のindex.html/JS状態を保持して
 // チェーン候補判定だけ遅れて復帰する問題を避ける。
 app.Use(async (context, next) =>
 {
     context.Response.Headers["X-Content-Type-Options"] = "nosniff";
     context.Response.Headers["X-Frame-Options"] = "SAMEORIGIN";
 
+    var requestPathBeforeRouting = context.Request.Path.Value ?? string.Empty;
+    var traceRuntimeUiActionRequest = requestPathBeforeRouting.Equals("/api/plugins/action", StringComparison.OrdinalIgnoreCase)
+        || requestPathBeforeRouting.Equals("/plugin-action", StringComparison.OrdinalIgnoreCase);
+    if (traceRuntimeUiActionRequest)
+    {
+        try
+        {
+            context.RequestServices.GetRequiredService<LogRepository>().Add("PLUGIN_ACTION_HTTP_REQUEST", "RECEIVED",
+                $"method={SafePluginActionValue(context.Request.Method)} path={SafePluginActionValue(requestPathBeforeRouting)} contentType={SafePluginActionValue(context.Request.ContentType)} contentLength={context.Request.ContentLength?.ToString() ?? "-"} hasFormContentType={context.Request.HasFormContentType} physicalEndpoint=/api/plugins/action logicalRoute=/plugin-action rule=plugin_action_http_route_contract");
+        }
+        catch { }
+    }
+
     await next();
+
+    if (traceRuntimeUiActionRequest)
+    {
+        try
+        {
+            context.RequestServices.GetRequiredService<LogRepository>().Add("PLUGIN_ACTION_HTTP_RESPONSE", "COMPLETED",
+                $"method={SafePluginActionValue(context.Request.Method)} path={SafePluginActionValue(requestPathBeforeRouting)} status={context.Response.StatusCode} endpointMatched={(context.Response.StatusCode != StatusCodes.Status405MethodNotAllowed)} physicalEndpoint=/api/plugins/action logicalRoute=/plugin-action rule=plugin_action_http_route_contract");
+        }
+        catch { }
+    }
 
     var path = context.Request.Path.Value ?? string.Empty;
     if (path.Equals("/", StringComparison.OrdinalIgnoreCase)
+        || path.StartsWith("/plugin/", StringComparison.OrdinalIgnoreCase)
         || path.EndsWith(".html", StringComparison.OrdinalIgnoreCase)
         || path.EndsWith(".js", StringComparison.OrdinalIgnoreCase)
         || path.EndsWith(".css", StringComparison.OrdinalIgnoreCase))
@@ -472,6 +633,190 @@ app.Use(async (context, next) =>
 });
 
 
+
+
+// NETWORK_ACCESS_AUTHENTICATION_INVARIANT
+// loopbackは無認証のローカルUI契約を維持するが、Hostをlocalhost/loopback IP + 現在portへ固定する。
+// 状態変更要求にOriginが付く場合も同じloopback originだけを許可し、DNS rebinding/外部ページからの
+// localhost操作を共通入口で拒否する。LAN要求はprivate address、保存済みパスワード、
+// 短寿命HttpOnlyセッション、同一オリジン検証を共通境界で必須とする。
+app.Use(async (context, next) =>
+{
+    var remoteAddress = context.Connection.RemoteIpAddress;
+    if (NetworkAccessSecurity.IsLoopback(remoteAddress))
+    {
+        if (!IsAllowedLoopbackHost(context.Request.Host, port))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await context.Response.WriteAsJsonAsync(new { message = "ローカル要求の宛先を確認できませんでした。" });
+            return;
+        }
+
+        if (!HttpMethods.IsGet(context.Request.Method)
+            && !HttpMethods.IsHead(context.Request.Method)
+            && !HttpMethods.IsOptions(context.Request.Method)
+            && !IsAllowedLoopbackOrigin(context.Request, port))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await context.Response.WriteAsJsonAsync(new { message = "ローカル操作元を確認できませんでした。" });
+            return;
+        }
+
+        await next();
+        return;
+    }
+
+    var path = context.Request.Path.Value ?? string.Empty;
+    var anonymousNetworkPath = path.Equals("/network-login", StringComparison.OrdinalIgnoreCase)
+        || path.Equals("/api/network-auth/login", StringComparison.OrdinalIgnoreCase)
+        || path.Equals("/api/network-auth/status", StringComparison.OrdinalIgnoreCase);
+
+    if (!IsNetworkLanAccessActive() || !NetworkAccessSecurity.IsLocalNetworkPeer(remoteAddress))
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        await context.Response.WriteAsJsonAsync(new { message = "この接続元からは利用できません。" });
+        return;
+    }
+
+    if (anonymousNetworkPath)
+    {
+        context.Response.Headers["Cache-Control"] = "no-store";
+        context.Response.Headers["Pragma"] = "no-cache";
+        await next();
+        return;
+    }
+
+    var security = context.RequestServices.GetRequiredService<NetworkAccessSecurity>();
+    context.Request.Cookies.TryGetValue(NetworkAccessSecurity.SessionCookieName, out var sessionToken);
+    if (!security.ValidateSession(sessionToken, remoteAddress, iniSettings.NetworkPasswordEncrypted, out _))
+    {
+        if (HttpMethods.IsGet(context.Request.Method)
+            && (context.Request.Headers.Accept.Any(x => x?.Contains("text/html", StringComparison.OrdinalIgnoreCase) == true)
+                || path == "/"))
+        {
+            var requestedPath = $"{context.Request.PathBase}{context.Request.Path}{context.Request.QueryString}";
+            var returnUrl = Uri.EscapeDataString(requestedPath);
+            context.Response.Redirect($"/network-login?returnUrl={returnUrl}");
+            return;
+        }
+
+        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        await context.Response.WriteAsJsonAsync(new { message = "接続用パスワードでログインしてください。" });
+        return;
+    }
+
+    if (!HttpMethods.IsGet(context.Request.Method)
+        && !HttpMethods.IsHead(context.Request.Method)
+        && !HttpMethods.IsOptions(context.Request.Method))
+    {
+        var origin = context.Request.Headers.Origin.ToString();
+        if (!Uri.TryCreate(origin, UriKind.Absolute, out var originUri)
+            || !string.Equals(originUri.Host, context.Request.Host.Host, StringComparison.OrdinalIgnoreCase)
+            || originUri.Port != (context.Request.Host.Port ?? port))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await context.Response.WriteAsJsonAsync(new { message = "操作元を確認できませんでした。" });
+            return;
+        }
+    }
+
+    await next();
+});
+
+app.MapGet("/api/network-auth/status", (HttpContext context, NetworkAccessSecurity security) =>
+{
+    var local = NetworkAccessSecurity.IsLoopback(context.Connection.RemoteIpAddress);
+    context.Request.Cookies.TryGetValue(NetworkAccessSecurity.SessionCookieName, out var token);
+    var expiresAt = default(DateTimeOffset);
+    var authenticated = local
+        || security.ValidateSession(token, context.Connection.RemoteIpAddress, iniSettings.NetworkPasswordEncrypted, out expiresAt);
+    return Results.Ok(new
+    {
+        local,
+        lanAccessEnabled = IsNetworkLanAccessActive(),
+        passwordConfigured = !string.IsNullOrWhiteSpace(iniSettings.NetworkPasswordEncrypted),
+        authenticated,
+        expiresAt = !local && authenticated ? expiresAt : (DateTimeOffset?)null
+    });
+});
+
+app.MapPost("/api/network-auth/login", async (HttpContext context, NetworkAccessSecurity security) =>
+{
+    var remoteAddress = context.Connection.RemoteIpAddress;
+    if (NetworkAccessSecurity.IsLoopback(remoteAddress))
+        return Results.Ok(new { success = true, local = true });
+    if (!IsNetworkLanAccessActive() || !NetworkAccessSecurity.IsLocalNetworkPeer(remoteAddress))
+        return Results.StatusCode(StatusCodes.Status403Forbidden);
+    if (security.IsLoginBlocked(remoteAddress, out var retryAfter))
+        return Results.Json(new { message = "しばらくしてからもう一度お試しください。", retryAfterSeconds = Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds)) }, statusCode: StatusCodes.Status429TooManyRequests);
+
+    NetworkLoginRequest? request;
+    try
+    {
+        request = await context.Request.ReadFromJsonAsync<NetworkLoginRequest>();
+    }
+    catch (JsonException)
+    {
+        request = null;
+    }
+
+    var sessionGeneration = security.CaptureSessionGeneration();
+    var credentialSecret = iniSettings.NetworkPasswordEncrypted;
+    var configuredPassword = CredentialProtector.Decrypt(credentialSecret);
+    if (request is null || configuredPassword is null || !FixedTimePasswordEquals(request.Password ?? string.Empty, configuredPassword))
+    {
+        if (!security.TryRecordLoginFailure(remoteAddress, sessionGeneration))
+            return Results.Json(new { message = "接続設定が変更されました。もう一度ログインしてください。" }, statusCode: StatusCodes.Status409Conflict);
+        return Results.Json(new { message = "パスワードが違います。" }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    if (!security.TryClearLoginFailures(remoteAddress, sessionGeneration))
+        return Results.Json(new { message = "接続設定が変更されました。もう一度ログインしてください。" }, statusCode: StatusCodes.Status409Conflict);
+
+    var lifetime = TimeSpan.FromMinutes(SettingsDefaults.NormalizeNetworkSessionLifetimeMinutes(iniSettings.NetworkSessionLifetimeMinutes));
+    if (!security.TryCreateSession(lifetime, remoteAddress, credentialSecret, sessionGeneration, out var session))
+        return Results.Json(new { message = "接続設定が変更されました。もう一度ログインしてください。" }, statusCode: StatusCodes.Status409Conflict);
+
+    context.Response.Cookies.Append(NetworkAccessSecurity.SessionCookieName, session.Token, new CookieOptions
+    {
+        HttpOnly = true,
+        SameSite = SameSiteMode.Strict,
+        Secure = false,
+        IsEssential = true,
+        Path = "/",
+        Expires = session.ExpiresAt
+    });
+    return Results.Ok(new { success = true, expiresAt = session.ExpiresAt });
+});
+
+app.MapPost("/api/network-auth/logout", (HttpContext context, NetworkAccessSecurity security) =>
+{
+    context.Request.Cookies.TryGetValue(NetworkAccessSecurity.SessionCookieName, out var token);
+    security.RevokeSession(token);
+    context.Response.Cookies.Delete(NetworkAccessSecurity.SessionCookieName, new CookieOptions { Path = "/" });
+    return Results.Ok(new { success = true });
+});
+
+app.MapGet("/network-login", (HttpContext context) =>
+{
+    var returnUrl = context.Request.Query["returnUrl"].ToString();
+    if (string.IsNullOrWhiteSpace(returnUrl) || !returnUrl.StartsWith('/') || returnUrl.StartsWith("//", StringComparison.Ordinal))
+        returnUrl = "/";
+    var returnUrlJson = JsonSerializer.Serialize(returnUrl);
+    context.Response.Headers["Cache-Control"] = "no-store";
+    context.Response.Headers["Pragma"] = "no-cache";
+    context.Response.Headers["Referrer-Policy"] = "no-referrer";
+    context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'self'; base-uri 'none'";
+    var html = $$$"""
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TvAIr 接続</title><link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.0-css-final199"></head><body class="tvair-generated-login"><main><h1>TvAIrへ接続</h1><form id="login"><label for="password">接続用パスワード</label><input id="password" type="password" autocomplete="current-password" required minlength="12"><button type="submit">接続</button><div id="message" class="message" role="status"></div></form></main>
+<script>
+const form=document.getElementById('login'),password=document.getElementById('password'),message=document.getElementById('message');
+form.addEventListener('submit',async e=>{e.preventDefault();message.textContent='確認しています…';try{const r=await fetch('/api/network-auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:password.value}),credentials:'same-origin'});const j=await r.json().catch(()=>({}));if(!r.ok){message.textContent=j.message||'接続できませんでした。';return;}location.replace({{{returnUrlJson}}});}catch{message.textContent='接続できませんでした。';}});
+</script></body></html>
+""";
+    return Results.Content(html, "text/html; charset=utf-8");
+});
 
 // ─── 起動/終了・TVTest干渉監査 ────────────────────────────────
 var lifecycleLog = app.Services.GetRequiredService<LogRepository>();
@@ -491,21 +836,33 @@ else
 var effectiveTvTestSettings = app.Services.GetRequiredService<IOptions<TvTestSettings>>().Value;
 TvTestRecordingDirectoryResolver.Initialize(effectiveTvTestSettings.ExecutablePath, lifecycleLog);
 TvTestRecordFileNameTemplateResolver.Initialize(effectiveTvTestSettings.ExecutablePath, lifecycleLog);
-TvTestRecordingOptionsInspector.Initialize(effectiveTvTestSettings.ExecutablePath, lifecycleLog);
 lifecycleLog.Add("APP_LIFECYCLE", "START",
      $"TvAIr start version={GetTvAIrAppVersion()} baseDir={AppContext.BaseDirectory}");
 EmitTvAIrRuntimeIdentityAudit(lifecycleLog);
 EmitTvAIrEpgRecRuntimePrerequisiteAudit(lifecycleLog, effectiveTvTestSettings);
-var startupTvTestSnapshot = TvTestProcessAuditor.Capture(lifecycleLog, "APP_START", emitLegacyEvents: true);
-// release_contract: External TVTest occupancy is checked lightly at viewerStart time only; do not persist it in TunerPool at startup.
+TvTestProcessAuditor.Capture(lifecycleLog, "APP_START", emitLegacyEvents: true);
+// 管理外TVTestは監視・保護・割当判断の対象外。起動時監査はTvAIr管理プロセスだけを扱う。
 RunTvAIrEpgRecStartupOrphanSafety(lifecycleLog);
+try
+{
+    app.Services.GetRequiredService<ReservationProjectionPromotionService>()
+        .PromotePending("Startup", runAllocationRoute: true);
+}
+catch (Exception ex)
+{
+    lifecycleLog.Add("RESERVATION_PROJECTION_PROMOTE", "Startup",
+        $"result=ERROR source=Startup error={ex.Message.Replace("\r", " ").Replace("\n", " ")} rule=release_contract");
+}
 app.Lifetime.ApplicationStopping.Register(() =>
 {
+    try { app.Services.GetRequiredService<ApplicationOperationGate>().BeginQuiescing("application_stopping"); } catch { }
+    try { app.Services.GetRequiredService<TunerPool>().BeginQuiescing("application_stopping"); } catch { }
     lifecycleLog.Add("APP_LIFECYCLE", "STOPPING", "TvAIr stopping begin");
     TvTestProcessAuditor.EmitSnapshot(lifecycleLog, "APP_STOPPING");
 });
 app.Lifetime.ApplicationStopped.Register(() =>
 {
+    try { app.Services.GetRequiredService<ApplicationOperationGate>().MarkStopped("application_stopped"); } catch { }
     lifecycleLog.Add("APP_LIFECYCLE", "STOPPED", "TvAIr stopped");
 });
 
@@ -525,378 +882,188 @@ app.UseStaticFiles(new StaticFileOptions
     }
 });
 
-// プラグイン静的ファイル配信。
-// Plugins/{PluginId}/wwwroot 配下のファイルを /plugin-assets/{PluginId}/... で公開する。
-// 開発中は自由度を優先し、正式版でManifest権限・ハッシュ許可制と連動させる。
+// release_contract: Plugins配下を汎用静的ファイルとして丸ごと公開しない。
+// プラグインassetは下の明示endpointだけを通し、拡張子・パス境界を一元確認する。
 var pluginRootForAssets = Path.Combine(AppContext.BaseDirectory, "Plugins");
 Directory.CreateDirectory(pluginRootForAssets);
-app.UseStaticFiles(new StaticFileOptions
-{
-    FileProvider = new PhysicalFileProvider(pluginRootForAssets),
-    RequestPath = "/plugin-assets",
-    OnPrepareResponse = ctx =>
-    {
-        ctx.Context.Response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
-        ctx.Context.Response.Headers["Pragma"] = "no-cache";
-        ctx.Context.Response.Headers["Expires"] = "0";
-    }
-});
 
 // release_contract: プラグイン同梱小型画像等の正式asset URL契約。
 // Plugins/{route}/Assets または Plugins/{route}/wwwroot/assets 配下のPNGのみを、同一オリジンURLで返す。
 // UIの小型アイコン用途に限定し、file://・外部URL・data URI依存を避ける。
-app.MapGet("/plugin-assets/{routeSegment}/{assetName}", (string routeSegment, string assetName, HttpRequest http, PluginRegistry registry, LogRepository log) =>
-    ResolvePluginAssetResult(routeSegment, assetName, registry, log, "route"));
-app.MapGet("/api/plugins/{pluginId}/assets/{assetName}", (string pluginId, string assetName, HttpRequest http, PluginRegistry registry, LogRepository log) =>
-    ResolvePluginAssetResult(pluginId, assetName, registry, log, "pluginId"));
+app.MapGet("/plugin-assets/{routeSegment}/{assetName}", (string routeSegment, string assetName, HttpRequest http, PluginRegistry registry, PluginBoundaryGate boundaryGate, LogRepository log) =>
+    ResolvePluginAssetResult(routeSegment, assetName, registry, boundaryGate, log, http.Path.Value ?? string.Empty, "route"));
+app.MapGet("/api/plugins/{pluginId}/assets/{assetName}", (string pluginId, string assetName, HttpRequest http, PluginRegistry registry, PluginBoundaryGate boundaryGate, LogRepository log) =>
+    ResolvePluginAssetResult(pluginId, assetName, registry, boundaryGate, log, http.Path.Value ?? string.Empty, "pluginId"));
 
 // ─── プラグインUI/API ──────────────────────────────────────────
-// TvAIr 1.0.0: AI-rhythm等が本体非依存で作り始められるよう、
-// UIルート・Manifest・権限宣言・Context API導線を本体側の正式入口として用意する。
+// プラグインが本体非依存で利用できるUIルート・Manifest・権限宣言・Context APIの正式入口。
 app.MapGet("/api/plugins", (PluginRegistry registry) =>
 {
-    var plugins = registry.GetAll()
+    var plugins = registry.GetRuntimePlugins()
         .Select(p => new
         {
-            name = p.Name,
-            version = p.Version,
-            kinds = new[]
-            {
-                p is IUiPlugin ? "ui" : null,
-                p is IAnalysisPlugin ? "analysis" : null,
-                p is IViewerPlugin ? "viewer" : null,
-                p is IManifestPlugin ? "manifest" : null
-            }.Where(x => x is not null),
-            manifest = p is IManifestPlugin mp ? mp.Manifest : null
+            pluginId = p.Descriptor.PluginId,
+            name = p.Descriptor.DisplayName,
+            version = p.Descriptor.Version,
+            sdkContractVersion = p.Descriptor.SdkContractVersion,
+            permissions = p.Descriptor.RequiredPermissions,
+            capabilities = p.Descriptor.RequiredCapabilities,
+            assets = p.Descriptor.Assets,
+            windows = p.Descriptor.Windows,
+            surfaces = p.Descriptor.Surfaces,
+            menuActions = p.Descriptor.MenuActions,
+            uiDefinitions = p.Descriptor.UiDefinitions
         })
         .ToList();
-    return Results.Ok(new { plugins });
+    return Results.Ok(new { plugins, source = "runtime.descriptor" });
 });
 
 app.MapGet("/api/plugins/ui", (PluginRegistry registry) =>
 {
-    var uiPlugins = registry.GetUiPlugins()
-        .Where(p => p.Ui.Enabled)
-        .Select(p =>
+    var plugins = registry.GetRuntimePlugins()
+        .SelectMany(plugin => plugin.Descriptor.UiDefinitions.Select(ui => new
         {
-            var publicRoute = NormalizeAirhythmPublicRoute(p.Ui.RouteSegment);
-            var displayName = NormalizeAirhythmDisplayName(string.IsNullOrWhiteSpace(p.Ui.MenuText) ? p.Name : p.Ui.MenuText);
-            return new
-            {
-                pluginName = NormalizeAirhythmPluginName(p.Name),
-                name = NormalizeAirhythmPluginName(p.Name),
-                version = p.Version,
-                enabled = p.Ui.Enabled,
-                route = publicRoute,
-                menuText = displayName,
-                description = NormalizeAirhythmDisplayName(p.Ui.Description),
-                icon = p.Ui.Icon,
-                displayOrder = p.Ui.DisplayOrder,
-                url = $"/plugin/{publicRoute}",
-                legacyUrl = IsAirhythmRouteCandidate(publicRoute) ? "/plugin/airithm" : $"/plugin-ui/{publicRoute}",
-                manifest = p is IManifestPlugin mp ? mp.Manifest : null
-            };
-        });
-
-    var manifestOnlyPlugins = registry.GetManifestPlugins()
-        .Where(p => !string.IsNullOrWhiteSpace(p.Manifest.Route))
-        .Where(p => !registry.GetUiPlugins().Any(u => string.Equals(u.Name, p.Name, StringComparison.OrdinalIgnoreCase)))
-        .Select(p =>
-        {
-            var route = p.Manifest.Route.Trim();
-            if (route.StartsWith("/plugin/", StringComparison.OrdinalIgnoreCase)) route = route[8..];
-            route = NormalizeAirhythmPublicRoute(route.Trim('/'));
-            var menuText = NormalizeAirhythmDisplayName(string.IsNullOrWhiteSpace(p.Manifest.Name) ? p.Name : p.Manifest.Name);
-            return new
-            {
-                pluginName = NormalizeAirhythmPluginName(p.Name),
-                name = NormalizeAirhythmPluginName(p.Name),
-                version = p.Version,
-                enabled = true,
-                route,
-                menuText,
-                description = NormalizeAirhythmDisplayName(p.Manifest.Description),
-                icon = string.Empty,
-                displayOrder = 1000,
-                url = $"/plugin/{route}",
-                legacyUrl = IsAirhythmRouteCandidate(route) ? "/plugin/airithm" : $"/plugin-ui/{route}",
-                manifest = (PluginManifest?)p.Manifest
-            };
-        });
-
-    var plugins = uiPlugins
-        .Concat(manifestOnlyPlugins)
-        .OrderBy(p => p.displayOrder)
-        .ThenBy(p => p.menuText)
+            pluginId = plugin.Descriptor.PluginId,
+            pluginName = plugin.Descriptor.DisplayName,
+            name = plugin.Descriptor.DisplayName,
+            version = plugin.Descriptor.Version,
+            enabled = true,
+            route = NormalizePluginRouteSegment(ui.Route),
+            kind = ui.Kind.ToString(),
+            uiDefinitionId = ui.UiDefinitionId,
+            windowDefinitionId = ui.WindowDefinitionId,
+            surfaceDefinitionId = ui.SurfaceDefinitionId,
+            url = $"/plugin/{NormalizePluginRouteSegment(ui.Route)}"
+        }))
+        .OrderBy(p => p.pluginName)
+        .ThenBy(p => p.route)
         .ToList();
-    return Results.Ok(new { plugins });
+    return Results.Ok(new { plugins, source = "runtime.descriptor.uiDefinitions" });
 });
 
 app.MapGet("/api/plugins/manifests", (PluginRegistry registry) =>
 {
-    var manifests = registry.GetAll()
-        .OfType<IManifestPlugin>()
-        .Select(p => p.Manifest)
+    var descriptors = registry.GetRuntimePlugins()
+        .Select(p => p.Descriptor)
         .ToList();
-    return Results.Ok(new { manifests });
+    return Results.Ok(new { descriptors, source = "runtime.descriptor", legacyManifestSupported = false });
 });
 
 app.MapGet("/api/plugins/menu-actions", (PluginDefaultMenuActionService menuActions) =>
 {
     var actions = menuActions.ResolveActions("api");
-    return Results.Ok(new { actions, contract = PluginDefaultMenuActionService.ContractVersion, projection = "menu_model_hamburger_context_page", compatAliasIsAdapterOnly = true });
+    return Results.Ok(new { actions, contract = PluginDefaultMenuActionService.ContractVersion, projection = "menu_model_hamburger_context_page", legacyMenuFallbackSupported = false });
 });
 
-app.MapGet("/plugin-menu/{routeSegment}", (string routeSegment, string? source, HttpRequest http, PluginRegistry registry, PluginDefaultMenuActionService menuActions, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, LogRepository log) =>
-    DispatchPluginDefaultMenuAction(routeSegment, string.IsNullOrWhiteSpace(source) ? "hamburger" : source!, http, registry, menuActions, windows, toolWindows, log));
+app.MapGet("/plugin-menu/{routeSegment}", (string routeSegment, string? source, HttpRequest http, PluginRegistry registry, PluginDefaultMenuActionService menuActions, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, PluginBoundaryGate boundaryGate, LogRepository log) =>
+    DispatchPluginDefaultMenuAction(routeSegment, string.IsNullOrWhiteSpace(source) ? "hamburger" : source!, http, registry, menuActions, windows, toolWindows, boundaryGate, log));
 app.MapGet("/plugin-menu-info/{routeSegment}", (string routeSegment, PluginRegistry registry, PluginDefaultMenuActionService menuActions, LogRepository log) =>
     RenderPluginDefaultMenuInfoByRoute(routeSegment, registry, menuActions, log));
 
 
-app.MapGet("/api/plugins/nicojk/live-comments", (string? reservationId, int? count, LiveCommentStore store) =>
+app.MapGet("/api/timed-text-streams", ReadTimedTextStreams);
+app.MapGet("/api/timed-text-streams/groups", ReadTimedTextStreamGroups);
+
+
+static IResult ReadTimedTextStreams(string? streamId, string? groupId, int? count, TimedTextStreamStore store)
 {
     store.PruneOlderThan(TimeSpan.FromHours(6));
-    var limit = Math.Clamp(count.GetValueOrDefault(100), 1, 300);
-    var comments = store.GetRecent(reservationId, limit);
-    return Results.Ok(new
-    {
-        ok = true,
-        reservationId = string.IsNullOrWhiteSpace(reservationId) ? null : reservationId,
-        count = comments.Count,
-        comments
-    });
-});
+    var items = store.GetRecent(streamId, groupId, Math.Clamp(count.GetValueOrDefault(100), 1, 300));
+    return Results.Ok(new { ok = true, streamId, groupId, count = items.Count, items });
+}
 
-app.MapGet("/api/plugins/nicojk/live-comments/groups", (int? count, LiveCommentStore store) =>
+static IResult ReadTimedTextStreamGroups(string? streamId, int? count, TimedTextStreamStore store)
 {
     store.PruneOlderThan(TimeSpan.FromHours(6));
-    var limit = Math.Clamp(count.GetValueOrDefault(50), 1, 300);
-    return Results.Ok(new
-    {
-        ok = true,
-        groups = store.GetGroups(limit)
-    });
-});
-
-
-static bool IsAirhythmRouteCandidate(string? value)
-{
-    var v = (value ?? string.Empty).Trim().Trim('/').ToLowerInvariant();
-    if (v.StartsWith("plugin/")) v = v[7..];
-    if (v.StartsWith("plugin-ui/")) v = v[10..];
-    return v.Equals("airhythm", StringComparison.OrdinalIgnoreCase)
-        || v.Equals("airithm", StringComparison.OrdinalIgnoreCase) // legacy alias
-        || v.Equals("ai-rhythm", StringComparison.OrdinalIgnoreCase)
-        || v.Equals("ai-rithm", StringComparison.OrdinalIgnoreCase) // legacy alias
-        || v.Contains("airhythm", StringComparison.OrdinalIgnoreCase)
-        || v.Contains("airithm", StringComparison.OrdinalIgnoreCase) // legacy alias
-        || v.Contains("ai-rhythm", StringComparison.OrdinalIgnoreCase)
-        || v.Contains("ai-rithm", StringComparison.OrdinalIgnoreCase); // legacy alias
+    return Results.Ok(new { ok = true, groups = store.GetGroups(streamId, Math.Clamp(count.GetValueOrDefault(50), 1, 300)) });
 }
 
-static string NormalizeAirhythmPublicRoute(string? value)
-    => IsAirhythmRouteCandidate(value) ? "airhythm" : (value ?? string.Empty).Trim().Trim('/');
 
-static string NormalizeAirhythmPluginName(string? value)
+
+static PluginWindowDefinition? ResolveRuntimeToolWindowDefinition(ITvAirRuntimeCapabilityPlugin runtimePlugin, string route, PluginWindowRequest request)
 {
-    var v = value ?? string.Empty;
-    if (v.Contains("AIrithm", StringComparison.OrdinalIgnoreCase)
-        || v.Contains("AI-rithm", StringComparison.OrdinalIgnoreCase)
-        || v.Contains("airithm", StringComparison.OrdinalIgnoreCase)
-        || v.Contains("AIrhythm", StringComparison.OrdinalIgnoreCase)
-        || v.Contains("AI-rhythm", StringComparison.OrdinalIgnoreCase)
-        || v.Contains("airhythm", StringComparison.OrdinalIgnoreCase))
+    var descriptor = runtimePlugin.Descriptor;
+    var requestedDefinitionId = ReadPayload(request.Payload ?? new Dictionary<string, string>(), "windowDefinitionId", "WindowDefinitionId");
+    if (!string.IsNullOrWhiteSpace(requestedDefinitionId))
     {
-        return v.Replace("AIrithm", "AIrhythm", StringComparison.OrdinalIgnoreCase)
-                .Replace("AI-rithm", "AI-rhythm", StringComparison.OrdinalIgnoreCase)
-                .Replace("airithm", "airhythm", StringComparison.OrdinalIgnoreCase);
+        var explicitDefinition = descriptor.Windows.FirstOrDefault(window =>
+            string.Equals(window.WindowDefinitionId, requestedDefinitionId, StringComparison.OrdinalIgnoreCase));
+        if (explicitDefinition is not null) return explicitDefinition;
     }
-    return v;
+
+    var normalizedRoute = NormalizePluginRouteSegment(route);
+    var uiDefinition = descriptor.UiDefinitions.FirstOrDefault(ui =>
+        ui.Kind == RuntimeUiKind.ToolWindow
+        && string.Equals(NormalizePluginRouteSegment(ui.Route), normalizedRoute, StringComparison.OrdinalIgnoreCase));
+    if (uiDefinition is not null && !string.IsNullOrWhiteSpace(uiDefinition.WindowDefinitionId))
+    {
+        return descriptor.Windows.FirstOrDefault(window =>
+            string.Equals(window.WindowDefinitionId, uiDefinition.WindowDefinitionId, StringComparison.OrdinalIgnoreCase));
+    }
+
+    return descriptor.Windows.Count == 1 ? descriptor.Windows[0] : null;
 }
 
-static string NormalizeAirhythmDisplayName(string? value)
+static void ApplyRuntimeToolWindowSizeContract(PluginWindowRequest request, ITvAirRuntimeCapabilityPlugin runtimePlugin, string route, LogRepository? log = null, string source = "", string entryKind = "")
 {
-    var v = NormalizeAirhythmPluginName(value);
-    if (v.Contains("AIrhythm", StringComparison.OrdinalIgnoreCase))
-    {
-        v = v.Replace("AIrhythm", "AI-rhythm", StringComparison.OrdinalIgnoreCase);
-    }
-    return v;
-}
-
-static void MigrateAirrhythmLocalSettings(LogRepository log)
-{
-    try
-    {
-        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        if (string.IsNullOrWhiteSpace(local)) return;
-
-        var oldDir = Path.Combine(local, "AIrithm.BasicPlugin"); // legacy alias
-        var newDir = Path.Combine(local, "AIrhythm.BasicPlugin");
-        var oldFile = Path.Combine(oldDir, "airithm-settings.json"); // legacy alias
-        var newFile = Path.Combine(newDir, "airhythm-settings.json");
-
-        if (!File.Exists(oldFile) || File.Exists(newFile)) return;
-
-        Directory.CreateDirectory(newDir);
-        File.Copy(oldFile, newFile, overwrite: false);
-        log.Add("AI_RHYTHM_SETTINGS_MIGRATED", "OK", "old=AIrithm.BasicPlugin/airithm-settings.json new=AIrhythm.BasicPlugin/airhythm-settings.json action=copy_only_keep_legacy rule=release_contract");
-    }
-    catch (Exception ex)
-    {
-        log.Add("AI_RHYTHM_SETTINGS_MIGRATED", "WARN", $"result=FAILED message={ex.Message} rule=release_contract");
-    }
-}
-
-app.MapPost("/api/plugins/navigation/open", async (HttpContext context, AirhythmNotificationService notificationService, LogRepository log) =>
-{
-    string route = string.Empty;
-    string url = string.Empty;
-    string referrerPath = string.Empty;
-
-    try
-    {
-        using var doc = await JsonDocument.ParseAsync(context.Request.Body);
-        var root = doc.RootElement;
-        if (root.TryGetProperty("route", out var routeElement)) route = routeElement.GetString() ?? string.Empty;
-        if (root.TryGetProperty("url", out var urlElement)) url = urlElement.GetString() ?? string.Empty;
-        if (root.TryGetProperty("referrerPath", out var referrerElement)) referrerPath = referrerElement.GetString() ?? string.Empty;
-    }
-    catch
-    {
-        // 互換性優先。壊れたリクエストでも遷移自体は止めない。
-    }
-
-    static string NormalizePluginRoute(string value)
-    {
-        value = (value ?? string.Empty).Trim();
-        if (value.StartsWith("/plugin-ui/", StringComparison.OrdinalIgnoreCase)) value = value[11..];
-        if (value.StartsWith("/plugin/", StringComparison.OrdinalIgnoreCase)) value = value[8..];
-        return value.Trim('/');
-    }
-
-    route = NormalizePluginRoute(string.IsNullOrWhiteSpace(route) ? url : route);
-    var isAirhythm = IsAirhythmRouteCandidate(route);
-    if (isAirhythm) route = "airhythm";
-
-    if (isAirhythm)
-    {
-        notificationService.MarkOpened();
-    }
-
-    log.Add("PLUGIN_NAVIGATION", "Open", $"route={route} airhythmRead={isAirhythm} from={referrerPath}");
-    return Results.Ok(new { ok = true, route, airhythmRead = isAirhythm });
-});
-
-app.MapPost("/api/plugins/action", HandlePluginActionDispatchAsync);
-app.MapPost("/plugin-action", HandlePluginActionDispatchAsync);
-app.MapPost("/api/plugins/window", HandlePluginWindowDispatchAsync);
-app.MapPost("/plugin-window", HandlePluginWindowDispatchAsync);
-app.MapGet("/api/plugins/window/capabilities", (PluginToolWindowHostService toolWindows, LogRepository log) => RenderPluginWindowHostCapabilities(toolWindows, log));
-app.MapGet("/plugin-window/capabilities", (PluginToolWindowHostService toolWindows, LogRepository log) => RenderPluginWindowHostCapabilities(toolWindows, log));
-app.MapGet("/api/plugins/viewer-tuners", (TunerPool tuners, ExternalTunerLeaseService externalTuners, LogRepository log) => RenderPluginViewerTuners(tuners, externalTuners, log));
-app.MapGet("/api/plugins/viewer-profiles", (IOptions<TvTestSettings> tvTestOptions, IniSettingsService ini, IReadOnlyList<TunerProfile> tunerProfiles, LogRepository log) => RenderPluginViewerProfiles(tvTestOptions, ini, tunerProfiles, log));
-app.MapGet("/api/plugins/viewer-control/channels", (ChannelFileLoader channels, LogRepository log) => RenderPluginViewerControlChannels(channels, log));
-app.MapGet("/api/plugins/program-guide/wave-filters", (LogRepository log) => RenderPluginProgramGuideWaveFilters(log));
-app.MapGet("/api/plugins/viewer-control/contract", (LogRepository log) => RenderPluginViewerControlContract(log));
-app.MapGet("/api/plugins/host-contract", (LogRepository log) => RenderPluginHostContract(log));
-app.MapGet("/api/plugins/safe-event/client-log", (HttpRequest http, LogRepository log) => RenderPluginSafeEventClientLog(http, log));
-app.MapGet("/api/plugins/safe-event/keepalive", (HttpRequest http, PluginActionTokenStore actionTokens, PluginWindowSessionStore windows, LogRepository log) => RenderPluginSafeEventKeepAlive(http, actionTokens, windows, log));
-app.MapGet("/tvair-safe-event-host.js", (HttpRequest http, LogRepository log) => RenderPluginSafeEventHostScript(http, log));
-app.MapGet("/plugin-window/{windowId}/state", (string windowId, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, LogRepository log) => RenderPluginWindowState(windowId, windows, toolWindows, log));
-app.MapGet("/plugin-window/{windowId}", (string windowId, HttpRequest http, PluginWindowSessionStore windows, LogRepository log) => RenderPluginWindowHost(windowId, http, windows, log));
-
-static void ApplyManifestToolWindowSizeContract(PluginWindowRequest request, ITvAIrPlugin? plugin, LogRepository? log = null, string source = "", string entryKind = "")
-{
-    if (request is null || plugin is null) return;
+    if (request is null) return;
     request.Payload ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-    PluginManifest? manifest = plugin is IManifestPlugin mp ? mp.Manifest : null;
-    PluginUiDescriptor? ui = plugin is IUiPlugin up ? up.Ui : null;
-
-    var manifestWidth = manifest is not null && manifest.ToolWindowWidth > 0 ? Math.Clamp(manifest.ToolWindowWidth, 240, 2400) : 0;
-    var manifestHeight = manifest is not null && manifest.ToolWindowHeight > 0 ? Math.Clamp(manifest.ToolWindowHeight, 240, 1600) : 0;
-    var manifestMinWidth = manifest is not null && manifest.ToolWindowMinWidth > 0 ? Math.Clamp(manifest.ToolWindowMinWidth, 160, 2400) : 0;
-    var manifestMinHeight = manifest is not null && manifest.ToolWindowMinHeight > 0 ? Math.Clamp(manifest.ToolWindowMinHeight, 160, 1600) : 0;
-
-    var uiWidth = ui is not null && ui.ToolWindowWidth > 0 ? Math.Clamp(ui.ToolWindowWidth, 240, 2400) : 0;
-    var uiHeight = ui is not null && ui.ToolWindowHeight > 0 ? Math.Clamp(ui.ToolWindowHeight, 240, 1600) : 0;
-    var uiMinWidth = ui is not null && ui.ToolWindowMinWidth > 0 ? Math.Clamp(ui.ToolWindowMinWidth, 160, 2400) : 0;
-    var uiMinHeight = ui is not null && ui.ToolWindowMinHeight > 0 ? Math.Clamp(ui.ToolWindowMinHeight, 160, 1600) : 0;
-
-    var contractWidth = Math.Max(manifestWidth, uiWidth);
-    var contractHeight = Math.Max(manifestHeight, uiHeight);
-    var explicitContractMinWidth = Math.Max(manifestMinWidth, uiMinWidth);
-    var explicitContractMinHeight = Math.Max(manifestMinHeight, uiMinHeight);
-
-    // release_contract: Treat a declared tool-window contract size as the generic lower bound when
-    // no explicit min-size is exported by older plugins/descriptors. This is not plugin-name
-    // specific: hamburger, tray, openWindow, existing-window reuse, and saved-state restore all
-    // consume the same resolved request.MinWidth/MinHeight below.
-    var contractMinWidth = explicitContractMinWidth > 0 ? explicitContractMinWidth : contractWidth;
-    var contractMinHeight = explicitContractMinHeight > 0 ? explicitContractMinHeight : contractHeight;
-
+    var definition = ResolveRuntimeToolWindowDefinition(runtimePlugin, route, request);
+    var contractWidth = definition is null ? 0 : NormalizePluginWindowDimension((int)Math.Round(definition.InitialSize.Width));
+    var contractHeight = definition is null ? 0 : NormalizePluginWindowDimension((int)Math.Round(definition.InitialSize.Height));
+    var contractMinWidth = definition is null ? 0 : NormalizePluginWindowDimension((int)Math.Round(definition.MinimumSize.Width));
+    var contractMinHeight = definition is null ? 0 : NormalizePluginWindowDimension((int)Math.Round(definition.MinimumSize.Height));
     var oldWidth = request.Width;
     var oldHeight = request.Height;
     var oldMinWidth = request.MinWidth;
     var oldMinHeight = request.MinHeight;
 
-    if (contractMinWidth > 0)
-    {
-        request.MinWidth = Math.Max(request.MinWidth, contractMinWidth);
-        request.Payload["minWidth"] = request.MinWidth.ToString(System.Globalization.CultureInfo.InvariantCulture);
-    }
-    if (contractMinHeight > 0)
-    {
-        request.MinHeight = Math.Max(request.MinHeight, contractMinHeight);
-        request.Payload["minHeight"] = request.MinHeight.ToString(System.Globalization.CultureInfo.InvariantCulture);
-    }
     if (!HasPluginWindowPayload(request, "width", "Width") && contractWidth > 0)
     {
-        request.Width = Math.Max(contractWidth, request.MinWidth);
+        request.Width = contractWidth;
         request.Payload["width"] = request.Width.ToString(System.Globalization.CultureInfo.InvariantCulture);
-    }
-    else if (request.Width > 0)
-    {
-        request.Width = Math.Max(request.Width, request.MinWidth);
     }
     if (!HasPluginWindowPayload(request, "height", "Height") && contractHeight > 0)
     {
-        request.Height = Math.Max(contractHeight, request.MinHeight);
+        request.Height = contractHeight;
         request.Payload["height"] = request.Height.ToString(System.Globalization.CultureInfo.InvariantCulture);
     }
-    else if (request.Height > 0)
+
+    // Runtime descriptor is the canonical lower bound. A caller may request a stricter
+    // minimum, but may not weaken the plugin's declared window contract.
+    if (contractMinWidth > 0 && request.MinWidth < contractMinWidth)
     {
-        request.Height = Math.Max(request.Height, request.MinHeight);
+        request.MinWidth = contractMinWidth;
+        request.Payload["minWidth"] = request.MinWidth.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+    if (contractMinHeight > 0 && request.MinHeight < contractMinHeight)
+    {
+        request.MinHeight = contractMinHeight;
+        request.Payload["minHeight"] = request.MinHeight.ToString(System.Globalization.CultureInfo.InvariantCulture);
     }
 
     if (log is not null && (request.Width != oldWidth || request.Height != oldHeight || request.MinWidth != oldMinWidth || request.MinHeight != oldMinHeight))
     {
-        log.Add("PLUGIN_TOOL_WINDOW_CONTRACT_RESOLVE", plugin.Name, $"result=APPLIED source={SafePluginActionValue(source)} entryKind={SafePluginActionValue(entryKind)} manifestSize={manifestWidth}x{manifestHeight} manifestMinSize={manifestMinWidth}x{manifestMinHeight} uiSize={uiWidth}x{uiHeight} uiMinSize={uiMinWidth}x{uiMinHeight} oldSize={oldWidth}x{oldHeight} oldMinSize={oldMinWidth}x{oldMinHeight} newSize={request.Width}x{request.Height} newMinSize={request.MinWidth}x{request.MinHeight} rule=release_contract");
+        log.Add("PLUGIN_TOOL_WINDOW_CONTRACT_RESOLVE", runtimePlugin.Descriptor.DisplayName, $"result=APPLIED source={SafePluginActionValue(source)} entryKind={SafePluginActionValue(entryKind)} windowDefinitionId={SafePluginActionValue(definition?.WindowDefinitionId)} descriptorSize={contractWidth}x{contractHeight} descriptorMinSize={contractMinWidth}x{contractMinHeight} oldSize={oldWidth}x{oldHeight} oldMinSize={oldMinWidth}x{oldMinHeight} newSize={request.Width}x{request.Height} newMinSize={request.MinWidth}x{request.MinHeight} rule=runtime_descriptor_window_contract");
     }
 }
 
-static string ResolvePluginToolWindowTitle(ITvAIrPlugin plugin, string fallbackTitle)
+static string ResolvePluginToolWindowTitle(ITvAirRuntimeCapabilityPlugin runtimePlugin, string route, PluginWindowRequest request, string fallbackTitle)
 {
     static string Clean(string? value) => string.IsNullOrWhiteSpace(value) ? string.Empty : value.Trim();
-
-    var uiTitle = plugin is IUiPlugin up ? Clean(up.Ui.ToolWindowTitle) : string.Empty;
-    if (!string.IsNullOrWhiteSpace(uiTitle)) return uiTitle;
-
-    var manifestTitle = plugin is IManifestPlugin mp ? Clean(mp.Manifest.ToolWindowTitle) : string.Empty;
-    if (!string.IsNullOrWhiteSpace(manifestTitle)) return manifestTitle;
-
+    var definitionTitle = Clean(ResolveRuntimeToolWindowDefinition(runtimePlugin, route, request)?.Title);
+    if (!string.IsNullOrWhiteSpace(definitionTitle)) return definitionTitle;
     var fallback = Clean(fallbackTitle);
-    return string.IsNullOrWhiteSpace(fallback) ? plugin.Name : fallback;
+    return string.IsNullOrWhiteSpace(fallback) ? runtimePlugin.Descriptor.DisplayName : fallback;
 }
 
-static PluginWindowRequest ResolvePluginToolWindowContract(ITvAIrPlugin plugin, string pluginActionId, string route, PluginWindowRequest request, string source, string entryKind, LogRepository log)
+static PluginWindowRequest ResolvePluginToolWindowContract(ITvAirRuntimeCapabilityPlugin runtimePlugin, string pluginActionId, string route, PluginWindowRequest request, string source, string entryKind, LogRepository log)
 {
     route = (route ?? string.Empty).Trim().Trim('/');
     request.Action = string.IsNullOrWhiteSpace(request.Action) ? "openWindow" : request.Action.Trim();
-    request.PluginId = string.IsNullOrWhiteSpace(request.PluginId) ? pluginActionId : request.PluginId.Trim();
+    request.PluginId = NormalizePluginActionId(string.IsNullOrWhiteSpace(request.PluginId) ? pluginActionId : request.PluginId);
     request.RouteSegment = string.IsNullOrWhiteSpace(request.RouteSegment) ? route : request.RouteSegment.Trim().Trim('/');
-    request.Title = ResolvePluginToolWindowTitle(plugin, string.IsNullOrWhiteSpace(request.Title) ? plugin.Name : request.Title.Trim());
+    request.Title = ResolvePluginToolWindowTitle(runtimePlugin, route, request, string.IsNullOrWhiteSpace(request.Title) ? runtimePlugin.Descriptor.DisplayName : request.Title.Trim());
     request.ContentRoute = string.IsNullOrWhiteSpace(request.ContentRoute) ? $"/plugin/{Uri.EscapeDataString(route)}" : request.ContentRoute.Trim();
     request.ReuseExisting = true;
     request.ActivateExisting = true;
@@ -905,19 +1072,43 @@ static PluginWindowRequest ResolvePluginToolWindowContract(ITvAIrPlugin plugin, 
     request.Payload["source"] = string.IsNullOrWhiteSpace(source) ? "unknown" : source;
     request.Payload["entryKind"] = string.IsNullOrWhiteSpace(entryKind) ? "unknown" : entryKind;
     request.Payload["unifiedToolWindowEntry"] = "true";
-    ApplyManifestToolWindowSizeContract(request, plugin, log, source, entryKind);
-    request.MinWidth = Math.Clamp(request.MinWidth <= 0 ? 320 : request.MinWidth, 160, 2400);
-    request.MinHeight = Math.Clamp(request.MinHeight <= 0 ? 240 : request.MinHeight, 160, 1600);
-    request.Width = Math.Max(request.MinWidth, Math.Clamp(request.Width <= 0 ? 620 : request.Width, 240, 2400));
-    request.Height = Math.Max(request.MinHeight, Math.Clamp(request.Height <= 0 ? 760 : request.Height, 240, 1600));
-    log.Add("PLUGIN_TOOL_WINDOW_ENTRY", plugin.Name, $"result=RESOLVED source={SafePluginActionValue(source)} entryKind={SafePluginActionValue(entryKind)} pluginId={SafePluginActionValue(pluginActionId)} routeSegment={SafePluginActionValue(route)} requestRoute={SafePluginActionValue(request.RouteSegment)} size={request.Width}x{request.Height} minSize={request.MinWidth}x{request.MinHeight} contentRoute={SafePluginActionValue(request.ContentRoute)} reuseExisting={request.ReuseExisting} activateExisting={request.ActivateExisting} rule=release_contract");
+    ApplyRuntimeToolWindowSizeContract(request, runtimePlugin, route, log, source, entryKind);
+    var windowDefinition = ResolveRuntimeToolWindowDefinition(runtimePlugin, route, request);
+    request.ScrollPolicy = windowDefinition?.ScrollPolicy ?? TvAIrPlugin.Windows.PluginWindowScrollPolicy.Auto;
+    request.HorizontalScrollPolicy = windowDefinition?.HorizontalScrollPolicy ?? TvAIrPlugin.Windows.PluginWindowAxisScrollPolicy.Auto;
+    request.VerticalScrollPolicy = windowDefinition?.VerticalScrollPolicy ?? TvAIrPlugin.Windows.PluginWindowAxisScrollPolicy.Auto;
+    request.SizeReference = windowDefinition?.SizeReference ?? TvAIrPlugin.Windows.PluginWindowSizeReference.OuterWindow;
+    request.ResizeMode = windowDefinition?.ResizeMode ?? (windowDefinition?.Resizable == false
+        ? TvAIrPlugin.Windows.PluginWindowResizeMode.Fixed
+        : TvAIrPlugin.Windows.PluginWindowResizeMode.Both);
+    request.RefreshMode = windowDefinition?.RefreshMode ?? TvAIrPlugin.Windows.PluginWindowRefreshMode.Navigate;
+    request.ContentSizePolicy = windowDefinition?.ContentSizePolicy ?? TvAIrPlugin.Windows.PluginWindowContentSizePolicy.Ignore;
+    request.PreserveInteractionState = windowDefinition?.PreserveInteractionState ?? true;
+    request.ReusePolicy = windowDefinition?.ReusePolicy ?? TvAIrPlugin.Windows.PluginWindowReusePolicy.PerRoute;
+    request.ActivationPolicy = windowDefinition?.ActivationPolicy ?? TvAIrPlugin.Windows.PluginWindowActivationPolicy.ManualOpenOnly;
+    request.CloseBehavior = windowDefinition?.CloseBehavior ?? TvAIrPlugin.Windows.PluginWindowCloseBehavior.Dispose;
+    request.BackgroundExecution = windowDefinition?.BackgroundExecution ?? TvAIrPlugin.Windows.PluginWindowBackgroundExecution.StopWithWindow;
+    request.StatePersistence = windowDefinition?.StatePersistence ?? TvAIrPlugin.Windows.PluginWindowStatePersistence.Placement;
+    request.Payload["scrollPolicy"] = request.ScrollPolicy.ToString();
+    request.Payload["horizontalScrollPolicy"] = request.HorizontalScrollPolicy.ToString();
+    request.Payload["verticalScrollPolicy"] = request.VerticalScrollPolicy.ToString();
+    request.Payload["sizeReference"] = request.SizeReference.ToString();
+    request.Payload["resizeMode"] = request.ResizeMode.ToString();
+    request.Payload["refreshMode"] = request.RefreshMode.ToString();
+    request.Payload["reusePolicy"] = request.ReusePolicy.ToString();
+    request.Payload["activationPolicy"] = request.ActivationPolicy.ToString();
+    request.Payload["closeBehavior"] = request.CloseBehavior.ToString();
+    request.Payload["backgroundExecution"] = request.BackgroundExecution.ToString();
+    request.Payload["statePersistence"] = request.StatePersistence.ToString();
+    request.Payload["contentSizePolicy"] = request.ContentSizePolicy.ToString();
+    request.Width = request.Width > 0 ? request.Width : 620;
+    request.Height = request.Height > 0 ? request.Height : 760;
+    log.Add("PLUGIN_TOOL_WINDOW_ENTRY", runtimePlugin.Descriptor.DisplayName, $"result=RESOLVED source={SafePluginActionValue(source)} entryKind={SafePluginActionValue(entryKind)} pluginId={SafePluginActionValue(pluginActionId)} routeSegment={SafePluginActionValue(route)} requestRoute={SafePluginActionValue(request.RouteSegment)} size={request.Width}x{request.Height} sizeReference={request.SizeReference} resizeMode={request.ResizeMode} scrollX={request.HorizontalScrollPolicy} scrollY={request.VerticalScrollPolicy} legacyScroll={request.ScrollPolicy} refreshMode={request.RefreshMode} contentSizePolicy={request.ContentSizePolicy} preserveInteractionState={request.PreserveInteractionState} reusePolicy={request.ReusePolicy} activationPolicy={request.ActivationPolicy} closeBehavior={request.CloseBehavior} backgroundExecution={request.BackgroundExecution} statePersistence={request.StatePersistence} contentRoute={SafePluginActionValue(request.ContentRoute)} reuseExisting={request.ReuseExisting} activateExisting={request.ActivateExisting} rule=runtime_descriptor_window_contract");
     return request;
 }
 
-
-
 static (PluginWindowSession Session, PluginToolWindowOpenResult HostResult, string WindowUrl, string ContentRoute, string AbsoluteUrl, PluginToolWindowIconSpec IconSpec, bool ReusedSession) OpenOrActivatePluginToolWindowUnified(
-    ITvAIrPlugin plugin,
+    ITvAirRuntimeCapabilityPlugin runtimePlugin,
     string pluginActionId,
     string route,
     PluginWindowRequest request,
@@ -928,32 +1119,61 @@ static (PluginWindowSession Session, PluginToolWindowOpenResult HostResult, stri
     PluginToolWindowHostService toolWindows,
     LogRepository log)
 {
-    request = ResolvePluginToolWindowContract(plugin, pluginActionId, route, request, source, entryKind, log);
-    var session = windows.OpenOrReuse(plugin.Name, pluginActionId, route, request, reuseExisting: true, out var reusedWindowSession);
+    request = ResolvePluginToolWindowContract(runtimePlugin, pluginActionId, route, request, source, entryKind, log);
+    var descriptor = runtimePlugin.Descriptor;
+    var session = windows.OpenOrReuse(descriptor.DisplayName, pluginActionId, route, request, reuseExisting: true, out var reusedWindowSession);
     var windowUrl = $"/plugin-window/{Uri.EscapeDataString(session.WindowId)}";
     var contentRoute = BuildHostManagedPluginContentRoute(session.ContentRoute, session.WindowId, session.Revision);
     var hostCaps = toolWindows.GetCapabilities();
     var navigationUrl = BuildToolWindowNavigationUrl(windowUrl, contentRoute, hostCaps);
     var absoluteWindowUrl = BuildAbsoluteLocalUrl(http, navigationUrl);
-    var iconSpec = ResolvePluginToolWindowIcon(plugin, route, pluginActionId, log);
-    var hostResult = toolWindows.OpenOrActivate(session, absoluteWindowUrl, iconSpec);
-    log.Add("PLUGIN_TOOL_WINDOW_ENTRY", plugin.Name, $"result=OPEN_OR_ACTIVATE source={SafePluginActionValue(source)} entryKind={SafePluginActionValue(entryKind)} windowId={SafePluginActionValue(session.WindowId)} reusedSession={reusedWindowSession} hostResult={SafePluginActionValue(hostResult.Result)} hostReused={hostResult.Reused} activated={hostResult.Activated} hostKind={SafePluginActionValue(hostResult.HostKind)} size={session.Width}x{session.Height} minSize={session.MinWidth}x{session.MinHeight} contentRoute={SafePluginActionValue(contentRoute)} rule=release_contract");
+    var iconSpec = ResolvePluginToolWindowIcon(runtimePlugin, route, pluginActionId, log);
+    var activateRequested = request.ActivationPolicy switch
+    {
+        TvAIrPlugin.Windows.PluginWindowActivationPolicy.Always => true,
+        TvAIrPlugin.Windows.PluginWindowActivationPolicy.Never => false,
+        _ => request.ActivateExisting
+    };
+    var hostResult = toolWindows.OpenOrActivate(session, absoluteWindowUrl, iconSpec, activateRequested);
+    log.Add("PLUGIN_TOOL_WINDOW_ENTRY", descriptor.DisplayName, $"result=OPEN_OR_ACTIVATE source={SafePluginActionValue(source)} entryKind={SafePluginActionValue(entryKind)} windowId={SafePluginActionValue(session.WindowId)} reusedSession={reusedWindowSession} hostResult={SafePluginActionValue(hostResult.Result)} hostReused={hostResult.Reused} activated={hostResult.Activated} hostKind={SafePluginActionValue(hostResult.HostKind)} size={session.Width}x{session.Height} minSize={session.MinWidth}x{session.MinHeight} contentRoute={SafePluginActionValue(contentRoute)} rule=runtime_descriptor_window_contract");
     return (session, hostResult, windowUrl, contentRoute, absoluteWindowUrl, iconSpec, reusedWindowSession);
 }
 
-static async Task<IResult> HandlePluginWindowDispatchAsync(HttpRequest http, PluginRegistry registry, PluginActionTokenStore actionTokens, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, LogRepository log)
+static async Task<IResult> HandlePluginWindowDispatchAsync(HttpRequest http, PluginRegistry registry, PluginActionTokenStore actionTokens, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, PluginBoundaryGate boundaryGate, LogRepository log)
 {
     var request = await ReadPluginWindowRequestAsync(http);
     NormalizePluginWindowRequestFromPayload(request);
-    var pluginId = (request.PluginId ?? string.Empty).Trim();
+    request.Payload ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    var pluginId = NormalizePluginActionId(!string.IsNullOrWhiteSpace(request.PluginId)
+        ? request.PluginId
+        : ReadPayload(request.Payload, "PluginId", "pluginId"));
     var route = !string.IsNullOrWhiteSpace(request.RouteSegment)
         ? request.RouteSegment.Trim()
-        : ReadPayload(request.Payload, "Route", "route", "RouteSegment", "routeSegment");
-    var action = string.IsNullOrWhiteSpace(request.Action) ? "openWindow" : request.Action.Trim();
+        : ReadPayload(request.Payload, "RouteSegment", "routeSegment");
+    var action = NormalizePluginWindowAction(string.IsNullOrWhiteSpace(request.Action) ? "openWindow" : request.Action);
+    request.Action = action;
+    request.Payload["action"] = action;
     var responseMode = NormalizePluginFormResponseMode(!string.IsNullOrWhiteSpace(request.ResponseMode) ? request.ResponseMode : ReadPayload(request.Payload, "responseMode", "ResponseMode"));
     responseMode = NormalizePluginWindowActionResponseMode(http, request, action, responseMode);
+    var requestedWindowIdForIdentity = NormalizePluginWindowId(!string.IsNullOrWhiteSpace(request.WindowId) ? request.WindowId : ReadPayload(request.Payload, "windowId", "WindowId", "currentWindowId", "CurrentWindowId", "safeEventWindowId", "SafeEventWindowId"));
+    if (string.IsNullOrWhiteSpace(request.WindowId) && !string.IsNullOrWhiteSpace(requestedWindowIdForIdentity))
+    {
+        request.WindowId = requestedWindowIdForIdentity;
+        request.Payload["windowId"] = requestedWindowIdForIdentity;
+    }
+    var recoveredWindowIdentity = RecoverPluginActionIdentity(registry, windows, pluginId, route, action, requestedWindowIdForIdentity, string.Empty, request.Payload);
+    if (!string.Equals(pluginId, recoveredWindowIdentity.PluginId, StringComparison.Ordinal) || !string.Equals(route, recoveredWindowIdentity.RouteSegment, StringComparison.Ordinal))
+    {
+        pluginId = recoveredWindowIdentity.PluginId;
+        route = recoveredWindowIdentity.RouteSegment;
+        request.PluginId = pluginId;
+        request.RouteSegment = route;
+        if (!string.IsNullOrWhiteSpace(pluginId)) request.Payload["PluginId"] = pluginId;
+        if (!string.IsNullOrWhiteSpace(route)) request.Payload["RouteSegment"] = route;
+        log.Add("PLUGIN_WINDOW_IDENTITY_RECOVER", string.IsNullOrWhiteSpace(pluginId) ? "-" : pluginId, $"result=APPLIED action={SafePluginActionValue(action)} reason={SafePluginActionValue(recoveredWindowIdentity.Reason)} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(route)} windowId={SafePluginActionValue(requestedWindowIdForIdentity)} endpoint={SafePluginActionValue(http.Path.Value)} rule=runtime_window_identity_recovery");
+    }
     var plugin = FindPluginByActionIdentity(registry, pluginId, route);
-    var pluginName = plugin?.Name ?? pluginId;
+    var pluginName = plugin?.Descriptor.DisplayName ?? pluginId;
 
     if (plugin is null)
     {
@@ -961,18 +1181,24 @@ static async Task<IResult> HandlePluginWindowDispatchAsync(HttpRequest http, Plu
         return BuildPluginWindowDispatchError(new PluginWindowResult { Success = false, Message = "Plugin not found.", Diagnostics = "plugin_not_found" }, responseMode, StatusCodes.Status404NotFound);
     }
 
-    var hasUiPermission = plugin is IManifestPlugin mp && mp.Manifest.Permissions.Contains(PluginPermission.ShowUi);
-    if (!hasUiPermission)
+    var windowBoundary = boundaryGate.CheckWindow(ResolveRuntimeBoundaryPlugin(registry, plugin), action, http.Path.Value ?? string.Empty);
+    if (!windowBoundary.Allowed)
     {
-        log.Add("PLUGIN_WINDOW", pluginName, $"action={SafePluginActionValue(action)} result=DENIED reason=missing_ShowUi_permission endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
-        return BuildPluginWindowDispatchError(new PluginWindowResult { Success = false, Message = "ShowUi permission is required.", Diagnostics = "missing_ShowUi_permission" }, responseMode, StatusCodes.Status403Forbidden);
+        log.Add("PLUGIN_WINDOW", pluginName, $"action={SafePluginActionValue(action)} result=DENIED reason={SafePluginActionValue(windowBoundary.Reason)} endpoint={SafePluginActionValue(http.Path.Value)} rule=plugin_boundary_gate");
+        return BuildPluginWindowDispatchError(new PluginWindowResult { Success = false, Message = "Plugin window request was denied by TvAIr host boundary.", Diagnostics = windowBoundary.Reason }, responseMode, StatusCodes.Status403Forbidden);
     }
 
-    ApplyManifestToolWindowSizeContract(request, plugin);
+    var runtimeWindowPlugin = ResolveRuntimeBoundaryPlugin(registry, plugin);
+    ApplyRuntimeToolWindowSizeContract(request, runtimeWindowPlugin, route);
 
-    var token = !string.IsNullOrWhiteSpace(request.WindowToken) ? request.WindowToken : request.Token;
-    var pluginActionIdForWindowToken = GetPluginActionIdentity(plugin, route);
-    var requestedWindowIdForToken = NormalizePluginWindowId(!string.IsNullOrWhiteSpace(request.WindowId) ? request.WindowId : ReadPayload(request.Payload, "windowId", "WindowId", "currentWindowId", "CurrentWindowId"));
+    var token = request.WindowToken;
+    var pluginActionIdForWindowToken = GetPluginActionIdentity(plugin);
+    var requestedWindowIdForToken = NormalizePluginWindowId(!string.IsNullOrWhiteSpace(request.WindowId) ? request.WindowId : ReadPayload(request.Payload, "windowId", "WindowId", "currentWindowId", "CurrentWindowId", "safeEventWindowId", "SafeEventWindowId"));
+    if (string.IsNullOrWhiteSpace(request.WindowId) && !string.IsNullOrWhiteSpace(requestedWindowIdForToken))
+    {
+        request.WindowId = requestedWindowIdForToken;
+        request.Payload["windowId"] = requestedWindowIdForToken;
+    }
     if (!ValidatePluginActionTokenOrRecoverHostWindow(actionTokens, windows, token, pluginActionIdForWindowToken, route, pluginName, action, requestedWindowIdForToken, null, http.Path.Value ?? string.Empty, "window_dispatch", log, out var tokenReason))
     {
         log.Add("PLUGIN_WINDOW", pluginName, $"action={SafePluginActionValue(action)} result=DENIED reason={tokenReason} windowId={SafePluginActionValue(requestedWindowIdForToken)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
@@ -981,12 +1207,12 @@ static async Task<IResult> HandlePluginWindowDispatchAsync(HttpRequest http, Plu
 
     if (action.Equals("openWindow", StringComparison.OrdinalIgnoreCase) || action.Equals("open", StringComparison.OrdinalIgnoreCase))
     {
-        var pluginActionId = GetPluginActionIdentity(plugin, route);
+        var pluginActionId = GetPluginActionIdentity(plugin);
         var hostOpenMode = IsPluginWindowHostOpenMode(responseMode);
         var defaultReuseExisting = hostOpenMode;
         var reuseExisting = request.ReuseExisting || defaultReuseExisting;
         var activateExisting = request.ActivateExisting || hostOpenMode;
-        var unifiedOpen = OpenOrActivatePluginToolWindowUnified(plugin, pluginActionId, route, request, "openWindow", "api_or_plugin_window", http, windows, toolWindows, log);
+        var unifiedOpen = OpenOrActivatePluginToolWindowUnified(runtimeWindowPlugin, pluginActionId, route, request, "openWindow", "api_or_plugin_window", http, windows, toolWindows, log);
         var session = unifiedOpen.Session;
         var reusedWindowSession = unifiedOpen.ReusedSession;
         var windowUrl = unifiedOpen.WindowUrl;
@@ -1003,8 +1229,6 @@ static async Task<IResult> HandlePluginWindowDispatchAsync(HttpRequest http, Plu
             RefreshRequested = false,
             RefreshTarget = "content",
             PreserveScroll = request.PreserveScroll,
-            RefreshScrollTarget = request.RefreshScrollTarget,
-            RefreshScrollMode = request.RefreshScrollMode,
             Revision = session.Revision
         };
         if (hostOpenMode)
@@ -1027,24 +1251,28 @@ static async Task<IResult> HandlePluginWindowDispatchAsync(HttpRequest http, Plu
 
     if (action.Equals("closeWindow", StringComparison.OrdinalIgnoreCase) || action.Equals("close", StringComparison.OrdinalIgnoreCase))
     {
-        var closedSession = windows.DeleteClosed(request.WindowId, GetPluginActionIdentity(plugin, route));
-        var ok = closedSession is not null;
-        var toolWindowClosed = toolWindows.Close(request.WindowId);
-        log.Add("PLUGIN_WINDOW", pluginName, $"action=closeWindow result={(ok ? "OK" : "NOT_FOUND")} windowId={SafePluginActionValue(request.WindowId)} toolWindowCloseRequested={toolWindowClosed} responseMode={SafePluginActionValue(responseMode)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
+        var resolvedCloseWindowId = NormalizePluginWindowId(!string.IsNullOrWhiteSpace(request.WindowId) ? request.WindowId : ReadPayload(request.Payload, "windowId", "WindowId", "currentWindowId", "CurrentWindowId", "safeEventWindowId", "SafeEventWindowId"));
+        request.WindowId = resolvedCloseWindowId;
+        // Hostが生存しているToolWindowは、×閉鎖と同じHost lifecycle正本へ通す。
+        // SessionStoreだけを先に削除する別ルートを作らない。Host不在のstale Sessionだけ最終回収する。
+        var toolWindowClosed = toolWindows.Close(resolvedCloseWindowId);
+        var closedSession = toolWindowClosed ? null : windows.DeleteClosed(resolvedCloseWindowId, GetPluginActionIdentity(plugin));
+        var ok = toolWindowClosed || closedSession is not null;
+        var resultText = ok ? (toolWindowClosed ? "HOST_CLOSE_REQUESTED" : "STALE_SESSION_REMOVED") : "NOT_FOUND";
+        log.Add("PLUGIN_WINDOW", pluginName, $"action=closeWindow result={resultText} windowId={SafePluginActionValue(resolvedCloseWindowId)} routeSegment={SafePluginActionValue(route)} toolWindowCloseRequested={toolWindowClosed} responseMode={SafePluginActionValue(responseMode)} endpoint={SafePluginActionValue(http.Path.Value)} navigationSuppressed=True rule=plugin_window_close_contract");
         return ok
-            ? BuildPluginWindowDispatchResponse(new PluginWindowResult { Success = true, Message = "Plugin window closed.", Diagnostics = "closed", WindowId = request.WindowId }, responseMode, ResolvePluginToolWindowReturnUrl(http, request, route))
-            : BuildPluginWindowDispatchError(new PluginWindowResult { Success = false, Message = "Plugin window not found.", Diagnostics = "window_not_found", WindowId = request.WindowId }, responseMode, StatusCodes.Status404NotFound);
+            ? BuildPluginWindowDispatchResponse(new PluginWindowResult { Success = true, Message = "Plugin window closed.", Diagnostics = "closed", WindowId = resolvedCloseWindowId }, responseMode, ResolvePluginToolWindowReturnUrl(http, request, route))
+            : BuildPluginWindowDispatchError(new PluginWindowResult { Success = false, Message = "Plugin window not found.", Diagnostics = "window_not_found", WindowId = resolvedCloseWindowId }, responseMode, StatusCodes.Status404NotFound);
     }
 
     if (action.Equals("updateWindow", StringComparison.OrdinalIgnoreCase) || action.Equals("update", StringComparison.OrdinalIgnoreCase))
     {
         var requestedAlwaysOnTopPresent = HasPluginWindowPayload(request, "alwaysOnTop", "AlwaysOnTop");
         var refreshAfter = request.RefreshAfter || (TryReadBoolPayload(request.Payload, out var refreshAfterValue, "refreshAfter", "RefreshAfter", "refresh", "Refresh") && refreshAfterValue);
-        var refreshTarget = NormalizePluginWindowRefreshTarget(!string.IsNullOrWhiteSpace(request.Target) ? request.Target : request.RefreshTarget);
+        var refreshTarget = NormalizePluginWindowRefreshTarget(request.RefreshTarget);
         request.RefreshTarget = refreshTarget;
-        request.Target = refreshTarget;
 
-        var session = windows.Update(request.WindowId, GetPluginActionIdentity(plugin, route), request);
+        var session = windows.Update(request.WindowId, GetPluginActionIdentity(plugin), request);
         var ok = session is not null;
         var hostApply = ok ? toolWindows.ApplySession(session!.WindowId, session!) : PluginToolWindowApplyResult.NotFound(request.WindowId);
         var refreshIssued = false;
@@ -1057,7 +1285,7 @@ static async Task<IResult> HandlePluginWindowDispatchAsync(HttpRequest http, Plu
 
         if (ok && refreshAfter)
         {
-            var refreshed = windows.Refresh(session!.WindowId, GetPluginActionIdentity(plugin, route), request);
+            var refreshed = windows.Refresh(session!.WindowId, GetPluginActionIdentity(plugin), request);
             if (refreshed is not null)
             {
                 session = refreshed;
@@ -1065,11 +1293,9 @@ static async Task<IResult> HandlePluginWindowDispatchAsync(HttpRequest http, Plu
                 var hostCaps = toolWindows.GetCapabilities();
                 var navigationUrl = BuildToolWindowNavigationUrl($"/plugin-window/{Uri.EscapeDataString(session.WindowId)}", responseContentRoute, hostCaps);
                 var absoluteNavigationUrl = BuildAbsoluteLocalUrl(http, navigationUrl);
-                var hostResult = toolWindows.OpenOrActivate(session, absoluteNavigationUrl);
+                var hostResult = toolWindows.RefreshExisting(session, absoluteNavigationUrl);
                 hostRefreshResult = hostResult.Result;
                 refreshIssued = true;
-                if (!string.IsNullOrWhiteSpace(request.RefreshScrollTarget))
-                    log.Add("PLUGIN_WINDOW_REFRESH_SCROLL", pluginName, $"result=REQUESTED action=updateWindow windowId={SafePluginActionValue(session.WindowId)} target={SafePluginActionValue(request.RefreshScrollTarget)} mode={SafePluginActionValue(request.RefreshScrollMode)} hostKind={SafePluginActionValue(hostResult.HostKind)} refreshTarget={SafePluginActionValue(refreshTarget)} reason=refresh_after_host_content_rerender rule=release_contract");
             }
             else
             {
@@ -1077,9 +1303,9 @@ static async Task<IResult> HandlePluginWindowDispatchAsync(HttpRequest http, Plu
             }
         }
 
-        log.Add("PLUGIN_WINDOW", pluginName, $"action=updateWindow result={(ok ? "OK" : "NOT_FOUND")} windowId={SafePluginActionValue(request.WindowId)} revision={session?.Revision ?? 0} payloadAlwaysOnTopPresent={requestedAlwaysOnTopPresent} payloadAlwaysOnTop={request.AlwaysOnTop} sessionAlwaysOnTop={session?.AlwaysOnTop.ToString() ?? "-"} hostUpdated={hostApply.HostAccepted} hostApplied={hostApply.Applied} hostBeforeTopMost={hostApply.BeforeTopMost?.ToString() ?? "-"} hostAfterTopMost={hostApply.AfterTopMost?.ToString() ?? "-"} hostBeforeSize={FormatPluginHostSize(hostApply.BeforeWidth, hostApply.BeforeHeight)} hostAfterSize={FormatPluginHostSize(hostApply.AfterWidth, hostApply.AfterHeight)} hostDiagnostics={SafePluginActionValue(hostApply.Diagnostics)} refreshAfter={refreshAfter} refreshTarget={SafePluginActionValue(refreshTarget)} refreshScrollTarget={SafePluginActionValue(request.RefreshScrollTarget)} refreshScrollMode={SafePluginActionValue(request.RefreshScrollMode)} refreshIssued={refreshIssued} hostRefresh={SafePluginActionValue(hostRefreshResult)} responseMode={SafePluginActionValue(responseMode)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
+        log.Add("PLUGIN_WINDOW", pluginName, $"action=updateWindow result={(ok ? "OK" : "NOT_FOUND")} windowId={SafePluginActionValue(request.WindowId)} revision={session?.Revision ?? 0} payloadAlwaysOnTopPresent={requestedAlwaysOnTopPresent} payloadAlwaysOnTop={request.AlwaysOnTop} sessionAlwaysOnTop={session?.AlwaysOnTop.ToString() ?? "-"} hostUpdated={hostApply.HostAccepted} hostApplied={hostApply.Applied} hostBeforeTopMost={hostApply.BeforeTopMost?.ToString() ?? "-"} hostAfterTopMost={hostApply.AfterTopMost?.ToString() ?? "-"} hostBeforeSize={FormatPluginHostSize(hostApply.BeforeWidth, hostApply.BeforeHeight)} hostAfterSize={FormatPluginHostSize(hostApply.AfterWidth, hostApply.AfterHeight)} hostDiagnostics={SafePluginActionValue(hostApply.Diagnostics)} refreshAfter={refreshAfter} refreshTarget={SafePluginActionValue(refreshTarget)} refreshIssued={refreshIssued} hostRefresh={SafePluginActionValue(hostRefreshResult)} responseMode={SafePluginActionValue(responseMode)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
         return ok
-            ? BuildPluginWindowDispatchResponse(new PluginWindowResult { Success = true, Message = "Plugin window updated.", Diagnostics = (hostApply.Applied ? "updated;hostApplied" : $"updated;{hostApply.Diagnostics}") + (refreshIssued ? ";refreshIssued" : string.Empty), WindowId = session!.WindowId, WindowUrl = $"/plugin-window/{Uri.EscapeDataString(session.WindowId)}", ContentRoute = responseContentRoute ?? BuildHostManagedPluginContentRoute(session.ContentRoute, session.WindowId, session.Revision), RefreshRequested = refreshIssued, RefreshTarget = refreshTarget, PreserveScroll = request.PreserveScroll, RefreshScrollTarget = request.RefreshScrollTarget, RefreshScrollMode = request.RefreshScrollMode, Revision = session.Revision }, responseMode, responseContentRoute ?? BuildHostManagedPluginContentRoute(session!.ContentRoute, session.WindowId, session.Revision))
+            ? BuildPluginWindowDispatchResponse(new PluginWindowResult { Success = true, Message = "Plugin window updated.", Diagnostics = (hostApply.Applied ? "updated;hostApplied" : $"updated;{hostApply.Diagnostics}") + (refreshIssued ? ";refreshIssued" : string.Empty), WindowId = session!.WindowId, WindowUrl = $"/plugin-window/{Uri.EscapeDataString(session.WindowId)}", ContentRoute = responseContentRoute ?? BuildHostManagedPluginContentRoute(session.ContentRoute, session.WindowId, session.Revision), RefreshRequested = refreshIssued, RefreshTarget = refreshTarget, PreserveScroll = request.PreserveScroll, Revision = session.Revision }, responseMode, responseContentRoute ?? BuildHostManagedPluginContentRoute(session!.ContentRoute, session.WindowId, session.Revision))
             : BuildPluginWindowDispatchError(new PluginWindowResult { Success = false, Message = "Plugin window not found.", Diagnostics = "window_not_found", WindowId = request.WindowId }, responseMode, StatusCodes.Status404NotFound);
     }
 
@@ -1088,11 +1314,10 @@ static async Task<IResult> HandlePluginWindowDispatchAsync(HttpRequest http, Plu
         || action.Equals("refresh", StringComparison.OrdinalIgnoreCase)
         || action.Equals("rerender", StringComparison.OrdinalIgnoreCase))
     {
-        var refreshTarget = NormalizePluginWindowRefreshTarget(!string.IsNullOrWhiteSpace(request.Target) ? request.Target : request.RefreshTarget);
+        var refreshTarget = NormalizePluginWindowRefreshTarget(request.RefreshTarget);
         request.RefreshTarget = refreshTarget;
-        request.Target = refreshTarget;
         var resolvedWindowId = ResolvePluginWindowId(request);
-        var session = windows.Refresh(resolvedWindowId, GetPluginActionIdentity(plugin, route), request);
+        var session = windows.Refresh(resolvedWindowId, GetPluginActionIdentity(plugin), request);
         var ok = session is not null;
         var hostRefreshResult = "-";
         string? refreshedContentRoute = null;
@@ -1102,18 +1327,16 @@ static async Task<IResult> HandlePluginWindowDispatchAsync(HttpRequest http, Plu
             var hostCaps = toolWindows.GetCapabilities();
             var navigationUrl = BuildToolWindowNavigationUrl($"/plugin-window/{Uri.EscapeDataString(session.WindowId)}", refreshedContentRoute, hostCaps);
             var absoluteNavigationUrl = BuildAbsoluteLocalUrl(http, navigationUrl);
-            var hostResult = toolWindows.OpenOrActivate(session, absoluteNavigationUrl);
+            var hostResult = toolWindows.RefreshExisting(session, absoluteNavigationUrl);
             hostRefreshResult = hostResult.Result;
-            if (!string.IsNullOrWhiteSpace(request.RefreshScrollTarget))
-                log.Add("PLUGIN_WINDOW_REFRESH_SCROLL", pluginName, $"result=REQUESTED action=refreshWindow windowId={SafePluginActionValue(session.WindowId)} target={SafePluginActionValue(request.RefreshScrollTarget)} mode={SafePluginActionValue(request.RefreshScrollMode)} hostKind={SafePluginActionValue(hostResult.HostKind)} refreshTarget={SafePluginActionValue(refreshTarget)} reason=refresh_window_host_content_rerender rule=release_contract");
         }
-        log.Add("PLUGIN_WINDOW", pluginName, $"action=refreshWindow result={(ok ? "ISSUED" : "NOT_FOUND")} windowId={SafePluginActionValue(resolvedWindowId)} target={SafePluginActionValue(refreshTarget)} preserveScroll={request.PreserveScroll} refreshScrollTarget={SafePluginActionValue(request.RefreshScrollTarget)} refreshScrollMode={SafePluginActionValue(request.RefreshScrollMode)} revision={session?.Revision ?? 0} contentRoute={SafePluginActionValue(session?.ContentRoute)} hostRefresh={SafePluginActionValue(hostRefreshResult)} responseMode={SafePluginActionValue(responseMode)} endpoint={SafePluginActionValue(http.Path.Value)} reloadScope=toolwindow-content-document_or_iframe-content-only rule=release_contract");
+        log.Add("PLUGIN_WINDOW", pluginName, $"action=refreshWindow result={(ok ? "ISSUED" : "NOT_FOUND")} windowId={SafePluginActionValue(resolvedWindowId)} target={SafePluginActionValue(refreshTarget)} preserveScroll={request.PreserveScroll} revision={session?.Revision ?? 0} contentRoute={SafePluginActionValue(session?.ContentRoute)} hostRefresh={SafePluginActionValue(hostRefreshResult)} responseMode={SafePluginActionValue(responseMode)} endpoint={SafePluginActionValue(http.Path.Value)} reloadScope=toolwindow-content-document_or_iframe-content-only rule=release_contract");
         if (ok)
         {
-            var result = new PluginWindowResult { Success = true, Message = "Plugin window refresh requested.", Diagnostics = "refresh_requested", WindowId = session!.WindowId, WindowUrl = $"/plugin-window/{Uri.EscapeDataString(session.WindowId)}", ContentRoute = refreshedContentRoute ?? BuildHostManagedPluginContentRoute(session.ContentRoute, session.WindowId, session.Revision), RefreshRequested = true, RefreshTarget = refreshTarget, PreserveScroll = request.PreserveScroll, RefreshScrollTarget = request.RefreshScrollTarget, RefreshScrollMode = request.RefreshScrollMode, Revision = session.Revision };
+            var result = new PluginWindowResult { Success = true, Message = "Plugin window refresh requested.", Diagnostics = "refresh_requested", WindowId = session!.WindowId, WindowUrl = $"/plugin-window/{Uri.EscapeDataString(session.WindowId)}", ContentRoute = refreshedContentRoute ?? BuildHostManagedPluginContentRoute(session.ContentRoute, session.WindowId, session.Revision), RefreshRequested = true, RefreshTarget = refreshTarget, PreserveScroll = request.PreserveScroll, Revision = session.Revision };
             return BuildPluginWindowDispatchResponse(result, responseMode, result.ContentRoute);
         }
-        return BuildPluginWindowDispatchError(new PluginWindowResult { Success = false, Message = "Plugin window not found.", Diagnostics = "window_not_found", WindowId = resolvedWindowId, RefreshTarget = refreshTarget, PreserveScroll = request.PreserveScroll, RefreshScrollTarget = request.RefreshScrollTarget, RefreshScrollMode = request.RefreshScrollMode }, responseMode, StatusCodes.Status404NotFound);
+        return BuildPluginWindowDispatchError(new PluginWindowResult { Success = false, Message = "Plugin window not found.", Diagnostics = "window_not_found", WindowId = resolvedWindowId, RefreshTarget = refreshTarget, PreserveScroll = request.PreserveScroll}, responseMode, StatusCodes.Status404NotFound);
     }
 
     log.Add("PLUGIN_WINDOW", pluginName, $"action={SafePluginActionValue(action)} result=DENIED reason=unsupported_window_action responseMode={SafePluginActionValue(responseMode)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
@@ -1146,9 +1369,8 @@ static IResult RenderPluginWindowState(string windowId, PluginWindowSessionStore
         refreshRequested = session.RefreshRequested,
         refreshTarget = "content",
         reloadScope = "iframe-content-only",
-        preserveScroll = session.PreserveScroll,
-        refreshScrollTarget = session.RefreshScrollTarget,
-        refreshScrollMode = session.RefreshScrollMode,
+        preserveScroll = session.PreserveInteractionState && session.PreserveScroll,
+        preserveInteractionState = session.PreserveInteractionState,
         title = session.Title,
         width = hostState?.Width > 0 ? hostState.Width : session.Width,
         height = hostState?.Height > 0 ? hostState.Height : session.Height,
@@ -1176,21 +1398,6 @@ static IResult RenderPluginWindowState(string windowId, PluginWindowSessionStore
         createdAt = session.CreatedAt,
         updatedAt = session.UpdatedAt
     });
-}
-
-static IReadOnlyList<int> BuildManagedViewerStopPidSet(ExternalTunerLeaseDto lease, bool includeRegistrySameTuner)
-{
-    var pids = new SortedSet<int>();
-    if (lease.ProcessId.HasValue && lease.ProcessId.Value > 0)
-        pids.Add(lease.ProcessId.Value);
-    if (includeRegistrySameTuner)
-    {
-        foreach (var viewer in TvAirManagedProcessRegistry.GetViewers(lease.Did, lease.BonDriverFileName))
-        {
-            if (viewer.ProcessId > 0) pids.Add(viewer.ProcessId);
-        }
-    }
-    return pids.ToList();
 }
 
 static bool IsTruthy(string? value)
@@ -1234,45 +1441,6 @@ static IResult RenderPluginWindowHostCapabilities(PluginToolWindowHostService to
 }
 
 
-static PluginViewerControlChannelInfo ToPluginViewerControlChannelInfo(ChannelTarget c, int index)
-{
-    var filterGroup = PluginProgramGuideFilterGroupFromChannel(c.Group, c.OriginalNetworkId);
-    var allocation = NormalizePluginAllocationGroup(c.Group);
-    var ready = c.OriginalNetworkId != 0 && c.TransportStreamId != 0 && c.ServiceId != 0;
-    return new PluginViewerControlChannelInfo
-    {
-        ProgramGuideOrder = index,
-        ServiceName = c.Name,
-        NetworkId = c.OriginalNetworkId,
-        TransportStreamId = c.TransportStreamId,
-        ServiceId = c.ServiceId,
-        Nid = c.OriginalNetworkId,
-        Tsid = c.TransportStreamId,
-        Sid = c.ServiceId,
-        ProgramGuideFilterGroup = filterGroup,
-        ProgramGuideFilterKey = filterGroup,
-        ProgramGuideFilterLabel = PluginProgramGuideFilterLabel(filterGroup),
-        BroadcastGroup = filterGroup,
-        AllocationGroup = allocation,
-        TunerGroup = allocation,
-        ChannelSpace = c.ResolvedSpace,
-        ChannelIndex = c.ResolvedChannelIndex,
-        ChannelArgument = c.ChannelArgument,
-        IdentitySource = "ProgramGuideProjection",
-        ViewerStartIdentityReady = ready
-    };
-}
-
-static string PluginProgramGuideFilterGroupFromChannel(string? group, ushort networkId)
-{
-    var g = (group ?? string.Empty).Trim().ToUpperInvariant();
-    if (g == "GR") return "GR";
-    if (g == "BS") return "BS";
-    if (g == "CS") return "CS";
-    if (g == "BSCS") return networkId == 4 ? "BS" : "CS";
-    return g;
-}
-
 static string ProgramGuideWaveGroupFromNetworkId(ushort networkId)
 {
     // ARIB: BS uses original_network_id=4. Current Japanese CS services handled by TvAIr/TVTest
@@ -1283,614 +1451,6 @@ static string ProgramGuideWaveGroupFromNetworkId(ushort networkId)
     return "GR";
 }
 
-static string PluginProgramGuideFilterLabel(string? group)
-{
-    return (group ?? string.Empty).Trim().ToUpperInvariant() switch
-    {
-        "GR" => "地上波",
-        "BS" => "BS",
-        "CS" => "CS",
-        _ => group ?? string.Empty
-    };
-}
-
-static ViewerProfileProjectionResult BuildViewerProfileProjection(TvTestSettings settings, IniSettingsService ini, IReadOnlyList<TunerProfile> tunerProfiles)
-{
-    var profiles = ViewerProfileContract.BuildProfiles(settings, ini, tunerProfiles);
-    var enabledRealCount = profiles.Count(p => p.Enabled && !p.IsAuto);
-    var viewingTunerCount = profiles.Count(p => p.Enabled && !p.IsAuto && string.Equals(p.Source, "tunerpool-viewing-tvtest-frame", StringComparison.OrdinalIgnoreCase));
-    var selectable = profiles
-        .Where(p => p.Enabled && !p.IsAuto)
-        .OrderBy(p => p.Order)
-        .ToList();
-    var defaultProfile = selectable.FirstOrDefault(p => p.IsDefault)?.Id
-        ?? selectable.FirstOrDefault()?.Id
-        ?? "tvtest1";
-    return new ViewerProfileProjectionResult(
-        profiles,
-        selectable,
-        enabledRealCount,
-        viewingTunerCount,
-        enabledRealCount >= 2,
-        defaultProfile,
-        string.Join(",", profiles.Select(p => p.Id)),
-        string.Join(",", selectable.Select(p => p.Id)));
-}
-
-
-static TvAIrPlugin.PluginViewerProfileInfo ToPluginViewerProfileInfo(ViewerProfileContractDto profile) => new()
-{
-    Id = profile.Id,
-    Name = profile.Name,
-    Enabled = profile.Enabled,
-    IsDefault = profile.IsDefault,
-    Order = profile.Order,
-    IsAuto = profile.IsAuto,
-    TvTestPathKey = profile.TvTestPathKey,
-    Source = profile.Source,
-    Note = profile.Note,
-    TvTestFrameIndex = profile.TvTestFrameIndex,
-    AvailableGroups = string.Join(",", profile.AvailableGroups ?? Array.Empty<string>())
-};
-
-
-static IResult RenderPluginViewerProfiles(IOptions<TvTestSettings> tvTestOptions, IniSettingsService ini, IReadOnlyList<TunerProfile> tunerProfiles, LogRepository log)
-{
-    var projection = BuildViewerProfileProjection(tvTestOptions.Value, ini, tunerProfiles);
-
-    log.Add("VIEWER_PROFILE_PROJECTION", "API",
-        $"result=OK source=api viewingTuners={projection.ViewingTunerCount} profiles={projection.Profiles.Count} selectable={projection.SelectableProfiles.Count} enabledReal={projection.EnabledRealProfileCount} selectorVisibleRecommended={projection.SelectorVisibleRecommended} profileIds={SafePluginActionValue(projection.ProfileIds)} selectableIds={SafePluginActionValue(projection.SelectableProfileIds)} default={SafePluginActionValue(projection.DefaultViewerProfile)} endpoint=/api/plugins/viewer-profiles rule=release_contract");
-
-    return Results.Ok(new
-    {
-        success = true,
-        contractVersion = TvAIrVersionContract.PluginHostContractVersion,
-        endpoint = "/api/plugins/viewer-profiles",
-        displayRule = "select_tvtest_frame_only_no_auto; viewerProfile_is_tvtest_frame_not_single_tuner; keep_min_width_invariant_even_when_selector_hidden",
-        payloadField = "viewerProfile",
-        defaultViewerProfile = projection.DefaultViewerProfile,
-        enabledRealProfileCount = projection.EnabledRealProfileCount,
-        selectorVisibleRecommended = projection.SelectorVisibleRecommended,
-        minWidthInvariantRequired = true,
-        viewerProfiles = projection.Profiles,
-        selectableViewerProfiles = projection.SelectableProfiles
-    });
-}
-
-static IResult RenderPluginViewerTuners(TunerPool tuners, ExternalTunerLeaseService externalTuners, LogRepository log)
-{
-    var leases = externalTuners.GetActiveLeases().ToList();
-    var lastViewerActionResult = externalTuners.GetLastViewerActionResult();
-    var items = tuners.GetStatus()
-        .Where(t => string.Equals(t.Role, "Viewing", StringComparison.OrdinalIgnoreCase))
-        .OrderBy(t => t.Group)
-        .ThenBy(t => t.SlotIndex)
-        .Select(t =>
-        {
-            var lease = leases.FirstOrDefault(l => string.Equals(l.Did, t.Did, StringComparison.OrdinalIgnoreCase) || string.Equals(l.TunerName, t.Name, StringComparison.OrdinalIgnoreCase));
-            var allocationGroup = NormalizePluginAllocationGroup(t.Group);
-            var filterGroup = lease is not null ? PluginProgramGuideFilterGroupFromAllocation(lease.Group, lease.NetworkId) : PluginProgramGuideFilterGroupFromTunerGroup(t.Group);
-            return new PluginViewerTunerInfo
-            {
-                Name = t.Name,
-                SlotIndex = t.SlotIndex,
-                Did = t.Did,
-                ProgramGuideFilterGroup = filterGroup,
-                DisplayGroup = filterGroup,
-                AllocationGroup = allocationGroup,
-                TunerGroup = allocationGroup,
-                Role = t.Role,
-                UsageKind = t.UsageKind.ToString(),
-                Busy = t.UsageKind != TunerUsageKind.Free || lease is not null,
-                IsViewingRole = true,
-                IsSelectableForViewer = t.UsageKind == TunerUsageKind.Free && lease is null,
-                BonDriverFileName = t.BonDriverFileName,
-                CurrentLeaseId = lease?.LeaseId ?? string.Empty,
-                Availability = t.UsageKind == TunerUsageKind.Free && lease is null ? "Available" : "Busy",
-                OccupiedBy = lease is not null ? "TvAIrViewerLease" : string.Empty,
-                ExternalPid = null,
-                ExternalBusyReason = string.Empty,
-                AvailabilityMessage = string.Empty,
-                LastViewerActionState = lastViewerActionResult?.State ?? string.Empty,
-                LastViewerActionErrorCode = lastViewerActionResult?.ErrorCode ?? string.Empty,
-                LastViewerActionMessage = lastViewerActionResult?.Message ?? string.Empty,
-                NetworkId = lease?.NetworkId,
-                TransportStreamId = lease?.TransportStreamId,
-                ServiceId = lease?.ServiceId
-            };
-        })
-        .ToList();
-    log.Add("PLUGIN_VIEWER_TUNERS", "API", $"result=OK count={items.Count} source=TunerPool.GetStatus role=Viewing lastViewerActionState={SafePluginActionValue(lastViewerActionResult?.State)} lastViewerActionError={SafePluginActionValue(lastViewerActionResult?.ErrorCode)} rule=release_contract");
-    return Results.Ok(new { success = true, contractVersion = TvAIrVersionContract.PluginHostContractVersion, source = "TunerPool.GetStatus", lastViewerActionResult, items });
-}
-
-static IResult RenderPluginViewerControlChannels(ChannelFileLoader channels, LogRepository log)
-{
-    var items = channels.Load().Targets
-        .Select((c, index) => ToPluginViewerControlChannelInfo(c, index))
-        .ToList();
-    var missing = items.Count(x => !x.ViewerStartIdentityReady);
-    log.Add("PLUGIN_VIEWER_CONTROL_IDENTITY", "API", $"result=OK count={items.Count} missingTriplet={missing} identitySource=ProgramGuideProjection identityFields=networkId|transportStreamId|serviceId endpoint=/api/plugins/viewer-control/channels rule=release_contract");
-    if (missing > 0)
-    {
-        var sample = string.Join(";", items.Where(x => !x.ViewerStartIdentityReady).Take(5).Select(x => $"{SafePluginActionValue(x.ServiceName)}:{x.NetworkId}/{x.TransportStreamId}/{x.ServiceId}"));
-        log.Add("VIEWER_CONTROL_IDENTITY_PROJECTION_WARN", "API", $"result=WARN missingTriplet={missing} sample={sample} action=disable_viewerStart_for_missing_identity rule=release_contract");
-    }
-    return Results.Ok(new
-    {
-        success = true,
-        contractVersion = TvAIrVersionContract.PluginHostContractVersion,
-        source = "ProgramGuideProjection",
-        identitySource = "ProgramGuideProjection",
-        identityFields = "networkId|transportStreamId|serviceId",
-        payloadAttributes = new
-        {
-            networkId = "data-tvair-payload-networkId",
-            transportStreamId = "data-tvair-payload-transportStreamId",
-            serviceId = "data-tvair-payload-serviceId"
-        },
-        items
-    });
-}
-
-static IResult RenderPluginProgramGuideWaveFilters(LogRepository log)
-{
-    var filters = BuildPluginProgramGuideWaveFilters();
-    log.Add("PLUGIN_PROGRAM_GUIDE_FILTER", "API", $"result=OK count={filters.Count} source=program_guide_wave_filter_module rule=release_contract");
-    return Results.Ok(new { success = true, contractVersion = TvAIrVersionContract.PluginHostContractVersion, source = "program_guide_wave_filter_module", field = "programGuideFilterGroup", items = filters });
-}
-
-static IResult RenderPluginViewerControlContract(LogRepository log)
-{
-    var contract = BuildPluginViewerControlHostContract();
-    log.Add("PLUGIN_VIEWER_CONTROL_CONTRACT", "API", $"result=OK safeEvents=dblclick|click scriptAllowed=False viewerTunersEndpoint=/api/plugins/viewer-tuners viewerControlChannelsEndpoint=/api/plugins/viewer-control/channels identitySource=ProgramGuideProjection identityFields=networkId|transportStreamId|serviceId rule=release_contract");
-    return Results.Ok(contract);
-}
-
-
-static IResult RenderPluginHostContract(LogRepository log)
-{
-    var contract = new
-    {
-        success = true,
-        contractVersion = TvAIrVersionContract.PluginHostContractVersion,
-        source = "TvAIrPluginHostContract",
-        purpose = "generic_plugin_host_contract_foundation",
-        compatibilityPolicy = new
-        {
-            currentContract = TvAIrVersionContract.PluginHostContractVersion,
-            newPluginsUseDeclaredManifest = true,
-            legacyAdaptersRemainIsolated = true,
-            preferredOpenModeIsCompatibilityAlias = true,
-            defaultMenuActionKindIsOfficial = true,
-            unknownManifestFieldsAreIgnored = true,
-            unknownCapabilitiesAreReportedNotGranted = true
-        },
-        pluginModel = new
-        {
-            supportedKinds = new[]
-            {
-                "Viewer",
-                "UI",
-                "Analysis",
-                "Utility",
-                "Companion",
-                "Remote",
-                "Headless"
-            },
-            uiModes = new[]
-            {
-                "page",
-                "toolWindow",
-                "headless",
-                "actionOnly"
-            },
-            rule = "kind_classifies_plugin_capability_authorizes_behavior"
-        },
-        manifestContract = new
-        {
-            acceptedFiles = new[] { "plugin.json", "<AssemblyName>.plugin.json", "<AssemblyName>.json" },
-            requiredForNewPlugins = new[] { "id", "name", "version", "route", "kind", "permissions" },
-            optional = new[]
-            {
-                "description",
-                "vendor",
-                "entry",
-                "icon",
-                "hostContractVersion",
-                "capabilities",
-                "tags",
-                "ui",
-                "menu",
-                "window",
-                "actions",
-                "assets",
-                "compatibility"
-            },
-            officialMenuField = "defaultMenuActionKind",
-            compatibilityMenuAlias = "preferredOpenMode",
-            supportedDefaultMenuActionKinds = new[] { "page", "toolWindow", "settings", "versionDialog", "statusDialog", "none" },
-            externalManifestMergePolicy = "plugin_json_supplements_missing_manifest_or_ui_fields_only"
-        },
-        capabilityContract = new
-        {
-            officialCapabilities = new[]
-            {
-                "ShowUi",
-                "OpenPage",
-                "OpenToolWindow",
-                "ReadChannels",
-                "ReadEpg",
-                "ReadReservations",
-                "ControlReservations",
-                "ReadTunerStatus",
-                "ControlViewer",
-                "ReadViewerSessions",
-                "UseActionApi",
-                "UseWindowApi",
-                "UseAssetApi",
-                "UseSafeEvent",
-                "UseRemoteAccess",
-                "UsePairing",
-                "UseLocalNetwork"
-            },
-            remoteFuturePolicy = "remote_and_location_free_plugins_must_declare_capability_and_use_host_auth_scope",
-            kindDoesNotGrantPermission = true
-        },
-        uiContract = new
-        {
-            page = new { hostRoute = "/plugin/{routeSegment}", chromeManagedBy = "TvAIr" },
-            toolWindow = new
-            {
-                hostManaged = true,
-                defaultSizeFields = new[] { "toolWindowWidth", "toolWindowHeight" },
-                minimumSizeFields = new[] { "toolWindowMinWidth", "toolWindowMinHeight" },
-                windowStateOwner = "TvAIrHost",
-                pluginMayDeclarePreference = true,
-                pluginMustNotForceWindowState = true
-            },
-            headless = new { uiRequired = false, actionAndStatusContractRequired = true }
-        },
-        apiPolicy = new
-        {
-            stableReadContracts = new[]
-            {
-                "channels",
-                "programGuideProjection",
-                "programGuideNowNext",
-                "viewerSessions",
-                "viewerTuners",
-                "viewerControlChannels",
-                "windowContract",
-                "themeAndDpi",
-                "hostCapabilities",
-                "pluginManifestProjection"
-            },
-            controlledActionContracts = new[]
-            {
-                "viewerStart",
-                "viewerStop",
-                "openWindow",
-                "updateWindow",
-                "refreshWindow",
-                "closeWindow"
-            },
-            notExposedByDesign = new[]
-            {
-                "rawTunerPoolMutation",
-                "directTVTestProcessOperation",
-                "recordingCoreControlFromViewerPlugin",
-                "epgWorkerControlFromViewerPlugin",
-                "wakeTaskMutationFromPlugin",
-                "rawTransportStreamProcessor",
-                "arbitraryTVTestMessageBridge"
-            }
-        },
-        actionContract = new
-        {
-            endpoint = "/api/plugins/action",
-            method = "POST",
-            tokenRequired = true,
-            safeEventSupported = true,
-            viewerActionsUseHostAllocationAndViewerRoutes = true,
-            pluginDoesNotOwnTvTestOrTunerAllocation = true,
-            hostHandledRefreshAfterSupported = true,
-            refreshScrollTargetSupported = true
-        },
-        windowContract = new
-        {
-            endpoint = "/api/plugins/window",
-            stateEndpoint = "/plugin-window/{windowId}/state",
-            capabilitiesEndpoint = "/api/plugins/window/capabilities",
-            supportedActions = new[] { "openWindow", "closeWindow", "updateWindow", "refreshWindow" },
-            hostOwns = new[] { "create", "reuse", "activate", "minSize", "positionPersistence", "statePersistence", "topMost", "showInTaskbar" },
-            pluginMayRequest = new[] { "size", "minSize", "topMost", "refreshTarget", "refreshScrollTarget", "refreshScrollMode" },
-            pluginMustNotEmulate = new[] { "Win32WindowState", "externalProcessWindowManagement", "hostChrome" }
-        },
-        assetContract = new
-        {
-            assetBaseUrlPattern = "/plugin-assets/{routeSegment}",
-            apiBaseUrlPattern = "/api/plugins/{pluginId}/assets",
-            allowedExtensions = new[] { "png", "jpg", "jpeg", "gif", "svg", "webp", "ico", "css" },
-            externalUrlAllowed = false,
-            dataUriRecommended = false,
-            formIconSourcePriority = "EmbeddedResource>plugin_file>default_TvAIr_icon"
-        },
-        safeEventContract = new
-        {
-            hostScript = "/tvair-safe-event-host.js",
-            pluginInlineScriptRequired = false,
-            supportedAttributes = new[]
-            {
-                "data-tvair-action",
-                "data-tvair-event",
-                "data-tvair-payload",
-                "data-tvair-refresh-after",
-                "data-tvair-refresh-target",
-                "data-tvair-refresh-scroll-target",
-                "data-tvair-refresh-scroll-mode"
-            },
-            tokenLongIdleRecovery = "host_window_alive_token_reissue"
-        },
-        sanitizerContract = new
-        {
-            scriptTagsAllowed = false,
-            inlineEventAttributesAllowed = false,
-            javascriptUrlsAllowed = false,
-            externalHttpResourcesAllowed = false,
-            iframeAllowed = false,
-            objectEmbedAllowed = false,
-            pluginUiShouldUseSafeEvent = true
-        },
-        tvTestHeaderReference = new
-        {
-            sourceHeader = "TVTestPlugin.h ver.0.0.15-pre",
-            adoptedConcepts = new[]
-            {
-                "hostInfo/capability query",
-                "channel/service identity",
-                "current program and event projection",
-                "theme/dark mode/dpi/font hints",
-                "viewer window state and command request separation"
-            },
-            intentionallyNotMirrored = new[]
-            {
-                "MESSAGE_STARTRECORD",
-                "MESSAGE_STOPRECORD",
-                "MESSAGE_MODIFYRECORD",
-                "MESSAGE_SETSTREAMCALLBACK",
-                "MESSAGE_REGISTERTSPROCESSOR",
-                "MESSAGE_SETDRIVERNAME",
-                "MESSAGE_CLOSE",
-                "MESSAGE_RESET",
-                "arbitrary MESSAGE_* passthrough"
-            },
-            reason = "TvAIr plugins use TvAIr host contracts instead of a raw TVTest callback/message bridge."
-        },
-        recommendedFutureExtensionPoints = new[]
-        {
-            "remotePairingAndSessionProjection",
-            "locationFreeAccessScopeProjection",
-            "read-only current service/detail projection",
-            "read-only audio/video stream projection",
-            "read-only logo availability projection",
-            "theme/dark-mode/dpi/font projection for plugin UI",
-            "safe plugin command/status item projection"
-        }
-    };
-    log.Add("PLUGIN_HOST_CONTRACT", "API", $"result=OK contractVersion={TvAIrVersionContract.PluginHostContractVersion} source=TvAIrPluginHostContract purpose=generic_plugin_host_contract_foundation manifest=id|name|version|route|kind|permissions capabilities=kind_separated permissions=capability_scoped uiModes=page|toolWindow|headless legacy=adapter_isolated remoteReady=True rule=release_contract");
-    return Results.Ok(contract);
-}
-
-static IResult RenderPluginSafeEventClientLog(HttpRequest http, LogRepository log)
-{
-    static string Q(HttpRequest request, string key) => request.Query.TryGetValue(key, out var v) ? (v.FirstOrDefault() ?? string.Empty) : string.Empty;
-    var phase = Q(http, "phase");
-    var pluginId = Q(http, "pluginId");
-    var route = Q(http, "routeSegment");
-    var windowId = Q(http, "windowId");
-    var eventName = Q(http, "event");
-    var action = Q(http, "action");
-    var mode = Q(http, "mode");
-    var hostKind = Q(http, "hostKind");
-    var tag = Q(http, "tag");
-    var hasAction = Q(http, "hasAction");
-    var hasToken = Q(http, "hasToken");
-    var hasTriplet = Q(http, "hasTriplet");
-    var networkId = Q(http, "networkId");
-    var transportStreamId = Q(http, "transportStreamId");
-    var serviceId = Q(http, "serviceId");
-    var message = $"phase={SafePluginActionValue(phase)} event={SafePluginActionValue(eventName)} action={SafePluginActionValue(action)} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(route)} windowId={SafePluginActionValue(windowId)} mode={SafePluginActionValue(mode)} hostKind={SafePluginActionValue(hostKind)} tag={SafePluginActionValue(tag)} hasAction={SafePluginActionValue(hasAction)} hasToken={SafePluginActionValue(hasToken)} hasTriplet={SafePluginActionValue(hasTriplet)} networkId={SafePluginActionValue(networkId)} transportStreamId={SafePluginActionValue(transportStreamId)} serviceId={SafePluginActionValue(serviceId)} source=client_beacon_no_plugin_js rule=release_contract";
-    log.Add("PLUGIN_SAFE_EVENT_BIND", string.IsNullOrWhiteSpace(route) ? "Client" : route, message);
-    return Results.Content("", "image/gif");
-}
-
-
-
-static IResult RenderPluginSafeEventKeepAlive(HttpRequest http, PluginActionTokenStore actionTokens, PluginWindowSessionStore windows, LogRepository log)
-{
-    static string Q(HttpRequest request, string key) => request.Query.TryGetValue(key, out var v) ? (v.FirstOrDefault() ?? string.Empty) : string.Empty;
-    var token = Q(http, "token");
-    var requestPluginId = Q(http, "pluginId");
-    var requestRouteSegment = Q(http, "routeSegment");
-    var windowId = NormalizePluginWindowId(Q(http, "windowId"));
-    var mode = Q(http, "mode");
-    var session = string.IsNullOrWhiteSpace(windowId) ? null : windows.Get(windowId);
-    if (session is null || session.IsClosed || !session.HostAlive)
-    {
-        var reason = session is null ? "window_not_found" : (session.IsClosed ? "window_closed" : "host_not_alive");
-        log.Add("PLUGIN_SAFE_EVENT_KEEPALIVE", string.IsNullOrWhiteSpace(requestRouteSegment) ? "Host" : requestRouteSegment, $"result=SKIPPED reason={SafePluginActionValue(reason)} windowId={SafePluginActionValue(windowId)} requestPlugin={SafePluginActionValue(requestPluginId)} requestRoute={SafePluginActionValue(requestRouteSegment)} mode={SafePluginActionValue(mode)} rule=release_contract");
-        return Results.NoContent();
-    }
-
-    var effectivePluginId = string.IsNullOrWhiteSpace(requestPluginId) ? session.PluginId : requestPluginId.Trim();
-    var effectiveRouteSegment = string.IsNullOrWhiteSpace(requestRouteSegment) ? session.RouteSegment : requestRouteSegment.Trim().Trim('/');
-
-    if (!string.Equals(session.PluginId, effectivePluginId, StringComparison.OrdinalIgnoreCase)
-        || !string.Equals(session.RouteSegment, effectiveRouteSegment, StringComparison.OrdinalIgnoreCase))
-    {
-        log.Add("PLUGIN_SAFE_EVENT_KEEPALIVE", string.IsNullOrWhiteSpace(effectiveRouteSegment) ? "Host" : effectiveRouteSegment, $"result=DENIED reason=window_identity_mismatch windowId={SafePluginActionValue(windowId)} sessionPlugin={SafePluginActionValue(session.PluginId)} requestPlugin={SafePluginActionValue(requestPluginId)} effectivePlugin={SafePluginActionValue(effectivePluginId)} sessionRoute={SafePluginActionValue(session.RouteSegment)} requestRoute={SafePluginActionValue(requestRouteSegment)} effectiveRoute={SafePluginActionValue(effectiveRouteSegment)} mode={SafePluginActionValue(mode)} rule=release_contract");
-        return Results.NoContent();
-    }
-
-    var ok = actionTokens.Renew(token, effectivePluginId, effectiveRouteSegment, out var reason2, out var expiresAt);
-    var issuedToken = string.Empty;
-    var recovered = false;
-    if (!ok && (reason2.Equals("token_not_found", StringComparison.OrdinalIgnoreCase)
-        || reason2.Equals("token_expired", StringComparison.OrdinalIgnoreCase)
-        || reason2.Equals("missing_token", StringComparison.OrdinalIgnoreCase)))
-    {
-        var recoveredEntry = actionTokens.Issue(effectivePluginId, effectiveRouteSegment);
-        ok = true;
-        recovered = true;
-        issuedToken = recoveredEntry.Token;
-        expiresAt = recoveredEntry.ExpiresAt;
-        reason2 = "token_recovered_from_live_host_window";
-    }
-
-    log.Add("PLUGIN_SAFE_EVENT_KEEPALIVE", string.IsNullOrWhiteSpace(effectiveRouteSegment) ? "Host" : effectiveRouteSegment, $"result={(ok ? (recovered ? "RECOVERED" : "OK") : "DENIED")} reason={SafePluginActionValue(reason2)} windowId={SafePluginActionValue(windowId)} requestPlugin={SafePluginActionValue(requestPluginId)} effectivePlugin={SafePluginActionValue(effectivePluginId)} requestRoute={SafePluginActionValue(requestRouteSegment)} effectiveRoute={SafePluginActionValue(effectiveRouteSegment)} tokenRenewed={ok} tokenRecovered={recovered} tokenReturned={!string.IsNullOrWhiteSpace(issuedToken)} tokenExpiresAt={(ok ? expiresAt.ToString("O") : "-")} mode={SafePluginActionValue(mode)} rule=release_contract");
-    return Results.Json(new
-    {
-        ok,
-        recovered,
-        tokenRenewed = ok,
-        token = issuedToken,
-        expiresAt = ok ? expiresAt.ToString("O") : string.Empty,
-        reason = reason2
-    });
-}
-
-static IResult RenderPluginSafeEventHostScript(HttpRequest http, LogRepository log)
-{
-    static string Q(HttpRequest request, string key) => request.Query.TryGetValue(key, out var v) ? (v.FirstOrDefault() ?? string.Empty) : string.Empty;
-    var mode = Q(http, "mode");
-    var route = Q(http, "route");
-    log.Add("PLUGIN_SAFE_EVENT_SCRIPT", string.IsNullOrWhiteSpace(route) ? "Host" : route, $"result=REQUESTED mode={SafePluginActionValue(mode)} routeSegment={SafePluginActionValue(route)} source=external_host_script endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
-    const string script = """
-(function(){
-function g(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(e){return '';} }
-function tok(v,t){return ((' '+(v||'')+' ').indexOf(' '+t+' '))>=0;}
-function tag(el){try{return el&&el.tagName?String(el.tagName).toLowerCase():'';}catch(e){return '';} }
-function q(name){try{var s=location.search||'';var m=s.match(new RegExp('[?&]'+name+'=([^&]+)'));return m?decodeURIComponent(m[1].replace(/\+/g,' ')):'';}catch(e){return '';} }
-function win(){return q('__tvairWindowId')||q('windowId');}
-function mode(){try{return (document.body&&document.body.className&&document.body.className.indexOf('tvair-plugin-toolwindow-content-only')>=0)?'directContent':'page';}catch(e){return q('__tvairToolHostContent')?'directContent':'page';} }
-function route(){try{return (document.body&&document.body.getAttribute('data-plugin-route'))||'';}catch(e){return '';} }
-function firstToken(){try{var a=document.querySelector('[data-tvair-action-token],[data-tvair-token]');var v=resolve(a||document.body,['data-tvair-action-token','data-tvair-token']);if(v)return v;var i=document.querySelector('input[name=\"actionToken\"],input[name=\"token\"]');return i?i.value||'':'';}catch(e){return '';} }
-function firstAttr(el,names){for(var i=0;i<names.length;i++){var v=g(el,names[i]);if(v)return v;}return '';}
-function nearestForm(el){var n=el;while(n&&n!==document){if(tag(n)==='form')return n;n=n.parentNode;}return null;}
-function collectNodes(el){var a=[];var n=el;while(n&&n!==document){a.push(n);if(tag(n)==='form')break;n=n.parentNode;}if(document.body)a.push(document.body);return a;}
-function resolve(el,names){var nodes=collectNodes(el);for(var i=0;i<nodes.length;i++){var v=firstAttr(nodes[i],names);if(v)return v;}return '';}
-function canonTriplet(el){return {
-  networkId:resolve(el,['data-tvair-payload-networkId','data-tvair-payload-NetworkId','data-tvair-payload-nid','data-tvair-network-id','data-network-id','data-nid']),
-  transportStreamId:resolve(el,['data-tvair-payload-transportStreamId','data-tvair-payload-TransportStreamId','data-tvair-payload-tsid','data-tvair-transport-stream-id','data-transport-stream-id','data-tsid']),
-  serviceId:resolve(el,['data-tvair-payload-serviceId','data-tvair-payload-ServiceId','data-tvair-payload-sid','data-tvair-service-id','data-service-id','data-sid'])
-};}
-function send(phase,eventName,action,el){
-  try{
-    var t=canonTriplet(el);
-    var url='/api/plugins/safe-event/client-log?phase='+encodeURIComponent(phase||'')+
-      '&event='+encodeURIComponent(eventName||'')+
-      '&action='+encodeURIComponent(action||'')+
-      '&pluginId='+encodeURIComponent(resolve(el,['data-tvair-plugin-id'])||'')+
-      '&routeSegment='+encodeURIComponent(resolve(el,['data-tvair-route-segment'])||route()||'')+
-      '&windowId='+encodeURIComponent(resolve(el,['data-tvair-window-id'])||win()||'')+
-      '&mode='+encodeURIComponent(mode())+
-      '&hostKind='+encodeURIComponent('winforms_webbrowser_fallback_direct_content')+
-      '&tag='+encodeURIComponent(tag(el))+
-      '&hasAction='+encodeURIComponent(action?'true':'false')+
-      '&hasToken='+encodeURIComponent((resolve(el,['data-tvair-action-token','data-tvair-token']))?'true':'false')+
-      '&hasTriplet='+encodeURIComponent((t.networkId&&t.transportStreamId&&t.serviceId)?'true':'false')+
-      '&networkId='+encodeURIComponent(t.networkId||'')+
-      '&transportStreamId='+encodeURIComponent(t.transportStreamId||'')+
-      '&serviceId='+encodeURIComponent(t.serviceId||'')+
-      '&_='+String(new Date().getTime());
-    try{var xhr=window.XMLHttpRequest?new XMLHttpRequest():null;if(!xhr&&window.ActiveXObject)xhr=new ActiveXObject('Microsoft.XMLHTTP');if(xhr){xhr.open('GET',url,true);xhr.send(null);return;}}catch(e1){ }
-    try{var img=new Image();img.src=url;}catch(e2){ }
-    try{var f=document.createElement('iframe');f.style.display='none';f.src=url;document.body.appendChild(f);setTimeout(function(){try{if(f&&f.parentNode)f.parentNode.removeChild(f);}catch(e3){ }},3000);}catch(e4){ }
-  }catch(e){ }
-}
-function find(start,eventName){var n=start;while(n&&n!==document){if(n.getAttribute&&g(n,'data-tvair-action')){var ev=g(n,'data-tvair-event');if(tok(ev,eventName))return n;if(eventName==='click'&&tok(ev,'dblclick')&&g(n,'data-tvair-click-fallback')==='true')return n;}n=n.parentNode;}return null;}
-function addHidden(form,name,value){if(!name||value==null||value==='')return;try{var es=form.elements?form.elements[name]:null;if(es){var e=es.length?es[es.length-1]:es;if(e&&e.name){e.value=String(value);return;}}}catch(x){ }var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
-function addAlias(form,canonical,value){if(!value)return;addHidden(form,canonical,value);if(canonical==='networkId')addHidden(form,'NetworkId',value);if(canonical==='transportStreamId')addHidden(form,'TransportStreamId',value);if(canonical==='serviceId')addHidden(form,'ServiceId',value);if(canonical==='networkId')addHidden(form,'nid',value);if(canonical==='transportStreamId')addHidden(form,'tsid',value);if(canonical==='serviceId')addHidden(form,'sid',value);}
-function isExplicitTvTestProfileValue(v){try{v=String(v||'').replace(/^\s+|\s+$/g,'');if(!v)return false;if(/^\d+$/.test(v))return parseInt(v,10)>0;return /^tvtest\d+$/i.test(v);}catch(e){return false;}}
-function readControlValue(sel){try{var e=document.querySelector(sel);if(!e)return '';var v=(e.value!=null)?String(e.value):'';if(v)return v;if(e.getAttribute)return e.getAttribute('value')||'';return '';}catch(x){return '';}}
-function currentViewerProfileValue(srcForm){try{var names=['viewerProfile','viewer-profile','viewer_profile','viewerProfileId','vtuner','vTuner','viewer','profile'];var selectors=[];for(var i=0;i<names.length;i++){selectors.push('select[name="'+names[i]+'"]');selectors.push('input[name="'+names[i]+'"]');selectors.push('[data-tvair-current-viewer-profile]');selectors.push('[data-viewer-profile-current]');}var best='';for(var j=0;j<selectors.length;j++){var v=readControlValue(selectors[j]);if(isExplicitTvTestProfileValue(v))return v;if(!best&&v)best=v;}if(srcForm&&srcForm.elements){for(var k=0;k<names.length;k++){try{var el=srcForm.elements[names[k]];if(el){var n=el.length?el[el.length-1]:el;var fv=n&&n.value?String(n.value):'';if(isExplicitTvTestProfileValue(fv))return fv;if(!best&&fv)best=fv;}}catch(e1){}}}return best;}catch(e){return '';}}
-function addViewerProfileAliases(form,value){try{if(!value)return;addHidden(form,'viewerProfile',value);addHidden(form,'ViewerProfile',value);addHidden(form,'viewer_profile',value);addHidden(form,'viewer-profile',value);addHidden(form,'viewerProfileId',value);addHidden(form,'ViewerProfileId',value);}catch(e){}}
-function copyDataPayload(form,node){if(!node||!node.attributes)return;for(var i=0;i<node.attributes.length;i++){var a=node.attributes[i];if(a&&a.name&&a.name.indexOf('data-tvair-payload-')===0)addHidden(form,a.name.substring('data-tvair-payload-'.length),a.value);}}
-function copyExistingInputs(form,src){try{if(!src||!src.elements)return;for(var i=0;i<src.elements.length;i++){var e=src.elements[i];if(e&&e.name)addHidden(form,e.name,e.value||'');}}catch(x){ }}
-function submit(el,eventName){var action=resolve(el,['data-tvair-action']);send('received_before_validate',eventName,action,el);if(!action){send('denied_missing_action',eventName,action,el);return;}var isWin=(action==='refreshWindow'||action==='updateWindow'||action==='closeWindow'||action==='rerenderWindow'||action==='openWindow');var srcForm=nearestForm(el);var form=document.createElement('form');form.method='post';form.action=resolve(el,['data-tvair-endpoint'])||(srcForm&&srcForm.getAttribute('action'))||(isWin?'/api/plugins/window':'/api/plugins/action');copyExistingInputs(form,srcForm);var currentViewerProfile=currentViewerProfileValue(srcForm);addViewerProfileAliases(form,currentViewerProfile);addHidden(form,'action',action);addHidden(form,'pluginId',resolve(el,['data-tvair-plugin-id']));addHidden(form,'routeSegment',resolve(el,['data-tvair-route-segment'])||route()||'');addHidden(form,'token',resolve(el,['data-tvair-token','data-tvair-action-token']));addHidden(form,'actionToken',resolve(el,['data-tvair-action-token','data-tvair-token']));addHidden(form,'responseMode',resolve(el,['data-tvair-response-mode'])||(isWin?'hostHandled':'refreshWindow'));addHidden(form,'windowId',resolve(el,['data-tvair-window-id'])||win());addHidden(form,'target',resolve(el,['data-tvair-target'])||'content');addHidden(form,'refreshTarget',resolve(el,['data-tvair-refresh-target'])||'content');addHidden(form,'preserveScroll',resolve(el,['data-tvair-preserve-scroll'])||'true');addHidden(form,'refreshScrollTarget',resolve(el,['data-tvair-refresh-scroll-target','data-tvair-scroll-target','data-tvair-focus-target'])||'');addHidden(form,'refreshScrollMode',resolve(el,['data-tvair-refresh-scroll-mode','data-tvair-scroll-mode'])||'center');addHidden(form,'safeEvent',eventName||'unknown');addHidden(form,'safeEventAction',action);addHidden(form,'safeEventSource','external-host-script-no-plugin-js');addHidden(form,'safeEventWindowId',resolve(el,['data-tvair-window-id'])||win());var nodes=collectNodes(el);for(var n=nodes.length-1;n>=0;n--)copyDataPayload(form,nodes[n]);addViewerProfileAliases(form,currentViewerProfile);var t=canonTriplet(el);addAlias(form,'networkId',t.networkId);addAlias(form,'transportStreamId',t.transportStreamId);addAlias(form,'serviceId',t.serviceId);document.body.appendChild(form);send('posting_form',eventName,action,el);form.submit();}
-function handle(e,eventName){e=e||window.event;var target=e.target||e.srcElement;var el=find(target,eventName);if(!el)return true;try{if(e.preventDefault)e.preventDefault();e.returnValue=false;}catch(x){ }submit(el,eventName);return false;}
-function bind(){if(window.__tvairSafeEventBound){send('bind_skip_already_bound','','',document.body);return;}window.__tvairSafeEventBound=true;send('bind_start','','',document.body);if(document.addEventListener){document.addEventListener('dblclick',function(e){return handle(e,'dblclick');},false);document.addEventListener('click',function(e){return handle(e,'click');},false);}else if(document.attachEvent){document.attachEvent('ondblclick',function(){return handle(window.event,'dblclick');});document.attachEvent('onclick',function(){return handle(window.event,'click');});}else{var od=document.ondblclick;document.ondblclick=function(e){if(handle(e||window.event,'dblclick')===false)return false;return od?od(e):true;};var oc=document.onclick;document.onclick=function(e){if(handle(e||window.event,'click')===false)return false;return oc?oc(e):true;};}send('bind_complete','','',document.body);}
-function applyToken(t){try{if(!t)return;var nodes=document.querySelectorAll('[data-tvair-action-token],[data-tvair-token]');for(var i=0;i<nodes.length;i++){try{nodes[i].setAttribute('data-tvair-action-token',t);nodes[i].setAttribute('data-tvair-token',t);}catch(e){}}var inputs=document.querySelectorAll('input[name="actionToken"],input[name="token"],input[name="windowToken"]');for(var j=0;j<inputs.length;j++){try{inputs[j].value=t;}catch(e){}}if(document.body){document.body.setAttribute('data-tvair-action-token',t);document.body.setAttribute('data-tvair-token',t);}}catch(e){} }
-function readJsonToken(text){try{if(!text)return'';if(window.JSON&&JSON.parse){var o=JSON.parse(text);return o&&o.token?String(o.token):'';}var m=/"token"\s*:\s*"([^"]+)"/.exec(text);return m?m[1]:'';}catch(e){return '';} }
-function keepalive(){try{var w=win();var r=route();var t=firstToken();if(!w||!r)return;var actionNode=document.querySelector('[data-tvair-plugin-id]');var p=resolve(actionNode||document.body,['data-tvair-plugin-id'])||'';var url='/api/plugins/safe-event/keepalive?pluginId='+encodeURIComponent(p)+'&routeSegment='+encodeURIComponent(r)+'&windowId='+encodeURIComponent(w)+'&mode='+encodeURIComponent(mode())+'&token='+encodeURIComponent(t||'')+'&_='+String(new Date().getTime());var xhr=window.XMLHttpRequest?new XMLHttpRequest():null;if(!xhr&&window.ActiveXObject)xhr=new ActiveXObject('Microsoft.XMLHTTP');if(xhr){xhr.onreadystatechange=function(){try{if(xhr.readyState===4){applyToken(readJsonToken(xhr.responseText||''));}}catch(e){}};xhr.open('GET',url,true);xhr.send(null);return;}var img=new Image();img.src=url;}catch(e){} }
-function startKeepalive(){try{if(window.__tvairSafeEventKeepaliveStarted)return;window.__tvairSafeEventKeepaliveStarted=true;keepalive();setInterval(keepalive,300000);}catch(e){}}
-function boot(){try{bind();startKeepalive();}catch(e){send('bind_error','','',document.body);} }
-send('script_loaded','','',document.body||null);
-if(document.readyState==='complete'||document.readyState==='interactive')boot();else if(document.addEventListener)document.addEventListener('DOMContentLoaded',boot,false);else if(document.attachEvent)document.attachEvent('onreadystatechange',function(){if(document.readyState==='complete')boot();});else window.onload=boot;
-})();
-""";
-    return Results.Content(script, "application/javascript; charset=utf-8");
-}
-
-static IReadOnlyList<PluginProgramGuideWaveFilterInfo> BuildPluginProgramGuideWaveFilters() => new[]
-{
-    new PluginProgramGuideWaveFilterInfo { Key = "GR", Group = "GR", Label = "地上波", Order = 0, IsProgramGuideFilter = true },
-    new PluginProgramGuideWaveFilterInfo { Key = "BS", Group = "BS", Label = "BS", Order = 1, IsProgramGuideFilter = true },
-    new PluginProgramGuideWaveFilterInfo { Key = "CS", Group = "CS", Label = "CS", Order = 2, IsProgramGuideFilter = true }
-};
-
-static PluginViewerControlHostContract BuildPluginViewerControlHostContract() => new()
-{
-    ContractVersion = TvAIrVersionContract.PluginHostContractVersion,
-    ToolWindowOnlySafeEvents = true,
-    PluginScriptAllowed = false,
-    SupportedEvents = new[] { "dblclick", "click" },
-    SupportedActions = new[] { "viewerStart", "viewerStop", "refreshWindow", "updateWindow" },
-    ViewerStartPayloadFields = "networkId|transportStreamId|serviceId|serviceName|programGuideFilterGroup|broadcastGroup|allocationGroup|tunerGroup|channelSpace|channelIndex|viewerProfile|windowId|responseMode|refreshAfter|refreshTarget|preserveViewerWindowState|viewerActivation|retuneExistingViewer; aliases=NetworkId|TransportStreamId|ServiceId|nid|tsid|sid|network_id|transport_stream_id|service_id|viewer_profile|payloadJson|actionPayloadJson|viewerStartPayloadJson",
-    ViewerStartPreferredTunerFields = "preferredTunerName|preferredDid|preferredSlot",
-    ProgramGuideFilterSource = "TvAIr program guide wave filter module",
-    ProgramGuideFilterField = "programGuideFilterGroup",
-    TunerGroupField = "tunerGroup",
-    ViewerTunersEndpoint = "/api/plugins/viewer-tuners",
-    ViewerControlChannelsEndpoint = "/api/plugins/viewer-control/channels",
-    ViewerControlIdentitySource = "ProgramGuideProjection",
-    ViewerControlIdentityFields = "networkId|transportStreamId|serviceId",
-    WaveFiltersEndpoint = "/api/plugins/program-guide/wave-filters",
-    AlwaysOnTopAction = "updateWindow payload.alwaysOnTop",
-    RefreshReloadScopeDirectContent = "toolwindow-content-document",
-    PreferredOpenModeToolWindowSupported = true,
-    ToolWindowContentOnly = true,
-    ViewerActionRefreshAfter = "viewerStart/viewerStop responseMode=hostHandled refreshAfter=true refreshTarget=content",
-    ViewerStartWindowStateContract = "preserveViewerWindowState=true viewerActivation=preserve",
-    ViewerStartRetuneExistingContract = "TvAIr-managed viewerStart uses existing managed TVTest internal retune only when viewerProfile/tvTestPathKey, BonDriver, and DID all match; BonDriver/DID changes require profile-scoped restart; retuneExistingViewer remains explicit/diagnostic only",
-    ViewerSessionCurrentSource = "GetViewerSessions active leases with networkId/transportStreamId/serviceId plus viewerProfile/viewerProfileName/tvTestPathKey",
-    ViewerProfilesEndpoint = "/api/plugins/viewer-profiles",
-    ViewerProfilePayloadField = "viewerProfile",
-    ViewerProfileReuseContract = "existing viewer reuse is scoped by viewerProfile/tvTestPathKey"
-};
-
-static string NormalizePluginAllocationGroup(string? group)
-{
-    var g = (group ?? string.Empty).Trim().ToUpperInvariant();
-    return g switch
-    {
-        "BS" or "CS" or "BS/CS" or "BSCS" => "BSCS",
-        "地上波" or "GR" or "GROUND" => "GR",
-        _ => string.IsNullOrWhiteSpace(g) ? string.Empty : g
-    };
-}
-
-static string PluginProgramGuideFilterGroupFromTunerGroup(string? group)
-    => NormalizePluginAllocationGroup(group) == "GR" ? "GR" : "BSCS";
-
-static string PluginProgramGuideFilterGroupFromAllocation(string? allocationGroup, ushort? networkId)
-{
-    var g = NormalizePluginAllocationGroup(allocationGroup);
-    if (g == "GR") return "GR";
-    if (g == "BSCS") return networkId == 4 ? "BS" : "CS";
-    return g;
-}
 
 static string BuildHostManagedPluginContentRoute(string contentRoute, string windowId, int revision)
 {
@@ -1909,7 +1469,66 @@ static string BuildHostManagedPluginContentRoute(string contentRoute, string win
 static string NormalizePluginWindowId(string? value)
 {
     if (string.IsNullOrWhiteSpace(value)) return string.Empty;
-    return new string(value.Trim().Where(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_' or '.').ToArray());
+    foreach (var candidate in SplitPluginWindowRawValues(value))
+    {
+        var normalized = NormalizePluginWindowIdAtom(candidate);
+        if (!string.IsNullOrWhiteSpace(normalized))
+            return normalized;
+    }
+    return string.Empty;
+}
+
+static string NormalizePluginWindowAction(string? value)
+{
+    var fallback = string.IsNullOrWhiteSpace(value) ? "openWindow" : value;
+    foreach (var candidate in SplitPluginWindowRawValues(fallback))
+    {
+        var action = new string(candidate.Trim().Where(ch => char.IsLetterOrDigit(ch)).ToArray());
+        if (string.IsNullOrWhiteSpace(action)) continue;
+        if (action.Equals("open", StringComparison.OrdinalIgnoreCase)) return "openWindow";
+        if (action.Equals("close", StringComparison.OrdinalIgnoreCase)) return "closeWindow";
+        if (action.Equals("update", StringComparison.OrdinalIgnoreCase)) return "updateWindow";
+        if (action.Equals("refresh", StringComparison.OrdinalIgnoreCase)) return "refreshWindow";
+        if (action.Equals("rerender", StringComparison.OrdinalIgnoreCase)) return "rerenderWindow";
+        if (action.Equals("openWindow", StringComparison.OrdinalIgnoreCase)) return "openWindow";
+        if (action.Equals("closeWindow", StringComparison.OrdinalIgnoreCase)) return "closeWindow";
+        if (action.Equals("updateWindow", StringComparison.OrdinalIgnoreCase)) return "updateWindow";
+        if (action.Equals("refreshWindow", StringComparison.OrdinalIgnoreCase)) return "refreshWindow";
+        if (action.Equals("rerenderWindow", StringComparison.OrdinalIgnoreCase)) return "rerenderWindow";
+    }
+    return string.IsNullOrWhiteSpace(value) ? "openWindow" : new string(value.Trim().Where(ch => char.IsLetterOrDigit(ch)).ToArray());
+}
+
+static IEnumerable<string> SplitPluginWindowRawValues(string? value)
+{
+    if (string.IsNullOrWhiteSpace(value)) yield break;
+    foreach (var part in value.Split(new[] { ',', ';', '|', '\r', '\n', '\t' }, StringSplitOptions.RemoveEmptyEntries))
+    {
+        var trimmed = part.Trim();
+        if (!string.IsNullOrWhiteSpace(trimmed))
+            yield return trimmed;
+    }
+}
+
+static string NormalizePluginWindowIdAtom(string? value)
+{
+    if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+    var normalized = new string(value.Trim().Where(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_' or '.').ToArray());
+    return CollapseRepeatedPluginWindowId(normalized);
+}
+
+static string CollapseRepeatedPluginWindowId(string value)
+{
+    var current = value;
+    while (current.Length > 0 && current.Length % 2 == 0)
+    {
+        var half = current.Length / 2;
+        var left = current[..half];
+        var right = current[half..];
+        if (!left.Equals(right, StringComparison.OrdinalIgnoreCase)) break;
+        current = left;
+    }
+    return current;
 }
 
 static bool ValidatePluginActionTokenOrRecoverHostWindow(
@@ -1931,7 +1550,8 @@ static bool ValidatePluginActionTokenOrRecoverHostWindow(
         return true;
 
     var initialReason = reason;
-    var canRecoverReason = initialReason.Equals("token_not_found", StringComparison.OrdinalIgnoreCase)
+    var canRecoverReason = initialReason.Equals("missing_token", StringComparison.OrdinalIgnoreCase)
+        || initialReason.Equals("token_not_found", StringComparison.OrdinalIgnoreCase)
         || initialReason.Equals("token_expired", StringComparison.OrdinalIgnoreCase);
     var normalizedWindowId = NormalizePluginWindowId(windowId);
     var normalizedSafeEventWindowId = NormalizePluginWindowId(safeEventWindowId);
@@ -2017,10 +1637,10 @@ static string BuildPluginRenderErrorBody(string pluginName, string routeSegment,
     var safePlugin = HtmlEncoder.Default.Encode(string.IsNullOrWhiteSpace(pluginName) ? routeSegment : pluginName);
     var safeRoute = HtmlEncoder.Default.Encode(routeSegment);
     var safeMessage = HtmlEncoder.Default.Encode(errorMessage);
-    return $"<div class=\"tvair-plugin-render-error\" style=\"padding:12px;font-family:system-ui,'Segoe UI',sans-serif;color:var(--tvair-color-text-main);background:#fff;\">" +
-           $"<h2 style=\"font-size:15px;margin:0 0 8px;\">Plugin RenderHtml error</h2>" +
-           $"<p style=\"margin:0 0 6px;\">plugin={safePlugin} route={safeRoute}</p>" +
-           $"<pre style=\"white-space:pre-wrap;font-size:12px;background:var(--tvair-color-surface-subpanel);border:1px solid #ddd;padding:8px;\">{safeMessage}</pre>" +
+    return $"<div class=\"tvair-plugin-render-error\">" +
+           $"<h2>Plugin RenderHtml error</h2>" +
+           $"<p>plugin={safePlugin} route={safeRoute}</p>" +
+           $"<pre>{safeMessage}</pre>" +
            $"</div>";
 }
 
@@ -2040,52 +1660,31 @@ static string NormalizePluginAssetName(string? value)
 
 static string ResolvePluginAssetRouteSegment(string pluginOrRoute, PluginRegistry registry)
 {
-    var normalized = NormalizePluginRouteSegment(pluginOrRoute);
-    if (string.IsNullOrWhiteSpace(normalized)) return string.Empty;
-    var ui = registry.GetUiPlugins().FirstOrDefault(p =>
-    {
-        var route = NormalizePluginRouteSegment(p.Ui.RouteSegment);
-        var identity = NormalizePluginRouteSegment(GetPluginActionIdentity(p, route));
-        return string.Equals(route, normalized, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(identity, normalized, StringComparison.OrdinalIgnoreCase);
-    });
-    return NormalizePluginRouteSegment(ui?.Ui.RouteSegment) is { Length: > 0 } routeSegment ? routeSegment : normalized;
+    var normalizedRoute = NormalizePluginRouteSegment(pluginOrRoute);
+    var runtime = registry.FindRuntimePlugin(pluginOrRoute);
+    if (runtime is null) return normalizedRoute;
+    var descriptorRoute = runtime.Descriptor.UiDefinitions
+        .Select(definition => NormalizePluginRouteSegment(definition.Route))
+        .FirstOrDefault(route => !string.IsNullOrWhiteSpace(route));
+    return string.IsNullOrWhiteSpace(descriptorRoute) ? normalizedRoute : descriptorRoute;
 }
 
 
-static PluginToolWindowIconSpec ResolvePluginToolWindowIcon(ITvAIrPlugin? plugin, string? routeSegment, string pluginActionId, LogRepository log)
+static PluginToolWindowIconSpec ResolvePluginToolWindowIcon(ITvAirRuntimeCapabilityPlugin runtimePlugin, string? routeSegment, string pluginActionId, LogRepository log)
 {
-    if (plugin is null)
-    {
-        return ResolveDefaultToolWindowIcon(string.Empty, "default_TvAIr_icon", "plugin_null");
-    }
+    var descriptor = runtimePlugin.Descriptor;
+    var iconAsset = descriptor.Assets.FirstOrDefault(asset =>
+        string.Equals(Path.GetExtension(asset.LogicalPath), ".ico", StringComparison.OrdinalIgnoreCase));
+    if (iconAsset is null)
+        return ResolveDefaultToolWindowIcon(string.Empty, "default_TvAIr_icon", "runtime_descriptor_icon_empty");
 
-    var pluginName = plugin.Name ?? string.Empty;
-    var manifestIcon = string.Empty;
+    var normalizedIcon = NormalizePluginAssetName(iconAsset.LogicalPath);
     try
     {
-        if (plugin is IManifestPlugin mp && !string.IsNullOrWhiteSpace(mp.Manifest.Icon))
-            manifestIcon = mp.Manifest.Icon.Trim();
-        if (string.IsNullOrWhiteSpace(manifestIcon) && plugin is IUiPlugin ui && !string.IsNullOrWhiteSpace(ui.Ui.Icon))
-            manifestIcon = ui.Ui.Icon.Trim();
-    }
-    catch { }
-
-    var normalizedIcon = NormalizePluginAssetName(manifestIcon);
-    if (string.IsNullOrWhiteSpace(normalizedIcon) || !string.Equals(Path.GetExtension(normalizedIcon), ".ico", StringComparison.OrdinalIgnoreCase))
-    {
-        return ResolveDefaultToolWindowIcon(normalizedIcon, "default_TvAIr_icon", string.IsNullOrWhiteSpace(normalizedIcon) ? "manifest_icon_empty" : "manifest_icon_not_ico");
-    }
-
-    try
-    {
-        var asm = plugin.GetType().Assembly;
-        var resourceNames = asm.GetManifestResourceNames();
-        var resource = resourceNames.FirstOrDefault(r =>
-            string.Equals(r, normalizedIcon, StringComparison.OrdinalIgnoreCase) ||
-            r.EndsWith("." + normalizedIcon, StringComparison.OrdinalIgnoreCase) ||
-            r.EndsWith(".Assets." + normalizedIcon, StringComparison.OrdinalIgnoreCase) ||
-            r.EndsWith(".assets." + normalizedIcon, StringComparison.OrdinalIgnoreCase));
+        var asm = runtimePlugin.GetType().Assembly;
+        var resource = asm.GetManifestResourceNames().FirstOrDefault(name =>
+            string.Equals(name, iconAsset.ResourceName, StringComparison.OrdinalIgnoreCase)
+            || name.EndsWith("." + iconAsset.ResourceName, StringComparison.OrdinalIgnoreCase));
         if (!string.IsNullOrWhiteSpace(resource))
         {
             using var stream = asm.GetManifestResourceStream(resource);
@@ -2095,47 +1694,16 @@ static PluginToolWindowIconSpec ResolvePluginToolWindowIcon(ITvAIrPlugin? plugin
                 stream.CopyTo(ms);
                 var bytes = ms.ToArray();
                 if (bytes.Length > 0)
-                {
-                    return new PluginToolWindowIconSpec(normalizedIcon, "embedded_resource", "embedded_resource_declared_icon", bytes, null);
-                }
+                    return new PluginToolWindowIconSpec(normalizedIcon, "runtime_descriptor_resource", "runtime_descriptor_declared_icon", bytes, null);
             }
         }
     }
     catch (Exception ex)
     {
-        log.Add("PLUGIN_TOOL_WINDOW_ICON", pluginName, $"phase=resolve source=embedded_resource result=ERROR manifestIcon={SafePluginActionValue(normalizedIcon)} error={SafePluginActionValue(ex.GetType().Name)} rule=release_contract");
+        log.Add("PLUGIN_TOOL_WINDOW_ICON", descriptor.DisplayName, $"phase=resolve source=runtime_descriptor_resource result=ERROR asset={SafePluginActionValue(normalizedIcon)} error={SafePluginActionValue(ex.GetType().Name)} rule=runtime_descriptor_asset_contract");
     }
 
-    try
-    {
-        var asmLocation = plugin.GetType().Assembly.Location;
-        var pluginDir = string.IsNullOrWhiteSpace(asmLocation) ? string.Empty : Path.GetDirectoryName(asmLocation) ?? string.Empty;
-        if (!string.IsNullOrWhiteSpace(pluginDir) && Directory.Exists(pluginDir))
-        {
-            var fullRoot = Path.GetFullPath(pluginDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
-            var candidates = new[]
-            {
-                Path.Combine(pluginDir, normalizedIcon),
-                Path.Combine(pluginDir, "Assets", normalizedIcon),
-                Path.Combine(pluginDir, "assets", normalizedIcon),
-                Path.Combine(pluginDir, "wwwroot", normalizedIcon),
-                Path.Combine(pluginDir, "wwwroot", "assets", normalizedIcon)
-            };
-            foreach (var candidate in candidates)
-            {
-                var full = Path.GetFullPath(candidate);
-                if (!full.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase)) continue;
-                if (!File.Exists(full)) continue;
-                return new PluginToolWindowIconSpec(normalizedIcon, "plugin_file", "plugin_declared_icon_file", null, full);
-            }
-        }
-    }
-    catch (Exception ex)
-    {
-        log.Add("PLUGIN_TOOL_WINDOW_ICON", pluginName, $"phase=resolve source=plugin_file result=ERROR manifestIcon={SafePluginActionValue(normalizedIcon)} error={SafePluginActionValue(ex.GetType().Name)} rule=release_contract");
-    }
-
-    return ResolveDefaultToolWindowIcon(normalizedIcon, "default_TvAIr_icon", "plugin_icon_not_found");
+    return ResolveDefaultToolWindowIcon(normalizedIcon, "default_TvAIr_icon", "runtime_descriptor_icon_not_found");
 }
 
 static PluginToolWindowIconSpec ResolveDefaultToolWindowIcon(string manifestIcon, string source, string diagnostics)
@@ -2157,7 +1725,7 @@ static PluginToolWindowIconSpec ResolveDefaultToolWindowIcon(string manifestIcon
     return new PluginToolWindowIconSpec(manifestIcon, source, diagnostics + ";system_default", null, null);
 }
 
-static IResult ResolvePluginAssetResult(string pluginOrRoute, string assetName, PluginRegistry registry, LogRepository log, string source)
+static IResult ResolvePluginAssetResult(string pluginOrRoute, string assetName, PluginRegistry registry, PluginBoundaryGate boundaryGate, LogRepository log, string endpoint, string source)
 {
     var route = ResolvePluginAssetRouteSegment(pluginOrRoute, registry);
     var name = NormalizePluginAssetName(assetName);
@@ -2165,6 +1733,20 @@ static IResult ResolvePluginAssetResult(string pluginOrRoute, string assetName, 
     {
         log.Add("PLUGIN_ASSET", "DENY", $"result=BAD_REQUEST source={SafePluginActionValue(source)} pluginOrRoute={SafePluginActionValue(pluginOrRoute)} asset={SafePluginActionValue(assetName)} reason=invalid_route_or_asset rule=release_contract");
         return Results.BadRequest("Invalid plugin asset request.");
+    }
+
+    var assetPlugin = FindPluginByActionIdentity(registry, pluginOrRoute, route);
+    if (assetPlugin is null)
+    {
+        log.Add("PLUGIN_ASSET", route, $"result=DENIED asset={SafePluginActionValue(name)} reason=plugin_not_found source={SafePluginActionValue(source)} rule=plugin_boundary_gate");
+        return Results.NotFound();
+    }
+
+    var assetBoundary = boundaryGate.CheckAsset(ResolveRuntimeBoundaryPlugin(registry, assetPlugin), name, endpoint);
+    if (!assetBoundary.Allowed)
+    {
+        log.Add("PLUGIN_ASSET", route, $"result=DENIED asset={SafePluginActionValue(name)} reason={SafePluginActionValue(assetBoundary.Reason)} source={SafePluginActionValue(source)} rule=plugin_boundary_gate");
+        return Results.NotFound();
     }
 
     var ext = Path.GetExtension(name).ToLowerInvariant();
@@ -2207,7 +1789,7 @@ static IResult RenderPluginWindowHost(string windowId, HttpRequest http, PluginW
     if (session.IsClosed)
     {
         log.Add("PLUGIN_WINDOW", session.PluginName, $"action=render result=CLOSED windowId={SafePluginActionValue(windowId)} routeSegment={SafePluginActionValue(session.RouteSegment)} rule=release_contract");
-        return PluginHtmlMessage("Plugin window closed", "このプラグインウィンドウは閉じられています。もう一度プラグイン画面から開いてください。", StatusCodes.Status410Gone, $"/plugin/{Uri.EscapeDataString(session.RouteSegment)}", "プラグインへ戻る");
+        return PluginHtmlMessage("プラグイン画面", "このプラグイン画面は閉じられています。もう一度プラグイン画面から開いてください。", StatusCodes.Status410Gone, $"/plugin/{Uri.EscapeDataString(session.RouteSegment)}", "プラグインへ戻る");
     }
 
     var title = HtmlEncoder.Default.Encode(string.IsNullOrWhiteSpace(session.Title) ? session.PluginName : session.Title);
@@ -2220,7 +1802,7 @@ static IResult RenderPluginWindowHost(string windowId, HttpRequest http, PluginW
     // It must not be treated as a normal browser page, otherwise TvAIr navigation chrome can leak into tool windows.
     var toolHost = true;
     var hostClass = "tvair-plugin-window-host tvair-plugin-window-host-tool";
-    var titleStyle = "display:none";
+    
     var html = $$"""
 <!doctype html>
 <html lang="ja">
@@ -2228,19 +1810,11 @@ static IResult RenderPluginWindowHost(string windowId, HttpRequest http, PluginW
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{title}}</title>
-<style>
-*{box-sizing:border-box;}
-html,body{margin:0;padding:0;width:100%;height:100%;min-width:0;min-height:0;overflow:hidden;background:var(--tvair-color-surface-panel);color:var(--tvair-color-text-main);font-family:system-ui,"Segoe UI",sans-serif;}
-.tvair-plugin-window-host{position:fixed;inset:0;width:100vw;height:100vh;min-width:0;min-height:0;display:flex;flex-direction:column;background:#fff;overflow:hidden;}
-.tvair-plugin-window-host-tool{background:#fff;}
-.tvair-plugin-window-title{flex:0 0 32px;height:32px;display:flex;align-items:center;padding:0 10px;font-size:13px;background:#20242b;color:#eee;border-bottom:1px solid #333;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.tvair-plugin-window-frame{display:block;flex:1 1 auto;min-width:0;min-height:0;border:0;width:100%;height:100%;background:#fff;overflow:auto;}
-.tvair-plugin-window-host-tool .tvair-plugin-window-frame{position:absolute;inset:0;width:100%;height:100%;}
-</style>
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.0-css-final199">
 </head>
-<body>
+<body class="tvair-plugin-window-page">
 <div class="{{hostClass}}" data-window-id="{{encodedWindowId}}" data-window-revision="{{initialRevision}}" data-tool-host="{{toolHost.ToString().ToLowerInvariant()}}">
-  <div class="tvair-plugin-window-title" style="{{titleStyle}}">{{title}}</div>
+  <div class="tvair-plugin-window-title tvair-plugin-window-title-hidden">{{title}}</div>
   <iframe id="tvair-plugin-window-frame" class="tvair-plugin-window-frame" src="{{content}}" title="{{title}}" scrolling="auto"></iframe>
 </div>
 <script>
@@ -2249,8 +1823,23 @@ html,body{margin:0;padding:0;width:100%;height:100%;min-width:0;min-height:0;ove
   const frame = document.getElementById('tvair-plugin-window-frame');
   let lastRevision = Number(document.querySelector('.tvair-plugin-window-host')?.dataset.windowRevision || '0');
   let refreshing = false;
+  let pollInFlight = false;
+  let pollTimer = 0;
+  const pollIntervalMs = 1000;
+  function scheduleWindowStatePoll(immediate = false) {
+    window.clearTimeout(pollTimer);
+    if (document.hidden) return;
+    pollTimer = window.setTimeout(pollWindowState, immediate ? 0 : pollIntervalMs);
+  }
+  // runtime_tool_window_interaction_state_contract:
+  // Host refreshはouter shellを再navigateせず、revision pollをwakeしてiframe contentだけ更新する。
+  window.__tvairRefreshWindowState = () => scheduleWindowStatePoll(true);
   async function pollWindowState() {
-    if (refreshing || !frame) return;
+    if (pollInFlight || refreshing || !frame || document.hidden) {
+      scheduleWindowStatePoll(false);
+      return;
+    }
+    pollInFlight = true;
     try {
       const res = await fetch(stateUrl, { cache: 'no-store' });
       if (!res.ok) return;
@@ -2278,17 +1867,29 @@ html,body{margin:0;padding:0;width:100%;height:100%;min-width:0;min-height:0;ove
           url.searchParams.set('__tvairScrollX', String(scrollX));
           url.searchParams.set('__tvairScrollY', String(scrollY));
         }
-        const restoreScroll = () => {
-          if (!preserveScroll) return;
-          try { frame.contentWindow?.scrollTo(scrollX, scrollY); } catch {}
+        const completeRefresh = () => {
+          if (preserveScroll) {
+            try { frame.contentWindow?.scrollTo(scrollX, scrollY); } catch {}
+          }
+          refreshing = false;
+          scheduleWindowStatePoll(false);
         };
-        frame.addEventListener('load', restoreScroll, { once: true });
+        frame.addEventListener('load', completeRefresh, { once: true });
         frame.setAttribute('src', url.pathname + url.search + url.hash);
-        window.setTimeout(() => { refreshing = false; }, 800);
+        return;
       }
     } catch { }
+    finally {
+      pollInFlight = false;
+      if (!refreshing) scheduleWindowStatePoll(false);
+    }
   }
-  window.setInterval(pollWindowState, 1000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) window.clearTimeout(pollTimer);
+    else scheduleWindowStatePoll(true);
+  });
+  window.addEventListener('focus', () => scheduleWindowStatePoll(true));
+  scheduleWindowStatePoll(true);
 })();
 </script>
 </body>
@@ -2301,7 +1902,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;min-width:0;min-height:0;ove
 
 static string NormalizePluginFormResponseMode(string? value)
 {
-    var mode = (value ?? string.Empty).Trim();
+    var mode = SplitPluginWindowRawValues(value).FirstOrDefault() ?? string.Empty;
     if (mode.Equals("redirect", StringComparison.OrdinalIgnoreCase)) return "redirect";
     if (mode.Equals("redirectBack", StringComparison.OrdinalIgnoreCase) || mode.Equals("redirect-back", StringComparison.OrdinalIgnoreCase)) return "redirectBack";
     if (mode.Equals("hostHandled", StringComparison.OrdinalIgnoreCase) || mode.Equals("host-handled", StringComparison.OrdinalIgnoreCase)) return "hostHandled";
@@ -2310,6 +1911,7 @@ static string NormalizePluginFormResponseMode(string? value)
     if (mode.Equals("toolWindow", StringComparison.OrdinalIgnoreCase) || mode.Equals("hostWindow", StringComparison.OrdinalIgnoreCase) || mode.Equals("toolWindowRedirectBack", StringComparison.OrdinalIgnoreCase)) return "toolWindow";
     if (mode.Equals("auto", StringComparison.OrdinalIgnoreCase)) return "toolWindow";
     if (mode.Equals("refreshWindow", StringComparison.OrdinalIgnoreCase) || mode.Equals("refresh", StringComparison.OrdinalIgnoreCase)) return "refreshWindow";
+    if (mode.Equals("patchWindow", StringComparison.OrdinalIgnoreCase) || mode.Equals("patch", StringComparison.OrdinalIgnoreCase)) return "patchWindow";
     return "json";
 }
 
@@ -2382,7 +1984,7 @@ static string AddToolWindowDirectContentQuery(string? route)
 
 static string ResolvePluginToolWindowReturnUrl(HttpRequest http, PluginWindowRequest request, string? route)
 {
-    var explicitReturn = !string.IsNullOrWhiteSpace(request.ReturnUrl) ? request.ReturnUrl : ReadPayload(request.Payload, "returnUrl", "ReturnUrl", "redirectBackUrl", "RedirectBackUrl", "sourceUrl", "SourceUrl");
+    var explicitReturn = !string.IsNullOrWhiteSpace(request.ReturnUrl) ? request.ReturnUrl : ReadPayload(request.Payload, "returnUrl", "ReturnUrl");
     var normalizedExplicit = NormalizeLocalPluginReturnUrl(http, explicitReturn);
     if (!string.IsNullOrWhiteSpace(normalizedExplicit)) return normalizedExplicit;
 
@@ -2404,7 +2006,9 @@ static string NormalizeLocalPluginReturnUrl(HttpRequest http, string? value)
 {
     var text = (value ?? string.Empty).Trim();
     if (string.IsNullOrWhiteSpace(text)) return string.Empty;
+    if (text.IndexOfAny(new[] { '\r', '\n', '\t' }) >= 0) return string.Empty;
     if (text.StartsWith("//", StringComparison.Ordinal)) return string.Empty;
+    if (text.StartsWith("/\\", StringComparison.Ordinal)) return string.Empty;
     if (text.StartsWith("/", StringComparison.Ordinal)) return text;
     if (Uri.TryCreate(text, UriKind.Absolute, out var absolute))
     {
@@ -2427,7 +2031,7 @@ static bool IsTrayPluginMenuSource(string? source)
        || string.Equals((source ?? string.Empty).Trim(), "tasktray", StringComparison.OrdinalIgnoreCase)
        || string.Equals((source ?? string.Empty).Trim(), "taskbar", StringComparison.OrdinalIgnoreCase);
 
-static IResult DispatchPluginDefaultMenuAction(string routeSegment, string source, HttpRequest http, PluginRegistry registry, PluginDefaultMenuActionService menuActions, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, LogRepository log)
+static IResult DispatchPluginDefaultMenuAction(string routeSegment, string source, HttpRequest http, PluginRegistry registry, PluginDefaultMenuActionService menuActions, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, PluginBoundaryGate boundaryGate, LogRepository log)
 {
     var isTraySource = IsTrayPluginMenuSource(source);
     var actionInfo = menuActions.ResolveActionByRoute(routeSegment);
@@ -2441,26 +2045,42 @@ static IResult DispatchPluginDefaultMenuAction(string routeSegment, string sourc
     var plugin = FindPluginForDefaultMenuAction(registry, actionInfo.PluginId, route);
     if (plugin is null)
     {
+        var missingKind = (actionInfo.Kind ?? string.Empty).Trim();
+        if (missingKind.Equals(PluginMenuActionKinds.StatusDialog, StringComparison.OrdinalIgnoreCase)
+            && string.Equals((actionInfo.Source ?? string.Empty).Trim(), "capability.statusDialog", StringComparison.OrdinalIgnoreCase))
+        {
+            var returnUrl = ResolvePluginMenuReturnUrl(http);
+            log.Add("PLUGIN_MENU_ACTION_DISPATCH", actionInfo.Name, $"result=STATUS_INFO kind={SafePluginActionValue(missingKind)} source={SafePluginActionValue(source)} route={SafePluginActionValue(route)} sourceKind={SafePluginActionValue(actionInfo.Source)} browserNavigation={(isTraySource ? "none" : "status_dialog_fallback")} mainBrowserOpened=False programGuideOpened=False redirectBack={!isTraySource} returnUrl={(isTraySource ? "-" : SafePluginActionValue(returnUrl))} rule=release_contract");
+            return isTraySource ? Results.NoContent() : RenderPluginVersionInfoPage(actionInfo, returnUrl);
+        }
+
         log.Add("PLUGIN_MENU_ACTION_DISPATCH", actionInfo.Name, $"result=PLUGIN_NOT_FOUND kind={SafePluginActionValue(actionInfo.Kind)} route={SafePluginActionValue(route)} source={SafePluginActionValue(source)} rule=release_contract");
         return PluginHtmlMessage("プラグイン操作", "対象プラグインが読み込まれていません。", StatusCodes.Status404NotFound, "/", "番組表へ戻る");
     }
 
     if (actionInfo.Kind.Equals(PluginMenuActionKinds.ToolWindow, StringComparison.OrdinalIgnoreCase))
     {
-        if (plugin is not IUiPlugin uiPlugin)
+        var menuWindowBoundary = boundaryGate.CheckWindow(ResolveRuntimeBoundaryPlugin(registry, plugin), "openWindow", http.Path.Value ?? string.Empty);
+        if (!menuWindowBoundary.Allowed)
         {
-            log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Name, $"result=DENIED kind=toolWindow reason=not_ui_plugin route={SafePluginActionValue(route)} source={SafePluginActionValue(source)} rule=release_contract");
-            return PluginHtmlMessage("プラグイン操作", "このプラグインはツールウィンドウを持っていません。", StatusCodes.Status400BadRequest, "/", "番組表へ戻る");
+            log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Descriptor.DisplayName, $"result=DENIED kind=toolWindow reason={SafePluginActionValue(menuWindowBoundary.Reason)} route={SafePluginActionValue(route)} source={SafePluginActionValue(source)} rule=plugin_boundary_gate");
+            return PluginHtmlMessage("プラグイン操作", "このプラグインの画面を操作できませんでした。", StatusCodes.Status403Forbidden, "/", "番組表へ戻る");
         }
 
-        var manifest = plugin is IManifestPlugin mp ? mp.Manifest : null;
-        var pluginActionId = GetPluginActionIdentity(plugin, route);
+        var runtimeMenuPlugin = ResolveRuntimeBoundaryPlugin(registry, plugin);
+        if (runtimeMenuPlugin is not ITvAirRuntimeUiPlugin)
+        {
+            log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Descriptor.DisplayName, $"result=DENIED kind=toolWindow reason=runtime_ui_not_implemented route={SafePluginActionValue(route)} source={SafePluginActionValue(source)} rule=runtime_ui_contract");
+            return PluginHtmlMessage("プラグイン操作", "このプラグインには開ける画面がありません。", StatusCodes.Status400BadRequest, "/", "番組表へ戻る");
+        }
+
+        var pluginActionId = NormalizePluginActionId(runtimeMenuPlugin.Descriptor.PluginId);
         var request = new PluginWindowRequest
         {
             Action = "openWindow",
             PluginId = pluginActionId,
             RouteSegment = route,
-            Title = string.IsNullOrWhiteSpace(uiPlugin.Ui.MenuText) ? plugin.Name : uiPlugin.Ui.MenuText,
+            Title = string.IsNullOrWhiteSpace(actionInfo.Label) ? plugin.Descriptor.DisplayName : actionInfo.Label,
             Width = 0,
             Height = 0,
             MinWidth = 0,
@@ -2475,19 +2095,22 @@ static IResult DispatchPluginDefaultMenuAction(string routeSegment, string sourc
             {
                 ["source"] = source,
                 ["defaultMenuAction"] = "true",
-                ["showInTaskbar"] = actionInfo.ShowInTaskbar ? "true" : "false"
+                ["showInTaskbar"] = actionInfo.ShowInTaskbar ? "true" : "false",
+                ["runtimeActionId"] = actionInfo.ActionId,
+                ["windowDefinitionId"] = actionInfo.WindowDefinitionId,
+                ["surfaceDefinitionId"] = actionInfo.SurfaceDefinitionId
             }
         };
 
-        var unifiedOpen = OpenOrActivatePluginToolWindowUnified(plugin, pluginActionId, route, request, source, "default_menu_toolwindow", http, windows, toolWindows, log);
+        var unifiedOpen = OpenOrActivatePluginToolWindowUnified(runtimeMenuPlugin, pluginActionId, route, request, source, "default_menu_toolwindow", http, windows, toolWindows, log);
         var session = unifiedOpen.Session;
         var reusedWindowSession = unifiedOpen.ReusedSession;
         var hostResult = unifiedOpen.HostResult;
 
         var returnUrl = ResolvePluginMenuReturnUrl(http);
         var browserNavigation = isTraySource ? "none" : "redirectBack";
-        log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Name, $"result=OK kind=toolWindow source={SafePluginActionValue(source)} route={SafePluginActionValue(route)} windowId={SafePluginActionValue(session.WindowId)} reusedSession={reusedWindowSession} hostResult={SafePluginActionValue(hostResult.Result)} hostReused={hostResult.Reused} activated={hostResult.Activated} size={session.Width}x{session.Height} minSize={session.MinWidth}x{session.MinHeight} showInTaskbar={actionInfo.ShowInTaskbar} browserNavigation={browserNavigation} mainBrowserOpened=False programGuideOpened=False redirectBack={!isTraySource} returnUrl={(isTraySource ? "-" : SafePluginActionValue(returnUrl))} rule=release_contract");
-        log.Add("PLUGIN_TOOL_WINDOW_ACTIVATE", plugin.Name, $"result={SafePluginActionValue(hostResult.Result)} source={SafePluginActionValue(source)} windowId={SafePluginActionValue(session.WindowId)} reused={hostResult.Reused} activated={hostResult.Activated} showInTaskbar={actionInfo.ShowInTaskbar} reason=default_menu_action browserNavigationSuppressed=True rule=release_contract");
+        log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Descriptor.DisplayName, $"result=OK kind=toolWindow source={SafePluginActionValue(source)} route={SafePluginActionValue(route)} windowId={SafePluginActionValue(session.WindowId)} reusedSession={reusedWindowSession} hostResult={SafePluginActionValue(hostResult.Result)} hostReused={hostResult.Reused} activated={hostResult.Activated} size={session.Width}x{session.Height} minSize={session.MinWidth}x{session.MinHeight} showInTaskbar={actionInfo.ShowInTaskbar} browserNavigation={browserNavigation} mainBrowserOpened=False programGuideOpened=False redirectBack={!isTraySource} returnUrl={(isTraySource ? "-" : SafePluginActionValue(returnUrl))} rule=release_contract");
+        log.Add("PLUGIN_TOOL_WINDOW_ACTIVATE", plugin.Descriptor.DisplayName, $"result={SafePluginActionValue(hostResult.Result)} source={SafePluginActionValue(source)} windowId={SafePluginActionValue(session.WindowId)} reused={hostResult.Reused} activated={hostResult.Activated} showInTaskbar={actionInfo.ShowInTaskbar} reason=default_menu_action browserNavigationSuppressed=True rule=release_contract");
         return isTraySource ? Results.NoContent() : PluginSeeOther(returnUrl);
     }
 
@@ -2496,64 +2119,86 @@ static IResult DispatchPluginDefaultMenuAction(string routeSegment, string sourc
 
     if (kind.Equals(PluginMenuActionKinds.Page, StringComparison.OrdinalIgnoreCase))
     {
+        var menuPageBoundary = boundaryGate.CheckRender(ResolveRuntimeBoundaryPlugin(registry, plugin), hostManagedToolWindowContent: false, http.Path.Value ?? string.Empty);
+        if (!menuPageBoundary.Allowed)
+        {
+            log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Descriptor.DisplayName, $"result=DENIED kind=page reason={SafePluginActionValue(menuPageBoundary.Reason)} route={SafePluginActionValue(route)} source={SafePluginActionValue(source)} rule=plugin_boundary_gate");
+            return PluginHtmlMessage("プラグイン操作", "このプラグインの画面を開けませんでした。", StatusCodes.Status403Forbidden, "/", "番組表へ戻る");
+        }
         var target = $"/plugin/{Uri.EscapeDataString(route)}";
-        log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Name, $"result=REDIRECT kind=page source={SafePluginActionValue(source)} route={SafePluginActionValue(route)} target={SafePluginActionValue(target)} browserNavigation={(isTraySource ? "none" : "plugin_page")} mainBrowserOpened={!isTraySource} programGuideOpened=False redirectBack=False returnUrl={(isTraySource ? "-" : SafePluginActionValue(returnUrlForLog))} rule=release_contract");
-        return isTraySource ? Results.NoContent() : PluginSeeOther(target);
+        // Page actions are browser navigation actions regardless of the menu entry point.
+        // Tray already opens this dispatch URL in the user's default browser; returning 204 for
+        // source=tray would strand that browser request on the dispatcher instead of the plugin page.
+        log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Descriptor.DisplayName, $"result=REDIRECT kind=page source={SafePluginActionValue(source)} route={SafePluginActionValue(route)} target={SafePluginActionValue(target)} browserNavigation=plugin_page mainBrowserOpened=True programGuideOpened=False redirectBack=False returnUrl={SafePluginActionValue(returnUrlForLog)} rule=release_contract");
+        return PluginSeeOther(target);
     }
 
     if (kind.Equals(PluginMenuActionKinds.Settings, StringComparison.OrdinalIgnoreCase))
     {
+        var menuSettingsBoundary = boundaryGate.CheckRender(ResolveRuntimeBoundaryPlugin(registry, plugin), hostManagedToolWindowContent: false, http.Path.Value ?? string.Empty);
+        if (!menuSettingsBoundary.Allowed)
+        {
+            log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Descriptor.DisplayName, $"result=DENIED kind=settings reason={SafePluginActionValue(menuSettingsBoundary.Reason)} route={SafePluginActionValue(route)} source={SafePluginActionValue(source)} rule=plugin_boundary_gate");
+            return PluginHtmlMessage("プラグイン操作", "このプラグインの設定画面を開けませんでした。", StatusCodes.Status403Forbidden, "/", "番組表へ戻る");
+        }
         var target = $"/plugin/{Uri.EscapeDataString(route)}?mode=settings";
-        log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Name, $"result=REDIRECT kind=settings source={SafePluginActionValue(source)} route={SafePluginActionValue(route)} target={SafePluginActionValue(target)} browserNavigation={(isTraySource ? "none" : "plugin_settings")} mainBrowserOpened={!isTraySource} programGuideOpened=False redirectBack=False returnUrl={(isTraySource ? "-" : SafePluginActionValue(returnUrlForLog))} rule=release_contract");
-        return isTraySource ? Results.NoContent() : PluginSeeOther(target);
+        // Settings actions are browser navigation actions for the same reason as page actions.
+        log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Descriptor.DisplayName, $"result=REDIRECT kind=settings source={SafePluginActionValue(source)} route={SafePluginActionValue(route)} target={SafePluginActionValue(target)} browserNavigation=plugin_settings mainBrowserOpened=True programGuideOpened=False redirectBack=False returnUrl={SafePluginActionValue(returnUrlForLog)} rule=release_contract");
+        return PluginSeeOther(target);
     }
 
     if (kind.Equals(PluginMenuActionKinds.VersionDialog, StringComparison.OrdinalIgnoreCase) || kind.Equals(PluginMenuActionKinds.StatusDialog, StringComparison.OrdinalIgnoreCase))
     {
-        log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Name, $"result=VERSION_INFO kind=info source={SafePluginActionValue(source)} route={SafePluginActionValue(route)} version={SafePluginActionValue(actionInfo.Version)} browserNavigation={(isTraySource ? "none" : "version_dialog_fallback")} mainBrowserOpened=False programGuideOpened=False redirectBack={!isTraySource} returnUrl={(isTraySource ? "-" : SafePluginActionValue(returnUrlForLog))} rule=release_contract");
+        log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Descriptor.DisplayName, $"result=VERSION_INFO kind=info source={SafePluginActionValue(source)} route={SafePluginActionValue(route)} version={SafePluginActionValue(actionInfo.Version)} browserNavigation={(isTraySource ? "none" : "version_dialog_fallback")} mainBrowserOpened=False programGuideOpened=False redirectBack={!isTraySource} returnUrl={(isTraySource ? "-" : SafePluginActionValue(returnUrlForLog))} rule=release_contract");
         return isTraySource ? Results.NoContent() : RenderPluginVersionInfoPage(actionInfo, returnUrlForLog);
     }
 
-    log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Name, $"result=DENIED kind={SafePluginActionValue(kind)} reason=unsupported_action_kind source={SafePluginActionValue(source)} route={SafePluginActionValue(route)} rule=release_contract");
+    log.Add("PLUGIN_MENU_ACTION_DISPATCH", plugin.Descriptor.DisplayName, $"result=DENIED kind={SafePluginActionValue(kind)} reason=unsupported_action_kind source={SafePluginActionValue(source)} route={SafePluginActionValue(route)} rule=release_contract");
     return PluginHtmlMessage("プラグイン操作", "このプラグインの既定アクション種別はTvAIr本体で実行できません。", StatusCodes.Status400BadRequest, ResolvePluginMenuReturnUrl(http), "戻る");
 }
 
-static ITvAIrPlugin? FindPluginForDefaultMenuAction(PluginRegistry registry, string pluginId, string route)
-{
-    var ui = registry.FindUiPlugin(route);
-    if (ui is not null) return ui;
-    return registry.GetAll().FirstOrDefault(p =>
-    {
-        if (p is IManifestPlugin mp)
-        {
-            var manifestRoute = (mp.Manifest.Route ?? string.Empty).Trim().Trim('/');
-            if (manifestRoute.StartsWith("plugin/", StringComparison.OrdinalIgnoreCase)) manifestRoute = manifestRoute[7..];
-            if (string.Equals(mp.Manifest.Id, pluginId, StringComparison.OrdinalIgnoreCase)) return true;
-            if (string.Equals(manifestRoute, route, StringComparison.OrdinalIgnoreCase)) return true;
-        }
-        return string.Equals(p.Name, pluginId, StringComparison.OrdinalIgnoreCase);
-    });
-}
+static ITvAirRuntimeCapabilityPlugin? FindPluginForDefaultMenuAction(PluginRegistry registry, string pluginId, string route)
+    => FindPluginByActionIdentity(registry, pluginId, route);
 
 static string ResolvePluginMenuReturnUrl(HttpRequest http)
 {
+    var explicitReturn = ReadPluginReturnQuery(http, "returnUrl", "ReturnUrl");
+    var normalizedExplicit = NormalizeLocalPluginReturnUrl(http, explicitReturn);
+    if (IsAllowedPluginMenuReturnUrl(normalizedExplicit)) return normalizedExplicit;
+
     var referrer = NormalizeLocalPluginReturnUrl(http, http.Headers.Referer.ToString());
-    if (!string.IsNullOrWhiteSpace(referrer)
-        && !referrer.StartsWith("/plugin-menu/", StringComparison.OrdinalIgnoreCase)
-        && !referrer.StartsWith("/plugin-menu-info/", StringComparison.OrdinalIgnoreCase)
-        && !referrer.StartsWith("/plugin-window/", StringComparison.OrdinalIgnoreCase)
-        && !referrer.StartsWith("/api/", StringComparison.OrdinalIgnoreCase))
-    {
-        return referrer;
-    }
+    if (IsAllowedPluginMenuReturnUrl(referrer)) return referrer;
     return "/";
+}
+
+static string ReadPluginReturnQuery(HttpRequest http, params string[] keys)
+{
+    foreach (var key in keys)
+    {
+        if (http.Query.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value.ToString())) return value.ToString();
+    }
+    return string.Empty;
+}
+
+static bool IsAllowedPluginMenuReturnUrl(string? value)
+{
+    var url = (value ?? string.Empty).Trim();
+    if (string.IsNullOrWhiteSpace(url)) return false;
+    if (!url.StartsWith("/", StringComparison.Ordinal) || url.StartsWith("//", StringComparison.Ordinal)) return false;
+    if (url.StartsWith("/plugin-menu/", StringComparison.OrdinalIgnoreCase)) return false;
+    if (url.StartsWith("/plugin-menu-info/", StringComparison.OrdinalIgnoreCase)) return false;
+    if (url.StartsWith("/plugin-window/", StringComparison.OrdinalIgnoreCase)) return false;
+    if (url.StartsWith("/api/", StringComparison.OrdinalIgnoreCase)) return false;
+    return true;
 }
 
 
 static IResult RenderPluginVersionInfoPage(PluginDefaultMenuActionInfo actionInfo, string? returnUrl)
 {
     var safeTitle = HtmlEncoder.Default.Encode(actionInfo.Name);
-    var safeVersion = HtmlEncoder.Default.Encode(string.IsNullOrWhiteSpace(actionInfo.Version) ? "不明" : actionInfo.Version);
+    var statusText = string.IsNullOrWhiteSpace(actionInfo.Version) ? actionInfo.Description : $"バージョン: {actionInfo.Version}";
+    if (string.IsNullOrWhiteSpace(statusText)) statusText = "バージョン: 不明";
+    var safeVersion = HtmlEncoder.Default.Encode(statusText);
     var safeReturn = HtmlEncoder.Default.Encode(string.IsNullOrWhiteSpace(returnUrl) ? "/" : returnUrl);
     var html = $$"""
 <!doctype html>
@@ -2562,14 +2207,14 @@ static IResult RenderPluginVersionInfoPage(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-notification.css?v=1.1.0">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.2.0-owner203">
 </head>
 <body>
-<script src="/tvair-notification.js?v=1.1.0"></script>
+<script src="/tvair-notification.js?v=1.2.0"></script>
 <script>
 document.addEventListener('DOMContentLoaded',function(){
-  if(window.TvAIrNotify){ TvAIrNotify({ title:'{{safeTitle}}', message:'バージョン: {{safeVersion}}', onOk:function(){ location.replace('{{safeReturn}}'); } }); }
-  else { alert('{{safeTitle}}\nバージョン: {{safeVersion}}'); location.replace('{{safeReturn}}'); }
+  if(window.TvAIrNotify){ TvAIrNotify({ title:'{{safeTitle}}', message:'{{safeVersion}}', onOk:function(){ location.replace('{{safeReturn}}'); } }); }
+  else { alert('{{safeTitle}}\n{{safeVersion}}'); location.replace('{{safeReturn}}'); }
 });
 </script>
 </body>
@@ -2590,6 +2235,13 @@ static IResult RenderPluginDefaultMenuInfoByRoute(string routeSegment, PluginReg
     var plugin = FindPluginForDefaultMenuAction(registry, actionInfo.PluginId, actionInfo.RouteSegment);
     if (plugin is null)
     {
+        if (actionInfo.Kind.Equals(PluginMenuActionKinds.StatusDialog, StringComparison.OrdinalIgnoreCase)
+            && string.Equals((actionInfo.Source ?? string.Empty).Trim(), "capability.statusDialog", StringComparison.OrdinalIgnoreCase))
+        {
+            log.Add("PLUGIN_MENU_INFO_RENDER", actionInfo.Name, $"result=OK_STATUS_ONLY route={SafePluginActionValue(actionInfo.RouteSegment)} version={SafePluginActionValue(actionInfo.Version)} source={SafePluginActionValue(actionInfo.Source)} rule=release_contract");
+            return RenderPluginVersionInfoPage(actionInfo, "/");
+        }
+
         log.Add("PLUGIN_MENU_INFO_RENDER", actionInfo.Name, $"result=PLUGIN_NOT_FOUND route={SafePluginActionValue(actionInfo.RouteSegment)} rule=release_contract");
         return PluginHtmlMessage("プラグイン情報", "対象プラグインが読み込まれていません。", StatusCodes.Status404NotFound, "/", "番組表へ戻る");
     }
@@ -2598,14 +2250,13 @@ static IResult RenderPluginDefaultMenuInfoByRoute(string routeSegment, PluginReg
     return RenderPluginDefaultMenuInfo(actionInfo, plugin);
 }
 
-static IResult RenderPluginDefaultMenuInfo(PluginDefaultMenuActionInfo actionInfo, ITvAIrPlugin plugin)
+static IResult RenderPluginDefaultMenuInfo(PluginDefaultMenuActionInfo actionInfo, ITvAirRuntimeCapabilityPlugin plugin)
 {
-    var manifest = plugin is IManifestPlugin mp ? mp.Manifest : null;
     var safeName = HtmlEncoder.Default.Encode(actionInfo.Name);
     var safeVersion = HtmlEncoder.Default.Encode(actionInfo.Version);
     var safeRoute = HtmlEncoder.Default.Encode(actionInfo.RouteSegment);
     var safeKind = HtmlEncoder.Default.Encode(actionInfo.Kind);
-    var safeDescription = HtmlEncoder.Default.Encode(string.IsNullOrWhiteSpace(actionInfo.Description) ? (manifest?.Description ?? string.Empty) : actionInfo.Description);
+    var safeDescription = HtmlEncoder.Default.Encode(actionInfo.Description ?? string.Empty);
     var html = $$"""
 <!doctype html>
 <html lang="ja">
@@ -2613,11 +2264,9 @@ static IResult RenderPluginDefaultMenuInfo(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeName}} 情報</title>
-<style>
-body{font-family:Meiryo,"Yu Gothic UI",sans-serif;margin:24px;background:#f5f7fb;color:#172333}.card{max-width:560px;border:1px solid #c9d2df;background:#fff;border-radius:12px;padding:18px;box-shadow:0 8px 24px rgba(20,30,50,.12)}h1{font-size:20px;margin:0 0 14px}.row{display:flex;gap:12px;margin:8px 0}.k{width:110px;color:#526275}.v{font-weight:600}.button{display:inline-block;margin-top:16px;padding:8px 12px;border:1px solid #8aa0b8;border-radius:8px;color:#102334;text-decoration:none;background:#eef4fb}
-</style>
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.0-css-final199">
 </head>
-<body><div class="card"><h1>{{safeName}} 情報</h1><div class="row"><div class="k">Version</div><div class="v">{{safeVersion}}</div></div><div class="row"><div class="k">Route</div><div class="v">{{safeRoute}}</div></div><div class="row"><div class="k">Action</div><div class="v">{{safeKind}}</div></div><p>{{safeDescription}}</p><a class="button" href="/">番組表へ戻る</a></div></body>
+<body class="tvair-plugin-info-page"><div class="card"><h1>{{safeName}} 情報</h1><div class="row"><div class="k">Version</div><div class="v">{{safeVersion}}</div></div><div class="row"><div class="k">Route</div><div class="v">{{safeRoute}}</div></div><div class="row"><div class="k">Action</div><div class="v">{{safeKind}}</div></div><p>{{safeDescription}}</p><a class="button" href="/">番組表へ戻る</a></div></body>
 </html>
 """;
     return Results.Content(html, "text/html; charset=utf-8");
@@ -2636,9 +2285,9 @@ static IResult PluginHtmlMessage(string title, string message, int statusCode, s
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<style>body{font-family:system-ui,"Segoe UI",sans-serif;margin:24px;line-height:1.6}.card{max-width:720px;border:1px solid #ddd;border-radius:12px;padding:18px}a.button{display:inline-block;margin-top:12px;padding:8px 12px;border:1px solid #888;border-radius:8px;text-decoration:none;color:#111}</style>
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.0-css-final199">
 </head>
-<body><div class="card"><h1>{{safeTitle}}</h1><p>{{safeMessage}}</p><a class="button" href="{{safeHref}}">{{safeLinkText}}</a></div></body>
+<body class="tvair-message-page"><div class="card"><h1>{{safeTitle}}</h1><p>{{safeMessage}}</p><a class="button" href="{{safeHref}}">{{safeLinkText}}</a></div></body>
 </html>
 """;
     return Results.Content(html, "text/html; charset=utf-8", statusCode: statusCode);
@@ -2648,7 +2297,7 @@ static IResult BuildPluginWindowDispatchResponse(PluginWindowResult result, stri
 {
     if (responseMode.Equals("redirect", StringComparison.OrdinalIgnoreCase)) return PluginSeeOther(redirectUrl);
     if (responseMode.Equals("redirectBack", StringComparison.OrdinalIgnoreCase) || responseMode.Equals("hostHandled", StringComparison.OrdinalIgnoreCase)) return Results.NoContent();
-    if (responseMode.Equals("html", StringComparison.OrdinalIgnoreCase)) return PluginHtmlMessage("Plugin window", result.Message, StatusCodes.Status200OK, result.WindowUrl, "Plugin windowを開く");
+    if (responseMode.Equals("html", StringComparison.OrdinalIgnoreCase)) return PluginHtmlMessage("プラグイン画面", result.Message, StatusCodes.Status200OK, result.WindowUrl, "プラグイン画面を開く");
     if (responseMode.Equals("noContent", StringComparison.OrdinalIgnoreCase) || responseMode.Equals("toolWindow", StringComparison.OrdinalIgnoreCase)) return Results.NoContent();
     return Results.Ok(result);
 }
@@ -2658,50 +2307,269 @@ static IResult BuildPluginWindowDispatchError(PluginWindowResult result, string 
     if (responseMode.Equals("noContent", StringComparison.OrdinalIgnoreCase) || responseMode.Equals("toolWindow", StringComparison.OrdinalIgnoreCase) || responseMode.Equals("hostHandled", StringComparison.OrdinalIgnoreCase) || responseMode.Equals("redirectBack", StringComparison.OrdinalIgnoreCase))
         return Results.NoContent();
     if (!responseMode.Equals("json", StringComparison.OrdinalIgnoreCase))
-        return PluginHtmlMessage("Plugin window error", string.IsNullOrWhiteSpace(result.Message) ? result.Diagnostics : result.Message, statusCode, "/", "番組表へ戻る");
+        return PluginHtmlMessage("プラグイン画面エラー", "プラグイン画面を開けませんでした。", statusCode, "/", "番組表へ戻る");
     return Results.Json(result, statusCode: statusCode);
 }
 
-static IResult BuildPluginActionDispatchError(PluginActionResult result, string responseMode, string windowId, int statusCode)
+static IReadOnlyList<RuntimeUiPatch> NormalizeRuntimeUiPatches(IReadOnlyList<RuntimeUiPatch>? patches)
+    => RuntimeUiPatchContract.Normalize(patches);
+
+static string BuildPluginFloatingButtonsHtml(RuntimeUiRenderContext context, string pluginName, LogRepository log)
 {
+    if (context.FloatingButtons.Count == 0) return string.Empty;
+    static string Enc(string? value) => System.Net.WebUtility.HtmlEncode(value ?? string.Empty);
+    static string NormalizeId(string? value)
+    {
+        var id = (value ?? string.Empty).Trim();
+        return System.Text.RegularExpressions.Regex.IsMatch(id, "^[A-Za-z][A-Za-z0-9_\\-:.]{0,127}$") ? id : string.Empty;
+    }
+
+    var normalized = context.FloatingButtons
+        .Where(x => x is not null && x.ActionAvailable)
+        .Select(x => new
+        {
+            Item = x,
+            Id = NormalizeId(x.Id),
+            Label = (x.Label ?? string.Empty).Trim(),
+            Tooltip = (x.Tooltip ?? string.Empty).Trim(),
+            Icon = (x.Icon ?? string.Empty).Trim()
+        })
+        .Where(x => !string.IsNullOrWhiteSpace(x.Id) && !string.IsNullOrWhiteSpace(x.Label))
+        .GroupBy(x => x.Id, StringComparer.OrdinalIgnoreCase)
+        .Select(g => g.First())
+        .OrderBy(x => x.Item.Position)
+        .ThenBy(x => x.Item.Priority)
+        .ThenBy(x => x.Id, StringComparer.OrdinalIgnoreCase)
+        .Take(16)
+        .ToArray();
+    if (normalized.Length == 0) return string.Empty;
+
+    var sb = new System.Text.StringBuilder();
+    sb.Append("<link rel=\"stylesheet\" href=\"/tvair-generated-surfaces.css?v=1.2.0-css-final199\">");
+
+    foreach (var group in normalized.GroupBy(x => x.Item.Position))
+    {
+        var cls = group.Key switch
+        {
+            PluginFloatingButtonPosition.BottomLeft => "bl",
+            PluginFloatingButtonPosition.TopRight => "tr",
+            PluginFloatingButtonPosition.TopLeft => "tl",
+            _ => "br"
+        };
+        sb.Append("<div class=\"tvair-floating-buttons ").Append(cls).Append("\" data-tvair-floating-position=\"").Append(cls).Append("\">");
+        foreach (var x in group)
+        {
+            var feedback = x.Item.Feedback;
+            var attrs = feedback is null
+                ? context.BuildPluginActionAttributes(x.Item.Payload, responseMode: x.Item.ResponseMode)
+                : context.BuildPluginActionAttributes(x.Item.Payload, feedback, responseMode: x.Item.ResponseMode);
+            var threshold = Math.Clamp(x.Item.ScrollThresholdPixels, 0, 10000);
+            var tooltip = string.IsNullOrWhiteSpace(x.Tooltip) ? x.Label : x.Tooltip;
+            sb.Append("<button type=\"button\" class=\"tvair-floating-button\" id=\"").Append(Enc(x.Id)).Append("\" title=\"").Append(Enc(tooltip)).Append("\" aria-label=\"").Append(Enc(tooltip)).Append("\" ")
+              .Append(attrs)
+              .Append(" data-tvair-floating-visibility=\"").Append(x.Item.Visibility.ToString()).Append("\" data-tvair-floating-scroll-threshold=\"").Append(threshold.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append("\" data-tvair-floating-hide-running=\"").Append(x.Item.HideWhileRunning ? "true" : "false").Append("\"");
+            if (x.Item.Visibility == PluginFloatingButtonVisibility.ActionAvailable && !x.Item.ActionAvailable) sb.Append(" hidden");
+            sb.Append(">");
+            if (!string.IsNullOrWhiteSpace(x.Icon)) sb.Append("<span aria-hidden=\"true\">").Append(Enc(x.Icon.Length > 8 ? x.Icon[..8] : x.Icon)).Append("</span> ");
+            sb.Append("<span class=\"tvair-floating-label-text\">").Append(Enc(x.Label.Length > 80 ? x.Label[..80] : x.Label)).Append("</span></button>");
+        }
+        sb.Append("</div>");
+    }
+    sb.Append("<script>(function(){function u(){var a=document.querySelectorAll?document.querySelectorAll('[data-tvair-floating-visibility=AfterScroll]'):[];var y=window.pageYOffset||document.documentElement.scrollTop||document.body.scrollTop||0;for(var i=0;i<a.length;i++){var t=parseInt(a[i].getAttribute('data-tvair-floating-scroll-threshold')||'240',10);a[i].hidden=y<t;}}if(window.addEventListener){window.addEventListener('scroll',u,false);window.addEventListener('resize',u,false);}else if(window.attachEvent){window.attachEvent('onscroll',u);window.attachEvent('onresize',u);}u();})();</script>");
+    log.Add("PLUGIN_FLOATING_BUTTON_CONTRACT", pluginName, $"result=ISSUED declared={context.FloatingButtons.Count} rendered={normalized.Length} positions={SafePluginActionValue(string.Join(",", normalized.Select(x => x.Item.Position).Distinct()))} route=pluginOwnedAction safeEvent=True rule=floating_button_contract");
+    return sb.ToString();
+}
+
+static string NormalizePluginUserFeedbackMessage(string? message, bool success)
+{
+    var value = (message ?? string.Empty).Trim();
+    if (success) return value;
+    if (string.IsNullOrWhiteSpace(value)) return "処理できませんでした";
+
+    // 利用者向け面へSQLパラメータ名・例外型・スタック/パスなどの内部診断を露出させない。
+    // 詳細はサーバーログに保持し、Plugin Action Feedbackは安全な短文へ正規化する。
+    var looksInternal = value.Contains("parameter", StringComparison.OrdinalIgnoreCase)
+        || value.Contains("exception", StringComparison.OrdinalIgnoreCase)
+        || value.Contains("stack", StringComparison.OrdinalIgnoreCase)
+        || value.Contains(" at ", StringComparison.OrdinalIgnoreCase)
+        || value.Contains("$", StringComparison.Ordinal)
+        || value.Contains("\\", StringComparison.Ordinal)
+        || value.Contains("/", StringComparison.Ordinal);
+    return looksInternal ? "処理できませんでした" : value;
+}
+
+static PluginFloatingLabel? NormalizePluginFloatingLabel(PluginFloatingLabel? label, PluginActionFeedback? feedback, string correlationId)
+{
+    if (label is null && (feedback is null || !feedback.ShowFloatingLabel || string.IsNullOrWhiteSpace(feedback.Message))) return null;
+    label ??= new PluginFloatingLabel
+    {
+        CorrelationId = feedback?.CorrelationId ?? correlationId,
+        Message = feedback?.Message ?? string.Empty,
+        Kind = feedback?.Kind ?? PluginActionFeedbackKind.Information,
+        Position = PluginFloatingLabelPosition.ContentCenter
+    };
+    var message = (label.Message ?? string.Empty).Trim();
+    if (string.IsNullOrWhiteSpace(message)) return null;
+    var duration = label.DurationMilliseconds;
+    if (duration <= 0)
+    {
+        duration = label.Kind switch
+        {
+            PluginActionFeedbackKind.Warning => 2500,
+            PluginActionFeedbackKind.Error => 3000,
+            _ => 1800
+        };
+    }
+    duration = Math.Clamp(duration, 1000, 5000);
+    return new PluginFloatingLabel
+    {
+        CorrelationId = string.IsNullOrWhiteSpace(label.CorrelationId) ? correlationId : label.CorrelationId.Trim(),
+        Message = message.Length > 240 ? message[..240] : message,
+        Kind = label.Kind,
+        Position = label.Position,
+        DurationMilliseconds = duration
+    };
+}
+
+static IResult BuildPluginActionDispatchError(RuntimeUiActionResult result, string responseMode, string windowId, int statusCode, bool feedbackRequested = false, string correlationId = "")
+{
+    if (feedbackRequested)
+    {
+        result.Feedback ??= new PluginActionFeedback
+        {
+            CorrelationId = correlationId,
+            Phase = PluginActionFeedbackPhase.Failed,
+            Kind = PluginActionFeedbackKind.Error,
+            Message = NormalizePluginUserFeedbackMessage(result.Message, success: false)
+        };
+        result.Feedback.CorrelationId = correlationId;
+        result.FloatingLabel = NormalizePluginFloatingLabel(result.FloatingLabel, result.Feedback, correlationId);
+        return Results.Json(result, statusCode: statusCode);
+    }
+    // plugin_action_error_status_contract: hostHandled/noContent/toolWindow are success response modes,
+    // not permission to erase a Host-side DENY/ERROR into HTTP 204. The safe-event client uses
+    // the HTTP status as its authoritative success bit, so preserve the real failure status.
     if (responseMode.Equals("hostHandled", StringComparison.OrdinalIgnoreCase)
         || responseMode.Equals("noContent", StringComparison.OrdinalIgnoreCase)
         || responseMode.Equals("toolWindow", StringComparison.OrdinalIgnoreCase))
-        return Results.NoContent();
+        return Results.Json(result, statusCode: statusCode);
 
-    if (!responseMode.Equals("json", StringComparison.OrdinalIgnoreCase))
+    if (!responseMode.Equals("json", StringComparison.OrdinalIgnoreCase)
+        && !responseMode.Equals("patchWindow", StringComparison.OrdinalIgnoreCase))
     {
         var href = string.IsNullOrWhiteSpace(windowId) ? "/" : $"/plugin-window/{Uri.EscapeDataString(windowId)}";
-        return PluginHtmlMessage("Plugin action error", string.IsNullOrWhiteSpace(result.Message) ? result.Diagnostics : result.Message, statusCode, href, "戻る");
+        return PluginHtmlMessage("プラグイン操作エラー", "プラグインの操作を完了できませんでした。", statusCode, href, "戻る");
     }
     return Results.Json(result, statusCode: statusCode);
 }
 
-static IResult BuildPluginViewerActionResponse(PluginActionResult result, string responseMode, string windowId, string refreshTarget, bool preserveScroll, PluginWindowSessionStore windows, string pluginId, LogRepository log, string pluginName, string action, bool refreshAfter = false, PluginToolWindowHostService? toolWindows = null, HttpRequest? http = null, string refreshScrollTarget = "", string refreshScrollMode = "center")
+static string BuildRuntimePageRefreshNavigationTarget(HttpRequest http, string requestedContentRoute)
 {
+    var referer = http.Headers["Referer"].FirstOrDefault();
+    var targetPath = string.Empty;
+    var targetQuery = string.Empty;
+    if (Uri.TryCreate(referer, UriKind.Absolute, out var refererUri)
+        && string.Equals(refererUri.Authority, http.Host.Value, StringComparison.OrdinalIgnoreCase)
+        && refererUri.AbsolutePath.StartsWith("/plugin/", StringComparison.OrdinalIgnoreCase))
+    {
+        targetPath = refererUri.AbsolutePath;
+        targetQuery = refererUri.Query;
+    }
+    else if (!string.IsNullOrWhiteSpace(requestedContentRoute)
+        && Uri.TryCreate(requestedContentRoute.Trim(), UriKind.Relative, out _)
+        && requestedContentRoute.Trim().StartsWith("/plugin/", StringComparison.OrdinalIgnoreCase))
+    {
+        var raw = requestedContentRoute.Trim();
+        var separator = raw.IndexOf('?');
+        targetPath = separator >= 0 ? raw[..separator] : raw;
+        targetQuery = separator >= 0 ? raw[separator..] : string.Empty;
+    }
+    if (string.IsNullOrWhiteSpace(targetPath))
+        return "/";
+
+    var query = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(targetQuery);
+    var kept = query
+        .Where(pair => !string.Equals(pair.Key, "_tvairPageRefresh", StringComparison.OrdinalIgnoreCase))
+        .SelectMany(pair => pair.Value.Select(value => new KeyValuePair<string, string?>(pair.Key, value)))
+        .ToList();
+    kept.Add(new KeyValuePair<string, string?>("_tvairPageRefresh", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(System.Globalization.CultureInfo.InvariantCulture)));
+    return targetPath + (Microsoft.AspNetCore.Http.QueryString.Create(kept).Value ?? string.Empty);
+}
+
+static IResult BuildPluginOwnedActionResponse(RuntimeUiActionResult result, string responseMode, string windowId, string refreshTarget, bool preserveScroll, PluginWindowSessionStore windows, string pluginId, LogRepository log, string pluginName, string action, TvAIrPlugin.Runtime.RuntimeUiKind? runtimeUiKind, bool refreshAfter = false, PluginToolWindowHostService? toolWindows = null, HttpRequest? http = null, string requestedContentRoute = "", bool feedbackRequested = false, string correlationId = "")
+{
+    if (feedbackRequested)
+    {
+        result.Feedback ??= new PluginActionFeedback
+        {
+            Phase = result.Succeeded ? PluginActionFeedbackPhase.Succeeded : PluginActionFeedbackPhase.Failed,
+            Kind = result.Succeeded ? PluginActionFeedbackKind.Success : PluginActionFeedbackKind.Error,
+            Message = NormalizePluginUserFeedbackMessage(result.Message, result.Succeeded)
+        };
+        result.Feedback.CorrelationId = correlationId;
+        result.FloatingLabel = NormalizePluginFloatingLabel(result.FloatingLabel, result.Feedback, correlationId);
+    }
+    else if (result.FloatingLabel is not null)
+    {
+        result.FloatingLabel = NormalizePluginFloatingLabel(result.FloatingLabel, null, correlationId);
+    }
     if (responseMode.Equals("refreshWindow", StringComparison.OrdinalIgnoreCase))
     {
+        if (runtimeUiKind == TvAIrPlugin.Runtime.RuntimeUiKind.Page)
+        {
+            var pageRoute = http?.Headers["Referer"].FirstOrDefault();
+            var redirectTarget = "/";
+            if (http is not null && Uri.TryCreate(pageRoute, UriKind.Absolute, out var refererUri)
+                && string.Equals(refererUri.Authority, http.Host.Value, StringComparison.OrdinalIgnoreCase)
+                && refererUri.AbsolutePath.StartsWith("/plugin/", StringComparison.OrdinalIgnoreCase))
+            {
+                redirectTarget = refererUri.PathAndQuery;
+            }
+            log.Add("PLUGIN_ACTION", pluginName, $"action={SafePluginActionValue(action)} responseMode=refreshWindow result=REDIRECT surface=page windowId=- target=current_page preserveScroll={preserveScroll} rule=runtime_ui_action_result_refresh_contract");
+            return PluginSeeOther(redirectTarget);
+        }
+
         var resolvedWindowId = NormalizePluginWindowId(windowId);
+        var currentSession = windows.Get(resolvedWindowId);
+        var declaredRefreshMode = currentSession?.RefreshMode ?? TvAIrPlugin.Windows.PluginWindowRefreshMode.Navigate;
+        if (declaredRefreshMode == TvAIrPlugin.Windows.PluginWindowRefreshMode.None)
+        {
+            log.Add("PLUGIN_ACTION_RESPONSE_CONTRACT", pluginName, $"action={SafePluginActionValue(action)} result=NO_REFRESH declaredRefreshMode=None windowId={SafePluginActionValue(resolvedWindowId)} rule=runtime_descriptor_refresh_mode_contract");
+            return Results.Json(result);
+        }
+        if (declaredRefreshMode == TvAIrPlugin.Windows.PluginWindowRefreshMode.StatePatch)
+        {
+            var normalizedPatches = NormalizeRuntimeUiPatches(result.UiPatches);
+            result.UiPatches = normalizedPatches;
+            log.Add("PLUGIN_ACTION_RESPONSE_CONTRACT", pluginName, $"action={SafePluginActionValue(action)} result=STATE_PATCH declaredRefreshMode=StatePatch windowId={SafePluginActionValue(resolvedWindowId)} patches={normalizedPatches.Count} navigation=False rule=runtime_descriptor_refresh_mode_contract");
+            return Results.Json(result);
+        }
         var refreshRequest = new PluginWindowRequest
         {
             WindowId = resolvedWindowId,
             RefreshTarget = NormalizePluginWindowRefreshTarget(refreshTarget),
-            Target = NormalizePluginWindowRefreshTarget(refreshTarget),
             PreserveScroll = preserveScroll,
-            RefreshScrollTarget = NormalizePluginRefreshScrollTarget(refreshScrollTarget),
-            RefreshScrollMode = NormalizePluginRefreshScrollMode(refreshScrollMode),
-            ForceReload = true
+            ForceReload = true,
+            ContentRoute = string.IsNullOrWhiteSpace(requestedContentRoute) ? string.Empty : requestedContentRoute.Trim()
         };
         var session = windows.Refresh(resolvedWindowId, pluginId, refreshRequest);
         if (session is null)
         {
-            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action={SafePluginActionValue(action)} responseMode=refreshWindow result=REFRESH_NOT_FOUND windowId={SafePluginActionValue(resolvedWindowId)} rule=release_contract");
-            return PluginHtmlMessage("Plugin action accepted", result.Message, StatusCodes.Status200OK, "/", "番組表へ戻る");
+            log.Add("PLUGIN_ACTION", pluginName, $"action={SafePluginActionValue(action)} responseMode=refreshWindow result=SKIPPED reason=window_already_closed windowId={SafePluginActionValue(resolvedWindowId)} rule=runtime_ui_action_result_refresh_contract");
+            return Results.Json(result);
         }
 
         var contentRoute = BuildHostManagedPluginContentRoute(session.ContentRoute, session.WindowId, session.Revision);
-        log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action={SafePluginActionValue(action)} responseMode=refreshWindow result=REDIRECT windowId={SafePluginActionValue(session.WindowId)} target=content preserveScroll={preserveScroll} revision={session.Revision} contentRoute={SafePluginActionValue(contentRoute)} rule=release_contract");
+        log.Add("PLUGIN_ACTION", pluginName, $"action={SafePluginActionValue(action)} responseMode=refreshWindow result=REDIRECT windowId={SafePluginActionValue(session.WindowId)} target=content preserveScroll={preserveScroll} revision={session.Revision} contentRoute={SafePluginActionValue(contentRoute)} rule=runtime_ui_action_result_refresh_contract");
         return PluginSeeOther(contentRoute);
+    }
+
+    if (responseMode.Equals("patchWindow", StringComparison.OrdinalIgnoreCase))
+    {
+        var normalizedPatches = NormalizeRuntimeUiPatches(result.UiPatches);
+        result.UiPatches = normalizedPatches;
+        log.Add("PLUGIN_ACTION_RESPONSE_CONTRACT", pluginName, $"action={SafePluginActionValue(action)} result=PATCH_WINDOW responseMode=patchWindow windowId={SafePluginActionValue(windowId)} requestedPatches={result.UiPatches?.Count ?? 0} appliedContractPatches={normalizedPatches.Count} contract=plugin_action_declarative_window_patch rule=release_contract");
+        return Results.Json(result);
     }
 
     if (responseMode.Equals("hostHandled", StringComparison.OrdinalIgnoreCase)
@@ -2712,16 +2580,25 @@ static IResult BuildPluginViewerActionResponse(PluginActionResult result, string
         var hostRefresh = "-";
         var resolvedWindowId = NormalizePluginWindowId(windowId);
         var normalizedTarget = NormalizePluginWindowRefreshTarget(refreshTarget);
-        if (refreshAfter && !string.IsNullOrWhiteSpace(resolvedWindowId))
+        var pageRefreshIssued = false;
+        if (refreshAfter && runtimeUiKind == TvAIrPlugin.Runtime.RuntimeUiKind.Page && http is not null)
+        {
+            var pageNavigationTarget = BuildRuntimePageRefreshNavigationTarget(http, requestedContentRoute);
+            http.HttpContext.Response.Headers["X-TvAIr-Refresh-Surface"] = "page";
+            http.HttpContext.Response.Headers["X-TvAIr-Preserve-Scroll"] = preserveScroll ? "true" : "false";
+            http.HttpContext.Response.Headers["X-TvAIr-Refresh-Location"] = pageNavigationTarget;
+            pageRefreshIssued = true;
+            refreshIssued = true;
+            hostRefresh = "PAGE_NAVIGATE";
+            log.Add("PLUGIN_PAGE_REFRESH_NAVIGATION", pluginName, $"action={SafePluginActionValue(action)} result=ISSUED target={SafePluginActionValue(pageNavigationTarget)} preserveScroll={preserveScroll} source=host_owned_same_page_navigation rule=runtime_page_refresh_navigation_contract");
+        }
+        else if (refreshAfter && !string.IsNullOrWhiteSpace(resolvedWindowId))
         {
             var refreshRequest = new PluginWindowRequest
             {
                 WindowId = resolvedWindowId,
                 RefreshTarget = normalizedTarget,
-                Target = normalizedTarget,
                 PreserveScroll = preserveScroll,
-                RefreshScrollTarget = NormalizePluginRefreshScrollTarget(refreshScrollTarget),
-                RefreshScrollMode = NormalizePluginRefreshScrollMode(refreshScrollMode),
                 ForceReload = true
             };
             var session = windows.Refresh(resolvedWindowId, pluginId, refreshRequest);
@@ -2731,538 +2608,184 @@ static IResult BuildPluginViewerActionResponse(PluginActionResult result, string
                 var hostCaps = toolWindows.GetCapabilities();
                 var navigationUrl = BuildToolWindowNavigationUrl($"/plugin-window/{Uri.EscapeDataString(session.WindowId)}", contentRoute, hostCaps);
                 var absoluteNavigationUrl = BuildAbsoluteLocalUrl(http, navigationUrl);
-                var hostResult = toolWindows.OpenOrActivate(session, absoluteNavigationUrl);
+                var hostResult = toolWindows.RefreshExisting(session, absoluteNavigationUrl);
                 hostRefresh = hostResult.Result;
                 refreshIssued = true;
-                var normalizedScrollTarget = NormalizePluginRefreshScrollTarget(refreshScrollTarget);
-                if (!string.IsNullOrWhiteSpace(normalizedScrollTarget))
-                    log.Add("PLUGIN_WINDOW_REFRESH_SCROLL", pluginName, $"result=REQUESTED action={SafePluginActionValue(action)} windowId={SafePluginActionValue(session.WindowId)} target={SafePluginActionValue(normalizedScrollTarget)} mode={SafePluginActionValue(NormalizePluginRefreshScrollMode(refreshScrollMode))} hostKind={SafePluginActionValue(hostResult.HostKind)} refreshTarget={SafePluginActionValue(normalizedTarget)} reason=viewer_action_refresh_after_host_content_rerender rule=release_contract");
             }
             else
             {
                 hostRefresh = session is null ? "REFRESH_NOT_FOUND" : "HOST_UNAVAILABLE";
             }
         }
-        log.Add("PLUGIN_ACTION_RESPONSE_CONTRACT", pluginName, $"action={SafePluginActionValue(action)} result=NO_CONTENT responseMode={SafePluginActionValue(responseMode)} windowId={SafePluginActionValue(windowId)} refreshAfter={refreshAfter} refreshTarget={SafePluginActionValue(normalizedTarget)} refreshScrollTarget={SafePluginActionValue(NormalizePluginRefreshScrollTarget(refreshScrollTarget))} refreshScrollMode={SafePluginActionValue(NormalizePluginRefreshScrollMode(refreshScrollMode))} refreshIssued={refreshIssued} hostRefresh={SafePluginActionValue(hostRefresh)} jsonSuppressed=True contract=plugin_action_hosthandled_refresh_after_content rule=release_contract");
+        if (feedbackRequested)
+        {
+            log.Add("PLUGIN_ACTION_FEEDBACK", pluginName, $"action={SafePluginActionValue(action)} correlationId={SafePluginActionValue(correlationId)} phase={SafePluginActionValue(result.Feedback?.Phase.ToString())} success={result.Succeeded} floatingLabel={(result.FloatingLabel is null ? "none" : "issued")} refreshIssued={refreshIssued} contract=plugin_action_feedback_lifecycle rule=release_contract");
+            return Results.Json(result);
+        }
+        log.Add("PLUGIN_ACTION_RESPONSE_CONTRACT", pluginName, $"action={SafePluginActionValue(action)} result=NO_CONTENT responseMode={SafePluginActionValue(responseMode)} surface={SafePluginActionValue(runtimeUiKind?.ToString())} windowId={SafePluginActionValue(windowId)} refreshAfter={refreshAfter} refreshTarget={SafePluginActionValue(normalizedTarget)} refreshIssued={refreshIssued} pageRefreshIssued={pageRefreshIssued} hostRefresh={SafePluginActionValue(hostRefresh)} jsonSuppressed=True contract=plugin_action_hosthandled_refresh_after_content rule=release_contract");
         return Results.NoContent();
     }
-    if (responseMode.Equals("html", StringComparison.OrdinalIgnoreCase)) return PluginHtmlMessage("Plugin action accepted", result.Message, StatusCodes.Status200OK, string.IsNullOrWhiteSpace(windowId) ? "/" : $"/plugin-window/{Uri.EscapeDataString(windowId)}", "戻る");
+    if (responseMode.Equals("html", StringComparison.OrdinalIgnoreCase)) return PluginHtmlMessage("プラグイン操作", result.Message, StatusCodes.Status200OK, string.IsNullOrWhiteSpace(windowId) ? "/" : $"/plugin-window/{Uri.EscapeDataString(windowId)}", "戻る");
     return Results.Ok(result);
 }
 
-static IResult BuildPluginViewerExpectedDeniedResponse(
-    ExternalTunerLeaseService externalTuners,
-    PluginActionResult result,
-    string state,
-    string errorCode,
-    string responseMode,
-    string windowId,
-    string refreshTarget,
-    bool preserveScroll,
+static async Task<IResult> HandlePluginActionDispatchAsync(
+    HttpRequest http,
+    PluginRegistry registry,
+    PluginActionTokenStore actionTokens,
     PluginWindowSessionStore windows,
-    string pluginId,
-    LogRepository log,
-    string pluginName,
-    string action,
-    string? leaseId = null,
-    string? tunerName = null,
-    string? did = null,
-    string? bonDriverFileName = null,
-    int? processId = null,
-    ushort? networkId = null,
-    ushort? transportStreamId = null,
-    ushort? serviceId = null,
-    string refreshScrollTarget = "",
-    string refreshScrollMode = "center")
+    PluginToolWindowHostService toolWindows,
+    PluginBoundaryGate boundaryGate,
+    LogRepository log)
 {
-    externalTuners.SetLastViewerActionResult(pluginName, action, result.Success, state, errorCode, result.Message, leaseId, tunerName, did, bonDriverFileName, processId, networkId, transportStreamId, serviceId, result.Diagnostics);
-    log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action={SafePluginActionValue(action)} result=EXPECTED_DENIED state={SafePluginActionValue(state)} errorCode={SafePluginActionValue(errorCode)} responseMode={SafePluginActionValue(responseMode)} windowId={SafePluginActionValue(windowId)} action=refresh_or_json_no_plugin_error_screen rule=release_contract");
-    return BuildPluginViewerActionResponse(result, responseMode, windowId, refreshTarget, preserveScroll, windows, pluginId, log, pluginName, action, refreshScrollTarget: refreshScrollTarget, refreshScrollMode: refreshScrollMode);
-}
-
-static bool IsProcessAlive(int processId)
-{
-    if (processId <= 0) return false;
-    try
-    {
-        using var process = Process.GetProcessById(processId);
-        return !process.HasExited;
-    }
-    catch
-    {
-        return false;
-    }
-}
-
-static async Task<IResult> HandlePluginActionDispatchAsync(HttpRequest http, PluginRegistry registry, PluginActionTokenStore actionTokens, ChannelFileLoader channelLoader, TunerPool tunerPool, ExternalTunerLeaseService externalTuners, TvTestLauncher tvTestLauncher, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, IOptions<TvTestSettings> tvTestOptions, IniSettingsService ini, IReadOnlyList<TunerProfile> tunerProfiles, LogRepository log)
-{
-    var request = await ReadPluginActionRequestAsync(http);
-    var pluginId = (request.PluginId ?? string.Empty).Trim();
-    var action = (request.Action ?? string.Empty).Trim();
+    var request = await ReadRuntimeUiActionHttpRequestAsync(http);
+    var action = SplitPluginWindowRawValues(request.Action).FirstOrDefault() ?? string.Empty;
     var payload = request.Payload ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    request.Payload = payload;
+    var pluginId = NormalizePluginActionId(!string.IsNullOrWhiteSpace(request.PluginId)
+        ? request.PluginId
+        : ReadPayload(payload, "PluginId", "pluginId"));
     var route = !string.IsNullOrWhiteSpace(request.RouteSegment)
         ? request.RouteSegment.Trim()
-        : ReadPayload(payload, "Route", "route", "RouteSegment", "routeSegment");
-    if (!string.IsNullOrWhiteSpace(route)) payload["RouteSegment"] = route;
+        : ReadPayload(payload, "RouteSegment", "routeSegment");
 
     var responseMode = NormalizePluginFormResponseMode(!string.IsNullOrWhiteSpace(request.ResponseMode) ? request.ResponseMode : ReadPayload(payload, "responseMode", "ResponseMode"));
     var requestedWindowId = NormalizePluginWindowId(!string.IsNullOrWhiteSpace(request.WindowId) ? request.WindowId : ReadPayload(payload, "windowId", "WindowId", "currentWindowId", "CurrentWindowId"));
-    var requestedRefreshTarget = NormalizePluginWindowRefreshTarget(!string.IsNullOrWhiteSpace(request.RefreshTarget) ? request.RefreshTarget : ReadPayload(payload, "refreshTarget", "RefreshTarget", "target", "Target"));
-    var requestedRefreshScrollTarget = NormalizePluginRefreshScrollTarget(!string.IsNullOrWhiteSpace(request.RefreshScrollTarget) ? request.RefreshScrollTarget : ReadPayload(payload, "refreshScrollTarget", "RefreshScrollTarget", "scrollTarget", "ScrollTarget", "focusTarget", "FocusTarget"));
-    var requestedRefreshScrollMode = NormalizePluginRefreshScrollMode(!string.IsNullOrWhiteSpace(request.RefreshScrollMode) ? request.RefreshScrollMode : ReadPayload(payload, "refreshScrollMode", "RefreshScrollMode", "scrollMode", "ScrollMode"));
+    var requestedRefreshTarget = NormalizePluginWindowRefreshTarget(!string.IsNullOrWhiteSpace(request.RefreshTarget) ? request.RefreshTarget : ReadPayload(payload, "refreshTarget", "RefreshTarget"));
     var safeEvent = ReadPayload(payload, "safeEvent", "SafeEvent");
-    var safeEventAction = ReadPayload(payload, "safeEventAction", "SafeEventAction");
-    var safeEventSource = ReadPayload(payload, "safeEventSource", "SafeEventSource");
+    var safeEventInteractionId = ReadPayload(payload, "safeEventInteractionId", "SafeEventInteractionId", "interactionId", "InteractionId");
     var safeEventWindowId = NormalizePluginWindowId(ReadPayload(payload, "safeEventWindowId", "SafeEventWindowId"));
+    var feedbackRequested = TryReadBoolPayload(payload, out var parsedFeedbackRequested, "feedbackRequested", "FeedbackRequested") && parsedFeedbackRequested;
+    var feedbackCorrelationId = string.IsNullOrWhiteSpace(safeEventInteractionId) ? Guid.NewGuid().ToString("N") : safeEventInteractionId.Trim();
+    var recoveredIdentity = RecoverPluginActionIdentity(registry, windows, pluginId, route, action, requestedWindowId, safeEventWindowId, payload);
+    if (!string.Equals(pluginId, recoveredIdentity.PluginId, StringComparison.Ordinal)
+        || !string.Equals(route, recoveredIdentity.RouteSegment, StringComparison.Ordinal))
+    {
+        pluginId = recoveredIdentity.PluginId;
+        route = recoveredIdentity.RouteSegment;
+        request.PluginId = pluginId;
+        request.RouteSegment = route;
+        if (!string.IsNullOrWhiteSpace(pluginId)) payload["PluginId"] = pluginId;
+        if (!string.IsNullOrWhiteSpace(route)) payload["RouteSegment"] = route;
+        log.Add("PLUGIN_ACTION_IDENTITY_RECOVER", string.IsNullOrWhiteSpace(pluginId) ? "-" : pluginId,
+            $"result=APPLIED action={SafePluginActionValue(action)} reason={SafePluginActionValue(recoveredIdentity.Reason)} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(route)} windowId={SafePluginActionValue(requestedWindowId)} safeEventWindowId={SafePluginActionValue(safeEventWindowId)} endpoint={SafePluginActionValue(http.Path.Value)} rule=plugin_action_identity_recovery");
+    }
+    if (!string.IsNullOrWhiteSpace(route)) payload["RouteSegment"] = route;
+
     var requestedPreserveScroll = true;
-    if (TryReadBoolPayload(payload, out var parsedPreserveScroll, "preserveScroll", "PreserveScroll")) requestedPreserveScroll = parsedPreserveScroll;
-    var requestedRefreshAfterExplicit = TryReadBoolPayload(payload, out var parsedRefreshAfter, "refreshAfter", "RefreshAfter");
-    var requestedRefreshAfter = requestedRefreshAfterExplicit && parsedRefreshAfter;
-    var preserveViewerWindowStateExplicit = TryReadBoolPayload(payload, out var parsedPreserveViewerWindowState, "preserveViewerWindowState", "PreserveViewerWindowState", "preserveFullscreen", "PreserveFullscreen");
-    var preserveViewerWindowState = preserveViewerWindowStateExplicit && parsedPreserveViewerWindowState;
-    var viewerActivation = ReadPayload(payload, "viewerActivation", "ViewerActivation", "activateMode", "ActivateMode", "focusMode", "FocusMode");
-    var retuneExistingViewerExplicit = TryReadBoolPayload(payload, out var parsedRetuneExistingViewer, "retuneExistingViewer", "RetuneExistingViewer", "reuseViewerProcess", "ReuseViewerProcess");
-    var retuneExistingViewer = retuneExistingViewerExplicit && parsedRetuneExistingViewer;
+    if (TryReadBoolPayload(payload, out var parsedPreserveScroll, "preserveScroll", "PreserveScroll"))
+        requestedPreserveScroll = parsedPreserveScroll;
+    var requestedRefreshAfter = TryReadBoolPayload(payload, out var parsedRefreshAfter, "refreshAfter", "RefreshAfter") && parsedRefreshAfter;
+    var requestedContentRoute = ReadPayload(payload, "contentRoute", "ContentRoute");
+    if (string.IsNullOrWhiteSpace(requestedContentRoute))
+    {
+        var requestedRefreshQuery = ReadPayload(payload, "refreshQuery", "RefreshQuery");
+        if (!string.IsNullOrWhiteSpace(requestedRefreshQuery))
+            requestedContentRoute = $"/plugin/{Uri.EscapeDataString(route)}?{requestedRefreshQuery.TrimStart('?')}";
+    }
 
     var plugin = FindPluginByActionIdentity(registry, pluginId, route);
-    var pluginName = plugin?.Name ?? pluginId;
-    var actionAllowed = plugin is IManifestPlugin mp && mp.Manifest.Permissions.Contains(PluginPermission.ControlViewer);
-    var isViewerStartAction = action.Equals("viewerStart", StringComparison.OrdinalIgnoreCase) || action.Equals("RequestViewerStart", StringComparison.OrdinalIgnoreCase);
-    var isViewerStopAction = action.Equals("viewerStop", StringComparison.OrdinalIgnoreCase) || action.Equals("RequestViewerStop", StringComparison.OrdinalIgnoreCase);
-    var isHostManagedToolWindowViewerAction = (isViewerStartAction || isViewerStopAction)
-        && !string.IsNullOrWhiteSpace(requestedWindowId)
-        && !string.IsNullOrWhiteSpace(safeEvent)
-        && responseMode.Equals("hostHandled", StringComparison.OrdinalIgnoreCase);
-    if (!requestedRefreshAfterExplicit && isHostManagedToolWindowViewerAction)
-    {
-        requestedRefreshAfter = true;
-        if (string.IsNullOrWhiteSpace(requestedRefreshTarget)) requestedRefreshTarget = "content";
-        log.Add("PLUGIN_ACTION_VIEWER_DEFAULT", pluginName, $"action={SafePluginActionValue(action)} result=APPLIED defaultRefreshAfter=True refreshTarget={SafePluginActionValue(requestedRefreshTarget)} windowId={SafePluginActionValue(requestedWindowId)} reason=host_managed_toolwindow_viewer_action_no_plugin_update_needed rule=release_contract");
-    }
-    if (!preserveViewerWindowStateExplicit && isViewerStartAction && isHostManagedToolWindowViewerAction)
-    {
-        preserveViewerWindowState = true;
-        if (string.IsNullOrWhiteSpace(viewerActivation)) viewerActivation = "preserve";
-        log.Add("PLUGIN_ACTION_VIEWER_DEFAULT", pluginName, $"action={SafePluginActionValue(action)} result=APPLIED defaultPreserveViewerWindowState=True viewerActivation={SafePluginActionValue(viewerActivation)} windowId={SafePluginActionValue(requestedWindowId)} reason=host_managed_toolwindow_viewer_action_no_plugin_update_needed rule=release_contract");
-    }
-    if (!retuneExistingViewerExplicit && isViewerStartAction && isHostManagedToolWindowViewerAction && preserveViewerWindowState)
-    {
-        // release_contract: preserveViewerWindowState は通常ウィンドウ化抑制であり、retuneExistingViewer の明示要求とは分離する。
-        // AIrCon管理viewerが生存している場合でも、後段の internal retune は同一BonDriver/DID内に限定する。
-        log.Add("PLUGIN_ACTION_VIEWER_DEFAULT", pluginName, $"action={SafePluginActionValue(action)} result=SKIPPED defaultRetuneExistingViewer=False windowId={SafePluginActionValue(requestedWindowId)} reason=preserve_window_state_is_not_retune_flag rule=release_contract");
-    }
-    if (!string.IsNullOrWhiteSpace(safeEvent))
-    {
-        var missingTriplet = string.Join(",", new[]
-        {
-            string.IsNullOrWhiteSpace(ReadPayload(payload, "NetworkId", "networkId", "network_id", "network-id", "nid")) ? "networkId" : string.Empty,
-            string.IsNullOrWhiteSpace(ReadPayload(payload, "TransportStreamId", "transportStreamId", "transport_stream_id", "transport-stream-id", "tsid")) ? "transportStreamId" : string.Empty,
-            string.IsNullOrWhiteSpace(ReadPayload(payload, "ServiceId", "serviceId", "service_id", "service-id", "sid")) ? "serviceId" : string.Empty
-        }.Where(x => !string.IsNullOrWhiteSpace(x)));
-        log.Add("PLUGIN_SAFE_EVENT", pluginName, $"event={SafePluginActionValue(safeEvent)} action={SafePluginActionValue(action)} safeEventAction={SafePluginActionValue(safeEventAction)} result=RECEIVED source={SafePluginActionValue(safeEventSource)} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(route)} windowId={SafePluginActionValue(requestedWindowId)} safeEventWindowId={SafePluginActionValue(safeEventWindowId)} responseMode={SafePluginActionValue(responseMode)} refreshAfter={requestedRefreshAfter} refreshTarget={SafePluginActionValue(requestedRefreshTarget)} refreshScrollTarget={SafePluginActionValue(requestedRefreshScrollTarget)} refreshScrollMode={SafePluginActionValue(requestedRefreshScrollMode)} missingPayload={SafePluginActionValue(string.IsNullOrWhiteSpace(missingTriplet) ? "-" : missingTriplet)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
-        log.Add("PLUGIN_SAFE_EVENT_PAYLOAD_AUDIT", pluginName, $"result=RECEIVED action={SafePluginActionValue(action)} queryKeys={SafePluginActionValue(FormatPluginQueryKeys(http))} payloadKeys={SafePluginActionValue(FormatPluginPayloadKeys(payload))} networkId={ReadUShortPayload(payload, "NetworkId", "networkId", "network_id", "network-id", "nid")} transportStreamId={ReadUShortPayload(payload, "TransportStreamId", "transportStreamId", "transport_stream_id", "transport-stream-id", "tsid")} serviceId={ReadUShortPayload(payload, "ServiceId", "serviceId", "service_id", "service-id", "sid")} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
-    }
-
+    var pluginName = plugin?.Descriptor.DisplayName ?? pluginId;
     if (plugin is null)
     {
-        log.Add("PLUGIN_ACTION", "DENY", $"plugin={SafePluginActionValue(pluginId)} action={SafePluginActionValue(action)} result=DENIED reason=plugin_not_found endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
-        return BuildPluginActionDispatchError(new PluginActionResult { Success = false, Message = "Plugin not found.", Diagnostics = "plugin_not_found" }, responseMode, requestedWindowId, StatusCodes.Status404NotFound);
+        log.Add("PLUGIN_ACTION", "DENY", $"plugin={SafePluginActionValue(pluginId)} action={SafePluginActionValue(action)} result=DENIED reason=plugin_not_found endpoint={SafePluginActionValue(http.Path.Value)} rule=plugin_action_dispatch");
+        return BuildPluginActionDispatchError(new RuntimeUiActionResult { Succeeded = false, Message = "Plugin not found.", Diagnostics = "plugin_not_found" }, responseMode, requestedWindowId, StatusCodes.Status404NotFound);
     }
 
-    var token = !string.IsNullOrWhiteSpace(request.ActionToken) ? request.ActionToken : request.Token;
-    var pluginActionIdForToken = GetPluginActionIdentity(plugin, route);
+    registry.FindRuntimeUiPluginNative(route, out var actionUiDefinition);
+    var actionUiKind = actionUiDefinition?.Kind;
+
+    var token = request.ActionToken;
+    var pluginActionIdForToken = GetPluginActionIdentity(plugin);
     if (!ValidatePluginActionTokenOrRecoverHostWindow(actionTokens, windows, token, pluginActionIdForToken, route, pluginName, action, requestedWindowId, safeEventWindowId, http.Path.Value ?? string.Empty, "action_dispatch", log, out var tokenReason))
     {
         if (!string.IsNullOrWhiteSpace(safeEvent))
-            log.Add("PLUGIN_SAFE_EVENT", pluginName, $"event={SafePluginActionValue(safeEvent)} action={SafePluginActionValue(action)} result=DENIED reason={tokenReason} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(route)} windowId={SafePluginActionValue(requestedWindowId)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
-        log.Add("PLUGIN_ACTION", pluginName, $"action={SafePluginActionValue(action)} result=DENIED reason={tokenReason} windowId={SafePluginActionValue(requestedWindowId)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
-        return BuildPluginActionDispatchError(new PluginActionResult { Success = false, Message = "Invalid plugin action token.", Diagnostics = tokenReason }, responseMode, requestedWindowId, StatusCodes.Status400BadRequest);
+            log.Add("PLUGIN_SAFE_EVENT", pluginName, $"event={SafePluginActionValue(safeEvent)} action={SafePluginActionValue(action)} result=DENIED reason={tokenReason} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(route)} windowId={SafePluginActionValue(requestedWindowId)} endpoint={SafePluginActionValue(http.Path.Value)} rule=plugin_action_dispatch");
+        log.Add("PLUGIN_ACTION", pluginName, $"action={SafePluginActionValue(action)} result=DENIED reason={tokenReason} windowId={SafePluginActionValue(requestedWindowId)} endpoint={SafePluginActionValue(http.Path.Value)} rule=plugin_action_dispatch");
+        return BuildPluginActionDispatchError(new RuntimeUiActionResult { Succeeded = false, Message = "Invalid plugin action token.", Diagnostics = tokenReason }, responseMode, requestedWindowId, StatusCodes.Status400BadRequest);
     }
 
-    if (!actionAllowed)
+    var actionBoundary = boundaryGate.CheckAction(ResolveRuntimeBoundaryPlugin(registry, plugin), pluginId, action, http.Path.Value ?? string.Empty);
+    if (!actionBoundary.Allowed)
     {
-        log.Add("PLUGIN_ACTION", pluginName, $"action={SafePluginActionValue(action)} result=DENIED reason=missing_ControlViewer_permission endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
-        return BuildPluginActionDispatchError(new PluginActionResult { Success = false, Message = "ControlViewer permission is required.", Diagnostics = "missing_ControlViewer_permission" }, responseMode, requestedWindowId, StatusCodes.Status403Forbidden);
+        log.Add("PLUGIN_ACTION", pluginName, $"action={SafePluginActionValue(action)} result=DENIED reason={SafePluginActionValue(actionBoundary.Reason)} endpoint={SafePluginActionValue(http.Path.Value)} rule=plugin_boundary_gate");
+        var status = actionBoundary.FailureKind == PluginBoundaryFailureKind.PermissionDenied ? StatusCodes.Status403Forbidden : StatusCodes.Status400BadRequest;
+        return BuildPluginActionDispatchError(new RuntimeUiActionResult { Succeeded = false, Message = "Plugin action was denied by TvAIr host boundary.", Diagnostics = actionBoundary.Reason }, responseMode, requestedWindowId, status);
     }
 
-    if (action.Equals("viewerStart", StringComparison.OrdinalIgnoreCase) || action.Equals("RequestViewerStart", StringComparison.OrdinalIgnoreCase))
+    var nativeActionHandler = registry.FindRuntimeUiPluginNative(route, out var nativeActionDefinition);
+    if (nativeActionHandler is null || nativeActionDefinition is null)
     {
-        var nid = ReadUShortPayload(payload, "NetworkId", "networkId", "network_id", "network-id", "nid");
-        var tsid = ReadUShortPayload(payload, "TransportStreamId", "transportStreamId", "transport_stream_id", "transport-stream-id", "tsid");
-        var sid = ReadUShortPayload(payload, "ServiceId", "serviceId", "service_id", "service-id", "sid");
-        var serviceName = ReadPayload(payload, "ServiceName", "serviceName", "service", "channelName", "name");
-        var groupHint = ReadPayload(payload, "Group", "group", "tunerGroup", "TunerGroup", "allocationGroup", "AllocationGroup", "broadcastGroup", "BroadcastGroup", "programGuideFilterGroup", "ProgramGuideFilterGroup");
-        var preferredTunerName = ReadPayload(payload, "preferredTunerName", "PreferredTunerName");
-        var preferredDid = ReadPayload(payload, "preferredDid", "PreferredDid");
-        var preferredSlot = ReadIntPayload(payload, "preferredSlot", "PreferredSlot");
-        var requestedViewerProfileRaw = ReadPayload(payload, "viewerProfile", "ViewerProfile", "viewer_profile", "viewer-profile", "viewerProfileId", "ViewerProfileId", "vtuner", "vTuner", "viewer", "profile");
-        var requestedViewerProfile = ViewerProfileContract.ResolveRequestedProfile(requestedViewerProfileRaw, tvTestOptions.Value, ini, tunerProfiles);
-        var viewerProfilePathKey = ViewerProfileContract.TvTestPathKeyForResolvedProfile(requestedViewerProfile);
-
-        if (!requestedViewerProfile.Enabled)
-        {
-            var denied = new PluginActionResult { Success = false, Message = "Requested viewer profile is not configured.", Diagnostics = $"state=denied;errorCode=viewerProfileUnavailable;viewerProfile={requestedViewerProfile.Id}" };
-            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=DENIED reason=viewerProfileUnavailable viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
-            return BuildPluginViewerExpectedDeniedResponse(externalTuners, denied, "denied", "viewerProfileUnavailable", responseMode, requestedWindowId, requestedRefreshTarget, requestedPreserveScroll, windows, GetPluginActionIdentity(plugin, route), log, pluginName, "viewerStart");
-        }
-
-        if (nid == 0 || tsid == 0 || sid == 0)
-        {
-            var denied = new PluginActionResult { Success = false, Message = "ViewerStart payload is incomplete.", Diagnostics = $"state=denied;errorCode=missingViewerPayload;networkId={nid};transportStreamId={tsid};serviceId={sid}" };
-            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=DENIED reason=missingViewerPayload networkId={nid} transportStreamId={tsid} serviceId={sid} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
-            return BuildPluginViewerExpectedDeniedResponse(externalTuners, denied, "denied", "missingViewerPayload", responseMode, requestedWindowId, requestedRefreshTarget, requestedPreserveScroll, windows, GetPluginActionIdentity(plugin, route), log, pluginName, "viewerStart", networkId: nid, transportStreamId: tsid, serviceId: sid);
-        }
-
-        var channelMap = channelLoader.Load();
-        var channel = channelMap.Targets.FirstOrDefault(c =>
-            c.OriginalNetworkId == nid && c.TransportStreamId == tsid && c.ServiceId == sid);
-        if (channel is null)
-        {
-            var denied = new PluginActionResult { Success = false, Message = "Viewer target channel was not found in TvAIr channel map.", Diagnostics = $"state=denied;errorCode=channelNotFound;networkId={nid};transportStreamId={tsid};serviceId={sid}" };
-            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=DENIED reason=channel_not_found nid={nid} tsid={tsid} sid={sid} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
-            return BuildPluginViewerExpectedDeniedResponse(externalTuners, denied, "denied", "channelNotFound", responseMode, requestedWindowId, requestedRefreshTarget, requestedPreserveScroll, windows, GetPluginActionIdentity(plugin, route), log, pluginName, "viewerStart", networkId: nid, transportStreamId: tsid, serviceId: sid);
-        }
-
-        var group = !string.IsNullOrWhiteSpace(channel.Group) ? channel.Group : groupHint ?? string.Empty;
-        if (!ViewerProfileContract.ProfileSupportsGroup(requestedViewerProfile, group))
-        {
-            var availableGroups = string.Join(",", requestedViewerProfile.AvailableGroups ?? Array.Empty<string>());
-            var denied = new PluginActionResult { Success = false, Message = "Requested viewer profile has no viewer tuner for this broadcast group.", Diagnostics = $"state=denied;errorCode=viewerProfileGroupUnavailable;viewerProfile={requestedViewerProfile.Id};group={group};availableGroups={availableGroups}" };
-            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=DENIED reason=viewerProfileGroupUnavailable viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} group={SafePluginActionValue(group)} availableGroups={SafePluginActionValue(availableGroups)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
-            return BuildPluginViewerExpectedDeniedResponse(externalTuners, denied, "denied", "viewerProfileGroupUnavailable", responseMode, requestedWindowId, requestedRefreshTarget, requestedPreserveScroll, windows, GetPluginActionIdentity(plugin, route), log, pluginName, "viewerStart", networkId: nid, transportStreamId: tsid, serviceId: sid);
-        }
-        var requestedServiceName = serviceName;
-        serviceName = string.IsNullOrWhiteSpace(serviceName) ? channel.Name : serviceName;
-        var requestedChspace = ReadIntPayload(payload, "channelSpace", "ChannelSpace", "chspace", "ChSpace");
-        var requestedChi = ReadIntPayload(payload, "channelIndex", "ChannelIndex", "chi", "Chi", "channel", "Channel");
-        var requestedProgramGuideGroup = ReadPayload(payload, "programGuideFilterGroup", "ProgramGuideFilterGroup");
-        var requestedBroadcastGroup = ReadPayload(payload, "broadcastGroup", "BroadcastGroup");
-        var sameTransportServices = channelMap.Targets
-            .Where(c => c.OriginalNetworkId == nid && c.TransportStreamId == tsid)
-            .OrderBy(c => c.ServiceId)
-            .ToList();
-        var sameTransportServiceIds = string.Join(",", sameTransportServices.Select(c => c.ServiceId.ToString(CultureInfo.InvariantCulture)));
-        var selectedChannelSource = "ProgramGuideProjectionTriplet(.ch2/chset resolved)";
-        var baseViewerChannelArgument = $"/chspace {channel.ResolvedSpace} /chi {channel.ResolvedChannelIndex}";
-        var viewerChannelArgument = $"{baseViewerChannelArgument} /sid {sid}";
-        var identityArgument = $"/nid {nid} /tsid {tsid} /sid {sid}";
-        var viewerClientId = ViewerProfileContract.BuildViewerClientId(pluginId, requestedViewerProfile.Id);
-        var activeClientLeasesBeforeStart = externalTuners.GetActiveLeases()
-            .Where(l => string.Equals(l.ClientId ?? string.Empty, viewerClientId, StringComparison.OrdinalIgnoreCase))
-            .OrderByDescending(l => l.AcquiredAt)
-            .ToList();
-        var stoppedBeforeStartPids = new HashSet<int>();
-
-        ExternalTunerLeaseDto? existingManagedViewer = null;
-        var existingManagedViewerPid = 0;
-        foreach (var prior in activeClientLeasesBeforeStart)
-        {
-            if (!ViewerProfileContract.LeaseMatchesProfile(prior, requestedViewerProfile))
-                continue;
-            if (prior.ProcessId.HasValue && prior.ProcessId.Value > 0 && IsProcessAlive(prior.ProcessId.Value) &&
-                TvAirManagedProcessRegistry.TryGet(prior.ProcessId.Value, out var managedViewerProcess) && managedViewerProcess.IsViewer)
-            {
-                existingManagedViewer = prior;
-                existingManagedViewerPid = prior.ProcessId.Value;
-                break;
-            }
-        }
-
-        foreach (var stale in activeClientLeasesBeforeStart)
-        {
-            var stalePid = stale.ProcessId.GetValueOrDefault();
-            if (stalePid > 0 && !IsProcessAlive(stalePid))
-            {
-                var delayedDeath = ViewerRetuneDelayedDeathAudit.MarkDetectedDead(stalePid);
-                log.Add("VIEWER_RETUNE_DELAYED_DEATH_AUDIT", pluginName, $"result={SafePluginActionValue(delayedDeath.Result)} stalePid={stalePid} leaseId={SafePluginActionValue(stale.LeaseId)} lastRetuneAt={SafePluginActionValue(delayedDeath.LastRetuneAtText)} detectedDeadAt={SafePluginActionValue(delayedDeath.DetectedDeadAtText)} elapsedSinceRetuneMs={SafePluginActionValue(delayedDeath.ElapsedMsText)} lastRetuneNid={SafePluginActionValue(delayedDeath.NetworkIdText)} lastRetuneTsid={SafePluginActionValue(delayedDeath.TransportStreamIdText)} lastRetuneSid={SafePluginActionValue(delayedDeath.ServiceIdText)} lastRetuneGroup={SafePluginActionValue(delayedDeath.Group)} lastRetuneDid={SafePluginActionValue(delayedDeath.Did)} lastRetuneBonDriver={SafePluginActionValue(delayedDeath.BonDriver)} reason=existing_process_not_alive_before_light_retune rule=release_contract");
-                externalTuners.Release(stale.LeaseId, $"Plugin:{pluginName}:stale_viewer_lease_cleanup_before_start");
-                log.Add("VIEWER_INTERNAL_RETUNE", pluginName, $"result=STALE_LEASE_RELEASED leaseId={SafePluginActionValue(stale.LeaseId)} stalePid={stalePid} reason=existing_process_not_alive_before_light_retune rule=release_contract");
-            }
-        }
-
-        var internalRetunePreferred = existingManagedViewer is not null && existingManagedViewerPid > 0;
-        log.Add("VIEWER_INTERNAL_RETUNE_DECISION", pluginName,
-            $"result={(internalRetunePreferred ? "PREFERRED" : "NEW_VIEWER_REQUIRED")} reason={(internalRetunePreferred ? "existing_tvair_managed_viewer_alive" : "no_alive_tvair_managed_viewer")} sameClient=True viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} tvTestPathKey={SafePluginActionValue(viewerProfilePathKey)} existingPid={(existingManagedViewerPid > 0 ? existingManagedViewerPid.ToString(CultureInfo.InvariantCulture) : "-")} existingGroup={SafePluginActionValue(existingManagedViewer?.Group)} requestedGroup={SafePluginActionValue(group)} existingDid={SafePluginActionValue(existingManagedViewer?.Did)} requestedNid={nid} requestedTsid={tsid} requestedSid={sid} requestedChspace={channel.ResolvedSpace} requestedChi={channel.ResolvedChannelIndex} processRestartPreferred=False retuneExistingViewerPayload={retuneExistingViewer} preserveViewerWindowState={preserveViewerWindowState} rule=release_contract");
-
-        log.Add("VIEWER_START_REQUEST", pluginName, $"requestedServiceName={SafePluginActionValue(requestedServiceName)} requestedNid={nid} requestedTsid={tsid} requestedSid={sid} requestedChspace={(requestedChspace.HasValue ? requestedChspace.Value.ToString(CultureInfo.InvariantCulture) : "-")} requestedChi={(requestedChi.HasValue ? requestedChi.Value.ToString(CultureInfo.InvariantCulture) : "-")} requestedProgramGuideGroup={SafePluginActionValue(requestedProgramGuideGroup)} requestedBroadcastGroup={SafePluginActionValue(requestedBroadcastGroup)} resolvedServiceName={SafePluginActionValue(channel.Name)} resolvedNid={channel.OriginalNetworkId} resolvedTsid={channel.TransportStreamId} resolvedSid={channel.ServiceId} resolvedChspace={channel.ResolvedSpace} resolvedChi={channel.ResolvedChannelIndex} group={SafePluginActionValue(group)} viewerChannelArgument={SafePluginActionValue(viewerChannelArgument)} identityArgument={SafePluginActionValue(identityArgument)} selectedChannelSource={SafePluginActionValue(selectedChannelSource)} sameTransportServiceCount={sameTransportServices.Count} sameTransportServiceIds={SafePluginActionValue(sameTransportServiceIds)} requestedWindowId={SafePluginActionValue(requestedWindowId)} viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} tvTestPathKey={SafePluginActionValue(viewerProfilePathKey)} contract=viewer_start_triplet_sid_launch_profile_scoped rule=release_contract");
-        if (!string.IsNullOrWhiteSpace(preferredTunerName) || !string.IsNullOrWhiteSpace(preferredDid) || preferredSlot.HasValue)
-        {
-            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart preferredTunerContract=ignored_light_api preferredTunerName={SafePluginActionValue(preferredTunerName)} preferredDid={SafePluginActionValue(preferredDid)} preferredSlot={(preferredSlot.HasValue ? preferredSlot.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "-")} rule=release_contract");
-        }
-
-        var lease = externalTuners.Request(new ExternalTunerLeaseRequest
-        {
-            Group = group,
-            RequiredGroup = group,
-            Source = $"Plugin:{pluginName}",
-            ClientId = viewerClientId,
-            Note = $"viewerStart service={serviceName} nid={nid} tsid={tsid} sid={sid}",
-            NetworkId = nid,
-            TransportStreamId = tsid,
-            ServiceId = sid,
-            ChannelSpace = channel.ResolvedSpace,
-            ChannelIndex = channel.ResolvedChannelIndex,
-            ViewerProfileId = requestedViewerProfile.Id,
-            ViewerProfileName = requestedViewerProfile.Name,
-            TvTestPathKey = viewerProfilePathKey,
-            ViewerProfileFrameIndex = requestedViewerProfile.TvTestFrameIndex
-        });
-
-        if (!lease.Success || lease.Lease is null)
-        {
-            var reason = string.IsNullOrWhiteSpace(lease.Reason) ? "tunerUnavailable" : lease.Reason!;
-            var denied = new PluginActionResult { Success = false, Message = "No viewer tuner is available.", Diagnostics = $"state=denied;errorCode={reason};status={lease.Status}" };
-            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=DENIED reason={SafePluginActionValue(reason)} service={SafePluginActionValue(serviceName)} group={SafePluginActionValue(group)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
-            return BuildPluginViewerExpectedDeniedResponse(externalTuners, denied, "denied", reason, responseMode, requestedWindowId, requestedRefreshTarget, requestedPreserveScroll, windows, GetPluginActionIdentity(plugin, route), log, pluginName, "viewerStart", networkId: nid, transportStreamId: tsid, serviceId: sid);
-        }
-
-        var leaseId = lease.Lease.LeaseId;
-        var existingViewerGroup = NormalizePluginAllocationGroup(existingManagedViewer?.Group);
-        var requestedLeaseGroup = NormalizePluginAllocationGroup(lease.Lease.Group);
-        var sameRetuneGroup = internalRetunePreferred && string.Equals(existingViewerGroup, requestedLeaseGroup, StringComparison.OrdinalIgnoreCase);
-        var sameRetuneDid = internalRetunePreferred && string.Equals((existingManagedViewer?.Did ?? string.Empty).Trim(), (lease.Lease.Did ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase);
-        var sameRetuneBonDriver = internalRetunePreferred && string.Equals(System.IO.Path.GetFileName(existingManagedViewer?.BonDriverFileName ?? string.Empty), System.IO.Path.GetFileName(lease.Lease.BonDriverFileName ?? string.Empty), StringComparison.OrdinalIgnoreCase);
-        // release_contract: TVTest1/TVTest2 の意味を「TvAIrが最初に紐付けた viewerProfile 専属PID」として扱う。
-        // TVTest の /s は PID 指定ではないが、コマンド投入前に対象 profile の所有PIDを前面化し、
-        // アクティブウィンドウへ吸われる環境でも「選択中TVTest枠」を受け口にする。
-        // exe名変更/ini複製はタスクバーアイコンを増やすため採用しない。
-        var retuneScopeStable = internalRetunePreferred && sameRetuneDid && sameRetuneBonDriver;
-        var pidScopedRetuneAvailable = false;
-        var internalRetuneAllowed = internalRetunePreferred;
-        var internalRetuneGuardReason = internalRetunePreferred
-            ? "profile_owned_pid_foreground_binding"
-            : "no_alive_tvair_managed_viewer";
-        if (internalRetunePreferred)
-        {
-            log.Add("VIEWER_RETUNE_SCOPE_DECISION", pluginName, $"result=ALLOW_PROFILE_PID_BINDING reason={SafePluginActionValue(internalRetuneGuardReason)} viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} existingPid={existingManagedViewerPid} existingGroup={SafePluginActionValue(existingViewerGroup)} requestedGroup={SafePluginActionValue(requestedLeaseGroup)} sameGroup={sameRetuneGroup} sameDid={sameRetuneDid} sameBonDriver={sameRetuneBonDriver} existingDid={SafePluginActionValue(existingManagedViewer?.Did)} requestedDid={SafePluginActionValue(lease.Lease.Did)} existingBonDriver={SafePluginActionValue(existingManagedViewer?.BonDriverFileName)} requestedBonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} retuneCommandScope=tvtest_single_instance_target_foreground_binding pidScopedRetuneAvailable={pidScopedRetuneAvailable} retuneScopeStable={retuneScopeStable} processRestartRequiredByScope=False preserveViewerWindowState={preserveViewerWindowState} policy=profile_owned_pid_binding_no_exe_rename rule=release_contract");
-            log.Add("VIEWER_INTERNAL_RETUNE_GUARD", pluginName, $"result=ALLOW reason={SafePluginActionValue(internalRetuneGuardReason)} existingPid={existingManagedViewerPid} existingGroup={SafePluginActionValue(existingViewerGroup)} requestedGroup={SafePluginActionValue(requestedLeaseGroup)} sameGroup={sameRetuneGroup} sameDid={sameRetuneDid} sameBonDriver={sameRetuneBonDriver} existingDid={SafePluginActionValue(existingManagedViewer?.Did)} requestedDid={SafePluginActionValue(lease.Lease.Did)} existingBonDriver={SafePluginActionValue(existingManagedViewer?.BonDriverFileName)} requestedBonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} policy=foreground_target_before_unscoped_command noExeRename=True noIniClone=True rule=release_contract");
-        }
-        ViewerWindowStateSnapshot? restartFallbackWindowState = null;
-        if (internalRetunePreferred && !internalRetuneAllowed && existingManagedViewerPid > 0 && preserveViewerWindowState)
-        {
-            restartFallbackWindowState = tvTestLauncher.CaptureViewerWindowState(existingManagedViewerPid, "viewerStart_scope_guard_restart_before_stop");
-        }
-        if (lease.Reused && lease.Lease.ProcessId.HasValue && lease.Lease.ProcessId.Value > 0)
-        {
-            var previousPid = lease.Lease.ProcessId.Value;
-            if (internalRetuneAllowed && previousPid == existingManagedViewerPid)
-            {
-                log.Add("VIEWER_START_PREVIOUS_VIEWER_STOP", pluginName, $"action=viewerStart leaseId={SafePluginActionValue(leaseId)} previousPid={previousPid} stopSkipped=True clientId={SafePluginActionValue(viewerClientId)} reusedLease=True reason=internal_retune_keeps_existing_viewer_process beforeNewLaunch=False rule=release_contract");
-            }
-            else if (stoppedBeforeStartPids.Add(previousPid))
-            {
-                var stop = tvTestLauncher.StopManagedViewerProcess(previousPid, internalRetunePreferred && !internalRetuneAllowed ? "viewerStart_scope_guard_profile_restart" : "viewerStart_reuse_previous_pid_guard");
-                log.Add("VIEWER_START_PREVIOUS_VIEWER_STOP", pluginName, $"action=viewerStart leaseId={SafePluginActionValue(leaseId)} previousPid={previousPid} stopSuccess={stop.Success} stopMessage={SafePluginActionValue(stop.Message)} clientId={SafePluginActionValue(viewerClientId)} reusedLease=True reason={(internalRetunePreferred && !internalRetuneAllowed ? "scope_guard_profile_restart" : "reuse_previous_pid_guard")} beforeNewLaunch=True rule=release_contract");
-            }
-        }
-        var viewerStartExternalSnapshot = TvTestProcessAuditor.Capture(log, "VIEWER_START_LIGHT_EXTERNAL_SCAN", emitLegacyEvents: false);
-        var unknownExternalLive = viewerStartExternalSnapshot.Processes
-            .Where(p => !p.IsTvAirManaged && p.IsLiveViewing && string.IsNullOrWhiteSpace(p.Did))
-            .ToList();
-        var blocking = viewerStartExternalSnapshot.Processes.FirstOrDefault(p =>
-            !p.IsTvAirManaged && p.IsLiveViewing &&
-            string.Equals((p.Did ?? string.Empty).Trim(), lease.Lease.Did, StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(System.IO.Path.GetFileName(p.BonDriverFileName ?? string.Empty), System.IO.Path.GetFileName(lease.Lease.BonDriverFileName ?? string.Empty), StringComparison.OrdinalIgnoreCase));
-        if (blocking is null && unknownExternalLive.Count > 0)
-        {
-            log.Add("VIEWER_START_EXTERNAL_IDENTITY_SNAPSHOT", pluginName,
-                $"result=INFO unknownExternalLive={unknownExternalLive.Count} targetDid={SafePluginActionValue(lease.Lease.Did)} targetBonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} action=do_not_deny_viewer_start_on_unknown_external_identity policy=snapshot_only_recording_slot_guard_no_external_process_touch rule=release_contract");
-        }
-        if (blocking is not null)
-        {
-            externalTuners.Release(leaseId, $"Plugin:{pluginName}:external_did_guard");
-            var message = $"External TVTest is using DID {lease.Lease.Did}.";
-            var denied = new PluginActionResult { Success = false, Message = message, Diagnostics = $"state=denied;errorCode=externalViewerOccupyingDid;tuner={lease.Lease.TunerName};did={lease.Lease.Did};bonDriver={lease.Lease.BonDriverFileName};blockingPid={blocking.ProcessId}" };
-            log.Add("VIEWER_START_EXTERNAL_DID_GUARD", pluginName, $"result=DENIED reason=externalViewerOccupyingDid tuner={SafePluginActionValue(lease.Lease.TunerName)} did={SafePluginActionValue(lease.Lease.Did)} bonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} blockingPid={blocking.ProcessId} action=release_viewer_lease_no_external_process_touch rule=release_contract");
-            log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=DENIED reason=externalViewerOccupyingDid service={SafePluginActionValue(serviceName)} group={SafePluginActionValue(group)} tuner={SafePluginActionValue(lease.Lease.TunerName)} did={SafePluginActionValue(lease.Lease.Did)} blockingPid={blocking.ProcessId} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
-            return BuildPluginViewerExpectedDeniedResponse(externalTuners, denied, "denied", "externalViewerOccupyingDid", responseMode, requestedWindowId, requestedRefreshTarget, requestedPreserveScroll, windows, GetPluginActionIdentity(plugin, route), log, pluginName, "viewerStart", leaseId, lease.Lease.TunerName, lease.Lease.Did, lease.Lease.BonDriverFileName, blocking.ProcessId, nid, tsid, sid);
-        }
-
-        var leaseBonDriverFileName = lease.Lease.BonDriverFileName ?? string.Empty;
-        var leaseDid = lease.Lease.Did ?? string.Empty;
-
-        if (internalRetunePreferred && !internalRetuneAllowed && existingManagedViewerPid > 0 && stoppedBeforeStartPids.Add(existingManagedViewerPid))
-        {
-            var stop = tvTestLauncher.StopManagedViewerProcess(existingManagedViewerPid, "viewerStart_scope_guard_previous_viewer_stop");
-            log.Add("VIEWER_START_PREVIOUS_VIEWER_STOP", pluginName, $"action=viewerStart leaseId={SafePluginActionValue(leaseId)} previousPid={existingManagedViewerPid} stopSuccess={stop.Success} stopMessage={SafePluginActionValue(stop.Message)} clientId={SafePluginActionValue(viewerClientId)} reusedLease={lease.Reused} reason=scope_guard_previous_viewer_stop beforeNewLaunch=True afterExternalGuard=True guardReason={SafePluginActionValue(internalRetuneGuardReason)} restoreStateCaptured={(restartFallbackWindowState?.Captured == true)} rule=release_contract");
-        }
-        if (internalRetuneAllowed && existingManagedViewer is not null && existingManagedViewerPid > 0)
-        {
-            log.Add("VIEWER_CHANNEL_ARGUMENT", pluginName, $"source=ProgramGuideProjectionTriplet finalChannelArgument={SafePluginActionValue(viewerChannelArgument)} identityArgument={SafePluginActionValue(identityArgument)} requestedServiceName={SafePluginActionValue(requestedServiceName)} resolvedServiceName={SafePluginActionValue(channel.Name)} nid={nid} tsid={tsid} sid={sid} chspace={channel.ResolvedSpace} chi={channel.ResolvedChannelIndex} sameTransportServiceCount={sameTransportServices.Count} sameTransportServiceIds={SafePluginActionValue(sameTransportServiceIds)} selectedChannelSource={SafePluginActionValue(selectedChannelSource)} preserveViewerWindowState={preserveViewerWindowState} viewerActivation={SafePluginActionValue(viewerActivation)} internalRetunePreferred=True internalRetuneAllowed=True targetBonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} targetDid={SafePluginActionValue(lease.Lease.Did)} rule=release_contract");
-            var targetPrepared = tvTestLauncher.PrepareViewerProfileCommandTarget(existingManagedViewerPid, requestedViewerProfile.Id, "viewerStart_before_single_instance_command");
-            log.Add("VIEWER_PROFILE_PID_BIND", pluginName, $"result={(targetPrepared ? "OK" : "WARN")} action=before_retune viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} existingPid={existingManagedViewerPid} requestedGroup={SafePluginActionValue(requestedLeaseGroup)} requestedDid={SafePluginActionValue(lease.Lease.Did)} requestedBonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} policy=selector_id_to_owned_pid_then_command rule=release_contract");
-            var retune = tvTestLauncher.RetuneExistingViewer(existingManagedViewerPid, leaseBonDriverFileName, leaseDid, viewerChannelArgument, true, string.IsNullOrWhiteSpace(viewerActivation) ? "preserve" : viewerActivation);
-            if (retune.Success)
-            {
-                ViewerRetuneDelayedDeathAudit.MarkRetuned(existingManagedViewerPid, nid, tsid, sid, requestedLeaseGroup, leaseDid, leaseBonDriverFileName);
-                externalTuners.AttachViewerProcess(leaseId, existingManagedViewerPid, viewerChannelArgument, "retuned", "reused", "internalRetuneCommandSent", "preserved", nid, tsid, sid, channel.ResolvedSpace, channel.ResolvedChannelIndex);
-                var internalRetuneDiag = $"state=retuned;leaseId={leaseId};tuner={lease.Lease.TunerName};did={lease.Lease.Did};bonDriver={lease.Lease.BonDriverFileName};viewerProcessId={existingManagedViewerPid};channelArgument={viewerChannelArgument};identityArgument={identityArgument};selectedChannelSource={selectedChannelSource};sameTransportServiceIds={sameTransportServiceIds};launchResult=reused;tuneResult=internalRetuneCommandSent;activateResult=preserved;processRestarted=False;preserveViewerWindowState=True;viewerActivation={viewerActivation};internalRetune=True;retuneScope=profileOwnedPidForegroundBinding";
-                externalTuners.SetLastViewerActionResult(pluginName, "viewerStart", true, "retuned", "-", "Viewer retuned inside existing TvAIr managed TVTest.", leaseId, lease.Lease.TunerName, lease.Lease.Did, lease.Lease.BonDriverFileName, existingManagedViewerPid, nid, tsid, sid, internalRetuneDiag);
-                log.Add("VIEWER_RETUNE_SURVIVAL", pluginName, $"result=OK source=viewerStart_action_context existingPid={existingManagedViewerPid} leaseId={SafePluginActionValue(leaseId)} previousNid={(existingManagedViewer.NetworkId.HasValue ? existingManagedViewer.NetworkId.Value.ToString(CultureInfo.InvariantCulture) : "-")} previousTsid={(existingManagedViewer.TransportStreamId.HasValue ? existingManagedViewer.TransportStreamId.Value.ToString(CultureInfo.InvariantCulture) : "-")} previousSid={(existingManagedViewer.ServiceId.HasValue ? existingManagedViewer.ServiceId.Value.ToString(CultureInfo.InvariantCulture) : "-")} requestedNid={nid} requestedTsid={tsid} requestedSid={sid} requestedGroup={SafePluginActionValue(requestedLeaseGroup)} requestedDid={SafePluginActionValue(lease.Lease.Did)} requestedBonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} processRestarted=False retuneScope=profileOwnedPidForegroundBinding rule=release_contract");
-                log.Add("VIEWER_INTERNAL_RETUNE", pluginName, $"result=OK method=tvtest_single_instance_commandline pid={existingManagedViewerPid} leaseId={SafePluginActionValue(leaseId)} previousLeaseId={SafePluginActionValue(existingManagedViewer.LeaseId)} previousNid={(existingManagedViewer.NetworkId.HasValue ? existingManagedViewer.NetworkId.Value.ToString(CultureInfo.InvariantCulture) : "-")} previousTsid={(existingManagedViewer.TransportStreamId.HasValue ? existingManagedViewer.TransportStreamId.Value.ToString(CultureInfo.InvariantCulture) : "-")} previousSid={(existingManagedViewer.ServiceId.HasValue ? existingManagedViewer.ServiceId.Value.ToString(CultureInfo.InvariantCulture) : "-")} requestedNid={nid} requestedTsid={tsid} requestedSid={sid} requestedChspace={channel.ResolvedSpace} requestedChi={channel.ResolvedChannelIndex} bonDriverChanged={!string.Equals(System.IO.Path.GetFileName(existingManagedViewer.BonDriverFileName), System.IO.Path.GetFileName(lease.Lease.BonDriverFileName), StringComparison.OrdinalIgnoreCase)} didChanged={!string.Equals(existingManagedViewer.Did, lease.Lease.Did, StringComparison.OrdinalIgnoreCase)} processRestarted=False retuneScope=profileOwnedPidForegroundBinding rule=release_contract");
-                if (!string.IsNullOrWhiteSpace(safeEvent))
-                    log.Add("PLUGIN_SAFE_EVENT", pluginName, $"event={SafePluginActionValue(safeEvent)} action=viewerStart result=POSTED_TO_VIEWER_INTERNAL_RETUNE service={SafePluginActionValue(serviceName)} nid={nid} tsid={tsid} sid={sid} windowId={SafePluginActionValue(requestedWindowId)} responseMode={SafePluginActionValue(responseMode)} state=retuned rule=release_contract");
-                log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=ACCEPTED state=retuned service={SafePluginActionValue(serviceName)} nid={nid} tsid={tsid} sid={sid} group={SafePluginActionValue(group)} tuner={SafePluginActionValue(lease.Lease.TunerName)} did={SafePluginActionValue(lease.Lease.Did)} pid={existingManagedViewerPid} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
-                var retuneActionResult = new PluginActionResult { Success = true, Message = "Viewer retuned inside existing TvAIr managed TVTest.", Diagnostics = internalRetuneDiag };
-                return BuildPluginViewerActionResponse(retuneActionResult, responseMode, requestedWindowId, requestedRefreshTarget, requestedPreserveScroll, windows, GetPluginActionIdentity(plugin, route), log, pluginName, "viewerStart", requestedRefreshAfter, toolWindows, http, requestedRefreshScrollTarget, requestedRefreshScrollMode);
-            }
-
-            var retuneFailureMessage = retune.Message ?? string.Empty;
-            var retuneProcessLost = retuneFailureMessage.Contains("disappeared", StringComparison.OrdinalIgnoreCase)
-                || retuneFailureMessage.Contains("exited", StringComparison.OrdinalIgnoreCase)
-                || retuneFailureMessage.Contains("not found", StringComparison.OrdinalIgnoreCase)
-                || retuneFailureMessage.Contains("lost", StringComparison.OrdinalIgnoreCase);
-            log.Add("VIEWER_INTERNAL_RETUNE", pluginName, $"result=FAILED method=tvtest_single_instance_commandline pid={existingManagedViewerPid} leaseId={SafePluginActionValue(leaseId)} requestedNid={nid} requestedTsid={tsid} requestedSid={sid} message={SafePluginActionValue(retune.Message)} processLost={retuneProcessLost} action={(retuneProcessLost ? "stale_release_then_restart_recovery" : "deny_without_restart")} reason=internal_retune_failed rule=release_contract");
-            if (retuneProcessLost)
-            {
-                TvAirManagedProcessRegistry.Unregister(existingManagedViewerPid);
-                externalTuners.SetViewerState(leaseId, "starting", "restartRecovery", "retuneProcessLost", "requested", "processLost");
-                goto StartNewViewer;
-            }
-            if (lease.Reused && string.Equals(existingManagedViewer.LeaseId, leaseId, StringComparison.OrdinalIgnoreCase))
-            {
-                externalTuners.SetViewerState(leaseId, "active", "reused", "retuneFailed", "preserved", "notNeeded");
-                log.Add("VIEWER_INTERNAL_RETUNE", pluginName, $"result=KEEP_EXISTING_LEASE leaseId={SafePluginActionValue(leaseId)} pid={existingManagedViewerPid} reason=retune_failed_same_lease_no_restart rule=release_contract");
-            }
-            else
-            {
-                externalTuners.Release(leaseId, $"Plugin:{pluginName}:internal_retune_failed_no_restart");
-            }
-            var failedRetune = new PluginActionResult { Success = false, Message = "Existing TVTest retune failed. TvAIr kept the existing viewer process alive and did not restart TVTest.", Diagnostics = $"state=denied;errorCode=internalRetuneFailed;viewerProcessId={existingManagedViewerPid};message={retune.Message}" };
-            return BuildPluginViewerExpectedDeniedResponse(externalTuners, failedRetune, "denied", "internalRetuneFailed", responseMode, requestedWindowId, requestedRefreshTarget, requestedPreserveScroll, windows, GetPluginActionIdentity(plugin, route), log, pluginName, "viewerStart", leaseId, lease.Lease.TunerName, lease.Lease.Did, lease.Lease.BonDriverFileName, existingManagedViewerPid, nid, tsid, sid);
-        }
-
-StartNewViewer:
-        log.Add("VIEWER_CHANNEL_ARGUMENT", pluginName, $"source=ProgramGuideProjectionTriplet finalChannelArgument={SafePluginActionValue(viewerChannelArgument)} identityArgument={SafePluginActionValue(identityArgument)} requestedServiceName={SafePluginActionValue(requestedServiceName)} resolvedServiceName={SafePluginActionValue(channel.Name)} nid={nid} tsid={tsid} sid={sid} chspace={channel.ResolvedSpace} chi={channel.ResolvedChannelIndex} sameTransportServiceCount={sameTransportServices.Count} sameTransportServiceIds={SafePluginActionValue(sameTransportServiceIds)} selectedChannelSource={SafePluginActionValue(selectedChannelSource)} preserveViewerWindowState={preserveViewerWindowState} viewerActivation={SafePluginActionValue(viewerActivation)} viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} tvTestPathKey={SafePluginActionValue(viewerProfilePathKey)} internalRetunePreferred={internalRetunePreferred} internalRetuneAllowed={internalRetuneAllowed} launchReason={(internalRetunePreferred && !internalRetuneAllowed ? "scope_guard_restart" : internalRetunePreferred ? "retune_failed_or_no_alive_viewer" : "no_alive_viewer")} rule=release_contract");
-        var restartReason = internalRetunePreferred && !internalRetuneAllowed ? "scope_guard_unscoped_retune_banned" : internalRetunePreferred ? "retune_failed_restart_recovery" : "no_alive_tvair_managed_viewer";
-        var restartPreviousPid = internalRetunePreferred && existingManagedViewerPid > 0 ? existingManagedViewerPid.ToString(CultureInfo.InvariantCulture) : "-";
-        log.Add("VIEWER_PROCESS_RESTART", pluginName, $"reason={SafePluginActionValue(restartReason)} previousPid={restartPreviousPid} newPid=- unavoidable={(internalRetunePreferred && !internalRetuneAllowed ? "True" : internalRetunePreferred ? "False" : "True")} processRestarted=True restoreRequested={(restartFallbackWindowState?.Captured == true)} restoreSourcePid={(restartFallbackWindowState?.ProcessId.ToString(CultureInfo.InvariantCulture) ?? "-")} policy=profile_scoped_restart_on_unscoped_retune_ban rule=release_contract");
-        var viewerLaunch = tvTestLauncher.StartViewer(leaseBonDriverFileName, leaseDid, viewerChannelArgument, preserveViewerWindowState, viewerActivation, restartFallbackWindowState);
-        if (!viewerLaunch.Success)
-        {
-            externalTuners.Release(leaseId, $"Plugin:{pluginName}:viewer_launch_failed");
-            var failed = new PluginActionResult { Success = false, Message = "Failed to launch TVTest viewer.", Diagnostics = $"state=failed;errorCode=viewerLaunchFailed;leaseId={leaseId};tuner={lease.Lease.TunerName};did={lease.Lease.Did};bonDriver={lease.Lease.BonDriverFileName};message={viewerLaunch.Message}" };
-            log.Add("VIEWER_START_RESULT", pluginName, $"success=False state=failed errorCode=viewerLaunchFailed leaseId={SafePluginActionValue(leaseId)} tuner={SafePluginActionValue(lease.Lease.TunerName)} did={SafePluginActionValue(lease.Lease.Did)} bonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} nid={nid} tsid={tsid} sid={sid} channelArgument={SafePluginActionValue(viewerChannelArgument)} identityArgument={SafePluginActionValue(identityArgument)} launchResult=failed rollbackResult=released rule=release_contract");
-            return BuildPluginViewerExpectedDeniedResponse(externalTuners, failed, "failed", "viewerLaunchFailed", responseMode, requestedWindowId, requestedRefreshTarget, requestedPreserveScroll, windows, GetPluginActionIdentity(plugin, route), log, pluginName, "viewerStart", leaseId, lease.Lease.TunerName, lease.Lease.Did, lease.Lease.BonDriverFileName, viewerLaunch.ProcessId, nid, tsid, sid);
-        }
-
-        externalTuners.AttachViewerProcess(leaseId, viewerLaunch.ProcessId, viewerChannelArgument, "launched", "started", "argumentPassed", "requested", nid, tsid, sid, channel.ResolvedSpace, channel.ResolvedChannelIndex);
-        var diag = $"state=launched;leaseId={leaseId};tuner={lease.Lease.TunerName};did={lease.Lease.Did};bonDriver={lease.Lease.BonDriverFileName};viewerProcessId={viewerLaunch.ProcessId};channelArgument={viewerChannelArgument};identityArgument={identityArgument};selectedChannelSource={selectedChannelSource};sameTransportServiceIds={sameTransportServiceIds};launchResult=started;tuneResult=argumentPassed;activateResult=requested;preserveViewerWindowState={preserveViewerWindowState};viewerActivation={viewerActivation};viewerProfile={requestedViewerProfile.Id};viewerProfileName={requestedViewerProfile.Name};tvTestPathKey={viewerProfilePathKey};restoreWindowStateRequested={(restartFallbackWindowState?.Captured == true)}";
-        log.Add("VIEWER_START_RESULT", pluginName, $"success=True state=launched errorCode=- leaseId={SafePluginActionValue(leaseId)} tuner={SafePluginActionValue(lease.Lease.TunerName)} did={SafePluginActionValue(lease.Lease.Did)} bonDriver={SafePluginActionValue(lease.Lease.BonDriverFileName)} pid={viewerLaunch.ProcessId} nid={nid} tsid={tsid} sid={sid} channelArgument={SafePluginActionValue(viewerChannelArgument)} identityArgument={SafePluginActionValue(identityArgument)} launchResult=started tuneResult=argumentPassed activateResult=requested viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} tvTestPathKey={SafePluginActionValue(viewerProfilePathKey)} rule=release_contract");
-        if (!string.IsNullOrWhiteSpace(safeEvent))
-            log.Add("PLUGIN_SAFE_EVENT", pluginName, $"event={SafePluginActionValue(safeEvent)} action=viewerStart result=POSTED_TO_VIEWER_START service={SafePluginActionValue(serviceName)} nid={nid} tsid={tsid} sid={sid} windowId={SafePluginActionValue(requestedWindowId)} responseMode={SafePluginActionValue(responseMode)} state=launched rule=release_contract");
-        log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStart result=ACCEPTED state=launched service={SafePluginActionValue(serviceName)} nid={nid} tsid={tsid} sid={sid} group={SafePluginActionValue(group)} tuner={SafePluginActionValue(lease.Lease.TunerName)} did={SafePluginActionValue(lease.Lease.Did)} pid={viewerLaunch.ProcessId} viewerProfile={SafePluginActionValue(requestedViewerProfile.Id)} viewerProfileName={SafePluginActionValue(requestedViewerProfile.Name)} endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
-        var actionResult = new PluginActionResult { Success = true, Message = "Viewer launch requested by TvAIr host.", Diagnostics = diag };
-        return BuildPluginViewerActionResponse(actionResult, responseMode, requestedWindowId, requestedRefreshTarget, requestedPreserveScroll, windows, GetPluginActionIdentity(plugin, route), log, pluginName, "viewerStart", requestedRefreshAfter, toolWindows, http, requestedRefreshScrollTarget, requestedRefreshScrollMode);
+        log.Add("PLUGIN_ACTION", pluginName, $"action={SafePluginActionValue(action)} result=DENIED reason=plugin_action_handler_not_implemented route={SafePluginActionValue(route)} endpoint={SafePluginActionValue(http.Path.Value)} rule=plugin_owned_action_dispatch");
+        return BuildPluginActionDispatchError(new RuntimeUiActionResult { Succeeded = false, Message = "Plugin action handler is not implemented.", Diagnostics = "plugin_action_handler_not_implemented" }, responseMode, requestedWindowId, StatusCodes.Status400BadRequest);
     }
 
-    if (action.Equals("viewerStop", StringComparison.OrdinalIgnoreCase) || action.Equals("RequestViewerStop", StringComparison.OrdinalIgnoreCase))
+    try
     {
-        var requestedLeaseId = ReadPayload(payload, "LeaseId", "leaseId", "payload-lease-id", "payload-leaseId");
-        var requestedViewerProfileRaw = ReadPayload(payload,
-            "viewerProfile", "ViewerProfile", "viewer_profile", "viewer-profile",
-            "viewerProfileId", "ViewerProfileId", "selectedViewerProfile", "SelectedViewerProfile",
-            "vtuner", "vTuner", "viewer", "profile");
-        var requestedViewerProfileId = NormalizeViewerProfileActionId(requestedViewerProfileRaw);
-        var hasRequestedViewerProfile = !string.IsNullOrWhiteSpace(requestedViewerProfileId);
-        var clientId = hasRequestedViewerProfile
-            ? $"{pluginId}:viewer:{requestedViewerProfileId}"
-            : ReadPayload(payload, "clientId", "ClientId");
-        if (string.IsNullOrWhiteSpace(clientId)) clientId = $"{pluginId}:viewer";
-
-        var stopResolveMode = "none";
-        var stopDeniedReason = string.Empty;
-        var activeLeasesBeforeStop = externalTuners.GetActiveLeases().ToList();
-        ExternalTunerLeaseDto? targetLease = null;
-
-        if (!string.IsNullOrWhiteSpace(requestedLeaseId))
-        {
-            var leaseById = activeLeasesBeforeStop.FirstOrDefault(x => string.Equals(x.LeaseId, requestedLeaseId, StringComparison.OrdinalIgnoreCase));
-            if (leaseById is not null && hasRequestedViewerProfile && !string.Equals(NormalizeViewerProfileActionId(leaseById.ViewerProfileId), requestedViewerProfileId, StringComparison.OrdinalIgnoreCase))
+        request.PluginId = pluginId;
+        request.RouteSegment = route;
+        request.Action = action;
+        request.Payload = payload;
+        request.WindowId = requestedWindowId;
+        request.RefreshTarget = requestedRefreshTarget;
+        request.PreserveScroll = requestedPreserveScroll;
+        var enabledPayload = ReadPayload(request.Payload, "enabled", "Enabled", "isEnabled", "checked");
+        log.Add("PLUGIN_ACTION_PAYLOAD_CONTRACT", pluginName,
+            $"action={SafePluginActionValue(action)} interactionId={SafePluginActionValue(safeEventInteractionId)} result=RECEIVED route={SafePluginActionValue(route)} windowId={SafePluginActionValue(requestedWindowId)} responseMode={SafePluginActionValue(responseMode)} payloadKeys={SafePluginActionValue(FormatPluginPayloadKeys(request.Payload))} enabled={SafePluginActionValue(string.IsNullOrWhiteSpace(enabledPayload) ? "-" : enabledPayload)} rule=plugin_owned_action_dispatch");
+        var pluginResult = await nativeActionHandler.HandleActionAsync(
+            new RuntimeUiActionContext
             {
-                stopResolveMode = "leaseId_profile_mismatch_denied";
-                stopDeniedReason = $"lease_profile_mismatch requestedProfile={requestedViewerProfileId} leaseProfile={NormalizeViewerProfileActionId(leaseById.ViewerProfileId)}";
-                log.Add("VIEWER_STOP_PROFILE_GUARD", pluginName, $"result=DENY reason=lease_profile_mismatch requestedLeaseId={SafePluginActionValue(requestedLeaseId)} requestedViewerProfile={SafePluginActionValue(requestedViewerProfileId)} leaseViewerProfile={SafePluginActionValue(leaseById.ViewerProfileId)} leasePid={(leaseById.ProcessId.HasValue ? leaseById.ProcessId.Value.ToString(CultureInfo.InvariantCulture) : "-")} policy=selected_viewer_profile_must_match_lease rule=release_contract");
-            }
-            else if (leaseById is not null)
-            {
-                targetLease = leaseById;
-                stopResolveMode = hasRequestedViewerProfile ? "leaseId_profile_verified" : "leaseId_no_profile_legacy";
-            }
-            else if (hasRequestedViewerProfile)
-            {
-                stopResolveMode = "stale_lease_profile_fallback";
-            }
-            else
-            {
-                stopResolveMode = "stale_lease_no_profile_denied";
-                stopDeniedReason = "stale_lease_without_viewer_profile";
-            }
-        }
-
-        if (targetLease is null && string.IsNullOrWhiteSpace(stopDeniedReason) && hasRequestedViewerProfile)
-        {
-            targetLease = activeLeasesBeforeStop
-                .Where(x => string.Equals(NormalizeViewerProfileActionId(x.ViewerProfileId), requestedViewerProfileId, StringComparison.OrdinalIgnoreCase))
-                .Where(x => string.Equals(x.ClientId, $"{pluginId}:viewer:{requestedViewerProfileId}", StringComparison.OrdinalIgnoreCase)
-                         || string.Equals(x.Source, $"Plugin:{pluginName}", StringComparison.OrdinalIgnoreCase)
-                         || (x.ClientId ?? string.Empty).StartsWith($"{pluginId}:viewer", StringComparison.OrdinalIgnoreCase))
-                .OrderByDescending(x => x.AcquiredAt)
-                .FirstOrDefault();
-            if (targetLease is not null)
-                stopResolveMode = stopResolveMode == "stale_lease_profile_fallback" ? "stale_lease_profile_resolved" : "viewerProfile";
-        }
-
-        if (targetLease is null && string.IsNullOrWhiteSpace(stopDeniedReason))
-        {
-            stopResolveMode = string.IsNullOrWhiteSpace(stopResolveMode) || stopResolveMode == "none"
-                ? "missing_viewer_profile_denied"
-                : stopResolveMode;
-            stopDeniedReason = hasRequestedViewerProfile ? "viewer_profile_session_not_found" : "missing_viewer_profile_and_lease";
-            log.Add("VIEWER_STOP_PROFILE_GUARD", pluginName, $"result=DENY reason={SafePluginActionValue(stopDeniedReason)} requestedLeaseId={SafePluginActionValue(requestedLeaseId)} requestedViewerProfile={SafePluginActionValue(requestedViewerProfileId)} clientId={SafePluginActionValue(clientId)} policy=no_generic_client_or_active_window_fallback rule=release_contract");
-        }
-
-        var resolvedLeaseId = targetLease?.LeaseId ?? string.Empty;
-        var stopPids = targetLease is not null
-            ? BuildManagedViewerStopPidSet(targetLease, includeRegistrySameTuner: false)
-            : Array.Empty<int>();
-        var stopDiagParts = new List<string>();
-        var ok = false;
-        var stopDiag = "not_attempted";
-        if (targetLease is not null)
-        {
-            foreach (var pid in stopPids)
-            {
-                var stop = tvTestLauncher.StopManagedViewerProcess(pid, "viewerStop_profile_bound_cleanup");
-                stopDiagParts.Add($"pid={pid}:{stop.Message}");
-            }
-            stopDiag = stopDiagParts.Count > 0 ? string.Join(",", stopDiagParts) : "no_process";
-            ok = !string.IsNullOrWhiteSpace(resolvedLeaseId) && externalTuners.Release(resolvedLeaseId, $"Plugin:{pluginName}:viewerStop:{stopResolveMode}");
-        }
-
-        var activeViewerSessionsAfterStop = hasRequestedViewerProfile
-            ? externalTuners.GetActiveLeases().Count(l => string.Equals(NormalizeViewerProfileActionId(l.ViewerProfileId), requestedViewerProfileId, StringComparison.OrdinalIgnoreCase))
-            : externalTuners.GetActiveLeases().Count(l => string.Equals(l.ClientId ?? string.Empty, clientId, StringComparison.OrdinalIgnoreCase));
-        log.Add("VIEWER_STOP_RESOLVE", pluginName, $"action=viewerStop requestedLeaseId={SafePluginActionValue(requestedLeaseId)} requestedViewerProfile={SafePluginActionValue(requestedViewerProfileId)} resolvedLeaseId={SafePluginActionValue(resolvedLeaseId)} resolvedViewerProfile={SafePluginActionValue(targetLease?.ViewerProfileId)} resolveMode={SafePluginActionValue(stopResolveMode)} clientId={SafePluginActionValue(clientId)} currentWindowId={SafePluginActionValue(requestedWindowId)} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(route)} resolvedGroup={SafePluginActionValue(targetLease?.Group)} resolvedTuner={SafePluginActionValue(targetLease?.TunerName)} resolvedDid={SafePluginActionValue(targetLease?.Did)} resolvedPid={(targetLease?.ProcessId.HasValue == true ? targetLease.ProcessId.Value.ToString(CultureInfo.InvariantCulture) : "-")} cleanupPids={SafePluginActionValue(string.Join(",", stopPids))} deniedReason={SafePluginActionValue(stopDeniedReason)} result={(ok ? "OK" : "NOT_FOUND")} rule=release_contract");
-        log.Add("PLUGIN_ACTION_VIEWER", pluginName, $"action=viewerStop result={(ok ? "OK" : "NOT_FOUND")} requestedLeaseId={SafePluginActionValue(requestedLeaseId)} requestedViewerProfile={SafePluginActionValue(requestedViewerProfileId)} resolvedLeaseId={SafePluginActionValue(resolvedLeaseId)} resolvedViewerProfile={SafePluginActionValue(targetLease?.ViewerProfileId)} leaseResolveMode={SafePluginActionValue(stopResolveMode)} processStop={SafePluginActionValue(stopDiag)} activeViewerSessionsAfterStop={activeViewerSessionsAfterStop} cleanupPids={SafePluginActionValue(string.Join(",", stopPids))} uiStateSource=GetViewerSessions current_active_sessions_only notFoundProcessPolicy=deny_if_profile_or_lease_not_resolved endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
-        var actionResult = ok
-            ? new PluginActionResult { Success = true, Message = "Viewer lease released.", Diagnostics = $"released;processStop={stopDiag};leaseResolveMode={stopResolveMode};viewerProfile={requestedViewerProfileId}" }
-            : new PluginActionResult { Success = false, Message = "Viewer lease not found or viewerProfile mismatch.", Diagnostics = $"lease_not_found_or_profile_mismatch;leaseResolveMode={stopResolveMode};reason={stopDeniedReason};viewerProfile={requestedViewerProfileId}" };
-        return ok
-            ? BuildPluginViewerActionResponse(actionResult, responseMode, requestedWindowId, requestedRefreshTarget, requestedPreserveScroll, windows, GetPluginActionIdentity(plugin, route), log, pluginName, "viewerStop", requestedRefreshAfter, toolWindows, http, requestedRefreshScrollTarget, requestedRefreshScrollMode)
-            : BuildPluginActionDispatchError(actionResult, responseMode, requestedWindowId, StatusCodes.Status404NotFound);
+                PluginId = pluginId,
+                UiDefinitionId = nativeActionDefinition.UiDefinitionId,
+                Route = route,
+                ActionName = action,
+                CurrentWindowId = requestedWindowId,
+                Payload = request.Payload,
+                CorrelationId = feedbackCorrelationId,
+                RequestedAt = DateTime.Now
+            },
+            http.HttpContext.RequestAborted);
+        log.Add("PLUGIN_ACTION", pluginName, $"action={SafePluginActionValue(action)} interactionId={SafePluginActionValue(safeEventInteractionId)} result={(pluginResult.Succeeded ? "OK" : "PLUGIN_DECLINED")} route={SafePluginActionValue(route)} responseMode={SafePluginActionValue(responseMode)} endpoint={SafePluginActionValue(http.Path.Value)} rule=plugin_owned_action_dispatch");
+        var effectiveRefreshTarget = pluginResult.RefreshRequested
+            ? NormalizePluginWindowRefreshTarget(pluginResult.RefreshTarget)
+            : requestedRefreshTarget;
+        var effectivePreserveScroll = pluginResult.RefreshRequested
+            ? pluginResult.PreserveScroll
+            : requestedPreserveScroll;
+        var effectiveContentRoute = pluginResult.RefreshRequested && !string.IsNullOrWhiteSpace(pluginResult.ContentRoute)
+            ? pluginResult.ContentRoute.Trim()
+            : requestedContentRoute;
+        var effectiveResponseMode = pluginResult.RefreshRequested
+            ? (actionUiKind == TvAIrPlugin.Runtime.RuntimeUiKind.Page ? responseMode : "refreshWindow")
+            : responseMode;
+        var effectiveRefreshAfter = pluginResult.RefreshRequested || requestedRefreshAfter;
+        log.Add("PLUGIN_RUNTIME_UI_ACTION_REFRESH_CONTRACT", pluginName,
+            $"action={SafePluginActionValue(action)} result={(pluginResult.RefreshRequested ? "PLUGIN_REQUESTED" : "REQUEST_FALLBACK")} surface={SafePluginActionValue(actionUiKind?.ToString())} responseMode={SafePluginActionValue(effectiveResponseMode)} windowId={SafePluginActionValue(requestedWindowId)} refreshTarget={SafePluginActionValue(effectiveRefreshTarget)} preserveScroll={effectivePreserveScroll} contentRoute={SafePluginActionValue(effectiveContentRoute)} rule=runtime_ui_action_result_refresh_contract");
+        return pluginResult.Succeeded
+            ? BuildPluginOwnedActionResponse(pluginResult, effectiveResponseMode, requestedWindowId, effectiveRefreshTarget, effectivePreserveScroll, windows, GetPluginActionIdentity(plugin), log, pluginName, action, actionUiKind, effectiveRefreshAfter, toolWindows, http, effectiveContentRoute, feedbackRequested, feedbackCorrelationId)
+            : BuildPluginActionDispatchError(pluginResult, effectiveResponseMode, requestedWindowId, StatusCodes.Status400BadRequest, feedbackRequested, feedbackCorrelationId);
     }
-
-    log.Add("PLUGIN_ACTION", pluginName, $"action={SafePluginActionValue(action)} result=DENIED reason=unsupported_action endpoint={SafePluginActionValue(http.Path.Value)} rule=release_contract");
-    return BuildPluginActionDispatchError(new PluginActionResult { Success = false, Message = "Unsupported plugin action.", Diagnostics = "unsupported_action" }, responseMode, requestedWindowId, StatusCodes.Status400BadRequest);
+    catch (Exception ex)
+    {
+        log.Add("PLUGIN_ACTION", pluginName, $"action={SafePluginActionValue(action)} result=ERROR type={SafePluginActionValue(ex.GetType().Name)} message={SafePluginActionValue(ex.Message)} endpoint={SafePluginActionValue(http.Path.Value)} rule=plugin_owned_action_dispatch");
+        return BuildPluginActionDispatchError(new RuntimeUiActionResult { Succeeded = false, Message = "Plugin action failed.", Diagnostics = ex.GetType().Name }, responseMode, requestedWindowId, StatusCodes.Status500InternalServerError, feedbackRequested, feedbackCorrelationId);
+    }
 }
-
 
 static async Task<PluginWindowRequest> ReadPluginWindowRequestAsync(HttpRequest http)
 {
     var result = new PluginWindowRequest();
     try
     {
+        if (string.Equals(http.Method, "GET", StringComparison.OrdinalIgnoreCase) && http.Query.Count > 0)
+        {
+            foreach (var kv in http.Query)
+            {
+                AssignPluginWindowField(result, kv.Key ?? string.Empty, kv.Value.ToString());
+            }
+            return result;
+        }
+
         if (http.HasFormContentType)
         {
             var form = await http.ReadFormAsync();
@@ -3304,31 +2827,27 @@ static void AssignPluginWindowField(PluginWindowRequest result, string key, stri
     switch (key.Trim())
     {
         case "pluginId": case "PluginId": result.PluginId = value; break;
-        case "routeSegment": case "RouteSegment": case "route": case "Route": result.RouteSegment = value; break;
+        case "routeSegment": case "RouteSegment": result.RouteSegment = value; break;
         case "action": case "Action": result.Action = value; break;
         case "windowId": case "WindowId": result.WindowId = value; break;
         case "title": case "Title": result.Title = value; result.Payload[key] = value; break;
-        case "width": case "Width": if (int.TryParse(value, out var w)) { result.Width = Math.Clamp(w, 240, 2400); result.Payload[key] = value; } break;
-        case "height": case "Height": if (int.TryParse(value, out var h)) { result.Height = Math.Clamp(h, 240, 1600); result.Payload[key] = value; } break;
-        case "minWidth": case "MinWidth": if (int.TryParse(value, out var mw)) { result.MinWidth = Math.Clamp(mw, 160, 2400); result.Payload[key] = value; } break;
-        case "minHeight": case "MinHeight": if (int.TryParse(value, out var mh)) { result.MinHeight = Math.Clamp(mh, 160, 1600); result.Payload[key] = value; } break;
+        case "width": case "Width": if (int.TryParse(value, out var w)) { result.Width = NormalizePluginWindowDimension(w); result.Payload[key] = value; } break;
+        case "height": case "Height": if (int.TryParse(value, out var h)) { result.Height = NormalizePluginWindowDimension(h); result.Payload[key] = value; } break;
+        case "minWidth": case "MinWidth": if (int.TryParse(value, out var mw)) { result.MinWidth = NormalizePluginWindowDimension(mw); result.Payload[key] = value; } break;
+        case "minHeight": case "MinHeight": if (int.TryParse(value, out var mh)) { result.MinHeight = NormalizePluginWindowDimension(mh); result.Payload[key] = value; } break;
         case "resizable": case "Resizable": if (bool.TryParse(value, out var rz)) { result.Resizable = rz; result.Payload[key] = value; } break;
         case "movable": case "Movable": if (bool.TryParse(value, out var mv)) { result.Movable = mv; result.Payload[key] = value; } break;
         case "alwaysOnTop": case "AlwaysOnTop": if (bool.TryParse(value, out var aot)) { result.AlwaysOnTop = aot; result.Payload[key] = value; } break;
         case "contentRoute": case "ContentRoute": result.ContentRoute = value; result.Payload[key] = value; break;
         case "refreshTarget": case "RefreshTarget": result.RefreshTarget = value; break;
-        case "target": case "Target": result.Target = value; break;
         case "preserveScroll": case "PreserveScroll": if (bool.TryParse(value, out var ps)) { result.PreserveScroll = ps; result.Payload[key] = value; } break;
-        case "refreshScrollTarget": case "RefreshScrollTarget": case "scrollTarget": case "ScrollTarget": case "focusTarget": case "FocusTarget": result.RefreshScrollTarget = value; result.Payload[key] = value; break;
-        case "refreshScrollMode": case "RefreshScrollMode": case "scrollMode": case "ScrollMode": result.RefreshScrollMode = value; result.Payload[key] = value; break;
         case "forceReload": case "ForceReload": if (bool.TryParse(value, out var fr)) { result.ForceReload = fr; result.Payload[key] = value; } break;
         case "refreshAfter": case "RefreshAfter": if (bool.TryParse(value, out var ra)) { result.RefreshAfter = ra; result.Payload[key] = value; } break;
         case "reuseExisting": case "ReuseExisting": if (bool.TryParse(value, out var re)) { result.ReuseExisting = re; result.Payload[key] = value; } break;
         case "activateExisting": case "ActivateExisting": if (bool.TryParse(value, out var ae)) { result.ActivateExisting = ae; result.Payload[key] = value; } break;
         case "windowToken": case "WindowToken": result.WindowToken = value; break;
-        case "token": case "Token": result.Token = value; break;
         case "responseMode": case "ResponseMode": result.ResponseMode = value; result.Payload[key] = value; break;
-        case "returnUrl": case "ReturnUrl": case "redirectBackUrl": case "RedirectBackUrl": case "sourceUrl": case "SourceUrl": result.ReturnUrl = value; result.Payload[key] = value; break;
+        case "returnUrl": case "ReturnUrl": result.ReturnUrl = value; result.Payload[key] = value; break;
         default:
             result.Payload[key] = value;
             break;
@@ -3336,39 +2855,36 @@ static void AssignPluginWindowField(PluginWindowRequest result, string key, stri
 }
 
 
+static int NormalizePluginWindowDimension(int value) => value > 0 ? value : 0;
+
 static void NormalizePluginWindowRequestFromPayload(PluginWindowRequest request)
 {
     if (string.IsNullOrWhiteSpace(request.PluginId)) request.PluginId = ReadPayload(request.Payload, "pluginId", "PluginId");
-    if (string.IsNullOrWhiteSpace(request.RouteSegment)) request.RouteSegment = ReadPayload(request.Payload, "routeSegment", "RouteSegment", "route", "Route");
+    if (string.IsNullOrWhiteSpace(request.RouteSegment)) request.RouteSegment = ReadPayload(request.Payload, "routeSegment", "RouteSegment");
     if (string.IsNullOrWhiteSpace(request.Action)) request.Action = ReadPayload(request.Payload, "action", "Action");
-    if (string.IsNullOrWhiteSpace(request.WindowId)) request.WindowId = ReadPayload(request.Payload, "windowId", "WindowId", "currentWindowId", "CurrentWindowId");
+    request.Action = NormalizePluginWindowAction(request.Action);
+    request.Payload["action"] = request.Action;
+    if (string.IsNullOrWhiteSpace(request.WindowId)) request.WindowId = ReadPayload(request.Payload, "windowId", "WindowId", "currentWindowId", "CurrentWindowId", "safeEventWindowId", "SafeEventWindowId");
+    request.WindowId = NormalizePluginWindowId(request.WindowId);
+    if (!string.IsNullOrWhiteSpace(request.WindowId)) request.Payload["windowId"] = request.WindowId;
     if (string.IsNullOrWhiteSpace(request.Title)) request.Title = ReadPayload(request.Payload, "title", "Title");
-    if (TryReadIntPayload(request.Payload, out var width, "width", "Width")) request.Width = Math.Clamp(width, 240, 2400);
-    if (TryReadIntPayload(request.Payload, out var height, "height", "Height")) request.Height = Math.Clamp(height, 240, 1600);
-    if (TryReadIntPayload(request.Payload, out var minWidth, "minWidth", "MinWidth")) request.MinWidth = Math.Clamp(minWidth, 160, 2400);
-    if (TryReadIntPayload(request.Payload, out var minHeight, "minHeight", "MinHeight")) request.MinHeight = Math.Clamp(minHeight, 160, 1600);
+    if (TryReadIntPayload(request.Payload, out var width, "width", "Width")) request.Width = NormalizePluginWindowDimension(width);
+    if (TryReadIntPayload(request.Payload, out var height, "height", "Height")) request.Height = NormalizePluginWindowDimension(height);
+    if (TryReadIntPayload(request.Payload, out var minWidth, "minWidth", "MinWidth")) request.MinWidth = NormalizePluginWindowDimension(minWidth);
+    if (TryReadIntPayload(request.Payload, out var minHeight, "minHeight", "MinHeight")) request.MinHeight = NormalizePluginWindowDimension(minHeight);
     if (TryReadBoolPayload(request.Payload, out var resizable, "resizable", "Resizable")) request.Resizable = resizable;
     if (TryReadBoolPayload(request.Payload, out var movable, "movable", "Movable")) request.Movable = movable;
     if (TryReadBoolPayload(request.Payload, out var alwaysOnTop, "alwaysOnTop", "AlwaysOnTop")) request.AlwaysOnTop = alwaysOnTop;
     if (string.IsNullOrWhiteSpace(request.ContentRoute)) request.ContentRoute = ReadPayload(request.Payload, "contentRoute", "ContentRoute");
-    var target = ReadPayload(request.Payload, "target", "Target", "refreshTarget", "RefreshTarget");
-    if (!string.IsNullOrWhiteSpace(target))
-    {
-        request.Target = target;
-        request.RefreshTarget = target;
-    }
+    var refreshTarget = ReadPayload(request.Payload, "refreshTarget", "RefreshTarget");
+    if (!string.IsNullOrWhiteSpace(refreshTarget)) request.RefreshTarget = refreshTarget;
     if (TryReadBoolPayload(request.Payload, out var preserveScroll, "preserveScroll", "PreserveScroll")) request.PreserveScroll = preserveScroll;
-    var refreshScrollTarget = ReadPayload(request.Payload, "refreshScrollTarget", "RefreshScrollTarget", "scrollTarget", "ScrollTarget", "focusTarget", "FocusTarget");
-    if (!string.IsNullOrWhiteSpace(refreshScrollTarget)) request.RefreshScrollTarget = NormalizePluginRefreshScrollTarget(refreshScrollTarget);
-    var refreshScrollMode = ReadPayload(request.Payload, "refreshScrollMode", "RefreshScrollMode", "scrollMode", "ScrollMode");
-    if (!string.IsNullOrWhiteSpace(refreshScrollMode)) request.RefreshScrollMode = NormalizePluginRefreshScrollMode(refreshScrollMode);
     if (TryReadBoolPayload(request.Payload, out var forceReload, "forceReload", "ForceReload")) request.ForceReload = forceReload;
     if (TryReadBoolPayload(request.Payload, out var refreshAfter, "refreshAfter", "RefreshAfter")) request.RefreshAfter = refreshAfter;
     if (TryReadBoolPayload(request.Payload, out var reuseExisting, "reuseExisting", "ReuseExisting")) request.ReuseExisting = reuseExisting;
     if (TryReadBoolPayload(request.Payload, out var activateExisting, "activateExisting", "ActivateExisting")) request.ActivateExisting = activateExisting;
     if (string.IsNullOrWhiteSpace(request.WindowToken)) request.WindowToken = ReadPayload(request.Payload, "windowToken", "WindowToken");
-    if (string.IsNullOrWhiteSpace(request.Token)) request.Token = ReadPayload(request.Payload, "token", "Token");
-    if (string.IsNullOrWhiteSpace(request.ReturnUrl)) request.ReturnUrl = ReadPayload(request.Payload, "returnUrl", "ReturnUrl", "redirectBackUrl", "RedirectBackUrl", "sourceUrl", "SourceUrl");
+    if (string.IsNullOrWhiteSpace(request.ReturnUrl)) request.ReturnUrl = ReadPayload(request.Payload, "returnUrl", "ReturnUrl");
     if (string.IsNullOrWhiteSpace(request.ResponseMode) || request.ResponseMode.Equals("json", StringComparison.OrdinalIgnoreCase))
     {
         var responseMode = ReadPayload(request.Payload, "responseMode", "ResponseMode");
@@ -3383,18 +2899,6 @@ static string ResolvePluginWindowId(PluginWindowRequest request)
     return NormalizePluginWindowId(windowId);
 }
 
-static string NormalizePluginRefreshScrollTarget(string? value)
-{
-    if (string.IsNullOrWhiteSpace(value)) return string.Empty;
-    var trimmed = value.Trim().TrimStart('#');
-    return new string(trimmed.Where(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_' or ':' or '.').ToArray());
-}
-
-static string NormalizePluginRefreshScrollMode(string? value)
-{
-    var mode = (value ?? string.Empty).Trim().ToLowerInvariant();
-    return mode is "top" or "nearest" or "center" ? mode : "center";
-}
 
 static string NormalizePluginWindowRefreshTarget(string? value)
 {
@@ -3435,16 +2939,16 @@ static bool TryReadBoolPayload(Dictionary<string, string> payload, out bool valu
     return false;
 }
 
-static async Task<PluginActionRequest> ReadPluginActionRequestAsync(HttpRequest http)
+static async Task<RuntimeUiActionHttpRequest> ReadRuntimeUiActionHttpRequestAsync(HttpRequest http)
 {
-    var result = new PluginActionRequest();
+    var result = new RuntimeUiActionHttpRequest();
     try
     {
         foreach (var kv in http.Query)
         {
             var key = kv.Key ?? string.Empty;
             var value = kv.Value.ToString();
-            AssignPluginActionField(result, key, value);
+            AssignRuntimeUiActionField(result, key, value);
         }
 
         if (http.HasFormContentType)
@@ -3454,7 +2958,7 @@ static async Task<PluginActionRequest> ReadPluginActionRequestAsync(HttpRequest 
             {
                 var key = kv.Key ?? string.Empty;
                 var value = kv.Value.ToString();
-                AssignPluginActionField(result, key, value);
+                AssignRuntimeUiActionField(result, key, value);
             }
             NormalizePluginActionPayloadAliases(result.Payload);
             return result;
@@ -3479,7 +2983,7 @@ static async Task<PluginActionRequest> ReadPluginActionRequestAsync(HttpRequest 
                 MergePluginActionJsonPayload(result.Payload, prop.Value);
                 continue;
             }
-            AssignPluginActionField(result, prop.Name, JsonElementToPluginActionString(prop.Value));
+            AssignRuntimeUiActionField(result, prop.Name, JsonElementToPluginActionString(prop.Value));
         }
         NormalizePluginActionPayloadAliases(result.Payload);
     }
@@ -3490,20 +2994,18 @@ static async Task<PluginActionRequest> ReadPluginActionRequestAsync(HttpRequest 
     return result;
 }
 
-static void AssignPluginActionField(PluginActionRequest target, string key, string value)
+static void AssignRuntimeUiActionField(RuntimeUiActionHttpRequest target, string key, string value)
 {
     key = (key ?? string.Empty).Trim();
     value = (value ?? string.Empty).Trim();
-    if (key.Equals("pluginId", StringComparison.OrdinalIgnoreCase) || key.Equals("plugin", StringComparison.OrdinalIgnoreCase))
+    if (key.Equals("pluginId", StringComparison.OrdinalIgnoreCase))
         target.PluginId = value;
-    else if (key.Equals("routeSegment", StringComparison.OrdinalIgnoreCase) || key.Equals("route", StringComparison.OrdinalIgnoreCase))
+    else if (key.Equals("routeSegment", StringComparison.OrdinalIgnoreCase))
         target.RouteSegment = value;
     else if (key.Equals("action", StringComparison.OrdinalIgnoreCase))
         target.Action = value;
     else if (key.Equals("actionToken", StringComparison.OrdinalIgnoreCase))
         target.ActionToken = value;
-    else if (key.Equals("token", StringComparison.OrdinalIgnoreCase))
-        target.Token = value;
     else if (key.Equals("responseMode", StringComparison.OrdinalIgnoreCase))
     {
         target.ResponseMode = value;
@@ -3514,7 +3016,7 @@ static void AssignPluginActionField(PluginActionRequest target, string key, stri
         target.WindowId = value;
         target.Payload[key] = value;
     }
-    else if (key.Equals("refreshTarget", StringComparison.OrdinalIgnoreCase) || key.Equals("target", StringComparison.OrdinalIgnoreCase))
+    else if (key.Equals("refreshTarget", StringComparison.OrdinalIgnoreCase))
     {
         target.RefreshTarget = value;
         target.Payload[key] = value;
@@ -3522,16 +3024,6 @@ static void AssignPluginActionField(PluginActionRequest target, string key, stri
     else if (key.Equals("preserveScroll", StringComparison.OrdinalIgnoreCase))
     {
         if (bool.TryParse(value, out var preserveScroll)) target.PreserveScroll = preserveScroll;
-        target.Payload[key] = value;
-    }
-    else if (key.Equals("refreshScrollTarget", StringComparison.OrdinalIgnoreCase) || key.Equals("scrollTarget", StringComparison.OrdinalIgnoreCase) || key.Equals("focusTarget", StringComparison.OrdinalIgnoreCase))
-    {
-        target.RefreshScrollTarget = value;
-        target.Payload[key] = value;
-    }
-    else if (key.Equals("refreshScrollMode", StringComparison.OrdinalIgnoreCase) || key.Equals("scrollMode", StringComparison.OrdinalIgnoreCase))
-    {
-        target.RefreshScrollMode = value;
         target.Payload[key] = value;
     }
     else if (!string.IsNullOrWhiteSpace(key))
@@ -3567,11 +3059,13 @@ static void MergePluginActionPayloadJson(Dictionary<string, string> payload, str
 
 static void NormalizePluginActionPayloadAliases(Dictionary<string, string> payload)
 {
-    MergePluginActionPayloadJson(payload, ReadPayload(payload, "payloadJson", "PayloadJson", "actionPayloadJson", "ActionPayloadJson", "viewerStartPayloadJson", "ViewerStartPayloadJson"));
+    MergePluginActionPayloadJson(payload, ReadPayload(payload, "payloadJson", "PayloadJson", "actionPayloadJson", "ActionPayloadJson"));
     CopyPluginActionPayloadAlias(payload, "networkId", "NetworkId", "network_id", "network-id", "nid", "Nid", "NID");
     CopyPluginActionPayloadAlias(payload, "transportStreamId", "TransportStreamId", "transport_stream_id", "transport-stream-id", "tsid", "Tsid", "TSID");
     CopyPluginActionPayloadAlias(payload, "serviceId", "ServiceId", "service_id", "service-id", "sid", "Sid", "SID");
     CopyPluginActionPayloadAlias(payload, "serviceName", "ServiceName", "service", "name", "channelName");
+    CopyPluginActionPayloadAlias(payload, "refreshTarget", "RefreshTarget", "refreshtarget", "refresh-target");
+    CopyPluginActionPayloadAlias(payload, "preserveScroll", "PreserveScroll", "preservescroll", "preserve-scroll");
     NormalizeViewerProfilePayloadAlias(payload);
 }
 
@@ -3597,11 +3091,6 @@ static void NormalizeViewerProfilePayloadAlias(Dictionary<string, string> payloa
     if (string.IsNullOrWhiteSpace(selected)) return;
 
     payload["viewerProfile"] = selected;
-    payload["ViewerProfile"] = selected;
-    payload["viewer_profile"] = selected;
-    payload["viewer-profile"] = selected;
-    payload["viewerProfileId"] = selected;
-    payload["ViewerProfileId"] = selected;
 }
 
 static bool IsExplicitTvTestProfileValue(string? value)
@@ -3613,24 +3102,6 @@ static bool IsExplicitTvTestProfileValue(string? value)
         && v.Length > "tvtest".Length
         && int.TryParse(v["tvtest".Length..], NumberStyles.Integer, CultureInfo.InvariantCulture, out var ordinal)
         && ordinal > 0;
-}
-
-static string NormalizeViewerProfileActionId(string? value)
-{
-    if (string.IsNullOrWhiteSpace(value)) return string.Empty;
-    var v = value.Trim();
-    if (v.Equals("auto", StringComparison.OrdinalIgnoreCase)
-        || v.Equals("default", StringComparison.OrdinalIgnoreCase)
-        || v.Equals("tvtest", StringComparison.OrdinalIgnoreCase))
-        return "tvtest1";
-    if (int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) && n > 0)
-        return $"tvtest{n}";
-    if (v.StartsWith("tvtest", StringComparison.OrdinalIgnoreCase)
-        && v.Length > "tvtest".Length
-        && int.TryParse(v["tvtest".Length..], NumberStyles.Integer, CultureInfo.InvariantCulture, out var ordinal)
-        && ordinal > 0)
-        return $"tvtest{ordinal}";
-    return string.Empty;
 }
 
 static void CopyPluginActionPayloadAlias(Dictionary<string, string> payload, string canonical, params string[] aliases)
@@ -3648,12 +3119,6 @@ static string FormatPluginPayloadKeys(Dictionary<string, string> payload)
     return string.Join("|", payload.Keys.Where(k => !string.IsNullOrWhiteSpace(k)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(k => k, StringComparer.OrdinalIgnoreCase).Take(80));
 }
 
-static string FormatPluginQueryKeys(HttpRequest http)
-{
-    if (http.Query.Count == 0) return "-";
-    return string.Join("|", http.Query.Keys.Where(k => !string.IsNullOrWhiteSpace(k)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(k => k, StringComparer.OrdinalIgnoreCase).Take(80));
-}
-
 static string JsonElementToPluginActionString(JsonElement value)
 {
     return value.ValueKind switch
@@ -3666,33 +3131,100 @@ static string JsonElementToPluginActionString(JsonElement value)
     };
 }
 
-static string GetPluginActionIdentity(ITvAIrPlugin plugin, string? routeSegment)
-    => plugin is IManifestPlugin mp && !string.IsNullOrWhiteSpace(mp.Manifest.Id)
-        ? mp.Manifest.Id.Trim()
-        : !string.IsNullOrWhiteSpace(routeSegment) ? routeSegment.Trim().Trim('/') : plugin.Name;
+static string NormalizePluginActionId(string? value)
+    => string.IsNullOrWhiteSpace(value) ? string.Empty : PluginIdentity.Normalize(value);
 
-static ITvAIrPlugin? FindPluginByActionIdentity(PluginRegistry registry, string? pluginId, string? routeSegment)
+static ITvAirRuntimeCapabilityPlugin ResolveRuntimeBoundaryPlugin(PluginRegistry registry, ITvAirRuntimeCapabilityPlugin plugin)
+    => plugin;
+
+static string GetPluginActionIdentity(ITvAirRuntimeCapabilityPlugin plugin)
+    => NormalizePluginActionId(plugin.Descriptor.PluginId);
+
+static ITvAirRuntimeCapabilityPlugin? FindPluginByActionIdentity(PluginRegistry registry, string? pluginId, string? routeSegment)
 {
-    var id = (pluginId ?? string.Empty).Trim().Trim('/');
-    var route = (routeSegment ?? string.Empty).Trim().Trim('/');
-    foreach (var plugin in registry.GetAll())
+    var id = NormalizePluginActionId(pluginId);
+    var route = NormalizePluginRouteSegment(routeSegment);
+    foreach (var plugin in registry.GetRuntimePlugins())
     {
-        if (plugin is IManifestPlugin mp && !string.IsNullOrWhiteSpace(mp.Manifest.Id)
-            && string.Equals(mp.Manifest.Id.Trim(), id, StringComparison.OrdinalIgnoreCase))
+        var descriptor = plugin.Descriptor;
+        var canonicalPluginId = NormalizePluginActionId(descriptor.PluginId);
+        var routeMatched = descriptor.UiDefinitions.Any(definition =>
+                string.Equals(NormalizePluginRouteSegment(definition.Route), route, StringComparison.OrdinalIgnoreCase))
+            || descriptor.MenuActions.Any(action =>
+                string.Equals(NormalizePluginRouteSegment(action.Route), route, StringComparison.OrdinalIgnoreCase));
+
+        if (!string.IsNullOrWhiteSpace(id)
+            && string.Equals(canonicalPluginId, id, StringComparison.OrdinalIgnoreCase))
             return plugin;
-        if (plugin is IUiPlugin ui)
-        {
-            if (!string.IsNullOrWhiteSpace(route)
-                && string.Equals(NormalizeAirhythmPublicRoute(ui.Ui.RouteSegment), NormalizeAirhythmPublicRoute(route), StringComparison.OrdinalIgnoreCase))
-                return plugin;
-            if (!string.IsNullOrWhiteSpace(id)
-                && string.Equals(NormalizeAirhythmPublicRoute(ui.Ui.RouteSegment), NormalizeAirhythmPublicRoute(id), StringComparison.OrdinalIgnoreCase))
-                return plugin;
-        }
-        if (!string.IsNullOrWhiteSpace(id) && string.Equals(plugin.Name, id, StringComparison.OrdinalIgnoreCase))
+        if (!string.IsNullOrWhiteSpace(route) && routeMatched)
             return plugin;
     }
     return null;
+}
+
+
+static (string PluginId, string RouteSegment, string Reason) RecoverPluginActionIdentity(
+    PluginRegistry registry,
+    PluginWindowSessionStore windows,
+    string? pluginId,
+    string? routeSegment,
+    string? action,
+    string? windowId,
+    string? safeEventWindowId,
+    Dictionary<string, string>? payload)
+{
+    var id = NormalizePluginActionId(pluginId);
+    var route = NormalizePluginRouteSegment(routeSegment);
+    if (FindPluginByActionIdentity(registry, id, route) is not null)
+        return (id, route, "already_resolved");
+
+    static string CleanRoute(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+        var raw = value.Trim().Trim('/');
+        if (raw.StartsWith("plugin/", StringComparison.OrdinalIgnoreCase)) raw = raw[7..];
+        if (raw.StartsWith("plugin-ui/", StringComparison.OrdinalIgnoreCase)) raw = raw[10..];
+        return new string(raw.Where(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_' or '.').ToArray());
+    }
+
+    var candidateWindowIds = new[] { windowId, safeEventWindowId, ReadPayload(payload ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase), "windowId", "WindowId", "currentWindowId", "CurrentWindowId", "safeEventWindowId", "SafeEventWindowId") }
+        .Select(NormalizePluginWindowId)
+        .Where(x => !string.IsNullOrWhiteSpace(x))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToList();
+    foreach (var candidateWindowId in candidateWindowIds)
+    {
+        var session = windows.Get(candidateWindowId);
+        if (session is null || session.IsClosed) continue;
+        var sessionPluginId = NormalizePluginActionId(session.PluginId);
+        var sessionRoute = NormalizePluginRouteSegment(session.RouteSegment);
+        if (FindPluginByActionIdentity(registry, sessionPluginId, sessionRoute) is not null)
+            return (sessionPluginId, sessionRoute, "host_window_session");
+    }
+
+    var actionText = (action ?? string.Empty).Trim();
+    var dot = actionText.IndexOf('.');
+    if (dot > 0)
+    {
+        var prefix = CleanRoute(actionText[..dot]);
+        if (!string.IsNullOrWhiteSpace(prefix))
+        {
+            var prefixedPlugin = FindPluginByActionIdentity(registry, prefix, prefix);
+            if (prefixedPlugin is not null)
+                return (GetPluginActionIdentity(prefixedPlugin), prefix, "action_prefix");
+        }
+    }
+
+    var payloadId = ReadPayload(payload ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase), "PluginId", "pluginId");
+    var payloadRoute = ReadPayload(payload ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase), "RouteSegment", "routeSegment");
+    if (!string.IsNullOrWhiteSpace(payloadId) || !string.IsNullOrWhiteSpace(payloadRoute))
+    {
+        var payloadPlugin = FindPluginByActionIdentity(registry, payloadId, payloadRoute);
+        if (payloadPlugin is not null)
+            return (GetPluginActionIdentity(payloadPlugin), CleanRoute(payloadRoute), "payload_identity");
+    }
+
+    return (id, route, "unresolved");
 }
 
 static string ReadPayload(Dictionary<string, string> payload, params string[] keys)
@@ -3704,20 +3236,6 @@ static string ReadPayload(Dictionary<string, string> payload, params string[] ke
     }
     return string.Empty;
 }
-
-static ushort ReadUShortPayload(Dictionary<string, string> payload, params string[] keys)
-{
-    var raw = ReadPayload(payload, keys);
-    if (ushort.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)) return value;
-    foreach (var part in raw.Split(new[] { ',', ';', '|', ' ' }, StringSplitOptions.RemoveEmptyEntries).Reverse())
-    {
-        if (ushort.TryParse(part.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out value)) return value;
-    }
-    return 0;
-}
-
-static int? ReadIntPayload(Dictionary<string, string> payload, params string[] keys)
-    => int.TryParse(ReadPayload(payload, keys), out var value) ? value : null;
 
 static string SafePluginActionValue(string? value)
 {
@@ -3742,73 +3260,131 @@ static string ExtractPluginBodyFragment(string html)
     return html[(bodyOpenEnd + 1)..bodyEnd];
 }
 
-static string BuildPluginShellHtml(string title, string route, string pluginBody, bool toolWindowContentOnly = false)
+static string ResolveEffectiveHostTheme(string? selectedTheme)
+{
+    var selected = IniSettingsService.NormalizeSystemTheme(selectedTheme);
+    if (string.Equals(selected, "dark", StringComparison.OrdinalIgnoreCase)) return "dark";
+    if (string.Equals(selected, "light", StringComparison.OrdinalIgnoreCase)) return "light";
+    try
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+        var value = key?.GetValue("AppsUseLightTheme");
+        var light = value is int i ? i != 0 : value?.ToString() != "0";
+        return light ? "light" : "dark";
+    }
+    catch
+    {
+        return "light";
+    }
+}
+
+static IReadOnlyDictionary<string, string> BuildPluginThemeContract(string selectedTheme, string effectiveTheme)
+{
+    var dark = string.Equals(effectiveTheme, "dark", StringComparison.OrdinalIgnoreCase);
+    var theme = dark ? "dark" : "light";
+    string Role(string token) => UiThemeRoleContract.Get(theme, token);
+
+    // Runtime UI receives a projection of the Host semantic role contract.
+    // Color values are never re-declared here; tvair-theme-contract.css is the source of truth.
+    return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["contractVersion"] = "2",
+        ["statePrecedence"] = "semantic_state_over_generic_hover",
+        ["selectedTheme"] = selectedTheme,
+        ["effectiveTheme"] = theme,
+        ["htmlAttribute"] = "data-tvair-effective-theme",
+        ["runtimeEvent"] = "tvair-theme-runtime-synced",
+
+        ["pageBackground"] = Role("--tvair-role-page-bg"),
+        ["surfaceBackground"] = Role("--tvair-role-panel-bg"),
+        ["subtleBackground"] = Role("--tvair-role-subpanel-bg"),
+        ["inputBackground"] = Role("--tvair-role-control-bg"),
+        ["text"] = Role("--tvair-role-page-fg"),
+        ["mutedText"] = Role("--tvair-role-text-muted-fg"),
+        ["border"] = Role("--tvair-role-border-soft"),
+        ["accent"] = Role("--tvair-role-action-primary-bg"),
+        ["accentText"] = Role("--tvair-role-action-primary-fg"),
+        ["focus"] = Role("--tvair-role-focus"),
+
+        ["controlBackground"] = Role("--tvair-role-control-bg"),
+        ["controlText"] = Role("--tvair-role-control-fg"),
+        ["controlBorder"] = Role("--tvair-role-control-border"),
+        ["controlHoverBackground"] = Role("--tvair-role-control-hover-bg"),
+        ["controlHoverText"] = Role("--tvair-role-control-hover-fg"),
+        ["controlHoverBorder"] = Role("--tvair-role-control-hover-border"),
+
+        ["selectedBackground"] = Role("--tvair-role-focus"),
+        ["selectedText"] = Role("--tvair-role-control-active-fg"),
+        ["selectedBorder"] = Role("--tvair-role-focus"),
+        ["selectedHoverBackground"] = Role("--tvair-role-focus"),
+        ["selectedHoverText"] = Role("--tvair-role-control-active-fg"),
+        ["selectedHoverBorder"] = Role("--tvair-role-focus"),
+
+        ["disabledBackground"] = Role("--tvair-role-control-disabled-bg"),
+        ["disabledText"] = Role("--tvair-role-control-disabled-fg"),
+        ["disabledBorder"] = Role("--tvair-role-action-disabled-border"),
+
+        ["primaryActionBackground"] = Role("--tvair-role-action-primary-bg"),
+        ["primaryActionText"] = Role("--tvair-role-action-primary-fg"),
+        ["primaryActionBorder"] = Role("--tvair-role-action-primary-border"),
+        ["primaryActionHoverBackground"] = Role("--tvair-role-action-primary-hover-bg"),
+        ["primaryActionHoverText"] = Role("--tvair-role-action-primary-fg"),
+        ["primaryActionHoverBorder"] = Role("--tvair-role-action-primary-border"),
+
+        ["secondaryActionBackground"] = Role("--tvair-role-action-secondary-bg"),
+        ["secondaryActionText"] = Role("--tvair-role-action-secondary-fg"),
+        ["secondaryActionBorder"] = Role("--tvair-role-action-secondary-border"),
+        ["secondaryActionHoverBackground"] = Role("--tvair-role-action-secondary-hover-bg"),
+        ["secondaryActionHoverText"] = Role("--tvair-role-action-secondary-fg"),
+        ["secondaryActionHoverBorder"] = Role("--tvair-role-action-secondary-border"),
+
+        ["dangerActionBackground"] = Role("--tvair-role-action-danger-bg"),
+        ["dangerActionText"] = Role("--tvair-role-action-danger-fg"),
+        ["dangerActionBorder"] = Role("--tvair-role-action-danger-border"),
+        ["dangerActionHoverBackground"] = Role("--tvair-role-action-danger-hover-bg"),
+        ["dangerActionHoverText"] = Role("--tvair-role-action-danger-fg"),
+        ["dangerActionHoverBorder"] = Role("--tvair-role-action-danger-border")
+    };
+}
+
+
+static string BuildPluginShellHtml(string title, string route, string pluginBody, bool toolWindowContentOnly = false, string selectedTheme = "current", string effectiveTheme = "light")
 {
     if (toolWindowContentOnly)
     {
-        return BuildPluginToolWindowContentHtml(title, route, pluginBody);
+        return BuildPluginToolWindowContentHtml(title, route, pluginBody, selectedTheme, effectiveTheme);
     }
 
     var safeTitle = System.Net.WebUtility.HtmlEncode(title);
     var safeRoute = System.Net.WebUtility.HtmlEncode(route);
+    var safeSelectedTheme = System.Net.WebUtility.HtmlEncode(IniSettingsService.NormalizeSystemTheme(selectedTheme));
+    var safeEffectiveTheme = System.Net.WebUtility.HtmlEncode(string.Equals(effectiveTheme, "dark", StringComparison.OrdinalIgnoreCase) ? "dark" : "light");
+    var themeClass = string.Equals(safeEffectiveTheme, "dark", StringComparison.OrdinalIgnoreCase) ? "tvair-theme-dark theme-dark" : "tvair-theme-light theme-light";
     var contentOnlyClass = string.Empty;
-    return $$"""
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+    var developerBeaconBody = """try{var img=new Image();var url='/api/plugins/safe-event/client-log?phase='+encodeURIComponent(phase||'')+'&event='+encodeURIComponent(eventName||'')+'&action='+encodeURIComponent(action||'')+'&interactionId='+encodeURIComponent(tvairGetAttr(el,'data-tvair-debug-interaction-id')||'')+'&pluginId='+encodeURIComponent(tvairGetAttr(el,'data-tvair-plugin-id')||'')+'&routeSegment='+encodeURIComponent(tvairGetAttr(el,'data-tvair-route-segment')||document.body.getAttribute('data-plugin-route')||'')+'&windowId='+encodeURIComponent(tvairGetAttr(el,'data-tvair-window-id')||tvairCurrentWindowId()||'')+'&hostKind='+encodeURIComponent('winforms_webbrowser_fallback_direct_content')+'&tag='+encodeURIComponent(tvairTagName(el))+'&type='+encodeURIComponent(tvairGetAttr(el,'type')||'')+'&hasToken='+encodeURIComponent((tvairGetAttr(el,'data-tvair-action-token')||tvairGetAttr(el,'data-tvair-token'))?'true':'false')+'&payloadCount='+encodeURIComponent(tvairGetAttr(el,'data-tvair-debug-payload-count')||'')+'&payloadKeys='+encodeURIComponent(tvairGetAttr(el,'data-tvair-debug-payload-keys')||'')+'&endpoint='+encodeURIComponent(tvairGetAttr(el,'data-tvair-debug-endpoint')||tvairGetAttr(el,'data-tvair-endpoint')||'')+'&status='+encodeURIComponent(tvairGetAttr(el,'data-tvair-debug-status')||'')+'&reason='+encodeURIComponent(tvairGetAttr(el,'data-tvair-debug-reason')||'')+'&readyState='+encodeURIComponent(document.readyState||'')+'&candidates='+encodeURIComponent(tvairCountSafeEventCandidates())+'&_='+String(new Date().getTime());img.src=url;}catch(_){}""";
+#else
+    var developerBeaconBody = "return;";
+#endif
+    return $$$$"""
 <!doctype html>
-<html lang="ja">
+<html lang="ja" class="{{{{themeClass}}}}" data-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme="{{{{safeSelectedTheme}}}}" data-tvair-selected-theme="{{{{safeSelectedTheme}}}}" data-tvair-effective-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme-scope="all">
 <head>
 <meta charset="utf-8">
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'">
-<title>{{safeTitle}} - TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.1.0">
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.1.0">
-<link rel="stylesheet" href="/tvair-notification.css?v=1.1.0">
-<link rel="stylesheet" href="/tvair-epg-panel.css?v=1.1.0">
-<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.1.0">
-<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.1.0">
-<script src="/tvair-theme.js?v=1.1.0"></script>
-
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-html,body{width:100%;height:100%}
-body{font-family:'Meiryo',sans-serif;font-size:12px;background:var(--tvair-bg-page,#f0f0f0);color:var(--tvair-text-main,#222);overflow:hidden;height:100vh;display:flex;flex-direction:column}
-#nav{background:var(--nav-bg);display:flex;align-items:center;gap:4px;padding:3px 6px;flex-shrink:0;height:30px;position:relative;z-index:1000;isolation:isolate}
-#nav .nav-btn{background:var(--nav-btn-bg);color:var(--tvair-nav-button-text,#222);border:none;padding:3px 0;cursor:pointer;font-size:12px;border-radius:2px;white-space:nowrap;min-width:110px;text-align:center;display:inline-flex;align-items:center;justify-content:center;height:24px}.nav-btn,.nav-btn:link,.nav-btn:visited,.nav-btn:hover,.nav-btn:active,.nav-btn:focus{color:var(--tvair-nav-button-text,#222);text-decoration:none}
-#nav .nav-btn:hover{background:var(--nav-btn-hover)}
-#nav .spacer{flex:1}
-
-
-
-#menu-wrap{position:relative}
-#menu-btn{background:var(--nav-btn-bg);color:var(--tvair-nav-button-text,#222);border:none;padding:3px 10px;cursor:pointer;font-size:15px;border-radius:2px;line-height:1;letter-spacing:1px}
-#menu-btn:hover{background:var(--nav-btn-hover)}
-/* release_contract MenuLegacyEntryCleanupContract: plugin shell menu behavior is owned by tvair-menu-spine.js; this CSS only keeps host-frame placement. */
-#menu-dropdown{display:none;position:absolute;top:100%;right:0;z-index:500;min-width:160px;margin-top:2px}
-#menu-dropdown.open{display:block}
-.menu-item{display:block;width:100%;padding:8px 14px;background:transparent;border:none;text-align:left;font-size:12px;cursor:pointer;color:var(--tvair-content-primary,#333);white-space:nowrap;text-decoration:none}
-.menu-item:hover{background:var(--tvair-surface-soft-hover,#eef4ff);color:var(--tvair-content-link,var(--nav-bg))}
-.menu-sep{height:1px;background:var(--timecol-bg);margin:3px 0}
-
-/* release_contract: EPG操作を1階層目から退避し、共通サブメニュー化 */
-.menu-group{margin:0;padding:0}
-.menu-group>summary{list-style:none}
-.menu-group>summary::-webkit-details-marker{display:none}
-.menu-summary{position:relative;user-select:none}
-.menu-summary::after{content:'▸';float:right;opacity:.72}
-.menu-group[open]>.menu-summary::after{content:'▾'}
-.menu-subitem{padding-left:26px;font-size:11.5px;background:var(--tvair-surface-subtle,#fbfcff)}
-.menu-subitem:hover{background:var(--tvair-surface-soft-hover,#eef4ff)}
-.nav-brand-text{font-weight:bold;color:var(--tvair-nav-text,#222);letter-spacing:.03em;margin-right:6px;white-space:nowrap;position:relative;z-index:20}
-#nav .nav-btn,#menu-wrap{position:relative;z-index:20}
-.plugin-shell-content{flex:1;min-height:0;overflow:auto;background:var(--tvair-bg-page,#f4f6f8)}
-.plugin-shell-inner{min-height:100%;box-sizing:border-box}
-.tvair-plugin-toolwindow-content-only #nav{display:none}
-.tvair-plugin-toolwindow-content-only .plugin-shell-content{height:100vh;min-height:0;overflow:auto;background:#fff}
-.tvair-plugin-toolwindow-content-only .plugin-shell-inner{min-height:100%;background:#fff}
-</style>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; media-src 'self' data:">
+<title>{{{{safeTitle}}}} - TvAIr</title>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.0">
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.0">
+<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.2.0">
+<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.0-theme204">
+<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.2.0-modules205">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.2.0-owner203">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.0-css-final199">
+<script src="/tvair-theme.js?v=1.2.0"></script>
 </head>
-<body class="tvair-non-program-page tvair-plugin-shell-page{{contentOnlyClass}}" data-plugin-route="{{safeRoute}}">
+<body class="tvair-non-program-page tvair-plugin-shell-page {{{{themeClass}}}}{{{{contentOnlyClass}}}}" data-plugin-route="{{{{safeRoute}}}}" data-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme="{{{{safeSelectedTheme}}}}" data-tvair-selected-theme="{{{{safeSelectedTheme}}}}" data-tvair-effective-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme-scope="all">
 <div id="nav">
   <a class="nav-btn" href="/" title="番組表">番組表</a>
   <a class="nav-btn" href="/reservations.html" title="予約リスト">予約リスト</a>
@@ -3824,14 +3400,13 @@ body{font-family:'Meiryo',sans-serif;font-size:12px;background:var(--tvair-bg-pa
 </div>
 <div class="plugin-shell-content">
   <main class="plugin-shell-inner">
-{{pluginBody}}
+{{{{pluginBody}}}}
   </main>
 </div>
-<script src="/tvair-notification.js?v=1.1.0"></script>
-<script src="/tvair-epg-run-contract.js?v=1.1.0"></script>
-<script src="/tvair-epg-widget.js?v=1.1.0"></script>
-<script src="/tvair-safe-event-host.js?v=1.1.0"></script>
-<script src="/tvair-menu-spine.js?v=1.1.0"></script>
+<script src="/tvair-notification.js?v=1.2.0"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.0"></script>
+<script src="/tvair-safe-event-host.js?v=1.2.0"></script>
+<script src="/tvair-menu-spine.js?v=1.2.0"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -3842,40 +3417,58 @@ function tvairCurrentWindowId(){
   return m?decodeURIComponent(m[1].replace(/\+/g,' ')):'';
 }
 function tvairCurrentRevision(){var q=location.search||'';var m=q.match(/[?&]_tvairWindowRevision=([^&]+)/);return m?decodeURIComponent(m[1].replace(/\+/g,' ')):'';}
-function tvairClientBeacon(phase,eventName,action,el){
-  try{
-    var img=new Image();
-    var networkId=tvairGetAttr(el,'data-tvair-payload-networkId')||tvairGetAttr(el,'data-tvair-payload-nid');
-    var tsid=tvairGetAttr(el,'data-tvair-payload-transportStreamId')||tvairGetAttr(el,'data-tvair-payload-tsid');
-    var sid=tvairGetAttr(el,'data-tvair-payload-serviceId')||tvairGetAttr(el,'data-tvair-payload-sid');
-    var url='/api/plugins/safe-event/client-log?phase='+encodeURIComponent(phase||'')+
-      '&event='+encodeURIComponent(eventName||'')+
-      '&action='+encodeURIComponent(action||'')+
-      '&pluginId='+encodeURIComponent(tvairGetAttr(el,'data-tvair-plugin-id')||'')+
-      '&routeSegment='+encodeURIComponent(tvairGetAttr(el,'data-tvair-route-segment')||document.body.getAttribute('data-plugin-route')||'')+
-      '&windowId='+encodeURIComponent(tvairGetAttr(el,'data-tvair-window-id')||tvairCurrentWindowId()||'')+
-      '&mode='+encodeURIComponent(document.body.className.indexOf('tvair-plugin-toolwindow-content-only')>=0?'directContent':'page')+
-      '&hostKind='+encodeURIComponent('winforms_webbrowser_fallback_direct_content')+
-      '&tag='+encodeURIComponent(tvairTagName(el))+
-      '&hasAction='+encodeURIComponent(action?'true':'false')+
-      '&hasToken='+encodeURIComponent((tvairGetAttr(el,'data-tvair-action-token')||tvairGetAttr(el,'data-tvair-token'))?'true':'false')+
-      '&hasTriplet='+encodeURIComponent((networkId&&tsid&&sid)?'true':'false')+
-      '&_='+String(new Date().getTime());
-    img.src=url;
-  }catch(_){ }
-}
+function tvairCountSafeEventCandidates(){try{var all=document.getElementsByTagName('*');var count=0;for(var i=0;i<all.length;i++){if(tvairGetAttr(all[i],'data-tvair-action'))count++;}return count;}catch(_){return -1;}}
+function tvairIsReservedPayloadKey(name){var n=String(name||'').toLowerCase();return n==='action'||n==='pluginid'||n==='routesegment'||n==='route'||n==='token'||n==='actiontoken'||n==='responsemode'||n==='windowid';}
+function tvairCollectFormValues(el,form){var mode=tvairGetAttr(el,'data-tvair-form-capture');if(!mode)return;var scope=null;if(mode==='closestForm'){var n=el;while(n&&n!==document){if(tvairTagName(n)==='form'){scope=n;break;}n=n.parentNode;}}else if(mode.charAt(0)==='#'){scope=document.getElementById(mode.substring(1));}if(!scope||!scope.elements)return;for(var i=0;i<scope.elements.length;i++){var item=scope.elements[i];if(!item||!item.name||item.disabled||tvairIsReservedPayloadKey(item.name))continue;var type=String(item.type||'').toLowerCase();if((type==='checkbox'||type==='radio')&&!item.checked)continue;tvairAppendHidden(form,item.name,item.value);}}
+function tvairCountSafeEventCandidates(){try{var all=document.getElementsByTagName('*');var count=0;for(var i=0;i<all.length;i++){if(tvairGetAttr(all[i],'data-tvair-action'))count++;}return count;}catch(_){return -1;}}
+function tvairNewInteractionId(){return 'ix-'+String((new Date()).getTime())+'-'+String(Math.floor(Math.random()*1000000000));}
+function tvairClientBeacon(phase,eventName,action,el){ {{{{developerBeaconBody}}}} }
 function tvairFindSafeEventTarget(start,eventName){
   var n=start;
   while(n&&n!==document){
     if(n.getAttribute&&tvairGetAttr(n,'data-tvair-action')){
       var events=tvairGetAttr(n,'data-tvair-event');
       if(tvairHasToken(events,eventName))return n;
-      // IE互換WebBrowserで dblclick が拾えない場合に備え、viewerStartのclick診断にも反応できるようにする。
       if(eventName==='click'&&tvairHasToken(events,'dblclick')&&tvairGetAttr(n,'data-tvair-click-fallback')==='true')return n;
     }
     n=n.parentNode;
   }
   return null;
+}
+function tvairFindHoverTarget(start){
+  var n=start;
+  while(n&&n!==document){
+    if(n.getAttribute&&tvairGetAttr(n,'data-tvair-hover-key'))return n;
+    n=n.parentNode;
+  }
+  return null;
+}
+function tvairNodeInside(root,node){try{while(node&&node!==document){if(node===root)return true;node=node.parentNode;}}catch(_){}return false;}
+function tvairDispatchRuntimeHover(el,state){
+  if(!el)return;
+  var detail={state:state,hoverKey:tvairGetAttr(el,'data-tvair-hover-key')||'',pluginId:tvairGetAttr(el,'data-tvair-plugin-id')||'',routeSegment:tvairGetAttr(el,'data-tvair-route-segment')||document.body.getAttribute('data-plugin-route')||''};
+  try{
+    var ev=null;
+    try{
+      ev=document.createEvent('CustomEvent');
+      if(ev.initCustomEvent)ev.initCustomEvent('tvair-runtime-hover',true,false,detail);
+    }catch(_){}
+    if(!ev||!ev.initCustomEvent){
+      ev=document.createEvent('Event');
+      ev.initEvent('tvair-runtime-hover',true,false);
+      ev.detail=detail;
+    }
+    if(el.dispatchEvent)el.dispatchEvent(ev);
+  }catch(_){}
+}
+function tvairHandleRuntimeHover(e,state){
+  e=e||window.event;
+  var target=e.target||e.srcElement;
+  var el=tvairFindHoverTarget(target);
+  if(!el)return;
+  var related=state==='enter'?(e.relatedTarget||e.fromElement):(e.relatedTarget||e.toElement);
+  if(related&&tvairNodeInside(el,related))return;
+  tvairDispatchRuntimeHover(el,state);
 }
 function tvairPreserveToolWindowLink(href){
   if(!href)return href;
@@ -3889,34 +3482,135 @@ function tvairPreserveToolWindowLink(href){
   var rev=tvairCurrentRevision(); if(rev&&a.search.indexOf('_tvairWindowRevision=')<0)a.search+='&_tvairWindowRevision='+encodeURIComponent(rev);
   return a.pathname+a.search+a.hash;
 }
-function tvairSubmitSafeAction(el,eventName){
+function tvairTryBeginRepeatPolicy(el,eventName,action){
+  var policy=String(tvairGetAttr(el,'data-tvair-repeat-policy')||'').toLowerCase();
+  if(policy!=='suppressburst')return true;
+  var windowMs=parseInt(tvairGetAttr(el,'data-tvair-burst-window-ms')||'0',10);
+  if(!isFinite(windowMs)||windowMs<=0)return true;
+  windowMs=Math.max(50,Math.min(1000,windowMs));
+  var now=(new Date()).getTime();
+  var key=String(eventName||'')+'|'+String(action||'');
+  var guard=el.__tvairBurstGuard;
+  if(guard&&guard.key===key&&now<guard.until){
+    var suppressedToken=String(now)+'|'+String(Math.random());
+    guard.until=now+windowMs;
+    guard.token=suppressedToken;
+    window.setTimeout(function(){try{var current=el.__tvairBurstGuard;if(current&&current.token===suppressedToken)delete el.__tvairBurstGuard;}catch(_){}},windowMs+1);
+    tvairClientBeacon('burst_suppressed',eventName,action,el);
+    return false;
+  }
+  var token=String(now)+'|'+String(Math.random());
+  el.__tvairBurstGuard={key:key,until:now+windowMs,token:token};
+  window.setTimeout(function(){try{var current=el.__tvairBurstGuard;if(current&&current.token===token)delete el.__tvairBurstGuard;}catch(_){}},windowMs+1);
+  return true;
+}
+function tvairApplyAcceptedButtonState(el,action,eventName){
+  if(!el||tvairTagName(el)!=='button')return;
+  var acceptedLabel=tvairGetAttr(el,'data-tvair-accepted-label');
+  if(!acceptedLabel)return;
+  el.setAttribute('aria-label',acceptedLabel);
+  try{el.innerText=acceptedLabel;}catch(_){try{el.textContent=acceptedLabel;}catch(__){}}
+  tvairClientBeacon('accepted_button_state_applied',eventName,action,el);
+}
+function tvairFeedbackEnabled(el){return String(tvairGetAttr(el,'data-tvair-feedback')||'').toLowerCase()==='true';}
+function tvairFeedbackSetLabel(el,label){if(!el||!label)return;el.setAttribute('aria-label',label);try{el.innerText=label;}catch(_){try{el.textContent=label;}catch(__){} } }
+function tvairBeginActionFeedback(el,eventName,action,correlationId){
+  if(!tvairFeedbackEnabled(el))return true;
+  if(el.__tvairFeedbackInFlight){tvairClientBeacon('feedback_duplicate_suppressed',eventName,action,el);return false;}
+  el.__tvairFeedbackInFlight=correlationId||'pending';
+  if(!el.__tvairFeedbackOriginal){el.__tvairFeedbackOriginal={label:(el.innerText||el.textContent||''),aria:tvairGetAttr(el,'aria-label'),disabled:!!el.disabled};}
+  if(String(tvairGetAttr(el,'data-tvair-feedback-disable-running')||'').toLowerCase()==='true'){el.disabled=true;el.setAttribute('disabled','disabled');}
+  tvairFeedbackSetLabel(el,tvairGetAttr(el,'data-tvair-feedback-pending-label'));
+  el.setAttribute('aria-busy','true');
+  tvairClientBeacon('feedback_running',eventName,action,el);
+  return true;
+}
+function tvairFloatingLabelKind(value){var kind=String(value||'Information').toLowerCase();return kind==='success'||kind==='warning'||kind==='error'?kind:'information';}
+function tvairShowFloatingLabel(body,el,eventName,action){
+  var feedback=body&&(body.feedback||body.Feedback)||{};
+  var label=body&&(body.floatingLabel||body.FloatingLabel)||null;
+  if(!label&&feedback&&(feedback.showFloatingLabel===false||feedback.ShowFloatingLabel===false))return;
+  var message=label?(label.message||label.Message||''):(feedback.message||feedback.Message||'');
+  if(!message)return;
+  var correlation=String((label&&(label.correlationId||label.CorrelationId))||(feedback.correlationId||feedback.CorrelationId)||'');
+  var kind=tvairFloatingLabelKind((label&&(label.kind||label.Kind))||(feedback.kind||feedback.Kind));
+  var duration=parseInt((label&&(label.durationMilliseconds||label.DurationMilliseconds))||0,10)||0;
+  if(duration<=0)duration=kind==='error'?3000:(kind==='warning'?2500:1800);
+  if(duration<1000)duration=1000;if(duration>5000)duration=5000;
+  var node=document.getElementById('tvair-host-floating-label');
+  if(!node){
+    node=document.createElement('div');node.id='tvair-host-floating-label';node.setAttribute('role',kind==='error'?'alert':'status');node.setAttribute('aria-live',kind==='error'?'assertive':'polite');node.setAttribute('aria-atomic','true');node.className='tvair-host-floating-label';document.body.appendChild(node);
+  }node.setAttribute('data-tvair-feedback-kind',kind);node.setAttribute('data-tvair-correlation-id',correlation);node.textContent=String(message);node.classList.add('is-visible');
+  if(node.__tvairHideTimer)clearTimeout(node.__tvairHideTimer);node.__tvairHideTimer=setTimeout(function(){node.classList.remove('is-visible');node.__tvairHideTimer=setTimeout(function(){if(node&&node.parentNode)node.parentNode.removeChild(node);},160);},duration);
+  tvairClientBeacon('floating_label_shown',eventName,action,el);
+}
+function tvairCompleteActionFeedback(el,eventName,action,body,httpOk){
+  if(!tvairFeedbackEnabled(el))return;
+  var feedback=body&&(body.feedback||body.Feedback)||{};
+  var phase=String(feedback.phase||feedback.Phase||(httpOk?'Succeeded':'Failed')).toLowerCase();
+  var success=(phase==='succeeded'||phase==='success');var nochange=(phase==='nochange'||phase==='no_change');var cancelled=(phase==='cancelled'||phase==='canceled');
+  var label=feedback.buttonLabel||feedback.ButtonLabel||'';
+  if(!label){if(success)label=tvairGetAttr(el,'data-tvair-feedback-success-label');else if(nochange)label=tvairGetAttr(el,'data-tvair-feedback-nochange-label');else if(!cancelled)label=tvairGetAttr(el,'data-tvair-feedback-failure-label');}
+  var original=el.__tvairFeedbackOriginal||{};
+  if(label)tvairFeedbackSetLabel(el,label);
+  var keepDisabled=(typeof feedback.keepDisabled!=='undefined')?!!feedback.keepDisabled:((typeof feedback.KeepDisabled!=='undefined')?!!feedback.KeepDisabled:false);
+  if(success&&String(tvairGetAttr(el,'data-tvair-feedback-keep-disabled-success')||'').toLowerCase()==='true')keepDisabled=true;
+  if(!success&&!nochange&&String(tvairGetAttr(el,'data-tvair-feedback-restore-failure')||'').toLowerCase()==='true'){tvairFeedbackSetLabel(el,original.label||'');if(original.aria)el.setAttribute('aria-label',original.aria);else el.removeAttribute('aria-label');}
+  if(keepDisabled){el.disabled=true;el.setAttribute('disabled','disabled');}else{el.disabled=!!original.disabled;if(original.disabled)el.setAttribute('disabled','disabled');else el.removeAttribute('disabled');}
+  el.removeAttribute('aria-busy');delete el.__tvairFeedbackInFlight;
+  tvairShowFloatingLabel(body,el,eventName,action);
+  tvairClientBeacon(success?'feedback_succeeded':(nochange?'feedback_nochange':(cancelled?'feedback_cancelled':'feedback_failed')),eventName,action,el);
+}
+function tvairApplyUiPatches(patches){if(!patches||typeof patches.length==='undefined')return;for(var i=0;i<patches.length&&i<64;i++){var p=patches[i]||{};var id=p.elementId||p.ElementId||'';if(!id)continue;var target=document.getElementById(id);if(!target)continue;var text=(typeof p.textContent!=='undefined')?p.textContent:p.TextContent;if(text!==null&&typeof text!=='undefined'){try{target.textContent=String(text);}catch(_){target.innerText=String(text);}}var cls=(typeof p.className!=='undefined')?p.className:p.ClassName;if(cls!==null&&typeof cls!=='undefined')target.className=String(cls);var remove=p.removeClasses||p.RemoveClasses||[];for(var r=0;r<remove.length;r++){var rc=String(remove[r]||'');if(!rc)continue;if(target.classList)target.classList.remove(rc);else target.className=(' '+target.className+' ').replace(' '+rc+' ',' ').replace(/^\s+|\s+$/g,'');}var add=p.addClasses||p.AddClasses||[];for(var a=0;a<add.length;a++){var ac=String(add[a]||'');if(!ac)continue;if(target.classList)target.classList.add(ac);else if((' '+target.className+' ').indexOf(' '+ac+' ')<0)target.className=(target.className?target.className+' ':'')+ac;}var disabled=(typeof p.disabled!=='undefined')?p.disabled:p.Disabled;if(disabled!==null&&typeof disabled!=='undefined'){target.disabled=!!disabled;if(disabled)target.setAttribute('disabled','disabled');else target.removeAttribute('disabled');}var hidden=(typeof p.hidden!=='undefined')?p.hidden:p.Hidden;if(hidden!==null&&typeof hidden!=='undefined'){target.hidden=!!hidden;if(hidden)target.setAttribute('hidden','hidden');else target.removeAttribute('hidden');}var checked=(typeof p.checked!=='undefined')?p.checked:p.Checked;if(checked!==null&&typeof checked!=='undefined'){target.checked=!!checked;if(checked)target.setAttribute('checked','checked');else target.removeAttribute('checked');}var value=(typeof p.value!=='undefined')?p.value:p.Value;if(value!==null&&typeof value!=='undefined')target.value=String(value);var attrs=p.attributes||p.Attributes||{};for(var name in attrs){if(!Object.prototype.hasOwnProperty.call(attrs,name))continue;var lower=String(name).toLowerCase();if(!(lower==='title'||lower.indexOf('aria-')===0||lower.indexOf('data-')===0))continue;var attrValue=attrs[name];if(attrValue===null||typeof attrValue==='undefined')target.removeAttribute(name);else target.setAttribute(name,String(attrValue));} } }
+function tvairApplyUiPatchesJson(json){try{var patches=JSON.parse(String(json||'[]'));tvairApplyUiPatches(patches);var applied=0;if(patches&&typeof patches.length!=='undefined'){for(var i=0;i<patches.length&&i<64;i++){var p=patches[i]||{};var id=p.elementId||p.ElementId||'';if(id&&document.getElementById(id))applied++;}}return applied;}catch(_){return -1;}}
+function tvairPageRefreshStateKey(){try{var search=String(location.search||'');search=search.replace(/([?&])_tvairPageRefresh=[^&]*&?/ig,function(_,sep){return sep==='?'?'?':'';});search=search.replace(/\?&/g,'?').replace(/[?&]$/,'');return 'tvair-page-refresh:'+location.pathname+search;}catch(_){return '';}}function tvairCapturePageRefreshState(){try{var key=tvairPageRefreshStateKey();if(!key)return;var state={x:window.pageXOffset||document.documentElement.scrollLeft||0,y:window.pageYOffset||document.documentElement.scrollTop||0};sessionStorage.setItem(key,JSON.stringify(state));}catch(_){}}function tvairRestorePageRefreshState(){try{var key=tvairPageRefreshStateKey();if(!key)return;var raw=sessionStorage.getItem(key);if(!raw)return;sessionStorage.removeItem(key);var state=JSON.parse(raw);window.scrollTo(Number(state.x)||0,Number(state.y)||0);}catch(_){}}function tvairInteractionStateKey(){var id=tvairCurrentWindowId();return id?'tvair-interaction-state:'+id:'';}function tvairCaptureInteractionState(){try{var key=tvairInteractionStateKey();if(!key)return;var a=document.activeElement;var state={x:window.pageXOffset||document.documentElement.scrollLeft||0,y:window.pageYOffset||document.documentElement.scrollTop||0,id:a&&a.id?a.id:'',start:(a&&typeof a.selectionStart==='number')?a.selectionStart:null,end:(a&&typeof a.selectionEnd==='number')?a.selectionEnd:null};sessionStorage.setItem(key,JSON.stringify(state));}catch(_){}}function tvairRestoreInteractionState(){try{var key=tvairInteractionStateKey();if(!key)return;var raw=sessionStorage.getItem(key);if(!raw)return;sessionStorage.removeItem(key);var state=JSON.parse(raw);window.scrollTo(Number(state.x)||0,Number(state.y)||0);if(state.id){var a=document.getElementById(state.id);if(a&&a.focus){a.focus();if(typeof a.setSelectionRange==='function'&&state.start!==null)a.setSelectionRange(state.start,state.end===null?state.start:state.end);}}}catch(_){}}function tvairRestoreRefreshState(){tvairRestoreInteractionState();tvairRestorePageRefreshState();}if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',tvairRestoreRefreshState);else setTimeout(tvairRestoreRefreshState,0);function tvairSubmitSafeAction(el,eventName){
   var action=tvairGetAttr(el,'data-tvair-action');
-  tvairClientBeacon('received_before_validate',eventName,action,el);
+  var interactionId=tvairNewInteractionId();el.setAttribute('data-tvair-debug-interaction-id',interactionId);
+  tvairClientBeacon('click_captured',eventName,action,el);tvairClientBeacon('received_before_validate',eventName,action,el);
   if(!action){tvairClientBeacon('denied_missing_action',eventName,action,el);return;}
+  var confirmMessage=tvairGetAttr(el,'data-tvair-confirm-message');
+  if(confirmMessage){var confirmed=false;try{confirmed=window.confirm(String(confirmMessage));}catch(_){confirmed=false;}if(!confirmed){tvairClientBeacon('action_cancelled_by_user',eventName,action,el);return;}}
+  if(!tvairTryBeginRepeatPolicy(el,eventName,action))return;
+  if(!tvairBeginActionFeedback(el,eventName,action,interactionId))return;
+  if(!tvairFeedbackEnabled(el))tvairApplyAcceptedButtonState(el,action,eventName);
   var isWindowAction=(action==='refreshWindow'||action==='updateWindow'||action==='closeWindow'||action==='rerenderWindow'||action==='openWindow');
-  var form=document.createElement('form');form.method='post';form.action=tvairGetAttr(el,'data-tvair-endpoint')||(isWindowAction?'/api/plugins/window':'/api/plugins/action');
+  var form=document.createElement('form');form.method='post';form.action=isWindowAction?'/api/plugins/window':'/api/plugins/action';
   tvairAppendHidden(form,'action',action);
   tvairAppendHidden(form,'pluginId',tvairGetAttr(el,'data-tvair-plugin-id'));
   tvairAppendHidden(form,'routeSegment',tvairGetAttr(el,'data-tvair-route-segment')||document.body.getAttribute('data-plugin-route')||'');
   tvairAppendHidden(form,'token',tvairGetAttr(el,'data-tvair-token')||tvairGetAttr(el,'data-tvair-action-token'));
   tvairAppendHidden(form,'actionToken',tvairGetAttr(el,'data-tvair-action-token')||tvairGetAttr(el,'data-tvair-token'));
-  tvairAppendHidden(form,'responseMode',tvairGetAttr(el,'data-tvair-response-mode')||(isWindowAction?'hostHandled':'refreshWindow'));
+  tvairAppendHidden(form,'responseMode',tvairGetAttr(el,'data-tvair-response-mode')||'hostHandled');
   tvairAppendHidden(form,'windowId',tvairGetAttr(el,'data-tvair-window-id')||tvairCurrentWindowId());
   tvairAppendHidden(form,'target',tvairGetAttr(el,'data-tvair-target')||'content');
   tvairAppendHidden(form,'refreshTarget',tvairGetAttr(el,'data-tvair-refresh-target')||'content');
-  tvairAppendHidden(form,'preserveScroll',tvairGetAttr(el,'data-tvair-preserve-scroll')||'true');tvairAppendHidden(form,'refreshScrollTarget',tvairGetAttr(el,'data-tvair-refresh-scroll-target')||tvairGetAttr(el,'data-tvair-scroll-target')||tvairGetAttr(el,'data-tvair-focus-target')||'');tvairAppendHidden(form,'refreshScrollMode',tvairGetAttr(el,'data-tvair-refresh-scroll-mode')||tvairGetAttr(el,'data-tvair-scroll-mode')||'center');
+  tvairAppendHidden(form,'preserveScroll',tvairGetAttr(el,'data-tvair-preserve-scroll')||'true');
   tvairAppendHidden(form,'safeEvent',eventName||'unknown');
   tvairAppendHidden(form,'safeEventAction',action);
   tvairAppendHidden(form,'safeEventSource','host-script-no-plugin-js');
+  tvairAppendHidden(form,'safeEventInteractionId',interactionId);
   tvairAppendHidden(form,'safeEventWindowId',tvairGetAttr(el,'data-tvair-window-id')||tvairCurrentWindowId());
+  tvairAppendHidden(form,'feedbackRequested',tvairFeedbackEnabled(el)?'true':'false');
+  tvairCollectFormValues(el,form);
   if(el.attributes){
     for(var i=0;i<el.attributes.length;i++){
       var a=el.attributes[i];
-      if(a&&a.name&&a.name.indexOf('data-tvair-payload-')===0){tvairAppendHidden(form,a.name.substring('data-tvair-payload-'.length),a.value);}
+      if(a&&a.name&&a.name.indexOf('data-tvair-payload-')===0){var pk=a.name.substring('data-tvair-payload-'.length);if(!tvairIsReservedPayloadKey(pk))tvairAppendHidden(form,pk,a.value);}
     }
   }
-  document.body.appendChild(form);
-  tvairClientBeacon('posting_form',eventName,action,el);
+  el.setAttribute('data-tvair-debug-payload-count',String(form.elements.length));tvairClientBeacon('payload_built',eventName,action,el);document.body.appendChild(form);
+  tvairClientBeacon('post_started',eventName,action,el);tvairClientBeacon('posting_form',eventName,action,el);
+  var submitResponseMode=tvairGetAttr(el,'data-tvair-response-mode')||'hostHandled';if(submitResponseMode==='hostHandled'||submitResponseMode==='noContent'||submitResponseMode==='patchWindow'){
+    try{
+      var pairs=[];
+      for(var j=0;j<form.elements.length;j++){var it=form.elements[j];if(it&&it.name)pairs.push(encodeURIComponent(it.name)+'='+encodeURIComponent(it.value||''));}
+      var endpoint=isWindowAction?'/api/plugins/window':'/api/plugins/action';var resolvedEndpoint=location.protocol+'//'+location.host+endpoint;el.setAttribute('data-tvair-debug-endpoint',resolvedEndpoint);var xhr=new XMLHttpRequest();
+      xhr.open('POST',resolvedEndpoint,true);
+      xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded; charset=UTF-8');var requestInteractionId=interactionId;xhr.onreadystatechange=function(){if(xhr.readyState===4){var previousInteractionId=tvairGetAttr(el,'data-tvair-debug-interaction-id');el.setAttribute('data-tvair-debug-interaction-id',requestInteractionId);el.setAttribute('data-tvair-debug-status',String(xhr.status||0));var body={};try{body=JSON.parse(xhr.responseText||'{}');}catch(_){if(submitResponseMode==='patchWindow'||tvairFeedbackEnabled(el))el.setAttribute('data-tvair-debug-reason','response_parse_failed');}if(xhr.status>=200&&xhr.status<400&&submitResponseMode==='patchWindow')tvairApplyUiPatches(body&&body.uiPatches?body.uiPatches:[]);var requestSucceeded=xhr.status>=200&&xhr.status<400;tvairCompleteActionFeedback(el,eventName,action,body,requestSucceeded);tvairClientBeacon(requestSucceeded?'post_completed':'post_failed',eventName,action,el);el.setAttribute('data-tvair-debug-interaction-id',previousInteractionId);var refreshSurface='';var preservePageScroll=false;var pageRefreshLocation='';try{refreshSurface=String(xhr.getResponseHeader('X-TvAIr-Refresh-Surface')||'').toLowerCase();preservePageScroll=String(xhr.getResponseHeader('X-TvAIr-Preserve-Scroll')||'').toLowerCase()==='true';pageRefreshLocation=String(xhr.getResponseHeader('X-TvAIr-Refresh-Location')||'');}catch(_){}if(requestSucceeded&&refreshSurface==='page'){if(preservePageScroll)tvairCapturePageRefreshState();tvairClientBeacon('page_refresh_issued',eventName,action,el);if(pageRefreshLocation){location.href=pageRefreshLocation;}else{location.href=location.pathname+location.search;}return;}}};xhr.onerror=function(){var previousInteractionId=tvairGetAttr(el,'data-tvair-debug-interaction-id');el.setAttribute('data-tvair-debug-interaction-id',requestInteractionId);el.setAttribute('data-tvair-debug-reason','xhr_error');tvairCompleteActionFeedback(el,eventName,action,{},false);tvairClientBeacon('post_failed',eventName,action,el);el.setAttribute('data-tvair-debug-interaction-id',previousInteractionId);};
+      xhr.send(pairs.join('&'));
+      return;
+    }catch(_){ }
+  }
   form.submit();
 }
 function tvairHandleSafeEvent(e,eventName){
@@ -3934,6 +3628,8 @@ function tvairBindSafeEvents(){
   tvairClientBeacon('bind_start','','',document.body);
   if(document.addEventListener){
     document.addEventListener('dblclick',function(e){return tvairHandleSafeEvent(e,'dblclick');},false);
+    document.addEventListener('mouseover',function(e){tvairHandleRuntimeHover(e,'enter');},false);
+    document.addEventListener('mouseout',function(e){tvairHandleRuntimeHover(e,'leave');},false);
     document.addEventListener('click',function(e){
       if(tvairHandleSafeEvent(e,'click')===false)return false;
       var a=e.target;while(a&&a!==document&&!(a.tagName&&String(a.tagName).toLowerCase()==='a'))a=a.parentNode;
@@ -3944,51 +3640,63 @@ function tvairBindSafeEvents(){
     },false);
   }else if(document.attachEvent){
     document.attachEvent('ondblclick',function(){return tvairHandleSafeEvent(window.event,'dblclick');});
+    document.attachEvent('onmouseover',function(){tvairHandleRuntimeHover(window.event,'enter');});
+    document.attachEvent('onmouseout',function(){tvairHandleRuntimeHover(window.event,'leave');});
     document.attachEvent('onclick',function(){return tvairHandleSafeEvent(window.event,'click');});
   }else{
     var oldDbl=document.ondblclick;document.ondblclick=function(e){if(tvairHandleSafeEvent(e||window.event,'dblclick')===false)return false;return oldDbl?oldDbl(e):true;};
+    var oldOver=document.onmouseover;document.onmouseover=function(e){tvairHandleRuntimeHover(e||window.event,'enter');return oldOver?oldOver(e):true;};
+    var oldOut=document.onmouseout;document.onmouseout=function(e){tvairHandleRuntimeHover(e||window.event,'leave');return oldOut?oldOut(e):true;};
     var oldClick=document.onclick;document.onclick=function(e){if(tvairHandleSafeEvent(e||window.event,'click')===false)return false;return oldClick?oldClick(e):true;};
   }
   tvairClientBeacon('bind_complete','','',document.body);
 }
-tvairBindSafeEvents();</script>
+function tvairFindActionTokenElement(){try{return document.querySelector?document.querySelector('[data-tvair-action-token],[data-tvair-token]'):null;}catch(_){return null;}}
+function tvairActionTokenIdentity(){try{var el=tvairFindActionTokenElement();if(!el)return null;var token=tvairGetAttr(el,'data-tvair-action-token')||tvairGetAttr(el,'data-tvair-token');var pluginId=tvairGetAttr(el,'data-tvair-plugin-id');var route=tvairGetAttr(el,'data-tvair-route-segment')||document.body.getAttribute('data-plugin-route')||'';if(!token||!pluginId||!route)return null;return{token:token,pluginId:pluginId,route:route};}catch(_){return null;}}
+function tvairRenewActionToken(){try{var id=tvairActionTokenIdentity();if(!id)return;var xhr=new XMLHttpRequest();xhr.open('POST','/api/plugins/action-token/renew',true);xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded; charset=UTF-8');xhr.send('actionToken='+encodeURIComponent(id.token)+'&pluginId='+encodeURIComponent(id.pluginId)+'&routeSegment='+encodeURIComponent(id.route));}catch(_){}}
+function tvairRecoverExpiredPageToken(){try{if(window.__tvairPageTokenRecoveryInFlight)return;var id=tvairActionTokenIdentity();if(!id)return;window.__tvairPageTokenRecoveryInFlight=true;var xhr=new XMLHttpRequest();xhr.open('POST','/api/plugins/action-token/validate',true);xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded; charset=UTF-8');xhr.onreadystatechange=function(){if(xhr.readyState!==4)return;window.__tvairPageTokenRecoveryInFlight=false;if(xhr.status>=200&&xhr.status<300)return;var path='/plugin/'+encodeURIComponent(id.route);var query=window.location&&window.location.search?window.location.search:'';window.location.replace(path+query);};xhr.onerror=function(){window.__tvairPageTokenRecoveryInFlight=false;};xhr.send('actionToken='+encodeURIComponent(id.token)+'&pluginId='+encodeURIComponent(id.pluginId)+'&routeSegment='+encodeURIComponent(id.route));}catch(_){window.__tvairPageTokenRecoveryInFlight=false;}}
+function tvairStartActionTokenKeepalive(){try{if(window.__tvairActionTokenKeepaliveStarted)return;window.__tvairActionTokenKeepaliveStarted=true;tvairRenewActionToken();window.setInterval(tvairRenewActionToken,300000);if(document.addEventListener)document.addEventListener('visibilitychange',function(){if(!document.hidden)tvairRecoverExpiredPageToken();},false);if(window.addEventListener){window.addEventListener('focus',tvairRecoverExpiredPageToken,false);window.addEventListener('pageshow',tvairRecoverExpiredPageToken,false);}else if(window.attachEvent)window.attachEvent('onfocus',tvairRecoverExpiredPageToken);}catch(_){}}
+function tvairBootSafeEvents(){try{tvairBindSafeEvents();tvairStartActionTokenKeepalive();}catch(_){tvairClientBeacon('bind_failed','','',document.body);}}if(document.readyState==='complete'||document.readyState==='interactive'){tvairBootSafeEvents();}else if(window.attachEvent){window.attachEvent('onload',tvairBootSafeEvents);}else if(window.addEventListener){window.addEventListener('load',tvairBootSafeEvents,false);}else{window.onload=tvairBootSafeEvents;}</script>
 
 </body>
 </html>
 """;
 }
 
-static string BuildPluginToolWindowContentHtml(string title, string route, string pluginBody)
+static string BuildPluginToolWindowContentHtml(string title, string route, string pluginBody, string selectedTheme, string effectiveTheme)
 {
     var safeTitle = System.Net.WebUtility.HtmlEncode(title);
     var safeRoute = System.Net.WebUtility.HtmlEncode(route);
-    var normalized = NormalizePluginToolWindowContent(pluginBody);
-    var pluginStyles = normalized.Styles;
+    var safeSelectedTheme = System.Net.WebUtility.HtmlEncode(IniSettingsService.NormalizeSystemTheme(selectedTheme));
+    var safeEffectiveTheme = System.Net.WebUtility.HtmlEncode(string.Equals(effectiveTheme, "dark", StringComparison.OrdinalIgnoreCase) ? "dark" : "light");
+    var themeClass = string.Equals(safeEffectiveTheme, "dark", StringComparison.OrdinalIgnoreCase) ? "tvair-theme-dark theme-dark" : "tvair-theme-light theme-light";
+    var normalized = NormalizePluginToolWindowContent(pluginBody, route);
+    var pluginHead = normalized.Head;
     var pluginContent = normalized.Body;
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+    var developerBeaconBody = """try{var img=new Image();var networkId=tvairGetAttr(el,'data-tvair-payload-networkId')||tvairGetAttr(el,'data-tvair-payload-nid');var tsid=tvairGetAttr(el,'data-tvair-payload-transportStreamId')||tvairGetAttr(el,'data-tvair-payload-tsid');var sid=tvairGetAttr(el,'data-tvair-payload-serviceId')||tvairGetAttr(el,'data-tvair-payload-sid');var url='/api/plugins/safe-event/client-log?phase='+encodeURIComponent(phase||'')+'&event='+encodeURIComponent(eventName||'')+'&action='+encodeURIComponent(action||'')+'&interactionId='+encodeURIComponent(tvairGetAttr(el,'data-tvair-debug-interaction-id')||'')+'&pluginId='+encodeURIComponent(tvairGetAttr(el,'data-tvair-plugin-id')||'')+'&routeSegment='+encodeURIComponent(tvairGetAttr(el,'data-tvair-route-segment')||document.body.getAttribute('data-plugin-route')||'')+'&windowId='+encodeURIComponent(tvairGetAttr(el,'data-tvair-window-id')||tvairCurrentWindowId()||'')+'&mode='+encodeURIComponent('directContent')+'&hostKind='+encodeURIComponent('winforms_webbrowser_fallback_direct_content')+'&tag='+encodeURIComponent(tvairTagName(el))+'&hasAction='+encodeURIComponent(action?'true':'false')+'&hasToken='+encodeURIComponent((tvairGetAttr(el,'data-tvair-action-token')||tvairGetAttr(el,'data-tvair-token'))?'true':'false')+'&hasTriplet='+encodeURIComponent((networkId&&tsid&&sid)?'true':'false')+'&_='+String(new Date().getTime());img.src=url;}catch(_){ }""";
+#else
+    var developerBeaconBody = "return;";
+#endif
     var template = """
 <!doctype html>
-<html lang="ja">
+<html lang="ja" class="{{themeClass}}" data-theme="{{safeEffectiveTheme}}" data-tvair-theme="{{safeSelectedTheme}}" data-tvair-selected-theme="{{safeSelectedTheme}}" data-tvair-effective-theme="{{safeEffectiveTheme}}" data-tvair-theme-scope="all">
 <head>
 <meta charset="utf-8">
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; media-src 'self' data:">
 <title>{{safeTitle}} - TvAIr Tool Window</title>
-<style>
-*{box-sizing:border-box}
-html,body{margin:0;padding:0;width:100%;height:100%;min-width:0;min-height:0;overflow:hidden;background:var(--tvair-color-surface-panel);color:var(--tvair-color-text-main)}
-body{font-family:Meiryo,"Yu Gothic",Arial,sans-serif;font-size:12px}
-.tvair-toolwindow-content-root{position:relative;width:100%;height:100%;min-width:0;min-height:0;overflow:hidden;background:#fff}
-img{max-width:100%}
-button,input,select,textarea{font-family:inherit;font-size:inherit}
-</style>
-{{pluginStyles}}
+<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.0-theme204">
+<script src="/tvair-theme.js?v=1.2.0"></script>
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.0-css-final199">
+{{pluginHead}}
 </head>
-<body class="tvair-plugin-toolwindow-content-only" data-plugin-route="{{safeRoute}}" data-tvair-host-kind="winforms_webbrowser_fallback_direct_content" data-tvair-toolwindow-contract="release_contract">
+<body class="tvair-plugin-toolwindow-content-only {{themeClass}}" data-plugin-route="{{safeRoute}}" data-theme="{{safeEffectiveTheme}}" data-tvair-theme="{{safeSelectedTheme}}" data-tvair-selected-theme="{{safeSelectedTheme}}" data-tvair-effective-theme="{{safeEffectiveTheme}}" data-tvair-theme-scope="all" data-tvair-host-kind="winforms_webbrowser_fallback_direct_content" data-tvair-toolwindow-contract="release_contract">
 <div class="tvair-toolwindow-content-root">
 {{pluginContent}}
 </div>
-<script src="/tvair-safe-event-host.js?v=1.1.0"></script>
+<script src="/tvair-safe-event-host.js?v=1.2.0"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -3996,13 +3704,58 @@ function tvairHasToken(value, token){return ((' '+(value||'')+' ').indexOf(' '+t
 function tvairTagName(el){try{return el&&el.tagName?String(el.tagName).toLowerCase():'';}catch(_){return '';} }
 function tvairCurrentWindowId(){var q=location.search||'';var m=q.match(/[?&]__tvairWindowId=([^&]+)/)||q.match(/[?&]windowId=([^&]+)/);return m?decodeURIComponent(m[1].replace(/\+/g,' ')):'';}
 function tvairCurrentRevision(){var q=location.search||'';var m=q.match(/[?&]_tvairWindowRevision=([^&]+)/);return m?decodeURIComponent(m[1].replace(/\+/g,' ')):'';}
-function tvairClientBeacon(phase,eventName,action,el){try{var img=new Image();var networkId=tvairGetAttr(el,'data-tvair-payload-networkId')||tvairGetAttr(el,'data-tvair-payload-nid');var tsid=tvairGetAttr(el,'data-tvair-payload-transportStreamId')||tvairGetAttr(el,'data-tvair-payload-tsid');var sid=tvairGetAttr(el,'data-tvair-payload-serviceId')||tvairGetAttr(el,'data-tvair-payload-sid');var url='/api/plugins/safe-event/client-log?phase='+encodeURIComponent(phase||'')+'&event='+encodeURIComponent(eventName||'')+'&action='+encodeURIComponent(action||'')+'&pluginId='+encodeURIComponent(tvairGetAttr(el,'data-tvair-plugin-id')||'')+'&routeSegment='+encodeURIComponent(tvairGetAttr(el,'data-tvair-route-segment')||document.body.getAttribute('data-plugin-route')||'')+'&windowId='+encodeURIComponent(tvairGetAttr(el,'data-tvair-window-id')||tvairCurrentWindowId()||'')+'&mode='+encodeURIComponent('directContent')+'&hostKind='+encodeURIComponent('winforms_webbrowser_fallback_direct_content')+'&tag='+encodeURIComponent(tvairTagName(el))+'&hasAction='+encodeURIComponent(action?'true':'false')+'&hasToken='+encodeURIComponent((tvairGetAttr(el,'data-tvair-action-token')||tvairGetAttr(el,'data-tvair-token'))?'true':'false')+'&hasTriplet='+encodeURIComponent((networkId&&tsid&&sid)?'true':'false')+'&_='+String(new Date().getTime());img.src=url;}catch(_){ }}
+function tvairIsReservedPayloadKey(name){var n=String(name||'').toLowerCase();return n==='action'||n==='pluginid'||n==='routesegment'||n==='route'||n==='token'||n==='actiontoken'||n==='responsemode'||n==='windowid';}
+function tvairCollectFormValues(el,form){var mode=tvairGetAttr(el,'data-tvair-form-capture');if(!mode)return;var scope=null;if(mode==='closestForm'){var n=el;while(n&&n!==document){if(tvairTagName(n)==='form'){scope=n;break;}n=n.parentNode;}}else if(mode.charAt(0)==='#'){scope=document.getElementById(mode.substring(1));}if(!scope||!scope.elements)return;for(var i=0;i<scope.elements.length;i++){var item=scope.elements[i];if(!item||!item.name||item.disabled||tvairIsReservedPayloadKey(item.name))continue;var type=String(item.type||'').toLowerCase();if((type==='checkbox'||type==='radio')&&!item.checked)continue;tvairAppendHidden(form,item.name,item.value);}}
+function tvairNewInteractionId(){return 'ix-'+String((new Date()).getTime())+'-'+String(Math.floor(Math.random()*1000000000));}function tvairClientBeacon(phase,eventName,action,el){ {{developerBeaconBody}} }
 function tvairFindSafeEventTarget(start,eventName){var n=start;while(n&&n!==document){if(n.getAttribute&&tvairGetAttr(n,'data-tvair-action')){var events=tvairGetAttr(n,'data-tvair-event');if(tvairHasToken(events,eventName))return n;if(eventName==='click'&&tvairHasToken(events,'dblclick')&&tvairGetAttr(n,'data-tvair-click-fallback')==='true')return n;}n=n.parentNode;}return null;}
+function tvairFindHoverTarget(start){
+  var n=start;
+  while(n&&n!==document){
+    if(n.getAttribute&&tvairGetAttr(n,'data-tvair-hover-key'))return n;
+    n=n.parentNode;
+  }
+  return null;
+}
+function tvairNodeInside(root,node){try{while(node&&node!==document){if(node===root)return true;node=node.parentNode;}}catch(_){}return false;}
+function tvairDispatchRuntimeHover(el,state){
+  if(!el)return;
+  var detail={state:state,hoverKey:tvairGetAttr(el,'data-tvair-hover-key')||'',pluginId:tvairGetAttr(el,'data-tvair-plugin-id')||'',routeSegment:tvairGetAttr(el,'data-tvair-route-segment')||document.body.getAttribute('data-plugin-route')||''};
+  try{
+    var ev=null;
+    try{
+      ev=document.createEvent('CustomEvent');
+      if(ev.initCustomEvent)ev.initCustomEvent('tvair-runtime-hover',true,false,detail);
+    }catch(_){}
+    if(!ev||!ev.initCustomEvent){
+      ev=document.createEvent('Event');
+      ev.initEvent('tvair-runtime-hover',true,false);
+      ev.detail=detail;
+    }
+    if(el.dispatchEvent)el.dispatchEvent(ev);
+  }catch(_){}
+}
+function tvairHandleRuntimeHover(e,state){
+  e=e||window.event;
+  var target=e.target||e.srcElement;
+  var el=tvairFindHoverTarget(target);
+  if(!el)return;
+  var related=state==='enter'?(e.relatedTarget||e.fromElement):(e.relatedTarget||e.toElement);
+  if(related&&tvairNodeInside(el,related))return;
+  tvairDispatchRuntimeHover(el,state);
+}
 function tvairPreserveToolWindowLink(href){if(!href)return href;var route=document.body.getAttribute('data-plugin-route')||'';var currentWindow=tvairCurrentWindowId();if(!currentWindow||!route)return href;var a=document.createElement('a');a.href=href;if(a.pathname!=='/plugin/'+route)return href;if(a.search.indexOf('__tvairWindowId=')<0)a.search+=(a.search?'&':'?')+'__tvairWindowId='+encodeURIComponent(currentWindow);if(a.search.indexOf('__tvairHostWindow=')<0)a.search+='&__tvairHostWindow=1';var rev=tvairCurrentRevision(); if(rev&&a.search.indexOf('_tvairWindowRevision=')<0)a.search+='&_tvairWindowRevision='+encodeURIComponent(rev);return a.pathname+a.search+a.hash;}
-function tvairSubmitSafeAction(el,eventName){var action=tvairGetAttr(el,'data-tvair-action');tvairClientBeacon('received_before_validate',eventName,action,el);if(!action){tvairClientBeacon('denied_missing_action',eventName,action,el);return;}var isWindowAction=(action==='refreshWindow'||action==='updateWindow'||action==='closeWindow'||action==='rerenderWindow'||action==='openWindow');var form=document.createElement('form');form.method='post';form.action=tvairGetAttr(el,'data-tvair-endpoint')||(isWindowAction?'/api/plugins/window':'/api/plugins/action');tvairAppendHidden(form,'action',action);tvairAppendHidden(form,'pluginId',tvairGetAttr(el,'data-tvair-plugin-id'));tvairAppendHidden(form,'routeSegment',tvairGetAttr(el,'data-tvair-route-segment')||document.body.getAttribute('data-plugin-route')||'');tvairAppendHidden(form,'token',tvairGetAttr(el,'data-tvair-token')||tvairGetAttr(el,'data-tvair-action-token'));tvairAppendHidden(form,'actionToken',tvairGetAttr(el,'data-tvair-action-token')||tvairGetAttr(el,'data-tvair-token'));tvairAppendHidden(form,'responseMode',tvairGetAttr(el,'data-tvair-response-mode')||(isWindowAction?'hostHandled':'refreshWindow'));tvairAppendHidden(form,'windowId',tvairGetAttr(el,'data-tvair-window-id')||tvairCurrentWindowId());tvairAppendHidden(form,'target',tvairGetAttr(el,'data-tvair-target')||'content');tvairAppendHidden(form,'refreshTarget',tvairGetAttr(el,'data-tvair-refresh-target')||'content');tvairAppendHidden(form,'preserveScroll',tvairGetAttr(el,'data-tvair-preserve-scroll')||'true');tvairAppendHidden(form,'refreshScrollTarget',tvairGetAttr(el,'data-tvair-refresh-scroll-target')||tvairGetAttr(el,'data-tvair-scroll-target')||tvairGetAttr(el,'data-tvair-focus-target')||'');tvairAppendHidden(form,'refreshScrollMode',tvairGetAttr(el,'data-tvair-refresh-scroll-mode')||tvairGetAttr(el,'data-tvair-scroll-mode')||'center');tvairAppendHidden(form,'safeEvent',eventName||'unknown');tvairAppendHidden(form,'safeEventAction',action);tvairAppendHidden(form,'safeEventSource','host-script-no-plugin-js');tvairAppendHidden(form,'safeEventWindowId',tvairGetAttr(el,'data-tvair-window-id')||tvairCurrentWindowId());if(el.attributes){for(var i=0;i<el.attributes.length;i++){var a=el.attributes[i];if(a&&a.name&&a.name.indexOf('data-tvair-payload-')===0){tvairAppendHidden(form,a.name.substring('data-tvair-payload-'.length),a.value);}}}document.body.appendChild(form);tvairClientBeacon('posting_form',eventName,action,el);form.submit();}
+function tvairTryBeginRepeatPolicy(el,eventName,action){var policy=String(tvairGetAttr(el,'data-tvair-repeat-policy')||'').toLowerCase();if(policy!=='suppressburst')return true;var windowMs=parseInt(tvairGetAttr(el,'data-tvair-burst-window-ms')||'0',10);if(!isFinite(windowMs)||windowMs<=0)return true;windowMs=Math.max(50,Math.min(1000,windowMs));var now=(new Date()).getTime();var key=String(eventName||'')+'|'+String(action||'');var guard=el.__tvairBurstGuard;if(guard&&guard.key===key&&now<guard.until){var suppressedToken=String(now)+'|'+String(Math.random());guard.until=now+windowMs;guard.token=suppressedToken;window.setTimeout(function(){try{var current=el.__tvairBurstGuard;if(current&&current.token===suppressedToken)delete el.__tvairBurstGuard;}catch(_){}},windowMs+1);tvairClientBeacon('burst_suppressed',eventName,action,el);return false;}var token=String(now)+'|'+String(Math.random());el.__tvairBurstGuard={key:key,until:now+windowMs,token:token};window.setTimeout(function(){try{var current=el.__tvairBurstGuard;if(current&&current.token===token)delete el.__tvairBurstGuard;}catch(_){}},windowMs+1);return true;}
+function tvairApplyAcceptedButtonState(el,action,eventName){if(!el||tvairTagName(el)!=='button')return;var acceptedLabel=tvairGetAttr(el,'data-tvair-accepted-label');if(!acceptedLabel)return;el.setAttribute('aria-label',acceptedLabel);try{el.innerText=acceptedLabel;}catch(_){try{el.textContent=acceptedLabel;}catch(__){}}tvairClientBeacon('accepted_button_state_applied',eventName,action,el);}
+function tvairFeedbackEnabled(el){return String(tvairGetAttr(el,'data-tvair-feedback')||'').toLowerCase()==='true';}function tvairFeedbackSetLabel(el,label){if(!el||!label)return;el.setAttribute('aria-label',label);try{el.innerText=label;}catch(_){try{el.textContent=label;}catch(__){} } }function tvairBeginActionFeedback(el,eventName,action,correlationId){if(!tvairFeedbackEnabled(el))return true;if(el.__tvairFeedbackInFlight){tvairClientBeacon('feedback_duplicate_suppressed',eventName,action,el);return false;}el.__tvairFeedbackInFlight=correlationId||'pending';if(!el.__tvairFeedbackOriginal)el.__tvairFeedbackOriginal={label:(el.innerText||el.textContent||''),aria:tvairGetAttr(el,'aria-label'),disabled:!!el.disabled};if(String(tvairGetAttr(el,'data-tvair-feedback-disable-running')||'').toLowerCase()==='true'){el.disabled=true;el.setAttribute('disabled','disabled');}tvairFeedbackSetLabel(el,tvairGetAttr(el,'data-tvair-feedback-pending-label'));el.setAttribute('aria-busy','true');tvairClientBeacon('feedback_running',eventName,action,el);return true;}function tvairFloatingLabelKind(value){var kind=String(value||'Information').toLowerCase();return kind==='success'||kind==='warning'||kind==='error'?kind:'information';}function tvairShowFloatingLabel(body,el,eventName,action){var feedback=body&&(body.feedback||body.Feedback)||{};var label=body&&(body.floatingLabel||body.FloatingLabel)||null;if(!label&&feedback&&(feedback.showFloatingLabel===false||feedback.ShowFloatingLabel===false))return;var message=label?(label.message||label.Message||''):(feedback.message||feedback.Message||'');if(!message)return;var correlation=String((label&&(label.correlationId||label.CorrelationId))||(feedback.correlationId||feedback.CorrelationId)||'');var kind=tvairFloatingLabelKind((label&&(label.kind||label.Kind))||(feedback.kind||feedback.Kind));var duration=parseInt((label&&(label.durationMilliseconds||label.DurationMilliseconds))||0,10)||0;if(duration<=0)duration=kind==='error'?3000:(kind==='warning'?2500:1800);if(duration<1000)duration=1000;if(duration>5000)duration=5000;var node=document.getElementById('tvair-host-floating-label');if(!node){node=document.createElement('div');node.id='tvair-host-floating-label';node.setAttribute('role',kind==='error'?'alert':'status');node.setAttribute('aria-live',kind==='error'?'assertive':'polite');node.setAttribute('aria-atomic','true');node.className='tvair-host-floating-label';document.body.appendChild(node);}node.setAttribute('data-tvair-feedback-kind',kind);node.setAttribute('data-tvair-correlation-id',correlation);node.innerText=String(message);node.classList.add('is-visible');if(node.__tvairHideTimer)clearTimeout(node.__tvairHideTimer);node.__tvairHideTimer=setTimeout(function(){if(node&&node.parentNode)node.parentNode.removeChild(node);},duration);tvairClientBeacon('floating_label_shown',eventName,action,el);} function tvairCompleteActionFeedback(el,eventName,action,body,httpOk){if(!tvairFeedbackEnabled(el))return;var feedback=body&&(body.feedback||body.Feedback)||{};var phase=String(feedback.phase||feedback.Phase||(httpOk?'Succeeded':'Failed')).toLowerCase();var success=phase==='succeeded'||phase==='success';var nochange=phase==='nochange'||phase==='no_change';var cancelled=phase==='cancelled'||phase==='canceled';var label=feedback.buttonLabel||feedback.ButtonLabel||'';if(!label){if(success)label=tvairGetAttr(el,'data-tvair-feedback-success-label');else if(nochange)label=tvairGetAttr(el,'data-tvair-feedback-nochange-label');else if(!cancelled)label=tvairGetAttr(el,'data-tvair-feedback-failure-label');}var original=el.__tvairFeedbackOriginal||{};if(label)tvairFeedbackSetLabel(el,label);var keepDisabled=(typeof feedback.keepDisabled!=='undefined')?!!feedback.keepDisabled:((typeof feedback.KeepDisabled!=='undefined')?!!feedback.KeepDisabled:false);if(success&&String(tvairGetAttr(el,'data-tvair-feedback-keep-disabled-success')||'').toLowerCase()==='true')keepDisabled=true;if(!success&&!nochange&&String(tvairGetAttr(el,'data-tvair-feedback-restore-failure')||'').toLowerCase()==='true'){tvairFeedbackSetLabel(el,original.label||'');if(original.aria)el.setAttribute('aria-label',original.aria);else el.removeAttribute('aria-label');}if(keepDisabled){el.disabled=true;el.setAttribute('disabled','disabled');}else{el.disabled=!!original.disabled;if(original.disabled)el.setAttribute('disabled','disabled');else el.removeAttribute('disabled');}el.removeAttribute('aria-busy');delete el.__tvairFeedbackInFlight;tvairShowFloatingLabel(body,el,eventName,action);tvairClientBeacon(success?'feedback_succeeded':(nochange?'feedback_nochange':(cancelled?'feedback_cancelled':'feedback_failed')),eventName,action,el);}
+function tvairApplyUiPatches(patches){if(!patches||typeof patches.length==='undefined')return;for(var i=0;i<patches.length&&i<64;i++){var p=patches[i]||{};var id=p.elementId||p.ElementId||'';if(!id)continue;var target=document.getElementById(id);if(!target)continue;var text=(typeof p.textContent!=='undefined')?p.textContent:p.TextContent;if(text!==null&&typeof text!=='undefined'){try{target.textContent=String(text);}catch(_){target.innerText=String(text);}}var cls=(typeof p.className!=='undefined')?p.className:p.ClassName;if(cls!==null&&typeof cls!=='undefined')target.className=String(cls);var remove=p.removeClasses||p.RemoveClasses||[];for(var r=0;r<remove.length;r++){var rc=String(remove[r]||'');if(!rc)continue;if(target.classList)target.classList.remove(rc);else target.className=(' '+target.className+' ').replace(' '+rc+' ',' ').replace(/^\s+|\s+$/g,'');}var add=p.addClasses||p.AddClasses||[];for(var a=0;a<add.length;a++){var ac=String(add[a]||'');if(!ac)continue;if(target.classList)target.classList.add(ac);else if((' '+target.className+' ').indexOf(' '+ac+' ')<0)target.className=(target.className?target.className+' ':'')+ac;}var disabled=(typeof p.disabled!=='undefined')?p.disabled:p.Disabled;if(disabled!==null&&typeof disabled!=='undefined'){target.disabled=!!disabled;if(disabled)target.setAttribute('disabled','disabled');else target.removeAttribute('disabled');}var hidden=(typeof p.hidden!=='undefined')?p.hidden:p.Hidden;if(hidden!==null&&typeof hidden!=='undefined'){target.hidden=!!hidden;if(hidden)target.setAttribute('hidden','hidden');else target.removeAttribute('hidden');}var checked=(typeof p.checked!=='undefined')?p.checked:p.Checked;if(checked!==null&&typeof checked!=='undefined'){target.checked=!!checked;if(checked)target.setAttribute('checked','checked');else target.removeAttribute('checked');}var value=(typeof p.value!=='undefined')?p.value:p.Value;if(value!==null&&typeof value!=='undefined')target.value=String(value);var attrs=p.attributes||p.Attributes||{};for(var name in attrs){if(!Object.prototype.hasOwnProperty.call(attrs,name))continue;var lower=String(name).toLowerCase();if(!(lower==='title'||lower.indexOf('aria-')===0||lower.indexOf('data-')===0))continue;var attrValue=attrs[name];if(attrValue===null||typeof attrValue==='undefined')target.removeAttribute(name);else target.setAttribute(name,String(attrValue));} } }
+function tvairApplyUiPatchesJson(json){try{var patches=JSON.parse(String(json||'[]'));tvairApplyUiPatches(patches);var applied=0;if(patches&&typeof patches.length!=='undefined'){for(var i=0;i<patches.length&&i<64;i++){var p=patches[i]||{};var id=p.elementId||p.ElementId||'';if(id&&document.getElementById(id))applied++;}}return applied;}catch(_){return -1;}}
+function tvairPageRefreshStateKey(){try{return 'tvair-page-refresh:'+location.pathname+location.search;}catch(_){return '';}}function tvairCapturePageRefreshState(){try{var key=tvairPageRefreshStateKey();if(!key)return;var state={x:window.pageXOffset||document.documentElement.scrollLeft||0,y:window.pageYOffset||document.documentElement.scrollTop||0};sessionStorage.setItem(key,JSON.stringify(state));}catch(_){}}function tvairRestorePageRefreshState(){try{var key=tvairPageRefreshStateKey();if(!key)return;var raw=sessionStorage.getItem(key);if(!raw)return;sessionStorage.removeItem(key);var state=JSON.parse(raw);window.scrollTo(Number(state.x)||0,Number(state.y)||0);}catch(_){}}function tvairInteractionStateKey(){var id=tvairCurrentWindowId();return id?'tvair-interaction-state:'+id:'';}function tvairCaptureInteractionState(){try{var key=tvairInteractionStateKey();if(!key)return;var a=document.activeElement;var state={x:window.pageXOffset||document.documentElement.scrollLeft||0,y:window.pageYOffset||document.documentElement.scrollTop||0,id:a&&a.id?a.id:'',start:(a&&typeof a.selectionStart==='number')?a.selectionStart:null,end:(a&&typeof a.selectionEnd==='number')?a.selectionEnd:null};sessionStorage.setItem(key,JSON.stringify(state));}catch(_){}}function tvairRestoreInteractionState(){try{var key=tvairInteractionStateKey();if(!key)return;var raw=sessionStorage.getItem(key);if(!raw)return;sessionStorage.removeItem(key);var state=JSON.parse(raw);window.scrollTo(Number(state.x)||0,Number(state.y)||0);if(state.id){var a=document.getElementById(state.id);if(a&&a.focus){a.focus();if(typeof a.setSelectionRange==='function'&&state.start!==null)a.setSelectionRange(state.start,state.end===null?state.start:state.end);}}}catch(_){}}function tvairRestoreRefreshState(){tvairRestoreInteractionState();tvairRestorePageRefreshState();}if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',tvairRestoreRefreshState);else setTimeout(tvairRestoreRefreshState,0);function tvairSubmitSafeAction(el,eventName){var action=tvairGetAttr(el,'data-tvair-action');var interactionId=tvairNewInteractionId();el.setAttribute('data-tvair-debug-interaction-id',interactionId);tvairClientBeacon('click_captured',eventName,action,el);tvairClientBeacon('received_before_validate',eventName,action,el);if(!action){tvairClientBeacon('denied_missing_action',eventName,action,el);return;}var confirmMessage=tvairGetAttr(el,'data-tvair-confirm-message');if(confirmMessage){var confirmed=false;try{confirmed=window.confirm(String(confirmMessage));}catch(_){confirmed=false;}if(!confirmed){tvairClientBeacon('action_cancelled_by_user',eventName,action,el);return;}}if(!tvairTryBeginRepeatPolicy(el,eventName,action))return;if(!tvairBeginActionFeedback(el,eventName,action,interactionId))return;if(!tvairFeedbackEnabled(el))tvairApplyAcceptedButtonState(el,action,eventName);var isWindowAction=(action==='refreshWindow'||action==='updateWindow'||action==='closeWindow'||action==='rerenderWindow'||action==='openWindow');var form=document.createElement('form');form.method='post';form.action=isWindowAction?'/api/plugins/window':'/api/plugins/action';tvairAppendHidden(form,'action',action);tvairAppendHidden(form,'pluginId',tvairGetAttr(el,'data-tvair-plugin-id'));tvairAppendHidden(form,'routeSegment',tvairGetAttr(el,'data-tvair-route-segment')||document.body.getAttribute('data-plugin-route')||'');tvairAppendHidden(form,'token',tvairGetAttr(el,'data-tvair-token')||tvairGetAttr(el,'data-tvair-action-token'));tvairAppendHidden(form,'actionToken',tvairGetAttr(el,'data-tvair-action-token')||tvairGetAttr(el,'data-tvair-token'));tvairAppendHidden(form,'responseMode',tvairGetAttr(el,'data-tvair-response-mode')||'hostHandled');tvairAppendHidden(form,'windowId',tvairGetAttr(el,'data-tvair-window-id')||tvairCurrentWindowId());tvairAppendHidden(form,'target',tvairGetAttr(el,'data-tvair-target')||'content');tvairAppendHidden(form,'refreshTarget',tvairGetAttr(el,'data-tvair-refresh-target')||'content');tvairAppendHidden(form,'preserveScroll',tvairGetAttr(el,'data-tvair-preserve-scroll')||'true');tvairAppendHidden(form,'safeEvent',eventName||'unknown');tvairAppendHidden(form,'safeEventAction',action);tvairAppendHidden(form,'safeEventSource','host-script-no-plugin-js');tvairAppendHidden(form,'safeEventInteractionId',interactionId);tvairAppendHidden(form,'safeEventWindowId',tvairGetAttr(el,'data-tvair-window-id')||tvairCurrentWindowId());tvairAppendHidden(form,'feedbackRequested',tvairFeedbackEnabled(el)?'true':'false');tvairCollectFormValues(el,form);if(el.attributes){for(var i=0;i<el.attributes.length;i++){var a=el.attributes[i];if(a&&a.name&&a.name.indexOf('data-tvair-payload-')===0){var pk=a.name.substring('data-tvair-payload-'.length);if(!tvairIsReservedPayloadKey(pk))tvairAppendHidden(form,pk,a.value);} } }el.setAttribute('data-tvair-debug-payload-count',String(form.elements.length));tvairClientBeacon('payload_built',eventName,action,el);document.body.appendChild(form);tvairClientBeacon('post_started',eventName,action,el);tvairClientBeacon('posting_form',eventName,action,el);var submitResponseMode=tvairGetAttr(el,'data-tvair-response-mode')||'hostHandled';if(submitResponseMode==='hostHandled'||submitResponseMode==='noContent'||submitResponseMode==='patchWindow'){try{var pairs=[];for(var j=0;j<form.elements.length;j++){var it=form.elements[j];if(it&&it.name)pairs.push(encodeURIComponent(it.name)+'='+encodeURIComponent(it.value||''));}var endpoint=isWindowAction?'/api/plugins/window':'/api/plugins/action';var resolvedEndpoint=location.protocol+'//'+location.host+endpoint;el.setAttribute('data-tvair-debug-endpoint',resolvedEndpoint);var xhr=new XMLHttpRequest();xhr.open('POST',resolvedEndpoint,true);xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded; charset=UTF-8');xhr.setRequestHeader('Accept','application/json, text/plain, */*');var requestInteractionId=interactionId;xhr.onreadystatechange=function(){if(xhr.readyState===4){var previousInteractionId=tvairGetAttr(el,'data-tvair-debug-interaction-id');el.setAttribute('data-tvair-debug-interaction-id',requestInteractionId);el.setAttribute('data-tvair-debug-status',String(xhr.status||0));var body={};try{body=JSON.parse(xhr.responseText||'{}');}catch(_){if(submitResponseMode==='patchWindow'||tvairFeedbackEnabled(el))el.setAttribute('data-tvair-debug-reason','response_parse_failed');}if(xhr.status>=200&&xhr.status<400&&submitResponseMode==='patchWindow')tvairApplyUiPatches(body&&body.uiPatches?body.uiPatches:[]);var requestSucceeded=xhr.status>=200&&xhr.status<400;tvairCompleteActionFeedback(el,eventName,action,body,requestSucceeded);tvairClientBeacon(requestSucceeded?'post_completed':'post_failed',eventName,action,el);el.setAttribute('data-tvair-debug-interaction-id',previousInteractionId);var refreshSurface='';var preservePageScroll=false;var pageRefreshLocation='';try{refreshSurface=String(xhr.getResponseHeader('X-TvAIr-Refresh-Surface')||'').toLowerCase();preservePageScroll=String(xhr.getResponseHeader('X-TvAIr-Preserve-Scroll')||'').toLowerCase()==='true';pageRefreshLocation=String(xhr.getResponseHeader('X-TvAIr-Refresh-Location')||'');}catch(_){}if(requestSucceeded&&refreshSurface==='page'){if(preservePageScroll)tvairCapturePageRefreshState();tvairClientBeacon('page_refresh_issued',eventName,action,el);if(pageRefreshLocation){location.href=pageRefreshLocation;}else{location.href=location.pathname+location.search;}return;}}};xhr.onerror=function(){var previousInteractionId=tvairGetAttr(el,'data-tvair-debug-interaction-id');el.setAttribute('data-tvair-debug-interaction-id',requestInteractionId);el.setAttribute('data-tvair-debug-reason','xhr_error');tvairCompleteActionFeedback(el,eventName,action,{},false);tvairClientBeacon('post_failed',eventName,action,el);el.setAttribute('data-tvair-debug-interaction-id',previousInteractionId);};xhr.send(pairs.join('&'));return;}catch(_){}}tvairCaptureInteractionState();form.submit();}
 function tvairHandleSafeEvent(e,eventName){e=e||window.event;var target=e.target||e.srcElement;var el=tvairFindSafeEventTarget(target,eventName);if(!el)return true;try{if(e.preventDefault)e.preventDefault();e.returnValue=false;}catch(_){ }tvairSubmitSafeAction(el,eventName);return false;}
-function tvairBindSafeEvents(){if(window.__tvairSafeEventBound){tvairClientBeacon('bind_skip_already_bound','','',document.body);return;}window.__tvairSafeEventBound=true;tvairClientBeacon('bind_start','','',document.body);if(document.addEventListener){document.addEventListener('dblclick',function(e){return tvairHandleSafeEvent(e,'dblclick');},false);document.addEventListener('click',function(e){if(tvairHandleSafeEvent(e,'click')===false)return false;var a=e.target;while(a&&a!==document&&!(a.tagName&&String(a.tagName).toLowerCase()==='a'))a=a.parentNode;if(a&&a.href){var next=tvairPreserveToolWindowLink(a.getAttribute('href')||'');if(next&&(next!==a.getAttribute('href'))){if(e.preventDefault)e.preventDefault();location.href=next;}}},false);}else if(document.attachEvent){document.attachEvent('ondblclick',function(){return tvairHandleSafeEvent(window.event,'dblclick');});document.attachEvent('onclick',function(){return tvairHandleSafeEvent(window.event,'click');});}else{var oldDbl=document.ondblclick;document.ondblclick=function(e){if(tvairHandleSafeEvent(e||window.event,'dblclick')===false)return false;return oldDbl?oldDbl(e):true;};var oldClick=document.onclick;document.onclick=function(e){if(tvairHandleSafeEvent(e||window.event,'click')===false)return false;return oldClick?oldClick(e):true;};}tvairClientBeacon('bind_complete','','',document.body);}
-tvairBindSafeEvents();
+function tvairBindSafeEvents(){if(window.__tvairSafeEventBound){tvairClientBeacon('bind_skip_already_bound','','',document.body);return;}window.__tvairSafeEventBound=true;tvairClientBeacon('bind_start','','',document.body);if(document.addEventListener){document.addEventListener('dblclick',function(e){return tvairHandleSafeEvent(e,'dblclick');},false);document.addEventListener('mouseover',function(e){tvairHandleRuntimeHover(e,'enter');},false);document.addEventListener('mouseout',function(e){tvairHandleRuntimeHover(e,'leave');},false);document.addEventListener('click',function(e){if(tvairHandleSafeEvent(e,'click')===false)return false;var a=e.target;while(a&&a!==document&&!(a.tagName&&String(a.tagName).toLowerCase()==='a'))a=a.parentNode;if(a&&a.href){var next=tvairPreserveToolWindowLink(a.getAttribute('href')||'');if(next&&(next!==a.getAttribute('href'))){if(e.preventDefault)e.preventDefault();location.href=next;} } },false);}else if(document.attachEvent){document.attachEvent('ondblclick',function(){return tvairHandleSafeEvent(window.event,'dblclick');});document.attachEvent('onmouseover',function(){tvairHandleRuntimeHover(window.event,'enter');});document.attachEvent('onmouseout',function(){tvairHandleRuntimeHover(window.event,'leave');});document.attachEvent('onclick',function(){return tvairHandleSafeEvent(window.event,'click');});}else{var oldDbl=document.ondblclick;document.ondblclick=function(e){if(tvairHandleSafeEvent(e||window.event,'dblclick')===false)return false;return oldDbl?oldDbl(e):true;};var oldOver=document.onmouseover;document.onmouseover=function(e){tvairHandleRuntimeHover(e||window.event,'enter');return oldOver?oldOver(e):true;};var oldOut=document.onmouseout;document.onmouseout=function(e){tvairHandleRuntimeHover(e||window.event,'leave');return oldOut?oldOut(e):true;};var oldClick=document.onclick;document.onclick=function(e){if(tvairHandleSafeEvent(e||window.event,'click')===false)return false;return oldClick?oldClick(e):true;};}tvairClientBeacon('bind_complete','','',document.body);}
+function tvairFindActionTokenElement(){try{return document.querySelector?document.querySelector('[data-tvair-action-token],[data-tvair-token]'):null;}catch(_){return null;}}
+function tvairRenewActionToken(){try{var el=tvairFindActionTokenElement();if(!el)return;var token=tvairGetAttr(el,'data-tvair-action-token')||tvairGetAttr(el,'data-tvair-token');var pluginId=tvairGetAttr(el,'data-tvair-plugin-id');var route=tvairGetAttr(el,'data-tvair-route-segment')||document.body.getAttribute('data-plugin-route')||'';if(!token||!pluginId||!route)return;var xhr=new XMLHttpRequest();xhr.open('POST','/api/plugins/action-token/renew',true);xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded; charset=UTF-8');xhr.send('actionToken='+encodeURIComponent(token)+'&pluginId='+encodeURIComponent(pluginId)+'&routeSegment='+encodeURIComponent(route));}catch(_){}}
+function tvairStartActionTokenKeepalive(){try{if(window.__tvairActionTokenKeepaliveStarted)return;window.__tvairActionTokenKeepaliveStarted=true;tvairRenewActionToken();window.setInterval(tvairRenewActionToken,300000);if(document.addEventListener)document.addEventListener('visibilitychange',function(){if(!document.hidden)tvairRenewActionToken();},false);if(window.addEventListener)window.addEventListener('focus',tvairRenewActionToken,false);else if(window.attachEvent)window.attachEvent('onfocus',tvairRenewActionToken);}catch(_){}}
+function tvairBootSafeEvents(){try{tvairBindSafeEvents();tvairStartActionTokenKeepalive();}catch(_){tvairClientBeacon('bind_failed','','',document.body);}}if(document.readyState==='complete'||document.readyState==='interactive'){tvairBootSafeEvents();}else if(window.attachEvent){window.attachEvent('onload',tvairBootSafeEvents);}else if(window.addEventListener){window.addEventListener('load',tvairBootSafeEvents,false);}else{window.onload=tvairBootSafeEvents;}
 </script>
 </body>
 </html>
@@ -4010,19 +3763,98 @@ tvairBindSafeEvents();
     return template
         .Replace("{{safeTitle}}", safeTitle, StringComparison.Ordinal)
         .Replace("{{safeRoute}}", safeRoute, StringComparison.Ordinal)
-        .Replace("{{pluginStyles}}", pluginStyles, StringComparison.Ordinal)
-        .Replace("{{pluginContent}}", pluginContent, StringComparison.Ordinal);
+        .Replace("{{safeSelectedTheme}}", safeSelectedTheme, StringComparison.Ordinal)
+        .Replace("{{safeEffectiveTheme}}", safeEffectiveTheme, StringComparison.Ordinal)
+        .Replace("{{themeClass}}", themeClass, StringComparison.Ordinal)
+        .Replace("{{pluginHead}}", pluginHead, StringComparison.Ordinal)
+        .Replace("{{pluginContent}}", pluginContent, StringComparison.Ordinal)
+        .Replace("{{developerBeaconBody}}", developerBeaconBody, StringComparison.Ordinal);
 }
 
-static (string Styles, string Body) NormalizePluginToolWindowContent(string? html)
+static (string Head, string Body) NormalizePluginToolWindowContent(string? html, string? routeSegment)
 {
     var source = html ?? string.Empty;
-    var styles = string.Join("\n", System.Text.RegularExpressions.Regex.Matches(source, "<\\s*style\\b[^>]*>.*?<\\s*/\\s*style\\s*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline).Cast<System.Text.RegularExpressions.Match>().Select(m => m.Value));
+    var headSource = ExtractPluginHeadFragment(source);
     var body = source;
     if (LooksLikeFullHtmlDocument(source)) body = ExtractPluginBodyFragment(source);
+
+    var headParts = new List<string>();
+    foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(headSource, "<\\s*style\\b[^>]*>.*?<\\s*/\\s*style\\s*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline))
+        headParts.Add(match.Value);
+    foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(headSource, "<\\s*link\\b[^>]*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline))
+    {
+        if (IsPluginHeadResourceAllowed(match.Value, routeSegment)) headParts.Add(match.Value);
+    }
+    foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(headSource, "<\\s*script\\b[^>]*src\\s*=\\s*(['\"]?)([^'\" >]+)\\1[^>]*>\\s*<\\s*/\\s*script\\s*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline))
+    {
+        if (IsPluginHeadResourceAllowed(match.Value, routeSegment)) headParts.Add(match.Value);
+    }
+
+    var bodyInlineStyles = string.Join("\n", System.Text.RegularExpressions.Regex.Matches(body, "<\\s*style\\b[^>]*>.*?<\\s*/\\s*style\\s*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline).Cast<System.Text.RegularExpressions.Match>().Select(m => m.Value));
+    if (!string.IsNullOrWhiteSpace(bodyInlineStyles)) headParts.Add(bodyInlineStyles);
+
     body = System.Text.RegularExpressions.Regex.Replace(body, "<\\s*style\\b[^>]*>.*?<\\s*/\\s*style\\s*>", string.Empty, System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline);
     body = System.Text.RegularExpressions.Regex.Replace(body, "<\\s*/?\\s*(html|head|body)\\b[^>]*>", string.Empty, System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline);
-    return (styles, body);
+    return (string.Join("\n", headParts), body);
+}
+
+static string NormalizePluginPageContent(string? html)
+{
+    var source = html ?? string.Empty;
+    if (string.IsNullOrWhiteSpace(source)) return string.Empty;
+
+    var body = LooksLikeFullHtmlDocument(source) ? ExtractPluginBodyFragment(source) : source;
+    var head = ExtractPluginHeadFragment(source);
+    var styles = new List<string>();
+    foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(head, @"<\s*style\b[^>]*>.*?<\s*/\s*style\s*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline))
+        styles.Add(match.Value);
+    foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(body, @"<\s*style\b[^>]*>.*?<\s*/\s*style\s*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline))
+        styles.Add(match.Value);
+
+    body = System.Text.RegularExpressions.Regex.Replace(body, @"<\s*style\b[^>]*>.*?<\s*/\s*style\s*>", string.Empty, System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline);
+    body = System.Text.RegularExpressions.Regex.Replace(body, @"<\s*/?\s*(html|head|body)\b[^>]*>", string.Empty, System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline);
+    return PluginHtmlSanitizer.Sanitize(string.Join("\n", styles) + "\n" + body);
+}
+
+static string BuildPluginPageActionAudit(string? html)
+{
+    var source = html ?? string.Empty;
+    var matches = System.Text.RegularExpressions.Regex.Matches(source, @"<(?<tag>[a-zA-Z][a-zA-Z0-9:-]*)\b(?<attrs>[^>]*\bdata-tvair-action\s*=\s*(?:""[^""]*""|'[^']*'|[^\s>]+)[^>]*)>", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline);
+    if (matches.Count == 0) return "candidates=0";
+
+    var samples = new List<string>();
+    foreach (System.Text.RegularExpressions.Match match in matches.Cast<System.Text.RegularExpressions.Match>().Take(8))
+    {
+        var attrs = match.Groups["attrs"].Value;
+        string Attr(string name)
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(attrs, @"\b" + System.Text.RegularExpressions.Regex.Escape(name) + @"\s*=\s*(?:""(?<v>[^""]*)""|'(?<v>[^']*)'|(?<v>[^\s>]+))", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            return m.Success ? m.Groups["v"].Value : string.Empty;
+        }
+        var payloadCount = System.Text.RegularExpressions.Regex.Matches(attrs, @"\bdata-tvair-payload-[a-zA-Z0-9_-]+\s*=", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Count;
+        samples.Add($"tag={SafePluginActionValue(match.Groups["tag"].Value)} type={SafePluginActionValue(Attr("type"))} event={SafePluginActionValue(Attr("data-tvair-event"))} action={SafePluginActionValue(Attr("data-tvair-action"))} endpoint={SafePluginActionValue(Attr("data-tvair-endpoint"))} pluginId={SafePluginActionValue(Attr("data-tvair-plugin-id"))} route={SafePluginActionValue(Attr("data-tvair-route-segment"))} tokenPresent={!string.IsNullOrWhiteSpace(Attr("data-tvair-action-token"))} responseMode={SafePluginActionValue(Attr("data-tvair-response-mode"))} payloadCount={payloadCount}");
+    }
+    return $"candidates={matches.Count} sample=[{string.Join(" | ", samples)}]";
+}
+
+static string ExtractPluginHeadFragment(string html)
+{
+    if (string.IsNullOrWhiteSpace(html)) return string.Empty;
+    var match = System.Text.RegularExpressions.Regex.Match(html, "<\\s*head\\b[^>]*>(.*?)<\\s*/\\s*head\\s*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline);
+    return match.Success ? match.Groups[1].Value : string.Empty;
+}
+
+static bool IsPluginHeadResourceAllowed(string tag, string? routeSegment)
+{
+    if (string.IsNullOrWhiteSpace(tag)) return false;
+    var src = System.Text.RegularExpressions.Regex.Match(tag, "\\b(?:href|src)\\s*=\\s*(['\"]?)([^'\" >]+)\\1", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    if (!src.Success) return true;
+    var url = src.Groups[2].Value.Trim();
+    if (string.IsNullOrWhiteSpace(url)) return false;
+    if (url.StartsWith("/", StringComparison.Ordinal) && !url.StartsWith("//", StringComparison.Ordinal)) return true;
+    if (url.StartsWith("./", StringComparison.Ordinal) || url.StartsWith("../", StringComparison.Ordinal)) return true;
+    if (url.StartsWith("data:", StringComparison.OrdinalIgnoreCase)) return true;
+    return false;
 }
 
 static bool LooksLikeFullHtmlDocument(string? html)
@@ -4033,24 +3865,23 @@ static bool LooksLikeFullHtmlDocument(string? html)
         || html.IndexOf("<head", StringComparison.OrdinalIgnoreCase) >= 0;
 }
 
-static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry registry, PluginActionTokenStore actionTokens, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, IOptions<TvTestSettings> tvTestOptions, IniSettingsService ini, IReadOnlyList<TunerProfile> tunerProfiles, LogRepository log)
+static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry registry, PluginActionTokenStore actionTokens, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, ExternalTunerLeaseService externalTuners, ViewerSessionRegistry viewerSessions, IOptions<TvTestSettings> tvTestOptions, IniSettingsService ini, IReadOnlyList<TunerProfile> tunerProfiles, PluginBoundaryGate boundaryGate, LogPresentationStore logPresentationStore, LogRepository log)
 {
     var requestedRoute = string.Join("", route.Where(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_' or '.'));
     if (string.IsNullOrWhiteSpace(requestedRoute))
         return Results.NotFound("Plugin UI not found.");
 
-    var publicRoute = NormalizeAirhythmPublicRoute(requestedRoute);
-    var plugin = registry.FindUiPlugin(requestedRoute);
-    var title = IsAirhythmRouteCandidate(requestedRoute) ? "AI-rhythm" : publicRoute;
-    if (plugin is not null)
-        title = NormalizeAirhythmDisplayName(plugin.Ui.MenuText.Length > 0 ? plugin.Ui.MenuText : plugin.Name);
+    var publicRoute = NormalizePluginRouteSegment(requestedRoute);
+    var nativeUi = registry.FindRuntimeUiPluginNative(requestedRoute, out var nativeUiDefinition);
+    var plugin = registry.FindRuntimePlugin(requestedRoute);
+    var title = plugin?.Descriptor.DisplayName ?? publicRoute;
 
     var currentWindowId = NormalizePluginWindowId(http.Query["__tvairWindowId"].FirstOrDefault()
         ?? http.Query["_tvairWindowId"].FirstOrDefault()
         ?? http.Query["windowId"].FirstOrDefault());
     var hostManagedWindow = !string.IsNullOrWhiteSpace(currentWindowId) ? windows.Get(currentWindowId) : null;
     var expectedWindowPluginId = plugin is not null
-        ? GetPluginActionIdentity(plugin, string.IsNullOrWhiteSpace(plugin.Ui.RouteSegment) ? publicRoute : plugin.Ui.RouteSegment)
+        ? GetPluginActionIdentity(plugin)
         : string.Empty;
     var isHostManagedWindowContent = hostManagedWindow is not null
         && plugin is not null
@@ -4074,7 +3905,7 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
     var currentRequestWave = currentRequestQuery.TryGetValue("wave", out var requestWave) ? requestWave : string.Empty;
     var currentRequestQueryKeys = string.Join(",", currentRequestQuery.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase));
 
-    // release_contract: Window state absolute URL contract must be derived before PluginUiContext construction.
+    // release_contract: Window state absolute URL contract must be derived before RuntimeUiRenderContext construction.
     // Keep this outside the plugin-specific block so WindowContract and diagnostics can share one authoritative value.
     var currentWindowStateEndpoint = isHostManagedWindowContent && !string.IsNullOrWhiteSpace(currentWindowId)
         ? $"/plugin-window/{Uri.EscapeDataString(currentWindowId)}/state"
@@ -4102,63 +3933,59 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
     {
         windows.UpdateContentRouteFromRender(currentWindowId, expectedWindowPluginId, currentRequestPathAndQuery);
     }
-    log.Add("PLUGIN_RENDER_ENTER", plugin?.Name ?? publicRoute, $"routeSegment={SafePluginActionValue(publicRoute)} requestedRoute={SafePluginActionValue(requestedRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} requestPath={SafePluginActionValue(currentRequestPath)} query={SafePluginActionValue(currentRequestQueryString)} rule=release_contract");
+    var hostSelectedTheme = IniSettingsService.NormalizeSystemTheme(ini.SystemTheme);
+    var hostEffectiveTheme = ResolveEffectiveHostTheme(hostSelectedTheme);
+    log.Add("PLUGIN_RENDER_ENTER", plugin?.Descriptor.DisplayName ?? publicRoute, $"routeSegment={SafePluginActionValue(publicRoute)} requestedRoute={SafePluginActionValue(requestedRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} requestPath={SafePluginActionValue(currentRequestPath)} query={SafePluginActionValue(currentRequestQueryString)} hostSelectedTheme={SafePluginActionValue(hostSelectedTheme)} hostEffectiveTheme={SafePluginActionValue(hostEffectiveTheme)} rule=release_contract");
+
+    if (plugin is not null)
+    {
+        var renderBoundary = boundaryGate.CheckRender(ResolveRuntimeBoundaryPlugin(registry, plugin), isHostManagedWindowContent, currentRequestPath);
+        if (!renderBoundary.Allowed)
+        {
+            log.Add("PLUGIN_RENDER", plugin.Descriptor.DisplayName, $"result=DENIED reason={SafePluginActionValue(renderBoundary.Reason)} routeSegment={SafePluginActionValue(publicRoute)} toolWindow={isHostManagedWindowContent} endpoint={SafePluginActionValue(currentRequestPath)} rule=plugin_boundary_gate");
+            return Results.StatusCode(StatusCodes.Status403Forbidden);
+        }
+    }
 
     try
     {
         string body;
 
         // TvAIr 1.0.0: プラグインページはTvAIr共通ヘッダー付きの拡張画面として表示する。
-        // release_contract: AI-rhythm は /plugin/airhythm を正式入口とし、旧 /plugin/airithm は legacy alias として解決する。
-        var physicalRoute = plugin?.Ui.RouteSegment ?? publicRoute;
-        var indexPath = Path.Combine(AppContext.BaseDirectory, "Plugins", physicalRoute, "wwwroot", "index.html");
-        if (!File.Exists(indexPath) && IsAirhythmRouteCandidate(publicRoute))
-        {
-            var legacyIndexPath = Path.Combine(AppContext.BaseDirectory, "Plugins", "airithm", "wwwroot", "index.html");
-            if (File.Exists(legacyIndexPath)) indexPath = legacyIndexPath;
-        }
+        var physicalRoute = NormalizePluginRouteSegment(nativeUiDefinition?.Route ?? publicRoute);
+        if (string.IsNullOrWhiteSpace(physicalRoute)) physicalRoute = publicRoute;
+        var pluginPageRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "Plugins", physicalRoute));
+        var pluginsRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "Plugins")).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var indexPath = Path.Combine(pluginPageRoot, "wwwroot", "index.html");
+        if (!Path.GetFullPath(indexPath).StartsWith(pluginsRoot, StringComparison.OrdinalIgnoreCase)) indexPath = string.Empty;
         if (File.Exists(indexPath))
         {
             var staticHtml = File.ReadAllText(indexPath);
-            body = ExtractPluginBodyFragment(staticHtml);
-            log.Add("PLUGIN_RENDER_RESULT", plugin?.Name ?? publicRoute, $"source=static_index routeSegment={SafePluginActionValue(publicRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} {BuildPluginRenderHtmlAudit(body)} rule=release_contract");
+            body = toolWindowContentOnly ? staticHtml : ExtractPluginBodyFragment(staticHtml);
+            log.Add("PLUGIN_RENDER_RESULT", plugin?.Descriptor.DisplayName ?? publicRoute, $"source=static_index routeSegment={SafePluginActionValue(publicRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} preserveFullHtml={toolWindowContentOnly} {BuildPluginRenderHtmlAudit(body)} rule=plugin_toolwindow_full_html_compat");
         }
         else if (plugin is not null)
         {
-            var pluginId = GetPluginActionIdentity(plugin, physicalRoute);
+            var pluginId = GetPluginActionIdentity(plugin);
             var token = actionTokens.Issue(pluginId, publicRoute);
-            var supportedActions = new[] { "viewerStart", "viewerStop" };
+            var supportedActions = new[] { "pluginOwnedAction" };
             var pluginAssetBaseUrl = $"/plugin-assets/{Uri.EscapeDataString(publicRoute)}";
             var pluginAssetApiBaseUrl = $"/api/plugins/{Uri.EscapeDataString(pluginId)}/assets";
             var toolWindowCaps = toolWindows.GetCapabilities();
-            var viewerProfileProjection = BuildViewerProfileProjection(tvTestOptions.Value, ini, tunerProfiles);
-            var viewerProfilesForContext = viewerProfileProjection.Profiles.Select(ToPluginViewerProfileInfo).ToList();
-            var selectableViewerProfilesForContext = viewerProfileProjection.SelectableProfiles.Select(ToPluginViewerProfileInfo).ToList();
-            log.Add("VIEWER_PROFILE_PROJECTION", plugin.Name,
-                $"result=OK source=PluginUiContext routeSegment={SafePluginActionValue(publicRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} viewingTuners={viewerProfileProjection.ViewingTunerCount} profiles={viewerProfileProjection.Profiles.Count} selectable={viewerProfileProjection.SelectableProfiles.Count} enabledReal={viewerProfileProjection.EnabledRealProfileCount} selectorVisibleRecommended={viewerProfileProjection.SelectorVisibleRecommended} profileIds={SafePluginActionValue(viewerProfileProjection.ProfileIds)} selectableIds={SafePluginActionValue(viewerProfileProjection.SelectableProfileIds)} default={SafePluginActionValue(viewerProfileProjection.DefaultViewerProfile)} rule=release_contract");
-            var actionContext = new TvAIrPlugin.PluginUiContext
+            var runtimeUiContext = new RuntimeUiRenderContext
             {
+                PluginId = pluginId,
+                UiDefinitionId = nativeUiDefinition?.UiDefinitionId ?? string.Empty,
+                Route = publicRoute,
                 RequestedAt = DateTime.Now,
                 IsClosedNetwork = true,
+                HostSelectedTheme = hostSelectedTheme,
+                HostEffectiveTheme = hostEffectiveTheme,
+                ThemeContract = BuildPluginThemeContract(hostSelectedTheme, hostEffectiveTheme),
                 ActionEndpoint = "/api/plugins/action",
-                ActionRoute = "/plugin-action",
-                PluginActionRoute = "/plugin-action",
-                PluginActionEndpoint = "/api/plugins/action",
                 ActionMethod = "POST",
-                PluginActionMethod = "POST",
                 SupportedActions = supportedActions,
-                PluginSupportedActions = supportedActions,
-                ViewerProfiles = viewerProfilesForContext,
-                SelectableViewerProfiles = selectableViewerProfilesForContext,
-                DefaultViewerProfile = viewerProfileProjection.DefaultViewerProfile,
-                EnabledRealViewerProfileCount = viewerProfileProjection.EnabledRealProfileCount,
-                SelectorVisibleRecommended = viewerProfileProjection.SelectorVisibleRecommended,
-                ViewerProfileSelectorVisibleRecommended = viewerProfileProjection.SelectorVisibleRecommended,
-                MinWidthInvariantRequired = true,
                 ActionToken = token.Token,
-                PluginActionToken = token.Token,
-                PluginId = pluginId,
-                RouteSegment = publicRoute,
                 ActionContract = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                 {
                     ["route"] = "/plugin-action",
@@ -4168,25 +3995,40 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
                     ["token"] = token.Token,
                     ["pluginId"] = pluginId,
                     ["routeSegment"] = publicRoute,
-                    ["responseMode"] = "json|refreshWindow|hostHandled|noContent",
-                    ["formResponseMode"] = "viewerStart/viewerStop support responseMode=hostHandled for no JSON/no rerender; refreshWindow for explicit rerender",
-                    ["viewerStartPayloadFields"] = "serviceId|networkId|transportStreamId|programGuideFilterGroup|broadcastGroup|allocationGroup|tunerGroup|channelSpace|channelIndex|viewerProfile|windowId|responseMode|refreshAfter|refreshTarget|refreshScrollTarget|refreshScrollMode|preserveViewerWindowState|viewerActivation|retuneExistingViewer",
-                    ["viewerStartPreferredTunerFields"] = "preferredTunerName|preferredDid|preferredSlot",
-                    ["viewerProfilesEndpoint"] = "/api/plugins/viewer-profiles",
-                    ["viewerProfileReuseContract"] = "viewerProfile/tvTestPathKey plus BonDriver/DID must match before internal retune",
-                    ["viewerProfiles"] = viewerProfileProjection.ProfileIds,
-                    ["selectableViewerProfiles"] = viewerProfileProjection.SelectableProfileIds,
-                    ["defaultViewerProfile"] = viewerProfileProjection.DefaultViewerProfile,
-                    ["enabledRealViewerProfileCount"] = viewerProfileProjection.EnabledRealProfileCount.ToString(CultureInfo.InvariantCulture),
-                    ["selectorVisibleRecommended"] = viewerProfileProjection.SelectorVisibleRecommended ? "true" : "false",
-                    ["viewerProfileSelectorVisibleRecommended"] = viewerProfileProjection.SelectorVisibleRecommended ? "true" : "false",
-                    ["minWidthInvariantRequired"] = "true"
+                    ["hostSelectedTheme"] = hostSelectedTheme,
+                    ["hostEffectiveTheme"] = hostEffectiveTheme,
+                    ["themeContract"] = "RuntimeUiRenderContext.ThemeContract",
+                    ["responseMode"] = "json|refreshWindow|patchWindow|hostHandled|noContent",
+                    ["pageResponseMode"] = "hostHandled",
+                    ["browserTransport"] = "application/x-www-form-urlencoded",
+                    ["browserTransportMethod"] = "host_managed_declarative_safe_event",
+                    ["scriptExecutionAllowed"] = "false",
+                    ["endpointUsage"] = "POST ActionContract.endpoint (/api/plugins/action); ActionContract.route (/plugin-action) is a logical contract identifier, not the HTTP POST target",
+                    ["tokenField"] = "actionToken (token alias accepted)",
+                    ["identityFields"] = "pluginId,routeSegment",
+                    ["actionField"] = "action=pluginOwnedAction",
+                    ["payloadFields"] = "data-tvair-payload-{name} -> form field {name} -> RuntimeUiActionHttpRequest.Payload",
+                    ["pageButtonContract"] = "data-tvair-event=click;data-tvair-action=pluginOwnedAction;data-tvair-endpoint=/api/plugins/action;data-tvair-plugin-id;data-tvair-route-segment;data-tvair-action-token;data-tvair-response-mode=hostHandled;data-tvair-repeat-policy;data-tvair-burst-window-ms;data-tvair-accepted-label;data-tvair-payload-*",
+                    ["pageAndToolWindowTransportSame"] = "true",
+                    ["refreshRequestedSurfaceOwner"] = "RuntimeUiDefinition.Kind",
+                    ["pageRefreshContract"] = "RefreshRequested -> Host-issued same ApplicationPage navigation; WindowInstanceId not required",
+                    ["toolWindowRefreshContract"] = "RefreshRequested -> current WindowContent refresh; WindowInstanceId required",
+                },
+                HoverContract = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["contract"] = "RuntimeHover",
+                    ["optInAttribute"] = RuntimeUiRenderContext.RuntimeHoverKeyAttribute,
+                    ["eventName"] = RuntimeUiRenderContext.RuntimeHoverEventName,
+                    ["states"] = "enter,leave",
+                    ["delivery"] = "bubbling_dom_custom_event",
+                    ["hostOwns"] = "hover_state_normalization_only",
+                    ["pluginOwns"] = "reaction,popup,marquee,overflow_detection,expansion,highlight",
+                    ["network"] = "none",
+                    ["tokenRequired"] = "false"
                 },
                 WindowRoute = "/plugin-window",
                 WindowEndpoint = "/api/plugins/window",
-                WindowStateEndpointTemplate = "/plugin-window/{windowId}/state",
                 CurrentWindowId = currentWindowId,
-                WindowId = currentWindowId,
                 IsHostManagedWindowContent = isHostManagedWindowContent,
                 CurrentWindowStateEndpoint = currentWindowStateEndpoint,
                 CurrentWindowStateUrl = currentWindowStateUrl,
@@ -4218,69 +4060,14 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
                     ["reuseKey"] = toolWindowCaps.ReuseKey,
                     ["refreshTarget"] = toolWindowCaps.RefreshTarget,
                     ["refreshReloadScope"] = isHostManagedWindowContent ? "toolwindow-content-document" : toolWindowCaps.RefreshReloadScope,
-                    ["supportsRefreshScrollTarget"] = toolWindowCaps.SupportsRefreshScrollTarget ? "true" : "false",
-                    ["refreshScrollModes"] = toolWindowCaps.RefreshScrollModes,
                     ["scriptExecutionAllowed"] = toolWindowCaps.ScriptExecutionAllowed ? "true" : "false",
                     ["supportsManifestFormIcon"] = toolWindowCaps.SupportsManifestFormIcon ? "true" : "false",
                     ["formIconSourcePriority"] = toolWindowCaps.FormIconSourcePriority
                 },
-                ViewerControlActionContract = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-                {
-                    ["contractVersion"] = "1.0.0",
-                    ["toolWindowOnlySafeEvents"] = "true",
-                    ["pluginScriptAllowed"] = "false",
-                    ["safeEventAttributePrefix"] = "data-tvair-",
-                    ["supportedEvents"] = "dblclick,click",
-                    ["supportedActions"] = "viewerStart,viewerStop,refreshWindow,updateWindow",
-                    ["viewerStartPayloadFields"] = "serviceId|networkId|transportStreamId|programGuideFilterGroup|broadcastGroup|allocationGroup|tunerGroup|channelSpace|channelIndex|viewerProfile|windowId|responseMode|refreshAfter|refreshTarget|refreshScrollTarget|refreshScrollMode|preserveViewerWindowState|viewerActivation|retuneExistingViewer",
-                    ["viewerStartPreferredTunerFields"] = "preferredTunerName|preferredDid|preferredSlot",
-                    ["viewerProfilesEndpoint"] = "/api/plugins/viewer-profiles",
-                    ["viewerProfileReuseContract"] = "viewerProfile/tvTestPathKey plus BonDriver/DID must match before internal retune",
-                    ["viewerProfiles"] = viewerProfileProjection.ProfileIds,
-                    ["selectableViewerProfiles"] = viewerProfileProjection.SelectableProfileIds,
-                    ["defaultViewerProfile"] = viewerProfileProjection.DefaultViewerProfile,
-                    ["enabledRealViewerProfileCount"] = viewerProfileProjection.EnabledRealProfileCount.ToString(CultureInfo.InvariantCulture),
-                    ["selectorVisibleRecommended"] = viewerProfileProjection.SelectorVisibleRecommended ? "true" : "false",
-                    ["viewerProfileSelectorVisibleRecommended"] = viewerProfileProjection.SelectorVisibleRecommended ? "true" : "false",
-                    ["minWidthInvariantRequired"] = "true",
-                    ["programGuideFilterSource"] = "TvAIrProgramGuideWaveFilter",
-                    ["programGuideFilterField"] = "programGuideFilterGroup",
-                    ["tunerGroupField"] = "tunerGroup",
-                    ["viewerTunersEndpoint"] = "/api/plugins/viewer-tuners",
-                    ["waveFiltersEndpoint"] = "/api/plugins/program-guide/wave-filters",
-                    ["alwaysOnTopAction"] = "updateWindow payload.alwaysOnTop refreshAfter=true refreshTarget=content",
-                    ["updateWindowRefreshAfter"] = "refreshAfter=true refreshTarget=content responseMode=hostHandled refreshScrollTarget=<elementId> refreshScrollMode=center|nearest|top",
-                    ["refreshScrollTarget"] = "element id only; no CSS selector; host applies after directContent rerender",
-                    ["refreshScrollModes"] = "center|nearest|top",
-                    ["updateWindowRefreshAfterAutoRender"] = "same_window_content_only",
-                    ["alwaysOnTopStateSource"] = "PluginUiContext.CurrentWindowAlwaysOnTop first; /plugin-window/{windowId}/state is authoritative for browser-side refresh",
-                    ["currentWindowAlwaysOnTop"] = currentWindowAlwaysOnTop ? "true" : "false",
-                    ["currentWindowRevision"] = currentWindowRevision.ToString(CultureInfo.InvariantCulture),
-                    ["currentWindowHostAlive"] = currentWindowHostAlive ? "true" : "false",
-                    ["renderHtmlStateReadPolicy"] = "do_not_http_self_call; use PluginUiContext direct state values",
-                    ["updateWindowPreferredResponseMode"] = "hostHandled",
-                    ["updateWindowAutoRender"] = "not_guaranteed; call refreshWindow responseMode=hostHandled if immediate rerender is required",
-                    ["directContentRefreshReloadScope"] = "toolwindow-content-document",
-                    ["preferredOpenModeToolWindowSupported"] = "true",
-                    ["toolWindowContentOnly"] = "true",
-                    ["currentRequestPath"] = currentRequestPath,
-                    ["currentRequestQueryString"] = currentRequestQueryString,
-                    ["currentRequestPathAndQuery"] = currentRequestPathAndQuery,
-                    ["currentRequestQueryKeys"] = currentRequestQueryKeys,
-                    ["currentRequestWave"] = currentRequestWave,
-                    ["pluginAssetBaseUrl"] = pluginAssetBaseUrl,
-                    ["pluginAssetAllowedExtensions"] = "png",
-                    ["pluginAssetResolveMethod"] = "PluginUiContext.ResolveAssetUrl(assetName)",
-                    ["toolWindowFormIconContract"] = "manifest/Ui.Icon .ico -> host-managed Form.Icon",
-                    ["toolWindowFormIconAllowedExtension"] = "ico",
-                    ["toolWindowFormIconSourcePriority"] = "EmbeddedResource>plugin_file>default_TvAIr_icon"
-                },
-                CurrentRequestPath = currentRequestPath,
-                CurrentRequestQueryString = currentRequestQueryString,
-                CurrentRequestPathAndQuery = currentRequestPathAndQuery,
-                CurrentRequestQuery = currentRequestQuery,
-                PluginAssetBaseUrl = pluginAssetBaseUrl,
-                PluginAssetContract = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                RequestPathAndQuery = currentRequestPathAndQuery,
+                RequestQuery = currentRequestQuery,
+                AssetBaseUrl = pluginAssetBaseUrl,
+                AssetContract = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                 {
                     ["contractVersion"] = "1.0.0",
                     ["preferredUrlPattern"] = "/plugin-assets/{routeSegment}/{assetName}",
@@ -4317,7 +4104,7 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
                     ["currentWindowAlwaysOnTop"] = currentWindowAlwaysOnTop ? "true" : "false",
                     ["currentWindowRevision"] = currentWindowRevision.ToString(CultureInfo.InvariantCulture),
                     ["currentWindowHostAlive"] = currentWindowHostAlive ? "true" : "false",
-                    ["currentWindowStateDirectValues"] = "PluginUiContext.CurrentWindowAlwaysOnTop|CurrentWindowRevision|CurrentWindowHostAlive; no RenderHtml self HTTP call required",
+                    ["currentWindowStateDirectValues"] = "RuntimeUiRenderContext.CurrentWindowAlwaysOnTop|CurrentWindowRevision|CurrentWindowHostAlive; no RenderHtml self HTTP call required",
                     ["isHostManagedWindowContent"] = isHostManagedWindowContent ? "true" : "false",
                     ["refreshContract"] = "host_state_revision",
                     ["refreshTarget"] = "content",
@@ -4340,30 +4127,14 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
                     ["toolWindowSupportsPositionPersistence"] = toolWindowCaps.SupportsPositionPersistence ? "true" : "false",
                     ["toolWindowSupportsStatePersistence"] = toolWindowCaps.SupportsStatePersistence ? "true" : "false",
                     ["toolWindowStateFields"] = "windowId|pluginId|routeSegment|title|width|height|minWidth|minHeight|left|top|alwaysOnTop|revision|isClosed|hostAlive|hostKind|webView2RuntimeAvailable|reuseKey|jsonScreenSuppressed|closeSync",
-                    ["toolWindowFormIconContract"] = "manifest/Ui.Icon .ico -> host-managed Form.Icon",
+                    ["toolWindowFormIconContract"] = "Runtime descriptor Assets .ico -> host-managed Form.Icon",
                     ["toolWindowFormIconAllowedExtension"] = "ico",
                     ["toolWindowFormIconSourcePriority"] = "EmbeddedResource>plugin_file>default_TvAIr_icon",
                     ["toolWindowFormResponse"] = "303_redirect_back_to_returnUrl_or_referrer_no_json_no_blank",
-                    ["viewerControlEventContract"] = "toolWindow-only safe host binding; data-tvair-event=dblclick; data-tvair-action=viewerStart; plugin JS remains forbidden",
-                    ["viewerTunersEndpoint"] = "/api/plugins/viewer-tuners",
-                    ["viewerProfilesEndpoint"] = "/api/plugins/viewer-profiles",
-                    ["viewerProfiles"] = viewerProfileProjection.ProfileIds,
-                    ["selectableViewerProfiles"] = viewerProfileProjection.SelectableProfileIds,
-                    ["defaultViewerProfile"] = viewerProfileProjection.DefaultViewerProfile,
-                    ["enabledRealViewerProfileCount"] = viewerProfileProjection.EnabledRealProfileCount.ToString(CultureInfo.InvariantCulture),
-                    ["selectorVisibleRecommended"] = viewerProfileProjection.SelectorVisibleRecommended ? "true" : "false",
-                    ["viewerProfileSelectorVisibleRecommended"] = viewerProfileProjection.SelectorVisibleRecommended ? "true" : "false",
-                    ["minWidthInvariantRequired"] = "true",
                     ["programGuideWaveFiltersEndpoint"] = "/api/plugins/program-guide/wave-filters",
                     ["preferredOpenMode"] = "toolWindow",
                     ["toolWindowContentOnly"] = "true",
                     ["actionForm"] = "form POST /api/plugins/action responseMode=hostHandled windowId=currentWindowId; use refreshWindow only when immediate rerender is required",
-                    ["viewerActionPreferredResponseMode"] = "hostHandled",
-                    ["viewerActionAutoRender"] = "viewerStart/viewerStop support responseMode=hostHandled refreshAfter=true refreshTarget=content refreshScrollTarget=<elementId> refreshScrollMode=center|nearest|top for same-window content rerender and host scroll",
-                    ["viewerStopSuccessState"] = "PLUGIN_ACTION_VIEWER result=OK plus no active GetViewerSessions entry means UI OFF; VIEWER_PROCESS_STOP NOT_FOUND is acceptable when lease is released",
-                    ["viewerStartPreserveWindowState"] = "preserveViewerWindowState=true viewerActivation=preserve prevents normal-window activation request; plugin must not call Win32/Alt+Enter",
-                    ["viewerActionRefreshAfter"] = "responseMode=hostHandled refreshAfter=true refreshTarget=content refreshScrollTarget=<elementId> refreshScrollMode=center|nearest|top rerenders same host-managed tool window content and scrolls after successful viewerStart/viewerStop",
-                    ["refreshScrollTarget"] = "element id only; no CSS selector; applied by TvAIr host after directContent rerender",
                     ["currentRequestPath"] = currentRequestPath,
                     ["currentRequestQueryString"] = currentRequestQueryString,
                     ["currentRequestPathAndQuery"] = currentRequestPathAndQuery,
@@ -4371,146 +4142,373 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
                     ["currentRequestWave"] = currentRequestWave,
                     ["pluginAssetBaseUrl"] = pluginAssetBaseUrl,
                     ["pluginAssetAllowedExtensions"] = "png",
-                    ["pluginAssetResolveMethod"] = "PluginUiContext.ResolveAssetUrl(assetName)",
-                    ["toolWindowFormIconContract"] = "manifest/Ui.Icon .ico -> host-managed Form.Icon",
-                    ["toolWindowFormIconAllowedExtension"] = "ico",
-                    ["toolWindowFormIconSourcePriority"] = "EmbeddedResource>plugin_file>default_TvAIr_icon"
+                    ["pluginAssetResolveMethod"] = "RuntimeUiRenderContext.ResolveAssetUrl(assetName)"
                 }
             };
-            log.Add("PLUGIN_UI_CONTEXT_ACTION_CONTRACT", plugin.Name, $"result=ISSUED route={SafePluginActionValue(actionContext.ActionRoute)} pluginActionRoute={SafePluginActionValue(actionContext.PluginActionRoute)} endpoint={SafePluginActionValue(actionContext.ActionEndpoint)} method={SafePluginActionValue(actionContext.ActionMethod)} actions={SafePluginActionValue(string.Join(",", supportedActions))} tokenPresent={!string.IsNullOrWhiteSpace(actionContext.ActionToken)} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(publicRoute)} rule=release_contract");
-            log.Add("PLUGIN_UI_CONTEXT_WINDOW_CONTRACT", plugin.Name, $"result=ISSUED route={SafePluginActionValue(actionContext.WindowRoute)} endpoint={SafePluginActionValue(actionContext.WindowEndpoint)} method={SafePluginActionValue(actionContext.WindowMethod)} actions={SafePluginActionValue(string.Join(",", actionContext.SupportedWindowActions))} tokenPresent={!string.IsNullOrWhiteSpace(actionContext.WindowToken)} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(publicRoute)} hostManaged=True currentWindowId={SafePluginActionValue(currentWindowId)} isHostManagedWindowContent={isHostManagedWindowContent} refreshTarget=content toolWindowSupported={toolWindowCaps.ToolWindowSupported} webView2Runtime={toolWindowCaps.WebView2RuntimeAvailable} hostKind={SafePluginActionValue(toolWindowCaps.HostKind)} reuseKey={SafePluginActionValue(toolWindowCaps.ReuseKey)} positionPersistence={toolWindowCaps.SupportsPositionPersistence} statePersistence={toolWindowCaps.SupportsStatePersistence} closeSync=closeWindow_and_host_x_button rule=release_contract");
-            log.Add("WINDOW_STATE_ENDPOINT_CONTRACT", plugin.Name, $"result=ISSUED currentWindowId={SafePluginActionValue(currentWindowId)} endpoint={SafePluginActionValue(currentWindowStateEndpoint)} absoluteUrl={SafePluginActionValue(currentWindowStateUrl)} currentWindowAlwaysOnTop={currentWindowAlwaysOnTop} currentWindowRevision={currentWindowRevision} currentWindowHostAlive={currentWindowHostAlive} csharpReadable={(!string.IsNullOrWhiteSpace(currentWindowStateUrl)).ToString()} stateDirectValues=PluginUiContext source=PluginUiContext.WindowContract rule=release_contract");
-            log.Add("PLUGIN_UI_CONTEXT_REQUEST_CONTRACT", plugin.Name, $"result=ISSUED routeSegment={SafePluginActionValue(publicRoute)} requestPath={SafePluginActionValue(actionContext.CurrentRequestPath)} requestQuery={SafePluginActionValue(actionContext.CurrentRequestQueryString)} pathAndQuery={SafePluginActionValue(actionContext.CurrentRequestPathAndQuery)} queryKeys={SafePluginActionValue(currentRequestQueryKeys)} wave={SafePluginActionValue(currentRequestWave)} toolWindow={isHostManagedWindowContent} directContent={toolWindowContentOnly} currentWindowId={SafePluginActionValue(currentWindowId)} rule=release_contract");
-            log.Add("PLUGIN_UI_CONTEXT_ASSET_CONTRACT", plugin.Name, $"result=ISSUED routeSegment={SafePluginActionValue(publicRoute)} pluginId={SafePluginActionValue(pluginId)} assetBaseUrl={SafePluginActionValue(pluginAssetBaseUrl)} apiBaseUrl={SafePluginActionValue(pluginAssetApiBaseUrl)} allowedExtensions=png imgTagAllowed=True externalUrlAllowed=False dataUriRecommended=False formIconAllowedExtensions=ico formIconSourcePriority=EmbeddedResource>plugin_file>default_TvAIr_icon rule=release_contract");
-            var renderHtml = plugin.RenderHtml(actionContext);
-            log.Add("PLUGIN_RENDER_RESULT", plugin.Name, $"source=plugin_render_raw routeSegment={SafePluginActionValue(publicRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} {BuildPluginRenderHtmlAudit(renderHtml)} rule=release_contract");
-            body = PluginHtmlSanitizer.Sanitize(renderHtml ?? string.Empty);
-            log.Add("PLUGIN_RENDER_RESULT", plugin.Name, $"source=plugin_render_sanitized routeSegment={SafePluginActionValue(publicRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} {BuildPluginRenderHtmlAudit(body)} rule=release_contract");
+            log.Add("PLUGIN_RUNTIME_UI_CONTEXT_ACTION_CONTRACT", plugin.Descriptor.DisplayName, $"result=ISSUED route=/plugin-action endpoint={SafePluginActionValue(runtimeUiContext.ActionEndpoint)} method={SafePluginActionValue(runtimeUiContext.ActionMethod)} actions={SafePluginActionValue(string.Join(",", supportedActions))} tokenPresent={!string.IsNullOrWhiteSpace(runtimeUiContext.ActionToken)} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(publicRoute)} rule=release_contract");
+            log.Add("PLUGIN_RUNTIME_UI_CONTEXT_HOVER_CONTRACT", plugin.Descriptor.DisplayName, $"result=ISSUED contract=RuntimeHover optIn=data-tvair-hover-key event=tvair-runtime-hover states=enter,leave delivery=bubbling_dom_custom_event network=none pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(publicRoute)} rule=runtime_hover_contract");
+            log.Add("PLUGIN_RUNTIME_UI_CONTEXT_WINDOW_CONTRACT", plugin.Descriptor.DisplayName, $"result=ISSUED route={SafePluginActionValue(runtimeUiContext.WindowRoute)} endpoint={SafePluginActionValue(runtimeUiContext.WindowEndpoint)} method={SafePluginActionValue(runtimeUiContext.WindowMethod)} actions={SafePluginActionValue(string.Join(",", runtimeUiContext.SupportedWindowActions))} tokenPresent={!string.IsNullOrWhiteSpace(runtimeUiContext.WindowToken)} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(publicRoute)} hostManaged=True currentWindowId={SafePluginActionValue(currentWindowId)} isHostManagedWindowContent={isHostManagedWindowContent} refreshTarget=content toolWindowSupported={toolWindowCaps.ToolWindowSupported} webView2Runtime={toolWindowCaps.WebView2RuntimeAvailable} hostKind={SafePluginActionValue(toolWindowCaps.HostKind)} reuseKey={SafePluginActionValue(toolWindowCaps.ReuseKey)} positionPersistence={toolWindowCaps.SupportsPositionPersistence} statePersistence={toolWindowCaps.SupportsStatePersistence} closeSync=closeWindow_and_host_x_button rule=release_contract");
+            log.Add("WINDOW_STATE_ENDPOINT_CONTRACT", plugin.Descriptor.DisplayName, $"result=ISSUED currentWindowId={SafePluginActionValue(currentWindowId)} endpoint={SafePluginActionValue(currentWindowStateEndpoint)} absoluteUrl={SafePluginActionValue(currentWindowStateUrl)} currentWindowAlwaysOnTop={currentWindowAlwaysOnTop} currentWindowRevision={currentWindowRevision} currentWindowHostAlive={currentWindowHostAlive} csharpReadable={(!string.IsNullOrWhiteSpace(currentWindowStateUrl)).ToString()} stateDirectValues=RuntimeUiRenderContext source=RuntimeUiRenderContext.WindowContract rule=release_contract");
+            log.Add("PLUGIN_RUNTIME_UI_CONTEXT_REQUEST_CONTRACT", plugin.Descriptor.DisplayName, $"result=ISSUED routeSegment={SafePluginActionValue(publicRoute)} requestPath={SafePluginActionValue(currentRequestPath)} requestQuery={SafePluginActionValue(currentRequestQueryString)} pathAndQuery={SafePluginActionValue(runtimeUiContext.RequestPathAndQuery)} queryKeys={SafePluginActionValue(currentRequestQueryKeys)} wave={SafePluginActionValue(currentRequestWave)} toolWindow={isHostManagedWindowContent} directContent={toolWindowContentOnly} currentWindowId={SafePluginActionValue(currentWindowId)} rule=release_contract");
+            log.Add("PLUGIN_RUNTIME_UI_CONTEXT_ASSET_CONTRACT", plugin.Descriptor.DisplayName, $"result=ISSUED routeSegment={SafePluginActionValue(publicRoute)} pluginId={SafePluginActionValue(pluginId)} assetBaseUrl={SafePluginActionValue(pluginAssetBaseUrl)} apiBaseUrl={SafePluginActionValue(pluginAssetApiBaseUrl)} allowedExtensions=png imgTagAllowed=True externalUrlAllowed=False dataUriRecommended=False formIconAllowedExtensions=ico formIconSourcePriority=EmbeddedResource>plugin_file>default_TvAIr_icon rule=release_contract");
+            if (nativeUi is null || nativeUiDefinition is null)
+                return Results.NotFound("Runtime Plugin UI not found.");
+            var renderHtml = nativeUi.RenderHtml(runtimeUiContext);
+            var floatingButtonsHtml = BuildPluginFloatingButtonsHtml(runtimeUiContext, plugin.Descriptor.DisplayName, log);
+            if (!string.IsNullOrWhiteSpace(floatingButtonsHtml))
+                renderHtml = (renderHtml ?? string.Empty) + floatingButtonsHtml;
+            log.Add("PLUGIN_RENDER_RESULT", plugin.Descriptor.DisplayName, $"source=plugin_render_raw routeSegment={SafePluginActionValue(publicRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} {BuildPluginRenderHtmlAudit(renderHtml)} rule=release_contract");
+            ApplyPluginPresentationLifecycleHint(pluginId, plugin.Descriptor.DisplayName, currentRequestQuery, logPresentationStore, log);
+            body = toolWindowContentOnly ? (renderHtml ?? string.Empty) : NormalizePluginPageContent(renderHtml);
+            log.Add("PLUGIN_RENDER_RESULT", plugin.Descriptor.DisplayName, $"source={(toolWindowContentOnly ? "plugin_render_full_html_compat" : "plugin_render_page_fragment_normalized")} routeSegment={SafePluginActionValue(publicRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} preserveFullHtml={toolWindowContentOnly} {BuildPluginRenderHtmlAudit(body)} rule=plugin_page_fragment_normalization_contract");
+            var pageActionAudit = BuildPluginPageActionAudit(body);
+            log.Add("PLUGIN_PAGE_ACTION_CANDIDATE", plugin.Descriptor.DisplayName, $"result={(pageActionAudit.StartsWith("candidates=0", StringComparison.Ordinal) ? "NONE" : "DETECTED")} routeSegment={SafePluginActionValue(publicRoute)} toolWindowContentOnly={toolWindowContentOnly} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} {pageActionAudit} rule=plugin_page_action_contract");
         }
         else
         {
             return Results.NotFound("Plugin UI not found.");
         }
 
-        log.Add("PLUGIN_SAFE_EVENT_INJECT", plugin?.Name ?? publicRoute, $"action=render result=INJECTED routeSegment={SafePluginActionValue(publicRoute)} toolWindowContentOnly={toolWindowContentOnly} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} script=external_and_inline_guarded hostKind={SafePluginActionValue(toolWindows.GetCapabilities().HostKind)} rule=release_contract");
-        return Results.Content(BuildPluginShellHtml(title, publicRoute, body, toolWindowContentOnly), "text/html; charset=utf-8");
+        log.Add("PLUGIN_SAFE_EVENT_INJECT", plugin?.Descriptor.DisplayName ?? publicRoute, $"action=render result=INJECTED routeSegment={SafePluginActionValue(publicRoute)} toolWindowContentOnly={toolWindowContentOnly} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} script=external_and_inline_guarded hostKind={SafePluginActionValue(toolWindows.GetCapabilities().HostKind)} rule=release_contract");
+        return Results.Content(BuildPluginShellHtml(title, publicRoute, body, toolWindowContentOnly, hostSelectedTheme, hostEffectiveTheme), "text/html; charset=utf-8");
     }
     catch (Exception ex)
     {
         var exMessage = $"{ex.GetType().Name}: {ex.Message}";
         var stackSummary = (ex.StackTrace ?? string.Empty).Replace("\r", " ").Replace("\n", " ");
         if (stackSummary.Length > 500) stackSummary = stackSummary[..500];
-        log.Add("PLUGIN_RENDER_EXCEPTION", plugin?.Name ?? publicRoute, $"routeSegment={SafePluginActionValue(publicRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} exceptionType={SafePluginActionValue(ex.GetType().Name)} message={SafePluginActionValue(ex.Message)} stack={SafePluginActionValue(stackSummary)} rule=release_contract");
-        var errorBody = BuildPluginRenderErrorBody(plugin?.Name ?? publicRoute, publicRoute, exMessage);
-        return Results.Content(BuildPluginShellHtml(title, publicRoute, errorBody, toolWindowContentOnly), "text/html; charset=utf-8");
+        log.Add("PLUGIN_RENDER_EXCEPTION", plugin?.Descriptor.DisplayName ?? publicRoute, $"routeSegment={SafePluginActionValue(publicRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} exceptionType={SafePluginActionValue(ex.GetType().Name)} message={SafePluginActionValue(ex.Message)} stack={SafePluginActionValue(stackSummary)} rule=release_contract");
+        var errorBody = BuildPluginRenderErrorBody(plugin?.Descriptor.DisplayName ?? publicRoute, publicRoute, exMessage);
+        return Results.Content(BuildPluginShellHtml(title, publicRoute, errorBody, toolWindowContentOnly, hostSelectedTheme, hostEffectiveTheme), "text/html; charset=utf-8");
     }
 }
 
-// release_contract: 旧AI-rithm URLは legacy alias。UI露出は常に /plugin/airhythm に統一する。
-app.MapGet("/plugin/airithm", () => Results.Redirect("/plugin/airhythm", permanent: false));
-app.MapGet("/plugin-ui/airithm", () => Results.Redirect("/plugin/airhythm", permanent: false));
-app.MapGet("/plugin/{route}", (string route, HttpRequest http, PluginRegistry registry, PluginActionTokenStore actionTokens, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, IOptions<TvTestSettings> tvTestOptions, IniSettingsService ini, IReadOnlyList<TunerProfile> tunerProfiles, LogRepository log) => RenderPluginHtml(route, http, registry, actionTokens, windows, toolWindows, tvTestOptions, ini, tunerProfiles, log));
+
+static void ApplyPluginPresentationLifecycleHint(string pluginId, string pluginName, IReadOnlyDictionary<string, string> requestQuery, LogPresentationStore logPresentationStore, LogRepository log)
+{
+    if (string.IsNullOrWhiteSpace(pluginId) || requestQuery.Count == 0)
+        return;
+
+    var lifecycle = ReadPluginPresentationLifecycleHint(requestQuery);
+    if (lifecycle == PluginPresentationLifecycleHint.None)
+        return;
+
+    var activeBefore = logPresentationStore.ListLogSnapshots()
+        .Where(x => string.Equals(x.SourcePluginId, pluginId, StringComparison.OrdinalIgnoreCase))
+        .ToArray();
+    var activePolicyBefore = logPresentationStore.ListLogPolicies()
+        .Where(x => string.Equals(x.SourcePluginId, pluginId, StringComparison.OrdinalIgnoreCase))
+        .ToArray();
+    var inactiveBefore = logPresentationStore.ListInactiveLogSnapshots()
+        .Where(x => string.Equals(x.SourcePluginId, pluginId, StringComparison.OrdinalIgnoreCase))
+        .ToArray();
+    var actionName = lifecycle.ToString().ToLowerInvariant();
+
+    if (lifecycle == PluginPresentationLifecycleHint.Disable)
+    {
+        logPresentationStore.ClearLogSnapshot(pluginId);
+        logPresentationStore.ClearLogPolicy(pluginId);
+        var activeAfterDisable = logPresentationStore.ListLogSnapshots().Count(x => string.Equals(x.SourcePluginId, pluginId, StringComparison.OrdinalIgnoreCase));
+        var activePolicyAfterDisable = logPresentationStore.ListLogPolicies().Count(x => string.Equals(x.SourcePluginId, pluginId, StringComparison.OrdinalIgnoreCase));
+        var inactiveAfterDisable = logPresentationStore.ListInactiveLogSnapshots().Count(x => string.Equals(x.SourcePluginId, pluginId, StringComparison.OrdinalIgnoreCase));
+        log.Add("PLUGIN_PRESENTATION_LIFECYCLE", pluginName,
+            $"result=SUSPENDED action=disable pluginId={SafePluginActionValue(pluginId)} activeBefore={activeBefore.Length} activePolicyBefore={activePolicyBefore.Length} inactiveBefore={inactiveBefore.Length} activeAfter={activeAfterDisable} activePolicyAfter={activePolicyAfterDisable} inactiveAfter={inactiveAfterDisable} reason=render_lifecycle_hint rule=plugin_presentation_lifecycle_contract");
+        return;
+    }
+
+    if ((activeBefore.Length > 0 || activePolicyBefore.Length > 0) && inactiveBefore.Length == 0)
+    {
+        var activeSample = activeBefore.FirstOrDefault();
+        log.Add("PLUGIN_PRESENTATION_LIFECYCLE", pluginName,
+            $"result=ACTIVE_PRESENT action={actionName} pluginId={SafePluginActionValue(pluginId)} restored=0 activeBefore={activeBefore.Length} activePolicyBefore={activePolicyBefore.Length} inactiveBefore=0 activeViewKeys={SafePluginActionValue(PluginPresentationViewKeys(activeBefore))} inactiveViewKeys=- entries={(activeSample?.Snapshot.Entries.Count ?? 0)} source=already_active_before_lifecycle_hint reason=render_lifecycle_hint rule=plugin_presentation_lifecycle_contract");
+        return;
+    }
+
+    var restored = logPresentationStore.ReactivateInactiveLogSnapshots(pluginId);
+    var activeAfter = logPresentationStore.ListLogSnapshots()
+        .Where(x => string.Equals(x.SourcePluginId, pluginId, StringComparison.OrdinalIgnoreCase))
+        .ToArray();
+    var inactiveAfter = logPresentationStore.ListInactiveLogSnapshots()
+        .Where(x => string.Equals(x.SourcePluginId, pluginId, StringComparison.OrdinalIgnoreCase))
+        .ToArray();
+    var sample = restored.FirstOrDefault() ?? activeAfter.FirstOrDefault();
+    var result = restored.Count > 0
+        ? "REACTIVATED"
+        : (activeAfter.Length > 0 ? "ACTIVE_PRESENT_AFTER_RENDER" : "NO_PRESENTATION_SNAPSHOT");
+    var source = restored.Count > 0
+        ? "inactive_snapshot_reactivated"
+        : (activeAfter.Length > 0 ? "plugin_render_or_existing_active_snapshot" : "no_active_or_inactive_snapshot");
+
+    log.Add("PLUGIN_PRESENTATION_LIFECYCLE", pluginName,
+        $"result={result} action={actionName} pluginId={SafePluginActionValue(pluginId)} restored={restored.Count} activeBefore={activeBefore.Length} inactiveBefore={inactiveBefore.Length} activeAfter={activeAfter.Length} inactiveAfter={inactiveAfter.Length} activeViewKeys={SafePluginActionValue(PluginPresentationViewKeys(activeAfter.Length > 0 ? activeAfter : activeBefore))} inactiveViewKeys={SafePluginActionValue(PluginPresentationViewKeys(inactiveAfter.Length > 0 ? inactiveAfter : inactiveBefore))} entries={(sample?.Snapshot.Entries.Count ?? 0)} source={source} reason=render_lifecycle_hint rule=plugin_presentation_lifecycle_contract");
+}
+
+static string PluginPresentationViewKeys(IEnumerable<PluginLogPresentationSnapshot> snapshots)
+{
+    var value = string.Join(",", snapshots
+        .Select(x => x.Snapshot.ViewKey)
+        .Where(x => !string.IsNullOrWhiteSpace(x))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
+    return string.IsNullOrWhiteSpace(value) ? "-" : value;
+}
+
+static PluginPresentationLifecycleHint ReadPluginPresentationLifecycleHint(IReadOnlyDictionary<string, string> query)
+{
+    static bool Truthy(string? value) => IsTruthy(value);
+    static string V(IReadOnlyDictionary<string, string> q, string key)
+        => q.TryGetValue(key, out var value) ? (value ?? string.Empty).Trim() : string.Empty;
+    static bool IsEnableValue(string value)
+        => value.Equals("enable", StringComparison.OrdinalIgnoreCase)
+           || value.Equals("enabled", StringComparison.OrdinalIgnoreCase)
+           || value.Equals("activate", StringComparison.OrdinalIgnoreCase)
+           || value.Equals("active", StringComparison.OrdinalIgnoreCase)
+           || value.Equals("refresh", StringComparison.OrdinalIgnoreCase)
+           || value.Equals("reactivate", StringComparison.OrdinalIgnoreCase);
+    static bool IsDisableValue(string value)
+        => value.Equals("disable", StringComparison.OrdinalIgnoreCase)
+           || value.Equals("disabled", StringComparison.OrdinalIgnoreCase)
+           || value.Equals("clear", StringComparison.OrdinalIgnoreCase)
+           || value.Equals("deactivate", StringComparison.OrdinalIgnoreCase)
+           || value.Equals("inactive", StringComparison.OrdinalIgnoreCase);
+    static bool IsSaveCloseValue(string value)
+        => value.Equals("saveclose", StringComparison.OrdinalIgnoreCase)
+           || value.Equals("save-close", StringComparison.OrdinalIgnoreCase)
+           || value.Equals("save_close", StringComparison.OrdinalIgnoreCase)
+           || value.Equals("save", StringComparison.OrdinalIgnoreCase);
+    static bool IsLifecycleCommandKey(string key)
+        => key.Equals("presentationLifecycle", StringComparison.OrdinalIgnoreCase)
+           || key.Equals("presentationCommand", StringComparison.OrdinalIgnoreCase)
+           || key.Equals("lifecycle", StringComparison.OrdinalIgnoreCase)
+           || key.Equals("lifecycleCommand", StringComparison.OrdinalIgnoreCase);
+
+    // The saved post-action enabled value is the authoritative presentation state.
+    if (query.ContainsKey("enabled"))
+        return Truthy(V(query, "enabled")) ? PluginPresentationLifecycleHint.Enable : PluginPresentationLifecycleHint.Disable;
+
+    // Explicit lifecycle/command values have priority over compatibility booleans.
+    // This prevents a form that carries both "command=disable" and an unrelated/stale
+    // "enabled=true" field from reactivating a snapshot during the same request.
+    foreach (var pair in query)
+    {
+        if (!IsLifecycleCommandKey(pair.Key))
+            continue;
+        var value = (pair.Value ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(value))
+            continue;
+        if (IsDisableValue(value))
+            return PluginPresentationLifecycleHint.Disable;
+        if (IsEnableValue(value))
+            return PluginPresentationLifecycleHint.Enable;
+        if (IsSaveCloseValue(value))
+            break;
+    }
+
+    return PluginPresentationLifecycleHint.None;
+}
+
+// release_contract: 既存プラグインToolWindow/Actionのホスト管理入口。
+// Capability API整理後も、既存ToolWindow経路は本体標準ルートとして維持する。
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+app.MapGet("/api/plugins/safe-event/client-log", (HttpRequest http, LogRepository log) =>
+{
+    var q = http.Query;
+    static string Q(IQueryCollection values, string key) => values.TryGetValue(key, out var value) ? value.ToString() : string.Empty;
+    var phase = Q(q, "phase");
+    var pluginId = Q(q, "pluginId");
+    var route = Q(q, "routeSegment");
+    var eventType = phase.StartsWith("bind_", StringComparison.OrdinalIgnoreCase) ? "PLUGIN_SAFE_EVENT_CLIENT_INIT"
+        : phase.StartsWith("payload_", StringComparison.OrdinalIgnoreCase) ? "PLUGIN_SAFE_EVENT_PAYLOAD"
+        : phase.StartsWith("post_", StringComparison.OrdinalIgnoreCase) ? "PLUGIN_SAFE_EVENT_POST"
+        : "PLUGIN_SAFE_EVENT_CLIENT";
+    log.Add(eventType, string.IsNullOrWhiteSpace(pluginId) ? route : pluginId,
+        $"phase={SafePluginActionValue(phase)} interactionId={SafePluginActionValue(Q(q, "interactionId"))} event={SafePluginActionValue(Q(q, "event"))} action={SafePluginActionValue(Q(q, "action"))} pluginId={SafePluginActionValue(pluginId)} route={SafePluginActionValue(route)} tag={SafePluginActionValue(Q(q, "tag"))} type={SafePluginActionValue(Q(q, "type"))} tokenPresent={SafePluginActionValue(Q(q, "hasToken"))} payloadCount={SafePluginActionValue(Q(q, "payloadCount"))} payloadKeys={SafePluginActionValue(Q(q, "payloadKeys"))} endpoint={SafePluginActionValue(Q(q, "endpoint"))} status={SafePluginActionValue(Q(q, "status"))} reason={SafePluginActionValue(Q(q, "reason"))} readyState={SafePluginActionValue(Q(q, "readyState"))} candidates={SafePluginActionValue(Q(q, "candidates"))} hostKind={SafePluginActionValue(Q(q, "hostKind"))} rule=safe_event_host_capture_contract");
+    return Results.NoContent();
+});
+#endif
+
+static async Task<IResult> RenewPluginActionTokenEndpoint(
+    HttpRequest http,
+    PluginActionTokenStore actionTokens,
+    LogRepository log)
+{
+    if (!http.HasFormContentType)
+        return Results.BadRequest(new { error = "form_content_required" });
+
+    var form = await http.ReadFormAsync();
+    var token = form["actionToken"].ToString();
+    if (string.IsNullOrWhiteSpace(token)) token = form["token"].ToString();
+    var pluginId = form["pluginId"].ToString();
+    var routeSegment = form["routeSegment"].ToString().Trim().Trim('/');
+
+    // plugin_action_token_keepalive_contract: renew only an already-issued token whose plugin/route
+    // identity still matches. No windowId is required, so long-lived Page surfaces and ToolWindows
+    // share the same Host-owned lifetime contract without weakening token identity validation.
+    if (!actionTokens.Renew(token, pluginId, routeSegment, out var reason, out _))
+    {
+        log.Add("PLUGIN_ACTION_TOKEN_KEEPALIVE", string.IsNullOrWhiteSpace(pluginId) ? routeSegment : pluginId,
+            $"result=DENIED reason={SafePluginActionValue(reason)} routeSegment={SafePluginActionValue(routeSegment)} rule=plugin_action_token_keepalive_contract");
+        return Results.BadRequest(new { error = reason });
+    }
+
+    return Results.NoContent();
+}
+
+static async Task<IResult> ValidatePluginPageActionTokenEndpoint(
+    HttpRequest http,
+    PluginActionTokenStore actionTokens,
+    LogRepository log)
+{
+    if (!http.HasFormContentType)
+        return Results.BadRequest(new { error = "form_content_required" });
+
+    var form = await http.ReadFormAsync();
+    var token = form["actionToken"].ToString();
+    if (string.IsNullOrWhiteSpace(token)) token = form["token"].ToString();
+    var pluginId = form["pluginId"].ToString();
+    var routeSegment = form["routeSegment"].ToString().Trim().Trim('/');
+
+    // plugin_page_action_token_recovery_contract: Page history/BFCache restoration may revive an old
+    // document after its token expired while that Page was not active. Validate possession only;
+    // never issue or resurrect a token here. A stale Page must navigate through /plugin/{route}
+    // so RenderPluginHtml remains the single source of new action tokens.
+    if (!actionTokens.Validate(token, pluginId, routeSegment, out var reason))
+    {
+        log.Add("PLUGIN_ACTION_TOKEN_PAGE_VALIDATE", string.IsNullOrWhiteSpace(pluginId) ? routeSegment : pluginId,
+            $"result=STALE reason={SafePluginActionValue(reason)} routeSegment={SafePluginActionValue(routeSegment)} recovery=host_plugin_render rule=plugin_page_action_token_recovery_contract");
+        return Results.StatusCode(StatusCodes.Status410Gone);
+    }
+
+    return Results.NoContent();
+}
+
+static Task<IResult> DispatchPluginOwnedActionEndpoint(
+    HttpRequest http,
+    PluginRegistry registry,
+    PluginActionTokenStore actionTokens,
+    PluginWindowSessionStore windows,
+    PluginToolWindowHostService toolWindows,
+    PluginBoundaryGate boundaryGate,
+    LogRepository log)
+{
+    log.Add("PLUGIN_ACTION_HTTP_ROUTE", "POST",
+        $"result=ACCEPTED path={SafePluginActionValue(http.Path.Value)} contentType={SafePluginActionValue(http.ContentType)} hasFormContentType={http.HasFormContentType} logicalRoute=/plugin-action physicalEndpoint=/api/plugins/action rule=plugin_action_http_route_contract");
+    return HandlePluginActionDispatchAsync(http, registry, actionTokens, windows, toolWindows, boundaryGate, log);
+}
+
+// plugin_action_http_route_contract: /api/plugins/action is the only physical mutation endpoint.
+// /plugin-action is a logical ActionContract route identifier and must never be used as a POST target.
+// Token keepalive and Page restoration validation are Host-owned lifetime maintenance; neither dispatches a plugin mutation.
+app.MapPost("/api/plugins/action-token/renew", RenewPluginActionTokenEndpoint);
+app.MapPost("/api/plugins/action-token/validate", ValidatePluginPageActionTokenEndpoint);
+app.MapPost("/api/plugins/action", DispatchPluginOwnedActionEndpoint);
+app.MapMethods("/api/plugins/action", new[] { "OPTIONS" }, () => Results.NoContent());
+app.MapPost("/api/plugins/window", (HttpRequest http, PluginRegistry registry, PluginActionTokenStore actionTokens, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, PluginBoundaryGate boundaryGate, LogRepository log) =>
+    HandlePluginWindowDispatchAsync(http, registry, actionTokens, windows, toolWindows, boundaryGate, log));
+
+// plugin_window_close_contract: old WebBrowser/tool-window content can accidentally navigate
+// close buttons as a normal GET. Treat only closeWindow/close with a valid window token/context
+// as a host-handled close request; this is a compatibility shim, not a generic GET mutation API.
+app.MapGet("/api/plugins/window", (HttpRequest http, PluginRegistry registry, PluginActionTokenStore actionTokens, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, PluginBoundaryGate boundaryGate, LogRepository log) =>
+    HandlePluginWindowDispatchAsync(http, registry, actionTokens, windows, toolWindows, boundaryGate, log));
+app.MapGet("/plugin-window/{windowId}", (string windowId, HttpRequest http, PluginWindowSessionStore windows, LogRepository log) =>
+    RenderPluginWindowHost(windowId, http, windows, log));
+app.MapGet("/plugin-window/{windowId}/state", (string windowId, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, LogRepository log) =>
+    RenderPluginWindowState(windowId, windows, toolWindows, log));
+app.MapGet("/api/plugins/window/capabilities", (PluginToolWindowHostService toolWindows, LogRepository log) =>
+    RenderPluginWindowHostCapabilities(toolWindows, log));
+
+app.MapGet("/plugin/{route}", (string route, HttpRequest http, PluginRegistry registry, PluginActionTokenStore actionTokens, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, ExternalTunerLeaseService externalTuners, ViewerSessionRegistry viewerSessions, IOptions<TvTestSettings> tvTestOptions, IniSettingsService ini, IReadOnlyList<TunerProfile> tunerProfiles, PluginBoundaryGate boundaryGate, LogPresentationStore logPresentationStore, LogRepository log) => RenderPluginHtml(route, http, registry, actionTokens, windows, toolWindows, externalTuners, viewerSessions, tvTestOptions, ini, tunerProfiles, boundaryGate, logPresentationStore, log));
 
 // 1.0.0互換URL。今後は /plugin/{route} を正式入口とする。
-app.MapGet("/plugin-ui/{route}", (string route, HttpRequest http, PluginRegistry registry, PluginActionTokenStore actionTokens, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, IOptions<TvTestSettings> tvTestOptions, IniSettingsService ini, IReadOnlyList<TunerProfile> tunerProfiles, LogRepository log) => RenderPluginHtml(route, http, registry, actionTokens, windows, toolWindows, tvTestOptions, ini, tunerProfiles, log));
 
 
-static DateTime? ParseAirhythmDateTime(string? value)
-{
-    if (string.IsNullOrWhiteSpace(value)) return null;
-    if (DateTime.TryParse(value, out var dt)) return dt.Kind == DateTimeKind.Utc ? dt.ToLocalTime() : dt;
-    if (DateOnly.TryParse(value, out var d)) return d.ToDateTime(TimeOnly.MinValue);
-    return null;
-}
-
-static bool ContainsAirhythmText(string? source, string keyword)
-    => !string.IsNullOrEmpty(source) && source.Contains(keyword, StringComparison.OrdinalIgnoreCase);
-
-static Dictionary<string, int> BuildAirhythmChannelOrder(ChannelFileLoader channelLoader)
-{
-    var channels = channelLoader.Load().Targets;
-    var chOrder = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-    for (var i = 0; i < channels.Count; i++)
-    {
-        var ch = channels[i];
-        chOrder.TryAdd($"{ch.OriginalNetworkId}:{ch.TransportStreamId}:{ch.ServiceId}", i);
-    }
-    return chOrder;
-}
-
-static int GetAirhythmChannelOrder(Dictionary<string, int> chOrder, ushort networkId, ushort tsId, ushort serviceId)
-    => chOrder.TryGetValue($"{networkId}:{tsId}:{serviceId}", out var idx) ? idx : int.MaxValue;
-
-static object ToAirhythmReservationDto(Reservation r) => new
-{
-    reservationId = r.Id,
-    programId = $"{r.NetworkId}:{r.TransportStreamId}:{r.ServiceId}:{r.EventId}",
-    r.NetworkId,
-    r.TransportStreamId,
-    r.ServiceId,
-    r.EventId,
-    r.Title,
-    r.ServiceName,
-    r.StartTime,
-    r.EndTime,
-    scheduledStartTime = r.ScheduledStartTime,
-    status = r.Status.ToString(),
-    source = r.Source.ToString(),
-    r.IsEnabled,
-    r.IsConflicted,
-    r.TunerName,
-    r.ActualTunerName,
-    r.RecordingStartedAt,
-    r.RecordingFinishedAt,
-    r.SourceRuleId,
-    r.SourceRuleName,
-    r.IsUserChain,
-    r.UserChainPreviousId,
-    r.UserChainRootId,
-    r.CreatedAt,
-    r.UpdatedAt
-};
-
-static object DetectAirhythmProgramFlags(EpgEvent e)
-{
-    var text = $"{EpgProjection.Title(e)} {EpgProjection.ShortText(e)} {EpgProjection.ExtendedText(e)}";
-    var projectionSafe = EpgTitleProjectionGuard.IsSafeForSpecialProjection(e, out _);
-    return new
-    {
-        isNewProgram = projectionSafe && (text.Contains("[新]") || text.Contains("［新］") || text.Contains("【新】") || text.Contains("新番組")),
-        isFinalEpisode = projectionSafe && (text.Contains("[終]") || text.Contains("［終］") || text.Contains("【終】") || text.Contains("最終回")),
-        isMovie = ContainsAirhythmText(e.Genre, "映画") || ContainsAirhythmText(EpgProjection.Title(e), "映画") || ContainsAirhythmText(EpgProjection.ShortText(e), "映画"),
-        isLive = text.Contains("[生]") || text.Contains("［生］") || text.Contains("【生】") || text.Contains("生中継") || text.Contains("生放送"),
-        isFirstRun = text.Contains("[初]") || text.Contains("［初］") || text.Contains("【初】") || text.Contains("初放送")
-    };
-}
-
-static int ScoreAirhythmCandidate(EpgEvent e)
-{
-    if (!EpgTitleProjectionGuard.IsSafeForSpecialProjection(e, out _)) return 0;
-    var score = 0;
-    var text = $"{EpgProjection.Title(e)} {EpgProjection.ShortText(e)} {EpgProjection.ExtendedText(e)} {e.Genre}";
-    if (text.Contains("ドラマ")) score += 20;
-    if (text.Contains("映画")) score += 20;
-    if (text.Contains("アニメ")) score += 10;
-    if (text.Contains("ドキュメンタリー")) score += 8;
-    if (text.Contains("[新]") || text.Contains("［新］") || text.Contains("【新】") || text.Contains("新番組")) score += 30;
-    if (text.Contains("[初]") || text.Contains("［初］") || text.Contains("【初】") || text.Contains("初放送")) score += 25;
-    if (text.Contains("[終]") || text.Contains("［終］") || text.Contains("【終】") || text.Contains("最終回")) score += 15;
-    if (e.Start.Hour >= 19 && e.Start.Hour <= 23) score += 5;
-    return score;
-}
 // ─── バージョン情報 ───────────────────────────────────────────────
 
-// release_contract: DirectRecorderBridge切り離し後の残存診断APIを削除。復号実行・監視はTvAIrEpgRecへ集約。
-app.MapGet("/api/chain-reservation-contract", () => Results.Json(new
+// 復号実行・監視はTvAIrEpgRecへ集約し、Host側に別の実行APIを持たない。
+// 番組表のチェーンボタン候補はHost側の共通成立条件で一括評価する。
+// UIは候補IDを表示へ投影するだけで、同一SID・隣接・親状態を再判定しない。
+app.MapPost("/api/chain-reservation-candidates", (ChainCandidatePreviewRequest request, ReservationStore store) =>
 {
-    adjacentMinGapSeconds = ChainReservationContract.AdjacentMinGapSeconds,
-    adjacentMaxGapSeconds = ChainReservationContract.AdjacentMaxGapSeconds,
-    adjacentMinGapMilliseconds = ChainReservationContract.AdjacentMinGapMilliseconds,
-    adjacentMaxGapMilliseconds = ChainReservationContract.AdjacentMaxGapMilliseconds,
-    rule = "chain_reservation_contract_shared_boundary_release_contract"
-}));
+    var frames = request.Events ?? Array.Empty<ChainCandidateEventFrame>();
+    if (frames.Count == 0)
+        return Results.Ok(new { candidates = Array.Empty<object>(), checkedCount = 0, eligibleCount = 0 });
+
+    var reservations = store.GetAll()
+        .Where(r => r.Source != ReservationSource.Epg)
+        .ToList();
+    var featureEnabled = request.LaterProgramPriorityEnabled && request.PseudoContinuousRecordingEnabled;
+    var now = DateTime.Now;
+    var candidates = new List<object>();
+    var checkedCount = 0;
+
+    Reservation? FindPredecessor(ChainCandidateEventFrame frame)
+    {
+        if (frame.EventId == 0) return null;
+        return reservations
+            .Where(r => ChainReservationEligibilityContract.IsActivePredecessorStatus(r.Status))
+            .Where(r => r.NetworkId == frame.NetworkId
+                && r.TransportStreamId == frame.TransportStreamId
+                && r.ServiceId == frame.ServiceId
+                && r.EventId == frame.EventId)
+            .OrderByDescending(r => r.Status == ReservationStatus.Recording)
+            .ThenByDescending(r => r.Status == ReservationStatus.Starting)
+            .ThenByDescending(r => r.Id)
+            .FirstOrDefault();
+    }
+
+    bool TargetAlreadyReserved(ChainCandidateEventFrame frame)
+    {
+        if (frame.EventId == 0) return false;
+        return reservations.Any(r =>
+            r.NetworkId == frame.NetworkId
+            && r.TransportStreamId == frame.TransportStreamId
+            && r.ServiceId == frame.ServiceId
+            && r.EventId == frame.EventId
+            && r.Status is ReservationStatus.Scheduled or ReservationStatus.Starting or ReservationStatus.Recording or ReservationStatus.Stopping);
+    }
+
+    foreach (var serviceFrames in frames.GroupBy(e => (e.NetworkId, e.TransportStreamId, e.ServiceId)))
+    {
+        var ordered = serviceFrames.OrderBy(e => e.Start).ThenBy(e => e.End).ThenBy(e => e.EventId).ToList();
+        for (var i = 1; i < ordered.Count; i++)
+        {
+            checkedCount++;
+            var previousFrame = ordered[i - 1];
+            var target = ordered[i];
+            var predecessor = FindPredecessor(previousFrame);
+            var eligibility = ChainReservationEligibilityContract.EvaluateOffer(
+                predecessor,
+                target.NetworkId,
+                target.TransportStreamId,
+                target.ServiceId,
+                target.Start,
+                target.End,
+                !string.IsNullOrWhiteSpace(target.Title),
+                TargetAlreadyReserved(target),
+                now,
+                featureEnabled);
+            if (!eligibility.IsEligible || predecessor is null)
+                continue;
+
+            candidates.Add(new
+            {
+                targetKey = target.Key,
+                predecessorReservationId = predecessor.Id,
+                reason = eligibility.ReasonToken
+            });
+        }
+    }
+
+    return Results.Ok(new
+    {
+        candidates,
+        checkedCount,
+        eligibleCount = candidates.Count,
+        featureEnabled,
+        rule = "chain_reservation_eligibility_contract"
+    });
+});
 
 app.MapGet("/api/version", () => Results.Ok(new
 {
@@ -4534,7 +4532,7 @@ static string GetTvAIrAppVersion()
 
 static void RunTvAIrEpgRecStartupOrphanSafety(LogRepository log)
 {
-    const string Rule = "broadcast_clock_passive_only_epg_orphan_safety";
+    const string Rule = "epg_startup_orphan_safety_contract";
     try
     {
         var workerPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "TvAIrEpgRec.exe"));
@@ -4710,6 +4708,7 @@ static string CleanupRuntimeReleaseMarkerFiles(string baseDir)
     }
 }
 
+#if TVAIR_DEVELOPER_DIAGNOSTICS
 static string BuildReleaseNotesAudit(string baseDir)
 {
     try
@@ -4724,9 +4723,16 @@ static string BuildReleaseNotesAudit(string baseDir)
         return $"releaseNotes=RELEASE_NOTES.txt releaseNotesAuditError={ex.GetType().Name}:{SafePathForLog(ex.Message)} releaseMarkerFiles=disabled releaseHistory=single_file";
     }
 }
+#endif
 
 static void EmitTvAIrRuntimeIdentityAudit(LogRepository log)
 {
+#if !TVAIR_DEVELOPER_DIAGNOSTICS
+    // 公開版でも旧開発成果物から上書き更新された場合のrelease marker残留だけは掃除する。
+    // 開発ログそのものは生成しない。
+    try { _ = CleanupRuntimeReleaseMarkerFiles(AppContext.BaseDirectory); } catch { }
+    return;
+#else
     static string Stamp(string path)
     {
         try
@@ -4747,552 +4753,39 @@ static void EmitTvAIrRuntimeIdentityAudit(LogRepository log)
         var tvairExe = Environment.ProcessPath ?? asm.Location;
         var workerPath = Path.Combine(AppContext.BaseDirectory, "TvAIrEpgRec.exe");
         var releaseNotesAudit = BuildReleaseNotesAudit(AppContext.BaseDirectory);
-        log.Add("APP_BINARY_IDENTITY", "START",
-            $"tvairVersion={GetTvAIrAppVersion()} tvairExe={Path.GetFileName(tvairExe)} tvairFile={Stamp(tvairExe)} " +
-            $"workerFileName={Path.GetFileName(workerPath)} workerFile={Stamp(workerPath)} {releaseNotesAudit} " +
-            $"baseDir=app_base rule=release_contract rollbackPoint=True rollbackBase=release_contract timePolicy=BROADCAST_CLOCK_PASSIVE_ONLY ntp=removed broadcastClock=observe_only_no_internal_offset recordFileName=tvtest_ini_template pluginUiAction=host_action_dispatch_value_contract logPolicy=release_candidate_noise_reduce");
-    }
-    catch (Exception ex)
-    {
-        log.Add("APP_BINARY_IDENTITY", "ERROR", $"error={ex.GetType().Name}:{ex.Message} rule=release_contract");
-    }
-}
+        var buildConfiguration = asm
+            .GetCustomAttributes(typeof(System.Reflection.AssemblyConfigurationAttribute), false)
+            .OfType<System.Reflection.AssemblyConfigurationAttribute>()
+            .FirstOrDefault()?.Configuration ?? "unknown";
+        var framework = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription.Replace(' ', '_');
+        var processArch = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture;
+        var osArch = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture;
 
-
-// release_contract: TvAIrEpgRec.exe のProbe/EPGジョブ契約確認API。
-// --mode probe の入口だけを提供し、録画・実EPG取得・録画前EPG確認の本線には接続しない。
-app.MapPost("/api/tvairepgrec/probe", async (int? keepAliveMs, LogRepository log) =>
-    await RunTvAIrEpgRecProbeAsync(keepAliveMs, log));
-app.MapGet("/api/tvairepgrec/probe", async (int? keepAliveMs, LogRepository log) =>
-    await RunTvAIrEpgRecProbeAsync(keepAliveMs, log));
-
-
-// release_contract: TvAIrEpgRec.exe --mode epg のジョブ契約確認API。
-// BonDriverは開かず、通常EPG取得に必要な group/tuner/did/bonDriver/channel 情報をWorkerが解釈して返すだけに限定する。
-// TvAIr release_contract cleanup:
-// Obsolete TvAIrEpgRec diagnostic/plan/probe endpoints were removed from Program.cs.
-// Keep only /api/tvairepgrec/probe because it is referenced by bundled documentation and remains a safe worker launch probe.
-
-static async Task<IResult> RunTvAIrEpgRecProbeAsync(int? keepAliveMs, LogRepository log)
-{
-    var boundedKeepAliveMs = Math.Clamp(keepAliveMs ?? 3000, 0, 30000);
-    var jobId = $"probe_{DateTimeOffset.Now:yyyyMMdd_HHmmss_fff}_{Guid.NewGuid():N}";
-    var runtimeDir = Path.Combine(AppContext.BaseDirectory, "runtime", "tvairepgrec-probe");
-    Directory.CreateDirectory(runtimeDir);
-
-    var jobPath = Path.Combine(runtimeDir, $"job_{jobId}.json");
-    var progressPath = Path.Combine(runtimeDir, $"progress_{jobId}.jsonl");
-    var resultPath = Path.Combine(runtimeDir, $"result_{jobId}.json");
-    var cancelPath = Path.Combine(runtimeDir, $"cancel_{jobId}.signal");
-
-    var workerExe = ResolveTvAIrEpgRecExecutablePath();
-    if (string.IsNullOrWhiteSpace(workerExe) || !File.Exists(workerExe))
-    {
-        log.Add("TVAIREPGREC_PROBE", "NG", $"result=NG reason=worker_exe_not_found checked=AppContextBaseDirectory worker=TvAIrEpgRec.exe rule=release_contract");
-        return Results.NotFound(new
+        // developer_log_header_contract:
+        // APP_BINARY_IDENTITY は通常の循環ログ本体ではなく固定ヘッダとして保持する。
+        // これにより長期連続稼働で10,000件を超えても、また開発者ログを途中クリアしても、
+        // 解析に必要なビルド/契約/実行環境の正本を必ず先頭に残す。
+        log.SetPinnedHeader(new LogEntry
         {
-            result = "NG",
-            reason = "worker_exe_not_found",
-            expectedProcessName = "TvAIrEpgRec.exe",
-            checkedBaseDirectory = AppContext.BaseDirectory,
-            rule = "release_contract"
-        });
-    }
-
-    var job = new
-    {
-        jobId,
-        mode = "probe",
-        progressPath,
-        resultPath,
-        outputPath = (string?)null,
-        cancelSignalPath = cancelPath,
-        metadata = new Dictionary<string, string>
-        {
-            ["caller"] = "TvAIr",
-            ["purpose"] = "worker_process_shell_probe",
-            ["tvairVersion"] = GetTvAIrAppVersion(),
-            ["rule"] = "release_contract"
-        }
-    };
-
-    await File.WriteAllTextAsync(jobPath, JsonSerializer.Serialize(job, new JsonSerializerOptions
-    {
-        WriteIndented = true,
-        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-    }));
-
-    var startedAt = DateTimeOffset.Now;
-    log.Add("TVAIREPGREC_PROBE", "START", $"jobId={jobId} exe={workerExe} keepAliveMs={boundedKeepAliveMs} rule=release_contract");
-
-    try
-    {
-        using var process = new Process();
-        process.StartInfo = TvAIr.Core.WorkerProcessStartInfoFactory.CreateTvAIrEpgRec(
-            workerExe,
-            TvAIr.Core.TvAIrEpgRecLaunchKind.DiagnosticProbe,
-            showTaskbarIconSetting: false);
-        process.StartInfo.ArgumentList.Add("--mode");
-        process.StartInfo.ArgumentList.Add("probe");
-        process.StartInfo.ArgumentList.Add("--job");
-        process.StartInfo.ArgumentList.Add(jobPath);
-        process.StartInfo.ArgumentList.Add("--progress");
-        process.StartInfo.ArgumentList.Add(progressPath);
-        process.StartInfo.ArgumentList.Add("--result");
-        process.StartInfo.ArgumentList.Add(resultPath);
-        process.StartInfo.ArgumentList.Add("--cancel");
-        process.StartInfo.ArgumentList.Add(cancelPath);
-        process.StartInfo.ArgumentList.Add("--keep-alive-ms");
-        process.StartInfo.ArgumentList.Add(boundedKeepAliveMs.ToString(System.Globalization.CultureInfo.InvariantCulture));
-
-        if (!process.Start())
-        {
-            log.Add("TVAIREPGREC_PROBE", "NG", $"jobId={jobId} result=NG reason=process_start_returned_false exe={workerExe} rule=release_contract");
-            return Results.Problem("TvAIrEpgRec.exe start returned false.");
-        }
-
-        var pid = process.Id;
-        var timeoutMs = Math.Clamp(boundedKeepAliveMs + 5000, 5000, 40000);
-        var completed = await WaitForExitWithTimeoutAsync(process, timeoutMs).ConfigureAwait(false);
-        var endedAt = DateTimeOffset.Now;
-
-        if (!completed)
-        {
-            try { process.Kill(entireProcessTree: true); } catch { }
-            log.Add("TVAIREPGREC_PROBE", "TIMEOUT", $"jobId={jobId} pid={pid} timeoutMs={timeoutMs} action=kill_requested rule=release_contract");
-            return Results.Ok(new
-            {
-                result = "TIMEOUT",
-                jobId,
-                pid,
-                workerExe,
-                keepAliveMs = boundedKeepAliveMs,
-                timeoutMs,
-                elapsedMs = (int)(endedAt - startedAt).TotalMilliseconds,
-                progress = ReadRecentTextLines(progressPath, 20),
-                resultPath,
-                progressPath,
-                rule = "release_contract"
-            });
-        }
-
-        var resultJson = TryReadJsonElement(resultPath);
-        var progressLines = ReadRecentTextLines(progressPath, 20);
-        log.Add("TVAIREPGREC_PROBE", process.ExitCode == 0 ? "OK" : "NG", $"jobId={jobId} pid={pid} exitCode={process.ExitCode} elapsedMs={(int)(endedAt - startedAt).TotalMilliseconds} resultExists={File.Exists(resultPath)} progressLines={progressLines.Length} rule=release_contract");
-
-        return Results.Ok(new
-        {
-            result = process.ExitCode == 0 ? "OK" : "NG",
-            jobId,
-            pid,
-            exitCode = process.ExitCode,
-            workerExe,
-            keepAliveMs = boundedKeepAliveMs,
-            elapsedMs = (int)(endedAt - startedAt).TotalMilliseconds,
-            workerResult = resultJson,
-            progress = progressLines,
-            resultPath,
-            progressPath,
-            jobPath,
-            expectedProcessName = "TvAIrEpgRec.exe",
-            rule = "release_contract"
+            Event = "APP_BINARY_IDENTITY",
+            Title = "BUILD_ENVIRONMENT",
+            Message =
+                $"tvairVersion={GetTvAIrAppVersion()} buildConfiguration={buildConfiguration} targetFramework=net8.0-windows " +
+                $"runtime={framework} processArch={processArch} osArch={osArch} pluginSdk={TvAIrVersionContract.PluginSdkVersion} hostContract={TvAIrVersionContract.PluginHostContractVersion} " +
+                $"tvairExe={Path.GetFileName(tvairExe)} tvairFile={Stamp(tvairExe)} " +
+                $"workerFileName={Path.GetFileName(workerPath)} workerFile={Stamp(workerPath)} {releaseNotesAudit} " +
+                $"baseDir=app_base rule=developer_log_header_contract rollbackPoint=True rollbackBase=release_contract ntp=removed recordFileName=tvtest_ini_template pluginUiAction=host_action_dispatch_value_contract logPolicy=release_noise_reduce",
+            CreatedAt = DateTime.Now
         });
     }
     catch (Exception ex)
     {
-        log.Add("TVAIREPGREC_PROBE", "ERROR", $"jobId={jobId} error={ex.GetType().Name} message={ex.Message} rule=release_contract");
-        return Results.Problem(ex.Message);
+        // ヘッダ構築そのものに失敗した場合だけ通常ログへ残す。
+        log.Add("APP_BINARY_IDENTITY", "ERROR", $"error={ex.GetType().Name}:{ex.Message} rule=developer_log_header_contract");
     }
+#endif
 }
 
-
-static string? ResolveTvAIrEpgRecExecutablePath()
-{
-    var candidates = new[]
-    {
-        Path.Combine(AppContext.BaseDirectory, "TvAIrEpgRec.exe"),
-        Path.Combine(AppContext.BaseDirectory, "TvAIrEpgRec", "TvAIrEpgRec.exe"),
-        Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "TvAIrEpgRec.exe"))
-    };
-
-    return candidates.FirstOrDefault(File.Exists);
-}
-
-static async Task<bool> WaitForExitWithTimeoutAsync(Process process, int timeoutMs)
-{
-    using var cts = new CancellationTokenSource(timeoutMs);
-    try
-    {
-        await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
-        return true;
-    }
-    catch (OperationCanceledException)
-    {
-        return false;
-    }
-}
-
-static JsonElement? TryReadJsonElement(string path)
-{
-    try
-    {
-        if (!File.Exists(path)) return null;
-        using var doc = JsonDocument.Parse(File.ReadAllText(path));
-        return doc.RootElement.Clone();
-    }
-    catch
-    {
-        return null;
-    }
-}
-
-static string[] ReadRecentTextLines(string path, int maxLines)
-{
-    try
-    {
-        if (!File.Exists(path)) return Array.Empty<string>();
-        return File.ReadLines(path).TakeLast(maxLines).ToArray();
-    }
-    catch
-    {
-        return Array.Empty<string>();
-    }
-}
-
-
-// ─── AI-rhythm API ────────────────────────────────────────────────
-// AI-rhythm本体は別DLL。TvAIr本体側はホストUI/APIのみを保持する。
-app.MapGet("/api/airhythm/dashboard", (AirhythmDashboardService dashboard) =>
-    Results.Ok(dashboard.Build()));
-
-app.MapGet("/api/airhythm/profile", (AirhythmProfileService profileService) =>
-    Results.Ok(profileService.Get()));
-
-app.MapPost("/api/airhythm/profile", (AirhythmProfileSettings request, AirhythmProfileService profileService) =>
-    Results.Ok(profileService.Save(request)));
-
-app.MapPost("/api/airhythm/backup", (AirhythmBackupService backupService) =>
-    Results.Ok(backupService.CreateSnapshot()));
-
-app.MapGet("/api/airhythm/notification", (AirhythmNotificationService notificationService) =>
-    Results.Ok(notificationService.GetStatus()));
-
-app.MapPost("/api/airhythm/notification/open", (AirhythmNotificationService notificationService) =>
-    Results.Ok(notificationService.MarkOpened()));
-
-// ─── AI-rhythm 読み取り専用データAPI ─────────────────────────────
-// AI-rhythmが「判断補助」に必要なTvAIr本体データを取得する正式入口。
-// ここでは録画予約・チューナー操作・DB変更を一切行わない。
-app.MapGet("/api/airhythm/data/summary", (
-    EpgStore epgStore,
-    ReservationStore reservationStore,
-    TunerPool tunerPool,
-    ChannelFileLoader channelLoader) =>
-{
-    var now = DateTime.Now;
-    var epgTo = now.AddDays(7);
-    var epgCount = epgStore.GetByRange(now, epgTo).Count;
-    var reservations = reservationStore.GetAll()
-        .Where(r => r.Source != ReservationSource.Epg)
-        .ToList();
-    var tuners = tunerPool.GetStatus();
-    var channels = channelLoader.Load().Targets;
-
-    return Results.Ok(new
-    {
-        generatedAt = now,
-        mode = "readOnly",
-        writeAccess = false,
-        available = new
-        {
-            epg = true,
-            reservations = true,
-            reservationHistory = true,
-            tunerStatus = true,
-            conflicts = true,
-            viewingHistory = false
-        },
-        counts = new
-        {
-            epgNext7Days = epgCount,
-            reservations = reservations.Count,
-            conflicts = reservations.Count(r => r.IsConflicted),
-            history = reservations.Count(r => r.Status is ReservationStatus.Completed or ReservationStatus.Cancelled or ReservationStatus.Failed),
-            tuners = tuners.Count,
-            tunerFree = tuners.Count(t => t.UsageKind == TunerUsageKind.Free),
-            channels = channels.Count
-        },
-        notes = new[]
-        {
-            "AI-rhythm用の正式データ入口です。DB直接参照は禁止です。",
-            "このAPI群は読み取り専用です。予約登録・削除・チューナー操作は行いません。",
-            "視聴履歴はTvAIr本体が保持していないため、現時点では未提供です。"
-        }
-    });
-});
-
-app.MapGet("/api/airhythm/data/epg", (
-    string? from,
-    string? to,
-    int? days,
-    int? limit,
-    string? keyword,
-    ushort? networkId,
-    ushort? tsId,
-    ushort? serviceId,
-    string? genre,
-    EpgStore epgStore,
-    ChannelFileLoader channelLoader) =>
-{
-    var start = ParseAirhythmDateTime(from) ?? DateTime.Now;
-    var maxDays = Math.Clamp(days ?? 7, 1, 14);
-    var end = ParseAirhythmDateTime(to) ?? start.AddDays(maxDays);
-    var take = Math.Clamp(limit ?? 5000, 1, 20000);
-
-    IEnumerable<EpgEvent> events = epgStore.GetByRange(start, end);
-    if (networkId.HasValue) events = events.Where(e => e.NetworkId == networkId.Value);
-    if (tsId.HasValue) events = events.Where(e => e.TransportStreamId == tsId.Value);
-    if (serviceId.HasValue) events = events.Where(e => e.ServiceId == serviceId.Value);
-    if (!string.IsNullOrWhiteSpace(keyword))
-    {
-        var kw = keyword.Trim();
-        events = events.Where(e => ContainsAirhythmText(EpgProjection.Title(e), kw) || ContainsAirhythmText(EpgProjection.ShortText(e), kw) || ContainsAirhythmText(EpgProjection.ExtendedText(e), kw));
-    }
-    if (!string.IsNullOrWhiteSpace(genre))
-    {
-        var g = genre.Trim();
-        events = events.Where(e => ContainsAirhythmText(e.Genre, g) || ContainsAirhythmText(e.GenreCodes, g));
-    }
-
-    var chOrder = BuildAirhythmChannelOrder(channelLoader);
-    var result = events
-        .OrderBy(e => e.Start)
-        .ThenBy(e => GetAirhythmChannelOrder(chOrder, e.NetworkId, e.TransportStreamId, e.ServiceId))
-        .Take(take)
-        .Select(e => new
-        {
-            programId = $"{e.NetworkId}:{e.TransportStreamId}:{e.ServiceId}:{e.EventId}",
-            e.NetworkId,
-            e.TransportStreamId,
-            e.ServiceId,
-            e.EventId,
-            e.ServiceName,
-            Title = EpgProjection.Title(e),
-            Description = EpgProjection.ShortText(e),
-            ExtendedText = EpgProjection.ExtendedText(e),
-            e.Genre,
-            e.GenreCodes,
-            e.DurationSeconds,
-            startTime = e.Start,
-            endTime = e.End,
-            e.UpdatedAt,
-            flags = DetectAirhythmProgramFlags(e)
-        })
-        .ToList();
-
-    return Results.Ok(new { generatedAt = DateTime.Now, mode = "readOnly", from = start, to = end, count = result.Count, events = result });
-});
-
-app.MapGet("/api/airhythm/data/reservations", (
-    bool? includeEpgSystemEntries,
-    bool? enabled,
-    bool? conflicted,
-    string? source,
-    string? status,
-    string? from,
-    string? to,
-    ReservationStore reservationStore) =>
-{
-    var start = ParseAirhythmDateTime(from);
-    var end = ParseAirhythmDateTime(to);
-    IEnumerable<Reservation> reservations = reservationStore.GetAll();
-
-    if (includeEpgSystemEntries != true) reservations = reservations.Where(r => r.Source != ReservationSource.Epg);
-    if (enabled.HasValue) reservations = reservations.Where(r => r.IsEnabled == enabled.Value);
-    if (conflicted.HasValue) reservations = reservations.Where(r => r.IsConflicted == conflicted.Value);
-    if (!string.IsNullOrWhiteSpace(source)) reservations = reservations.Where(r => string.Equals(r.Source.ToString(), source.Trim(), StringComparison.OrdinalIgnoreCase));
-    if (!string.IsNullOrWhiteSpace(status)) reservations = reservations.Where(r => string.Equals(r.Status.ToString(), status.Trim(), StringComparison.OrdinalIgnoreCase));
-    if (start.HasValue) reservations = reservations.Where(r => r.EndTime > start.Value);
-    if (end.HasValue) reservations = reservations.Where(r => r.StartTime < end.Value);
-
-    var result = reservations.OrderBy(r => r.StartTime).Select(ToAirhythmReservationDto).ToList();
-    return Results.Ok(new { generatedAt = DateTime.Now, mode = "readOnly", count = result.Count, reservations = result });
-});
-
-app.MapGet("/api/airhythm/data/history", (
-    string? from,
-    string? to,
-    int? limit,
-    ReservationStore reservationStore) =>
-{
-    var start = ParseAirhythmDateTime(from);
-    var end = ParseAirhythmDateTime(to);
-    var take = Math.Clamp(limit ?? 1000, 1, 10000);
-
-    IEnumerable<Reservation> history = reservationStore.GetAll()
-        .Where(r => r.Source != ReservationSource.Epg)
-        .Where(r => r.Status is ReservationStatus.Completed or ReservationStatus.Cancelled or ReservationStatus.Failed || r.RecordingStartedAt.HasValue || r.RecordingFinishedAt.HasValue);
-    if (start.HasValue) history = history.Where(r => r.EndTime >= start.Value);
-    if (end.HasValue) history = history.Where(r => r.StartTime < end.Value);
-
-    var result = history.OrderByDescending(r => r.EndTime).Take(take).Select(ToAirhythmReservationDto).ToList();
-    return Results.Ok(new { generatedAt = DateTime.Now, mode = "readOnly", count = result.Count, history = result, notes = new[] { "再生履歴・視聴時間はTvAIr本体が保持していないため、この履歴には含まれません。" } });
-});
-
-app.MapGet("/api/airhythm/data/tuners", (TunerPool tunerPool) =>
-{
-    var slots = tunerPool.GetStatus()
-        .OrderBy(t => t.Group)
-        .ThenBy(t => t.SlotIndex)
-        .Select(t => new
-        {
-            t.Name,
-            t.BonDriverFileName,
-            t.Did,
-            t.Group,
-            t.Role,
-            t.SlotIndex,
-            usageKind = t.UsageKind.ToString(),
-            isFree = t.UsageKind == TunerUsageKind.Free,
-            t.ReservationId,
-            t.ProcessId,
-            t.PlannedEndTime
-        })
-        .ToList();
-    return Results.Ok(new { generatedAt = DateTime.Now, mode = "readOnly", total = slots.Count, free = slots.Count(s => s.isFree), busy = slots.Count(s => !s.isFree), slots });
-});
-
-// ─── 外部視聴チューナー要求 API（AIrCon 連携用）────────────────
-// 録画・チェーン予約を最優先し、空きチューナーがある場合だけ Viewing として貸し出す。
-app.MapPost("/api/tuners/external/request", (ExternalTunerLeaseRequest request, ExternalTunerLeaseService externalTuners) =>
-{
-    var result = externalTuners.Request(request);
-    if (!result.Success)
-    {
-        return Results.Conflict(new
-        {
-            ok = false,
-            result.Reason,
-            result.Status,
-            message = "空きチューナーがないため、外部視聴用チューナー要求を拒否しました。録画・チェーン予約は保護されています。"
-        });
-    }
-
-    return Results.Ok(new
-    {
-        ok = true,
-        result.Reused,
-        lease = result.Lease,
-        launch = result.Lease is null ? null : new
-        {
-            bonDriver = result.Lease.BonDriverFileName,
-            did = result.Lease.Did,
-            tunerName = result.Lease.TunerName,
-            note = "AIrCon側でTVTest/LIVETestを起動する場合は、このBonDriver/DIDを使用してください。TvAIr本体は起動しません。"
-        }
-    });
-});
-
-app.MapPost("/api/tuners/external/release", (ExternalTunerReleaseRequest request, ExternalTunerLeaseService externalTuners) =>
-{
-    var ok = externalTuners.Release(request.LeaseId ?? string.Empty, request.Source);
-    return ok
-        ? Results.Ok(new { ok = true, message = "外部視聴用チューナーを解放しました。" })
-        : Results.NotFound(new { ok = false, message = "指定された外部視聴用チューナー貸出は見つかりません。" });
-});
-
-app.MapGet("/api/tuners/external/leases", (ExternalTunerLeaseService externalTuners) =>
-{
-    var leases = externalTuners.GetActiveLeases();
-    return Results.Ok(new { generatedAt = DateTime.Now, count = leases.Count, leases });
-});
-
-app.MapGet("/api/airhythm/data/conflicts", (ReservationStore reservationStore) =>
-{
-    var conflicts = reservationStore.GetAll()
-        .Where(r => r.Source != ReservationSource.Epg && r.IsConflicted)
-        .OrderBy(r => r.StartTime)
-        .Select(r => new
-        {
-            reservationId = r.Id,
-            programId = $"{r.NetworkId}:{r.TransportStreamId}:{r.ServiceId}:{r.EventId}",
-            r.Title,
-            r.ServiceName,
-            r.StartTime,
-            r.EndTime,
-            r.TunerName,
-            r.ActualTunerName,
-            r.IsEnabled,
-            r.IsUserChain,
-            r.UserChainPreviousId,
-            r.UserChainRootId,
-            reason = "チューナー割当競合"
-        })
-        .ToList();
-    return Results.Ok(new { generatedAt = DateTime.Now, mode = "readOnly", count = conflicts.Count, conflicts });
-});
-
-app.MapGet("/api/airhythm/data/channels", (ChannelFileLoader channelLoader) =>
-{
-    var loaded = channelLoader.Load();
-    return Results.Ok(new
-    {
-        generatedAt = DateTime.Now,
-        mode = "readOnly",
-        loaded.Message,
-        loaded.Files,
-        loaded.Warnings,
-        count = loaded.Targets.Count,
-        channels = loaded.Targets.Select((t, index) => new { index, t.Group, t.ServiceId, t.OriginalNetworkId, t.TransportStreamId, t.Name, t.ChannelArgument })
-    });
-});
-
-app.MapGet("/api/airhythm/data/candidates", (
-    int? days,
-    int? limit,
-    EpgStore epgStore,
-    ReservationStore reservationStore,
-    ChannelFileLoader channelLoader) =>
-{
-    var now = DateTime.Now;
-    var to = now.AddDays(Math.Clamp(days ?? 7, 1, 14));
-    var take = Math.Clamp(limit ?? 300, 1, 2000);
-    var reservedProgramIds = reservationStore.GetAll()
-        .Where(r => r.Source != ReservationSource.Epg)
-        .Select(r => $"{r.NetworkId}:{r.TransportStreamId}:{r.ServiceId}:{r.EventId}")
-        .ToHashSet(StringComparer.OrdinalIgnoreCase);
-    var chOrder = BuildAirhythmChannelOrder(channelLoader);
-
-    var candidates = epgStore.GetByRange(now, to)
-        .Where(e => !reservedProgramIds.Contains($"{e.NetworkId}:{e.TransportStreamId}:{e.ServiceId}:{e.EventId}"))
-        .Select(e => new { Event = e, Flags = DetectAirhythmProgramFlags(e), Score = ScoreAirhythmCandidate(e) })
-        .Where(x => x.Score > 0)
-        .OrderByDescending(x => x.Score)
-        .ThenBy(x => x.Event.Start)
-        .ThenBy(x => GetAirhythmChannelOrder(chOrder, x.Event.NetworkId, x.Event.TransportStreamId, x.Event.ServiceId))
-        .Take(take)
-        .Select(x => new
-        {
-            programId = $"{x.Event.NetworkId}:{x.Event.TransportStreamId}:{x.Event.ServiceId}:{x.Event.EventId}",
-            x.Event.NetworkId,
-            x.Event.TransportStreamId,
-            x.Event.ServiceId,
-            x.Event.EventId,
-            x.Event.ServiceName,
-            Title = EpgProjection.Title(x.Event),
-            Description = EpgProjection.ShortText(x.Event),
-            ExtendedText = EpgProjection.ExtendedText(x.Event),
-            x.Event.Genre,
-            x.Event.GenreCodes,
-            startTime = x.Event.Start,
-            endTime = x.Event.End,
-            score = x.Score,
-            flags = x.Flags
-        })
-        .ToList();
-
-    return Results.Ok(new { generatedAt = DateTime.Now, mode = "readOnly", count = candidates.Count, candidates, notes = new[] { "このscoreはAI-rhythm本体の最終判断ではなく、TvAIr側の軽量候補抽出用スコアです。" } });
-});
 
 // ─── EPG API ─────────────────────────────────────────────────────
 
@@ -5309,19 +4802,36 @@ app.MapGet("/api/epg/status", (EpgCapture capture, EpgScheduler scheduler) =>
     });
 });
 
+// ProgramGuide scheduled-Daily time-range projection.
+// Read-only: consume only EpgScheduler's persisted SystemDailyEpg reservation rows;
+// do not reconstruct planned time from settings and do not alter System EPG responsibility.
+app.MapGet("/api/epg/scheduled-daily-windows", (ReservationStore store) =>
+{
+    var now = DateTime.Now;
+    var rows = store.GetAll()
+        .Where(ReservationIntentContract.IsDailyEpg)
+        .Where(r => r.Status is ReservationStatus.Scheduled or ReservationStatus.Recording)
+        .Where(r => r.EndTime > now)
+        .GroupBy(r => new { r.StartTime, r.EndTime })
+        .Select(g => new { startTime = g.Key.StartTime, endTime = g.Key.EndTime })
+        .OrderBy(x => x.startTime)
+        .ToArray();
+    return Results.Ok(rows);
+});
+
 // EPG取得ジョブ実行契約状態（メニューガード用）
 app.MapGet("/api/epg/run-state", (EpgScheduler scheduler) =>
     Results.Ok(scheduler.GetRunState()));
 
 // TvAIr終了（メニュー操作用）
-app.MapPost("/api/app/exit", (string? source, LogRepository log) =>
+app.MapPost("/api/app/exit", (string? source, LogRepository log, IHostApplicationLifetime lifetime) =>
 {
     var safeSource = string.IsNullOrWhiteSpace(source) ? "WebMenu" : source.Trim().Replace("\r", " ").Replace("\n", " ");
-    try { log.Add("APP_EXIT_REQUEST", "Menu", $"source={safeSource} action=EnvironmentExit rule=release_contract"); } catch { }
+    try { log.Add("APP_EXIT_REQUEST", "Menu", $"source={safeSource} action=StopApplication commonRoute=/api/app/exit rule=release_contract"); } catch { }
     _ = Task.Run(async () =>
     {
         await Task.Delay(150).ConfigureAwait(false);
-        Environment.Exit(0);
+        lifetime.StopApplication();
     });
     return Results.Ok(new { accepted = true });
 });
@@ -5405,14 +4915,17 @@ app.MapPost("/api/epg/run", (HttpRequest request, EpgScheduler scheduler) =>
 app.MapPost("/api/epg/cancel", (HttpRequest request, EpgScheduler scheduler) =>
 {
     var source = request.Query.TryGetValue("source", out var q) ? q.ToString() : "WebApi.EpgCancel";
-    var accepted = scheduler.Cancel(source);
+    var accepted = scheduler.CancelVisible(source);
     var runState = scheduler.GetRunState();
-    return Results.Ok(new { accepted, runState, message = accepted ? "キャンセル要求を送信しました。" : "実行中のEPG取得はありません。" });
+    return Results.Ok(new { accepted, runState, message = accepted ? "Visible EPG取得のキャンセル要求を送信しました。" : "キャンセル対象のVisible EPG取得は実行中ではありません。" });
 });
 
 // 番組表データ取得（日付指定）
-app.MapGet("/api/epg/events", (string? date, EpgStore store, ReservationStore reservations, ChannelFileLoader channelLoader, LogRepository log) =>
+app.MapGet("/api/epg/events", (string? date, EpgStore store, ReservationStore reservations, ChannelFileLoader channelLoader, LogRepository log, IProgramEventSource programEvents) =>
 {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+    var requestStopwatch = System.Diagnostics.Stopwatch.StartNew();
+#endif
     var baseDate = DateOnly.TryParse(date, out var parsed)
         ? parsed
         : DateOnly.FromDateTime(DateTime.Now);
@@ -5420,16 +4933,12 @@ app.MapGet("/api/epg/events", (string? date, EpgStore store, ReservationStore re
     var dayStart = baseDate.ToDateTime(new TimeOnly(4, 0));  // 4:00 開始（TvRock準拠）
     var dayEnd   = dayStart.AddDays(1);
 
-    var rawEvents = store.GetAllRaw();
     var displayDate = dayStart.ToString("M月d日・dddd",
         System.Globalization.CultureInfo.GetCultureInfo("ja-JP"));
 
     var channels = BuildCurrentProgramGuideChannels(channelLoader);
-    var currentServiceKeys = BuildProgramGuideChannelServiceKeySet(channels);
-    var events = rawEvents
-        .Where(e => currentServiceKeys.Contains(ProgramGuideEventServiceKey(e)))
+    var events = programEvents.GetByRange(dayStart, dayEnd)
         .ToList();
-    var dayEvents = events.Where(e => e.End > dayStart && e.Start < dayEnd).ToList();
 
     var chOrder = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
     for (var ci = 0; ci < channels.Count; ci++)
@@ -5453,22 +4962,57 @@ app.MapGet("/api/epg/events", (string? date, EpgStore store, ReservationStore re
         })
         .ThenBy(e => e.Start)
         .ThenBy(e => e.End)
-        .ThenBy(e => e.TableId)
         .ThenBy(e => e.EventId)
+        .ThenBy(e => e.SourceKind, StringComparer.OrdinalIgnoreCase)
         .ToList();
 
-    var timelineEvents = BuildProgramGuideTimelineEvents(
+    var timelineEvents = BuildProjectedProgramGuideTimelineEvents(
         sortedEvents,
         channels,
         dayStart,
         dayEnd,
-        store,
         log,
         baseDate);
 
     var displayEvents = timelineEvents
-        .Select(e => NormalizeProgramGuideEventForDisplay(e, serviceDisplayNameByKey))
+        .Select(e => NormalizeProjectedProgramGuideEventForDisplay(e, serviceDisplayNameByKey))
         .ToList();
+
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+    var projectedOnlyCount = timelineEvents.Count(e => !e.DbEventExists);
+    var dbWithOverlayCount = timelineEvents.Count(e => string.Equals(e.ProjectionState, ProjectedEventStates.DbWithOverlay, StringComparison.OrdinalIgnoreCase));
+    log.Add("PROGRAM_GUIDE_PROJECTED_DISPLAY_HANDOFF", "API",
+        $"result=OK date={baseDate:yyyy-MM-dd} projectedOnly={projectedOnlyCount} dbWithOverlay={dbWithOverlayCount} displayEvents={displayEvents.Count} elapsedMs={requestStopwatch.ElapsedMilliseconds} diagnostics=release_compact source=IProgramEventSource target=programguide_display dbWrite=none rule=program_guide_projection_contract");
+
+    var dbWithOverlayEvents = timelineEvents
+        .Where(e => string.Equals(e.ProjectionState, ProjectedEventStates.DbWithOverlay, StringComparison.OrdinalIgnoreCase))
+        .ToList();
+    if (dbWithOverlayEvents.Count > 0)
+    {
+        var titleDbUsed = dbWithOverlayEvents.Count(e => string.Equals(e.ProjectionTitleSource, "db", StringComparison.OrdinalIgnoreCase));
+        var titleOverlayUsed = dbWithOverlayEvents.Count(e => string.Equals(e.ProjectionTitleSource, "overlay", StringComparison.OrdinalIgnoreCase));
+        var titleOverlayCandidateIgnored = dbWithOverlayEvents.Count(e => e.ProjectionTitleDbPresent && e.ProjectionTitleOverlayCandidatePresent);
+        var titleBothMissing = dbWithOverlayEvents.Count(e => !e.ProjectionTitleDbPresent && !e.ProjectionTitleOverlayCandidatePresent);
+
+        var outlineDbPresent = dbWithOverlayEvents.Count(e => e.ProjectionOutlineDbPresent);
+        var outlineDbMissingOverlayPresent = dbWithOverlayEvents.Count(e => !e.ProjectionOutlineDbPresent && e.ProjectionOutlineOverlayCandidatePresent);
+        var outlineOverlayUsed = dbWithOverlayEvents.Count(e => string.Equals(e.ProjectionOutlineSource, "overlay", StringComparison.OrdinalIgnoreCase));
+        var outlineDbPresentOverlayIgnored = dbWithOverlayEvents.Count(e => e.ProjectionOutlineDbPresent && e.ProjectionOutlineOverlayCandidatePresent);
+        var outlineBothMissing = dbWithOverlayEvents.Count(e => !e.ProjectionOutlineDbPresent && !e.ProjectionOutlineOverlayCandidatePresent);
+
+        var detailDbPresent = dbWithOverlayEvents.Count(e => e.ProjectionDetailDbPresent);
+        var detailDbMissingOverlayPresent = dbWithOverlayEvents.Count(e => !e.ProjectionDetailDbPresent && e.ProjectionDetailOverlayCandidatePresent);
+        var detailOverlayUsed = dbWithOverlayEvents.Count(e => string.Equals(e.ProjectionDetailSource, "overlay", StringComparison.OrdinalIgnoreCase));
+        var detailDbPresentOverlayIgnored = dbWithOverlayEvents.Count(e => e.ProjectionDetailDbPresent && e.ProjectionDetailOverlayCandidatePresent);
+        var detailBothMissing = dbWithOverlayEvents.Count(e => !e.ProjectionDetailDbPresent && !e.ProjectionDetailOverlayCandidatePresent);
+
+        log.Add("DB_WITH_OVERLAY_FIELD_MERGE_SUMMARY", "API",
+            $"result=OK date={baseDate:yyyy-MM-dd} dbWithOverlay={dbWithOverlayEvents.Count} " +
+            $"titleDbUsed={titleDbUsed} titleOverlayUsed={titleOverlayUsed} titleOverlayCandidateIgnored={titleOverlayCandidateIgnored} titleBothMissing={titleBothMissing} " +
+            $"outlineDbPresent={outlineDbPresent} outlineDbMissingOverlayPresent={outlineDbMissingOverlayPresent} outlineOverlayUsed={outlineOverlayUsed} outlineDbPresentOverlayIgnored={outlineDbPresentOverlayIgnored} outlineBothMissing={outlineBothMissing} " +
+            $"detailDbPresent={detailDbPresent} detailDbMissingOverlayPresent={detailDbMissingOverlayPresent} detailOverlayUsed={detailOverlayUsed} detailDbPresentOverlayIgnored={detailDbPresentOverlayIgnored} detailBothMissing={detailBothMissing} " +
+            $"titlePolicy=db_first overlayTitleUse=only_when_db_missing outlinePolicy=db_first_fill_missing detailPolicy=db_first_fill_missing dbWrite=none rule=db_with_overlay_field_merge_contract");
+    }
 
     var rawBlankTitleCount = displayEvents.Count(e => string.IsNullOrEmpty(e.CellText.Title));
     var titleLessDescriptorCount = displayEvents.Count(e => string.IsNullOrEmpty(e.CellText.Title) && string.IsNullOrEmpty(e.RawShortEventDescriptorHex));
@@ -5479,7 +5023,52 @@ app.MapGet("/api/epg/events", (string? date, EpgStore store, ReservationStore re
     var cellItemsCount = displayEvents.Count(e => !string.IsNullOrEmpty(e.CellText.Items));
 
     log.Add("PROGRAMGUIDE_CELL_TEXT_DIRECT_HANDOFF", "API",
-        $"result=OK date={baseDate:yyyy-MM-dd} events={displayEvents.Count} blankTitle={rawBlankTitleCount} titleLessDescriptor={titleLessDescriptorCount} rawExtendedDescriptorHex={rawExtendedDescriptorHexCount} cellTitle={cellTitleCount} cellOutline={cellOutlineCount} cellDetail={cellDetailCount} cellItems={cellItemsCount} cellTextSource=db_raw_descriptor_common_decoder boundary=outline_detail_separator_kept dbReadFilters=none ch2Filter=removed reservationTitleBorrow=removed dtoDirectField=cellText legacyBodyFields=deleted rule=release_contract");
+        $"result=OK date={baseDate:yyyy-MM-dd} events={displayEvents.Count} blankTitle={rawBlankTitleCount} titleLessDescriptor={titleLessDescriptorCount} rawExtendedDescriptorHex={rawExtendedDescriptorHexCount} cellTitle={cellTitleCount} cellOutline={cellOutlineCount} cellDetail={cellDetailCount} cellItems={cellItemsCount} cellTextSource=db_raw_descriptor_common_decoder_or_projected_event boundary=outline_detail_separator_kept dbReadFilters=none dbWrite=none ch2Filter=removed reservationTitleBorrow=removed dtoDirectField=cellText legacyBodyFields=deleted rule=release_contract");
+
+    if (rawBlankTitleCount > 0)
+    {
+        const int blankTitleDiagnosticLimit = 24;
+        var blankTitleDiagnostics = timelineEvents
+            .Select((projected, index) => new
+            {
+                Projected = projected,
+                Display = index < displayEvents.Count ? displayEvents[index] : null
+            })
+            .Where(x => x.Display is not null && string.IsNullOrEmpty(x.Display.CellText.Title))
+            .Take(blankTitleDiagnosticLimit)
+            .ToList();
+
+        foreach (var item in blankTitleDiagnostics)
+        {
+            var projected = item.Projected;
+            var display = item.Display!;
+            var dbTitle = projected.DbEvent is null ? string.Empty : EpgProjection.Title(projected.DbEvent);
+            var overlayTitle = projected.Title ?? string.Empty;
+            var rawShortHex = projected.DbEvent?.RawShortEventDescriptorHex ?? string.Empty;
+            var rawExtendedHex = projected.DbEvent?.RawExtendedEventDescriptorHex ?? string.Empty;
+            var rawLoopHex = projected.DbEvent?.RawDescriptorLoopHex ?? string.Empty;
+
+            log.Add("PROGRAMGUIDE_BLANK_TITLE_DIAGNOSTIC", "API",
+                $"result=OBSERVED date={baseDate:yyyy-MM-dd} " +
+                $"nid={projected.NetworkId} tsid={projected.TransportStreamId} sid={projected.ServiceId} eventId={projected.EventId} " +
+                $"start={projected.Start:yyyy-MM-ddTHH:mm:ss} end={projected.End:yyyy-MM-ddTHH:mm:ss} service={SafeProgramGuideDiagnosticValue(display.ServiceName)} " +
+                $"projectionState={SafeProgramGuideDiagnosticValue(projected.ProjectionState)} sourceKind={SafeProgramGuideDiagnosticValue(projected.SourceKind)} " +
+                $"sourcePluginId={SafeProgramGuideDiagnosticValue(projected.SourcePluginId)} sourceEventKey={SafeProgramGuideDiagnosticValue(projected.SourceEventKey)} " +
+                $"dbEventExists={projected.DbEventExists} dbTitlePresent={!string.IsNullOrWhiteSpace(dbTitle)} overlayTitlePresent={!string.IsNullOrWhiteSpace(overlayTitle)} " +
+                $"dbTitle={SafeProgramGuideDiagnosticValue(dbTitle)} overlayTitle={SafeProgramGuideDiagnosticValue(overlayTitle)} finalCellTitle={SafeProgramGuideDiagnosticValue(display.CellText.Title)} " +
+                $"rawShortPresent={!string.IsNullOrWhiteSpace(rawShortHex)} rawShortBytes={ProgramGuideHexByteLength(rawShortHex)} " +
+                $"rawExtendedPresent={!string.IsNullOrWhiteSpace(rawExtendedHex)} rawExtendedBytes={ProgramGuideHexByteLength(rawExtendedHex)} " +
+                $"descriptorLoopPresent={!string.IsNullOrWhiteSpace(rawLoopHex)} descriptorLoopBytes={ProgramGuideHexByteLength(rawLoopHex)} " +
+                $"projectionTitleSource={SafeProgramGuideDiagnosticValue(projected.ProjectionTitleSource)} " +
+                $"rule=programguide_blank_title_source_trace");
+        }
+
+        log.Add("PROGRAMGUIDE_BLANK_TITLE_DIAGNOSTIC_SUMMARY", "API",
+            $"result=OBSERVED date={baseDate:yyyy-MM-dd} blankTitle={rawBlankTitleCount} emitted={blankTitleDiagnostics.Count} truncated={rawBlankTitleCount > blankTitleDiagnosticLimit} " +
+            $"limit={blankTitleDiagnosticLimit} purpose=source_boundary_trace dbWrite=none rule=programguide_blank_title_source_trace");
+    }
+
+#endif
 
     return Results.Ok(new
     {
@@ -5495,32 +5084,38 @@ app.MapGet("/api/epg/events", (string? date, EpgStore store, ReservationStore re
 // 番組詳細
 app.MapGet("/api/epg/event", (
     ushort networkId, ushort tsId, ushort serviceId, ushort eventId,
-    EpgStore store,
+    IProgramEventSource programEvents,
     ChannelFileLoader channelLoader) =>
 {
     if (!BuildProgramGuideChannelServiceKeySet(BuildCurrentProgramGuideChannels(channelLoader))
         .Contains(ProgramGuideServiceKey3(networkId, tsId, serviceId)))
         return Results.NotFound();
-    var ev = store.GetOne(networkId, tsId, serviceId, eventId);
-    return ev is null ? Results.NotFound() : Results.Ok(ev);
+    var ev = programEvents.GetByEventKey(networkId, tsId, serviceId, eventId);
+    return ev is null ? Results.NotFound() : Results.Ok(ev.ToEpgEvent());
 });
 
 // 番組検索
 app.MapGet("/api/epg/search", (
     string?  q,            // キーワード
     bool?    desc,         // 説明文も検索
-    string?  sids,         // サービスID カンマ区切り
+    string?  services,     // 局identity NID:TSID:SID カンマ区切り
+    string?  sids,         // 旧互換: SID カンマ区切り。一意に現在局へ解決できる場合のみ使用
     string?  dow,          // 曜日 カンマ区切り (0=日〜6=土)
     int?     timeFrom,     // 開始時間 (0〜23)
     int?     timeTo,       // 終了時間 (1〜24)
     string?  dateFrom,     // 期間開始 yyyy-MM-dd
     string?  dateTo,       // 期間終了 yyyy-MM-dd
-    EpgStore store,
+    IProgramEventSource programEvents,
     ChannelFileLoader channelLoader) =>
 {
-    var serviceIds = sids?.Split(',', StringSplitOptions.RemoveEmptyEntries)
-        .Select(s => ushort.TryParse(s.Trim(), out var v) ? (ushort?)v : null)
-        .Where(v => v.HasValue).Select(v => v!.Value);
+    var serviceKeys = new HashSet<ServiceIdentityContract.Key>();
+    foreach (var token in (services ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+    {
+        if (!ServiceIdentityContract.TryParseKey(token, out var key))
+            return Results.BadRequest(new { message = $"対象局identityが不正です: {token}" });
+        serviceKeys.Add(key);
+    }
+
     var days = dow?.Split(',', StringSplitOptions.RemoveEmptyEntries)
         .Select(d => int.TryParse(d.Trim(), out var v) ? (int?)v : null)
         .Where(v => v.HasValue).Select(v => v!.Value);
@@ -5530,10 +5125,51 @@ app.MapGet("/api/epg/search", (
         ? dt.ToDateTime(TimeOnly.MaxValue) : (DateTime?)null;
 
     var channels = BuildCurrentProgramGuideChannels(channelLoader);
-    var currentServiceKeys = BuildProgramGuideChannelServiceKeySet(channels);
-    var events = store.Search(q, desc ?? false, serviceIds, days, timeFrom, timeTo, from, to)
-        .Where(e => currentServiceKeys.Contains(ProgramGuideEventServiceKey(e)))
-        .ToList();
+    foreach (var token in (sids ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+    {
+        if (!ushort.TryParse(token, out var legacySid))
+            return Results.BadRequest(new { message = $"旧形式の対象局SIDが不正です: {token}" });
+
+        var matches = channels
+            .Where(ch => ch.ServiceId == legacySid)
+            .Select(ServiceIdentityContract.From)
+            .Distinct()
+            .Take(2)
+            .ToList();
+        if (matches.Count != 1)
+            return Results.BadRequest(new
+            {
+                message = matches.Count == 0
+                    ? $"旧形式の対象局 SID={legacySid} を現在の局情報から一意に解決できません。"
+                    : $"旧形式の対象局 SID={legacySid} は複数局に一致します。NID:TSID:SIDで指定してください。"
+            });
+        serviceKeys.Add(matches[0]);
+    }
+
+    var daySet = days?.ToHashSet();
+    var keyword = (q ?? string.Empty).Trim();
+    var searchFrom = from ?? DateTime.Now;
+    var searchTo = to ?? searchFrom.AddDays(14);
+
+    IEnumerable<ProjectedProgramEvent> query = programEvents.GetByRange(searchFrom, searchTo)
+        .Where(e => e.End >= DateTime.Now);
+
+    if (serviceKeys.Count > 0)
+        query = query.Where(e => serviceKeys.Contains(new ServiceIdentityContract.Key(e.NetworkId, e.TransportStreamId, e.ServiceId)));
+    if (daySet is { Count: > 0 })
+        query = query.Where(e => daySet.Contains((int)e.Start.DayOfWeek));
+    if (timeFrom.HasValue)
+        query = query.Where(e => e.Start.Hour >= timeFrom.Value);
+    if (timeTo.HasValue && timeTo.Value < 24)
+        query = query.Where(e => e.Start.Hour < timeTo.Value);
+    if (keyword.Length > 0)
+    {
+        query = desc == true
+            ? query.Where(e => ProgramGuideProjectedContains(e.Title, keyword) || ProgramGuideProjectedContains(e.ShortText, keyword) || ProgramGuideProjectedContains(e.ExtendedText, keyword) || ProgramGuideProjectedContains(e.CellText, keyword))
+            : query.Where(e => ProgramGuideProjectedContains(e.Title, keyword));
+    }
+
+    var events = query.ToList();
 
     var chOrder  = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
     for (var i = 0; i < channels.Count; i++)
@@ -5553,12 +5189,19 @@ app.MapGet("/api/epg/search", (
         .Select(e => new
         {
             e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId,
-            e.ServiceName,
-            Title = EpgProjection.Title(e),
-            Description = EpgProjection.ShortText(e),
+            ServiceName = ServiceIdentityContract.ResolveCurrentServiceName(channels, e.NetworkId, e.TransportStreamId, e.ServiceId, e.ServiceName),
+            Title = e.Title,
+            Description = e.ShortText,
+            ExtendedText = e.ExtendedText,
             e.Genre,
             GenreCodes = e.GenreCodes,
-            e.DurationSeconds, e.Start, e.End
+            e.DurationSeconds, e.Start, e.End,
+            projectedEventId = e.Key.Value,
+            projectionState = e.ProjectionState,
+            sourceKind = e.SourceKind,
+            sourcePluginId = e.SourcePluginId,
+            sourceEventKey = e.SourceEventKey,
+            dbEventExists = e.DbEventExists
         });
 
     return Results.Ok(new { count = events.Count, events = sorted });
@@ -5566,30 +5209,35 @@ app.MapGet("/api/epg/search", (
 
 app.MapGet("/api/epg/tagged", (
     string kind,
-    EpgStore store,
+    IProgramEventSource programEvents,
     ChannelFileLoader channelLoader) =>
 {
     var now = DateTime.Now;
     var to = now.AddDays(7);
-    var events = store.GetByRange(now, to);
+    // The tagged candidate lists use the same seven-day window over the canonical
+    // projected programme set. Reuse ProgramGuideProjectionService's immutable
+    // revision-bound full snapshot and apply the existing range predicate locally
+    // instead of rebuilding the DB + External EPG merge for each tagged tab read.
+    var events = programEvents.GetAll()
+        .Where(e => e.End > now && e.Start < to)
+        .ToList();
 
-    Func<EpgEvent, bool> match = kind?.ToLowerInvariant() switch
+    Func<ProjectedProgramEvent, bool> match = kind?.ToLowerInvariant() switch
     {
         "newprogram" => e =>
         {
-            var title = EpgProjection.Title(e) ?? string.Empty;
+            var title = e.Title ?? string.Empty;
             return title.Contains("[新]") || title.Contains("［新］") || title.Contains("【新】") || title.Contains("新番組");
         },
         "finalepisode" => e =>
         {
-            var title = EpgProjection.Title(e) ?? string.Empty;
+            var title = e.Title ?? string.Empty;
             return title.Contains("[終]") || title.Contains("［終］") || title.Contains("【終】") || title.Contains("最終回");
         },
         _ => _ => false
     };
 
     var channels = BuildCurrentProgramGuideChannels(channelLoader);
-    var currentServiceKeys = BuildProgramGuideChannelServiceKeySet(channels);
     var chOrder = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
     for (var i = 0; i < channels.Count; i++)
     {
@@ -5599,9 +5247,8 @@ app.MapGet("/api/epg/tagged", (
     }
 
     var filtered = events
-        .Where(e => currentServiceKeys.Contains(ProgramGuideEventServiceKey(e)))
         .Where(match)
-        .GroupBy(e => new { e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId })
+        .GroupBy(e => new { e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId, e.SourceKind, e.SourcePluginId, e.SourceEventKey })
         .Select(g => g.OrderBy(x => x.Start).First())
         .OrderBy(e => e.Start)
         .ThenBy(e =>
@@ -5613,18 +5260,27 @@ app.MapGet("/api/epg/tagged", (
         {
             e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId,
             e.ServiceName,
-            Title = EpgProjection.Title(e),
-            Description = EpgProjection.ShortText(e),
+            Title = e.Title,
+            Description = e.ShortText,
             e.Genre,
             GenreCodes = e.GenreCodes,
             e.DurationSeconds, e.Start, e.End,
-            titleProjectionSafe = false, titleProjectionReason = "raw_unsealed"
+            projectedEventId = e.Key.Value,
+            projectionState = e.ProjectionState,
+            sourceKind = e.SourceKind,
+            sourcePluginId = e.SourcePluginId,
+            sourceEventKey = e.SourceEventKey,
+            dbEventExists = e.DbEventExists,
+            titleProjectionSafe = false, titleProjectionReason = "raw_unsealed_or_projected"
         })
         .ToList();
 
     return Results.Ok(new { count = filtered.Count, events = filtered, rule = "release_contract" });
 });
 
+// Developer Diagnostics public-release boundary:
+// 一般公開版では診断APIをルーティングせず、開発者ログ/診断スナップショットを外部公開しない。
+#if TVAIR_DEVELOPER_DIAGNOSTICS
 // ログ
 app.MapGet("/api/debug/tuner-allocation", (ReservationStore store) =>
 {
@@ -5683,7 +5339,8 @@ if (enableRouteReplayDebugApi)
             SyncProgramRuleReservations: true,
             ReevaluateAllocations: true,
             RefreshPreRecordEpgEntries: false,
-            RefreshWakeTask: false));
+            RefreshWakeTask: false,
+            WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce));
 
         var json = store.ReadTunerAllocationDebugJson();
         return json is null
@@ -5694,18 +5351,35 @@ if (enableRouteReplayDebugApi)
 
 
 
+// developer_log_delta_read_contract:
+// /api/log は開発者専用の差分取得口。通常アクセスでは、その時点までのログ本体を
+// 同一lock内でスナップショット化して消費し、固定ビルドヘッダだけは毎回先頭に付与する。
+// ?count= 指定時だけ既存の非破壊Recent取得を残し、診断補助用途との互換性を維持する。
 app.MapGet("/api/log", (int? count, LogRepository log) =>
 {
     var entries = count.HasValue
         ? log.GetRecent(count.Value)
-        : log.GetAll();
+        : log.ConsumeAll();
     return Results.Ok(entries);
 });
+#endif
 
 app.MapGet("/api/user-events", (int? count, string? severity, string? category, UserEventLogService userEvents) =>
 {
     var max = Math.Clamp(count ?? 100, 1, 1000);
-    return Results.Ok(userEvents.GetRecent(max, severity, category));
+    var rows = userEvents.GetRecent(max, severity, category)
+        .Select(e => new UserEventLogDisplayEntry
+        {
+            Id = e.Id,
+            Severity = e.Severity,
+            Category = e.Category,
+            Result = e.Result,
+            Target = e.Target,
+            Message = UserLogProjectionService.BuildStandardMessage(e),
+            CreatedAt = e.CreatedAt
+        })
+        .ToArray();
+    return Results.Ok(rows);
 });
 
 app.MapGet("/api/user-events/report", (int? hours, int? count, UserEventLogService userEvents) =>
@@ -5724,6 +5398,115 @@ app.MapDelete("/api/user-events", (UserEventLogService userEvents) =>
 
 // release_contract: DROP品質調査再開用の読み取り専用ログ窓口。
 // 既存ログを絞り込むだけで、録画・EPG・割当・停止処理には介入しない。
+
+
+static bool IsPluginPresentationTextMode(string? value, string expected)
+    => string.Equals((value ?? string.Empty).Trim(), expected, StringComparison.OrdinalIgnoreCase);
+
+static bool IsPluginPresentationMultilineText(string? value)
+    => (value ?? string.Empty).Contains('\n');
+
+static bool IsPluginPresentationTargetMultiline(TvAirLogPresentationEntryDto entry)
+{
+    if (IsPluginPresentationTextMode(entry.TargetTextMode, "multiline"))
+        return true;
+    if (IsPluginPresentationTextMode(entry.TargetTextMode, "singleline"))
+        return false;
+
+    var parts = 0;
+    if (!string.IsNullOrWhiteSpace(entry.ProgramTitle)) parts++;
+    if (!string.IsNullOrWhiteSpace(entry.ServiceName)) parts++;
+    if (!string.IsNullOrWhiteSpace(entry.ReservationId)) parts++;
+    return parts > 1;
+}
+
+// release_contract: generic log presentation read surface.
+// Host settings and plugin policies share the same projection contract; highest priority wins deterministically.
+app.MapGet("/api/log-presentation/{viewKey}", (string viewKey, LogPresentationStore store, UserEventLogService userEvents, IniSettingsService ini, LogRepository log) =>
+{
+    var activePolicy = store.GetActiveLogPolicy(viewKey);
+    var activeSnapshot = store.GetActiveLogSnapshot(viewKey);
+    var hostPolicy = UserLogProjectionService.CreateHostPolicy(viewKey, ini);
+
+    var policyPriority = activePolicy?.Policy.Priority ?? int.MinValue;
+    var snapshotPriority = activeSnapshot?.Snapshot.Priority ?? int.MinValue;
+    var hostPriority = hostPolicy?.Priority ?? int.MinValue;
+
+    TvAirLogPresentationSnapshotDto? snapshot;
+    string sourcePluginId;
+    if (activePolicy is not null && policyPriority >= snapshotPriority && policyPriority >= hostPriority)
+    {
+        snapshot = UserLogProjectionService.BuildSnapshot(activePolicy.Policy, userEvents.GetRecent(100));
+        sourcePluginId = activePolicy.SourcePluginId;
+    }
+    else if (activeSnapshot is not null && snapshotPriority >= hostPriority)
+    {
+        snapshot = activeSnapshot.Snapshot;
+        sourcePluginId = activeSnapshot.SourcePluginId;
+    }
+    else if (hostPolicy is not null)
+    {
+        snapshot = UserLogProjectionService.BuildSnapshot(hostPolicy, userEvents.GetRecent(100));
+        sourcePluginId = "tvair.settings";
+    }
+    else
+    {
+        snapshot = null;
+        sourcePluginId = string.Empty;
+    }
+    var entries = snapshot?.Entries ?? Array.Empty<TvAirLogPresentationEntryDto>();
+    var entryCount = entries.Count;
+    var multilineMessageCount = entries.Count(e => IsPluginPresentationMultilineText(e.Message));
+    var multilineTargetCount = entries.Count(e => IsPluginPresentationTargetMultiline(e));
+    var projectedDetailRowCount = entries.Count(e => (e.Message ?? string.Empty).Contains('\n'));
+    var projectedDetailItemCount = entries.Sum(e => Math.Max(0, (e.Message ?? string.Empty).Split('\n').Length - 1));
+    var firstMessageHasNewline = entries.FirstOrDefault()?.Message?.Contains('\n') == true;
+    var firstTargetIsMultiline = entries.FirstOrDefault() is { } firstEntry && IsPluginPresentationTargetMultiline(firstEntry);
+    log.Add("LOG_PRESENTATION_READ", viewKey,
+        $"active={snapshot is not null} sourcePluginId={SafePluginActionValue(sourcePluginId)} entries={entryCount} projectedDetailRows={projectedDetailRowCount} projectedDetailItems={projectedDetailItemCount} multilineMessages={multilineMessageCount} multilineTargets={multilineTargetCount} firstMessageHasNewline={firstMessageHasNewline} firstTargetIsMultiline={firstTargetIsMultiline} replaceHostDefault={snapshot?.ReplaceHostDefault.ToString() ?? "-"} rule=log_presentation_readback_contract");
+    return Results.Ok(new
+    {
+        active = snapshot is not null,
+        viewKey,
+        sourcePluginId,
+        entryCount,
+        multilineMessageCount,
+        multilineTargetCount,
+        projectedDetailRowCount,
+        projectedDetailItemCount,
+        firstMessageHasNewline,
+        firstTargetIsMultiline,
+        snapshot,
+        rule = "log_presentation_capability"
+    });
+});
+
+app.MapGet("/api/log-presentation", (LogPresentationStore store) =>
+{
+    var snapshots = store.ListLogSnapshots();
+    var policies = store.ListLogPolicies();
+    return Results.Ok(new
+    {
+        count = snapshots.Count + policies.Count,
+        snapshots = snapshots.Select(x => new { x.SourcePluginId, x.Snapshot.ViewKey, x.Snapshot.Title, x.Snapshot.Summary, x.Snapshot.Priority, x.Snapshot.UpdatedAt, entryCount = x.Snapshot.Entries.Count }),
+        policies = policies.Select(x => new { x.SourcePluginId, x.Policy.ViewKey, x.Policy.Title, x.Policy.Enabled, x.Policy.DetailKeys, x.Policy.Layout, x.Policy.HideEmptyDetails, x.Policy.Priority, x.Policy.UpdatedAt }),
+        rule = "user_operation_log_projection_policy"
+    });
+});
+
+app.MapGet("/api/recording-quality/presentation", (LogPresentationStore store) =>
+{
+    var active = store.GetActiveRecordingQualitySnapshot();
+    return Results.Ok(new
+    {
+        active = active is not null,
+        sourcePluginId = active?.SourcePluginId ?? string.Empty,
+        snapshot = active?.Snapshot,
+        rule = "recording_quality_presentation_capability"
+    });
+});
+
+#if TVAIR_DEVELOPER_DIAGNOSTICS
 app.MapGet("/api/recording-quality/logs", (int? count, LogRepository log) =>
 {
     var max = Math.Clamp(count ?? 200, 1, 1000);
@@ -5752,6 +5535,7 @@ app.MapGet("/api/recording-quality/logs", (int? count, LogRepository log) =>
         entries
     });
 });
+#endif
 
 
 
@@ -5815,6 +5599,256 @@ static string TitleGuardLogValue(string? value)
 static string ReservationUserTitleLogValue(string? rawTitle)
     => ReservationTitleDisplayContract.ForLog(rawTitle);
 
+static string ReadProjectedEventIdFromRequest(HttpRequest request)
+{
+    if (request.Query.TryGetValue("projectedEventId", out var queryValue) && !string.IsNullOrWhiteSpace(queryValue.ToString()))
+        return queryValue.ToString().Trim();
+    if (request.Query.TryGetValue("projectedId", out var shortQueryValue) && !string.IsNullOrWhiteSpace(shortQueryValue.ToString()))
+        return shortQueryValue.ToString().Trim();
+    if (request.Headers.TryGetValue("X-TvAIr-Projected-Event-Id", out var headerValue) && !string.IsNullOrWhiteSpace(headerValue.ToString()))
+        return headerValue.ToString().Trim();
+
+    if (request.HasFormContentType)
+    {
+        var form = request.Form;
+        if (form.TryGetValue("projectedEventId", out var formValue) && !string.IsNullOrWhiteSpace(formValue.ToString()))
+            return formValue.ToString().Trim();
+        if (form.TryGetValue("projectedId", out var shortFormValue) && !string.IsNullOrWhiteSpace(shortFormValue.ToString()))
+            return shortFormValue.ToString().Trim();
+    }
+
+    return string.Empty;
+}
+
+static bool ReadForceProjectedFallbackFromRequest(HttpRequest request)
+{
+    static bool IsEnabledValue(string? value)
+    {
+        var v = (value ?? string.Empty).Trim();
+        return string.Equals(v, "true", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(v, "1", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(v, "yes", StringComparison.OrdinalIgnoreCase);
+    }
+
+    if (request.Query.TryGetValue("forceProjectedFallback", out var queryValue) && IsEnabledValue(queryValue.ToString()))
+        return true;
+    if (request.Query.TryGetValue("forceProjectedReservationFallback", out var longQueryValue) && IsEnabledValue(longQueryValue.ToString()))
+        return true;
+    if (request.Headers.TryGetValue("X-TvAIr-Force-Projected-Fallback", out var headerValue) && IsEnabledValue(headerValue.ToString()))
+        return true;
+
+    if (request.HasFormContentType)
+    {
+        var form = request.Form;
+        if (form.TryGetValue("forceProjectedFallback", out var formValue) && IsEnabledValue(formValue.ToString()))
+            return true;
+        if (form.TryGetValue("forceProjectedReservationFallback", out var longFormValue) && IsEnabledValue(longFormValue.ToString()))
+            return true;
+    }
+
+    return false;
+}
+
+static ProjectedProgramEvent? ResolveProjectedReservationEvent(string projectedEventId, Reservation reservation, IProgramEventSource programEvents, LogRepository log, string sourceText, bool forceProjectedFallback)
+{
+    var trimmed = (projectedEventId ?? string.Empty).Trim();
+    if (forceProjectedFallback)
+    {
+        log.Add("PROJECTED_RESERVATION_REQUEST", sourceText,
+            $"result=DIAGNOSTIC mode=force_projected_fallback projectedEventId={SafeProjectedEventLogValue(trimmed)} nid={reservation.NetworkId} tsid={reservation.TransportStreamId} sid={reservation.ServiceId} eid={reservation.EventId} rule=projected_reservation_contract");
+        return ResolveProjectedReservationEventByRequestIdentity(reservation, programEvents, log, sourceText, "forced_fallback_diagnostic", trimmed);
+    }
+
+    if (!string.IsNullOrWhiteSpace(trimmed))
+    {
+        var byProjectedId = programEvents.GetAll()
+            .FirstOrDefault(e => string.Equals(e.Key.Value, trimmed, StringComparison.Ordinal));
+        if (byProjectedId is null
+            && ProjectedEventKey.TryParse(trimmed, out var parsedProjectedKey))
+        {
+            byProjectedId = programEvents.GetByProjectedKey(parsedProjectedKey);
+        }
+        if (byProjectedId is not null)
+        {
+            log.Add("PROJECTED_RESERVATION_REQUEST", sourceText,
+                $"result=RESOLVED mode=projectedEventId projectionState={byProjectedId.ProjectionState} sourceKind={byProjectedId.SourceKind} sourcePluginId={SafeProjectedEventLogValue(byProjectedId.SourcePluginId)} sourceEventKey={SafeProjectedEventLogValue(byProjectedId.SourceEventKey)} projectedEventId={SafeProjectedEventLogValue(trimmed)} dbEventExists={byProjectedId.DbEventExists} rule=projected_reservation_contract");
+            return byProjectedId;
+        }
+
+        var fallback = ResolveProjectedReservationEventByRequestIdentity(reservation, programEvents, log, sourceText, "stale_projected_event_id", trimmed);
+        if (fallback is not null) return fallback;
+        return null;
+    }
+
+    return ResolveProjectedReservationEventByRequestIdentity(reservation, programEvents, log, sourceText, "request_identity", string.Empty);
+}
+
+static ProjectedProgramEvent? ResolveProjectedReservationEventByRequestIdentity(Reservation reservation, IProgramEventSource programEvents, LogRepository log, string sourceText, string reason, string projectedEventId)
+{
+    if (reservation.NetworkId == 0 || reservation.TransportStreamId == 0 || reservation.ServiceId == 0)
+        return null;
+
+    if (reservation.EventId != 0)
+    {
+        var byEventKey = programEvents.GetByEventKey(reservation.NetworkId, reservation.TransportStreamId, reservation.ServiceId, reservation.EventId);
+        if (byEventKey is not null)
+        {
+            log.Add("PROJECTED_RESERVATION_REQUEST", sourceText,
+                $"result=RESOLVED mode=fallback_event_key reason={reason} projectionState={byEventKey.ProjectionState} sourceKind={byEventKey.SourceKind} sourcePluginId={SafeProjectedEventLogValue(byEventKey.SourcePluginId)} sourceEventKey={SafeProjectedEventLogValue(byEventKey.SourceEventKey)} projectedEventId={SafeProjectedEventLogValue(projectedEventId)} resolvedProjectedEventId={SafeProjectedEventLogValue(byEventKey.Key.Value)} dbEventExists={byEventKey.DbEventExists} nid={reservation.NetworkId} tsid={reservation.TransportStreamId} sid={reservation.ServiceId} eid={reservation.EventId} rule=projected_reservation_contract");
+            return byEventKey;
+        }
+    }
+
+    var byTime = ResolveProjectedReservationEventByTimeIdentity(reservation, programEvents, log, sourceText, reason, projectedEventId);
+    return byTime;
+}
+
+static ProjectedProgramEvent? ResolveProjectedReservationEventByTimeIdentity(Reservation reservation, IProgramEventSource programEvents, LogRepository log, string sourceText, string reason, string projectedEventId)
+{
+    if (reservation.StartTime == default || reservation.EndTime == default)
+        return null;
+
+    var requestStart = reservation.StartTime;
+    var requestEnd = reservation.EndTime;
+    var localStart = requestStart.ToLocalTime();
+    var localEnd = requestEnd.ToLocalTime();
+    var from = MinDateTime(requestStart, localStart).AddMinutes(-3);
+    var to = MaxDateTime(requestEnd, localEnd).AddMinutes(3);
+
+    if (reservation.EndTime <= reservation.StartTime || to <= from)
+        return null;
+
+    var sameService = programEvents.GetByRange(from, to)
+        .Where(e => e.NetworkId == reservation.NetworkId
+                 && e.TransportStreamId == reservation.TransportStreamId
+                 && e.ServiceId == reservation.ServiceId)
+        .ToList();
+
+    if (sameService.Count == 0)
+        return null;
+
+    var eventIdCandidates = reservation.EventId == 0
+        ? new List<ProjectedProgramEvent>()
+        : sameService.Where(e => e.EventId == reservation.EventId).ToList();
+    var selected = SelectSingleProjectedCandidate(eventIdCandidates, out var eventIdAmbiguous);
+    if (selected is not null)
+    {
+        LogProjectedReservationFallbackResolved(log, sourceText, "fallback_range_event_id", reason, projectedEventId, selected, reservation, eventIdCandidates.Count);
+        return selected;
+    }
+    if (eventIdAmbiguous)
+    {
+        LogProjectedReservationFallbackRejected(log, sourceText, "ambiguous_fallback_event_id_candidates", reason, projectedEventId, reservation, eventIdCandidates.Count);
+        return null;
+    }
+
+    var exactTimeCandidates = sameService
+        .Where(e => IsSameDateTime(e.Start, requestStart) && IsSameDateTime(e.End, requestEnd)
+                 || IsSameDateTime(e.Start, localStart) && IsSameDateTime(e.End, localEnd))
+        .ToList();
+    selected = SelectSingleProjectedCandidate(exactTimeCandidates, out var exactTimeAmbiguous);
+    if (selected is not null)
+    {
+        LogProjectedReservationFallbackResolved(log, sourceText, "fallback_exact_time", reason, projectedEventId, selected, reservation, exactTimeCandidates.Count);
+        return selected;
+    }
+    if (exactTimeAmbiguous)
+    {
+        LogProjectedReservationFallbackRejected(log, sourceText, "ambiguous_fallback_exact_time_candidates", reason, projectedEventId, reservation, exactTimeCandidates.Count);
+        return null;
+    }
+
+    var normalizedTitle = NormalizeProjectedReservationCandidateTitle(reservation.Title);
+    if (string.IsNullOrWhiteSpace(normalizedTitle))
+        return null;
+
+    var closeTitleCandidates = sameService
+        .Where(e => IsCloseDateTime(e.Start, requestStart, 60) && IsCloseDateTime(e.End, requestEnd, 60)
+                 || IsCloseDateTime(e.Start, localStart, 60) && IsCloseDateTime(e.End, localEnd, 60))
+        .Where(e => string.Equals(NormalizeProjectedReservationCandidateTitle(e.Title), normalizedTitle, StringComparison.Ordinal))
+        .ToList();
+    selected = SelectSingleProjectedCandidate(closeTitleCandidates, out var closeTitleAmbiguous);
+    if (selected is not null)
+    {
+        LogProjectedReservationFallbackResolved(log, sourceText, "fallback_close_time_title", reason, projectedEventId, selected, reservation, closeTitleCandidates.Count);
+        return selected;
+    }
+    if (closeTitleAmbiguous)
+    {
+        LogProjectedReservationFallbackRejected(log, sourceText, "ambiguous_fallback_close_time_title_candidates", reason, projectedEventId, reservation, closeTitleCandidates.Count);
+        return null;
+    }
+
+    return null;
+}
+
+static ProjectedProgramEvent? SelectSingleProjectedCandidate(IReadOnlyList<ProjectedProgramEvent> candidates, out bool ambiguous)
+{
+    ambiguous = false;
+    if (candidates.Count == 0) return null;
+
+    var dbCandidates = candidates.Where(e => e.DbEventExists || e.DbEvent is not null).ToList();
+    if (dbCandidates.Count == 1) return dbCandidates[0];
+    if (dbCandidates.Count > 1)
+    {
+        ambiguous = true;
+        return null;
+    }
+
+    if (candidates.Count == 1) return candidates[0];
+    ambiguous = true;
+    return null;
+}
+
+static void LogProjectedReservationFallbackResolved(LogRepository log, string sourceText, string mode, string reason, string projectedEventId, ProjectedProgramEvent resolved, Reservation reservation, int candidateCount)
+{
+    log.Add("PROJECTED_RESERVATION_REQUEST", sourceText,
+        $"result=RESOLVED mode={mode} reason={reason} candidateCount={candidateCount} projectionState={resolved.ProjectionState} sourceKind={resolved.SourceKind} sourcePluginId={SafeProjectedEventLogValue(resolved.SourcePluginId)} sourceEventKey={SafeProjectedEventLogValue(resolved.SourceEventKey)} projectedEventId={SafeProjectedEventLogValue(projectedEventId)} resolvedProjectedEventId={SafeProjectedEventLogValue(resolved.Key.Value)} dbEventExists={resolved.DbEventExists} nid={reservation.NetworkId} tsid={reservation.TransportStreamId} sid={reservation.ServiceId} eid={reservation.EventId} resolvedEid={resolved.EventId} start={reservation.StartTime:MM/dd HH:mm:ss} end={reservation.EndTime:MM/dd HH:mm:ss} resolvedStart={resolved.Start:MM/dd HH:mm:ss} resolvedEnd={resolved.End:MM/dd HH:mm:ss} rule=projected_reservation_contract");
+}
+
+static void LogProjectedReservationFallbackRejected(LogRepository log, string sourceText, string rejectReason, string reason, string projectedEventId, Reservation reservation, int candidateCount)
+{
+    log.Add("PROJECTED_RESERVATION_REQUEST", sourceText,
+        $"result=REJECTED reason={rejectReason} fallbackReason={reason} candidateCount={candidateCount} projectedEventId={SafeProjectedEventLogValue(projectedEventId)} nid={reservation.NetworkId} tsid={reservation.TransportStreamId} sid={reservation.ServiceId} eid={reservation.EventId} start={reservation.StartTime:MM/dd HH:mm:ss} end={reservation.EndTime:MM/dd HH:mm:ss} rule=projected_reservation_contract");
+}
+
+static string NormalizeProjectedReservationCandidateTitle(string? title)
+{
+    var value = (title ?? string.Empty).Trim();
+    if (value.Length == 0) return string.Empty;
+    return string.Join(" ", value.Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries));
+}
+
+static bool IsSameDateTime(DateTime a, DateTime b)
+    => Math.Abs((a - b).TotalSeconds) < 1;
+
+static bool IsCloseDateTime(DateTime a, DateTime b, int toleranceSeconds)
+    => Math.Abs((a - b).TotalSeconds) <= toleranceSeconds;
+
+static DateTime MinDateTime(DateTime a, DateTime b) => a <= b ? a : b;
+static DateTime MaxDateTime(DateTime a, DateTime b) => a >= b ? a : b;
+
+static void ApplyProjectedEventToReservation(Reservation reservation, ProjectedProgramEvent projectedEvent)
+{
+    reservation.NetworkId = projectedEvent.NetworkId;
+    reservation.TransportStreamId = projectedEvent.TransportStreamId;
+    reservation.ServiceId = projectedEvent.ServiceId;
+    reservation.EventId = projectedEvent.EventId;
+    reservation.StartTime = projectedEvent.Start;
+    reservation.EndTime = projectedEvent.End;
+    if (!string.IsNullOrWhiteSpace(projectedEvent.Title))
+        reservation.Title = projectedEvent.Title.Trim();
+    if (string.IsNullOrWhiteSpace(reservation.ServiceName) && !string.IsNullOrWhiteSpace(projectedEvent.ServiceName))
+        reservation.ServiceName = projectedEvent.ServiceName.Trim();
+}
+
+static string SafeProjectedEventLogValue(string? value)
+{
+    if (string.IsNullOrWhiteSpace(value)) return "-";
+    var v = value.Replace("\r", " ").Replace("\n", " ").Replace("\t", " ").Replace("|", "/").Replace("\"", "'").Trim();
+    return v.Length <= 180 ? v : v[..180] + "…";
+}
+
 // ─── 予約 API ───────────────────────────────────────────────────
 
 // 予約一覧
@@ -5831,33 +5865,13 @@ app.MapGet("/api/reservations", (ReservationPresentationService presenter, LogRe
     }
 });
 
-app.MapPost("/api/reservations/refresh", (ReservationAllocationRouteService allocationRoute, LogRepository log) =>
-{
-    try
-    {
-        allocationRoute.Run(new ReservationAllocationRouteRequest(
-            Source: "ReservationList",
-            Action: "ManualRefresh",
-            RunKeywordMatcher: false,
-            SyncProgramRuleReservations: true,
-            ReevaluateAllocations: true,
-            RefreshPreRecordEpgEntries: true,
-            RefreshWakeTask: true,
-            EmitConflictLogs: true,
-            ConflictLogCategory: "ReservationAPI",
-            ConflictLogTitle: "RefreshConflict"));
-        log.Add("ReservationAPI", "Refresh", "予約一覧の手動更新で再割り当てを実行しました。");
-        return Results.Ok(new { message = "予約一覧を更新しました。" });
-    }
-    catch (Exception ex)
-    {
-        log.Add("ReservationAPI", "Refresh", $"/api/reservations/refresh 失敗: {ex}");
-        return Results.BadRequest(new { message = "予約一覧の更新に失敗しました。" });
-    }
-});
+// release_contract ReservationListManualRefreshContract:
+// Manual refresh reads GET /api/reservations only.  The former POST refresh route
+// re-ran ProgramRule sync, allocation, PreRecEpg, and Wake reconstruction and was
+// therefore an invalid recovery path for stale UI state.
 
 // 予約追加（番組表からの直接予約）
-app.MapPost("/api/reservations", (HttpRequest request, Reservation r, ReservationStore store, EpgStore epgStore, ChannelFileLoader channelLoader, ReservationAllocationRouteService allocationRoute, EpgScheduler epgScheduler, IOptions<EpgSettings> epgSettings, LogRepository log) =>
+app.MapPost("/api/reservations", (HttpRequest request, Reservation r, ReservationStore store, ReservationPresentationService presentation, IProgramEventSource programEvents, ReservationProjectionMetadataStore projectionMetadataStore, ChannelFileLoader channelLoader, ReservationAllocationRouteService allocationRoute, PluginTypedEventHub typedEvents, LogRepository log) =>
 {
     try
     {
@@ -5868,8 +5882,23 @@ app.MapPost("/api/reservations", (HttpRequest request, Reservation r, Reservatio
             ? ReservationSource.Immediate
             : ReservationSource.Manual;
 
-        var requestEvent = r.EventId == 0 ? null : epgStore.GetOne(r.NetworkId, r.TransportStreamId, r.ServiceId, r.EventId);
         var sourceText = r.Source == ReservationSource.Immediate ? "Immediate" : "Manual";
+        var projectedEventId = ReadProjectedEventIdFromRequest(request);
+        var forceProjectedFallback = ReadForceProjectedFallbackFromRequest(request);
+        var projectedEvent = ResolveProjectedReservationEvent(projectedEventId, r, programEvents, log, sourceText, forceProjectedFallback);
+        if ((forceProjectedFallback || !string.IsNullOrWhiteSpace(projectedEventId)) && projectedEvent is null)
+        {
+            log.Add("PROJECTED_RESERVATION_REQUEST", "Manual",
+                $"result=REJECTED reason=projected_event_not_found fallbackForced={forceProjectedFallback} projectedEventId={SafeProjectedEventLogValue(projectedEventId)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eid={r.EventId} rule=projected_reservation_contract");
+            return Results.NotFound(new { message = "投影番組が見つかりません。" });
+        }
+
+        if (projectedEvent is not null)
+        {
+            ApplyProjectedEventToReservation(r, projectedEvent);
+        }
+
+        var requestEvent = projectedEvent?.ToEpgEvent() ?? (r.EventId == 0 ? null : programEvents.GetByEventKey(r.NetworkId, r.TransportStreamId, r.ServiceId, r.EventId)?.ToEpgEvent());
         var routeSource = r.Source == ReservationSource.Immediate ? "ImmediateReservation" : "ManualReservation";
 
         // ChannelArgument はフロントや既存DBの値を信用せず、現在の .ch2 から常に再解決する。
@@ -5893,7 +5922,7 @@ app.MapPost("/api/reservations", (HttpRequest request, Reservation r, Reservatio
         // release_contract:
         // Immediate は「番組表の当該イベントを今から録る」操作であり、予約本体の時間軸は実開始側を正本にする。
         // EPG 番組開始時刻は requestEvent/EPG DB の event metadata として残し、StartTime / occupancy / segmentStart へは流し込まない。
-        // REC_FOLLOW_UPDATE 側の巻き戻りガードより前に、初期予約作成時点で過去開始を作らない。
+        // 初期予約作成時点で現在時刻より前の開始時刻を生成しない。
         if (r.Source == ReservationSource.Immediate)
         {
             var immediateNow = DateTime.Now;
@@ -5915,57 +5944,88 @@ app.MapPost("/api/reservations", (HttpRequest request, Reservation r, Reservatio
         if (!ApplyReservationTitleQualityGuard(r, requestEvent, sourceText, log, out var rawTitleError))
             return Results.BadRequest(new { message = rawTitleError });
 
-        // release_contract:
-        // 番組表/局別リスト/予約ボタンの正規Add入口で同一親予約を1件に正規化する。
-        // SystemEpg/PreRecEpg子予約はReservationStore側で親予約扱いしない。
-        // 既存予約がある場合は新規IDを作らず、以後の割当は既存の共通ALLOC_ROUTEに任せる。
-        var duplicate = store.FindActiveParentDuplicate(r);
-        if (duplicate is not null)
+        // Fast no-side-effect reuse check. The authoritative duplicate check is repeated atomically
+        // with INSERT below, so this does not become a check-then-insert race.
+        var existingBeforeSideEffects = store.FindActiveParentDuplicate(r);
+        if (existingBeforeSideEffects is not null)
         {
             log.Add("RESERVATION_DEDUPE", sourceText,
-                $"result=REUSE_EXISTING existing=R{duplicate.Id} requestedSource={sourceText} service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] rawTitleBlank={ReservationTitleDisplayContract.RawBlankFlag(r.Title)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eid={r.EventId} start={r.StartTime:MM/dd HH:mm} end={r.EndTime:MM/dd HH:mm} commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
-            var existing = store.GetById(duplicate.Id);
-            return Results.Ok(new { id = duplicate.Id, message = "既に予約済みです。", isConflicted = existing?.IsConflicted ?? false, reused = true });
+                $"result=REUSE_EXISTING existing=R{existingBeforeSideEffects.Id} requestedSource={sourceText} existingStatus={existingBeforeSideEffects.Status} existingDataVersion={existingBeforeSideEffects.DataVersion} stage=before_epg_side_effects rule=release_contract");
+            return Results.Ok(new { id = existingBeforeSideEffects.Id, message = "既に予約済みです。", isConflicted = existingBeforeSideEffects.IsConflicted, reused = true, reservation = presentation.GetReservation(existingBeforeSideEffects.Id) });
         }
 
-        var cancelEpgConfirmed = request.Query.TryGetValue("cancelEpgIfRunning", out var cancelQ)
-            && string.Equals(cancelQ.ToString(), "true", StringComparison.OrdinalIgnoreCase);
-        var preAddRunState = epgScheduler.GetRunState();
-        if (cancelEpgConfirmed && preAddRunState.IsRunning)
-        {
-            var accepted = epgScheduler.Cancel($"ReservationAdd.EpgCancelConfirmed.{sourceText}");
-            log.Add("EPG_RESERVATION_ADD_CANCEL_CONFIRMED", sourceText,
-                $"result={(accepted ? "REQUESTED" : "NO_RUNNING_EPG")} targetScope={preAddRunState.TargetScope} source={preAddRunState.Source} uiMode={preAddRunState.UiMode} action=cancel_epg_before_reservation_add rule=release_contract");
-        }
-        else if (preAddRunState.IsRunning)
-        {
-            log.Add("EPG_RESERVATION_ADD_CANCEL_DECLINED", sourceText,
-                $"targetScope={preAddRunState.TargetScope} source={preAddRunState.Source} uiMode={preAddRunState.UiMode} action=continue_epg_and_add_reservation rule=release_contract");
-        }
-
+        // Duplicate detection and INSERT are committed atomically below.
+        // This includes Immediate requests so concurrent clicks/retries converge on one reservation id.
         log.Add("RESERVE_ENTRY", sourceText, $"共通入口要求 source={sourceText} service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] rawTitleBlank={ReservationTitleDisplayContract.RawBlankFlag(r.Title)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} start={r.StartTime:MM/dd HH:mm} end={r.EndTime:MM/dd HH:mm} rule=release_contract");
-        var id = store.Add(r);
-        log.Add("Reservation", "Add", $"予約追加: service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] id=R{id} source={sourceText} {r.StartTime:HH:mm}〜{r.EndTime:HH:mm} rule=release_contract");
+        using var eventScope = typedEvents.BeginOutboxScope(out var commitEvents);
+        var addResult = store.AddOrGetActiveParent(r);
+        var id = addResult.ReservationId;
+        if (!addResult.Added && !addResult.Reactivated)
+        {
+            log.Add("RESERVATION_DEDUPE", sourceText,
+                $"result=REUSE_EXISTING existing=R{id} requestedSource={sourceText} existingStatus={addResult.Reservation.Status} existingDataVersion={addResult.Reservation.DataVersion} service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] rawTitleBlank={ReservationTitleDisplayContract.RawBlankFlag(r.Title)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eid={r.EventId} commonRoute=ATOMIC_ADD rule=release_contract");
+            return Results.Ok(new { id, message = "既に予約済みです。", isConflicted = addResult.Reservation.IsConflicted, reused = true, reservation = presentation.GetReservation(id) });
+        }
 
-        allocationRoute.Run(new ReservationAllocationRouteRequest(
+        if (addResult.Reactivated)
+        {
+            log.Add("RESERVATION_DEDUPE", sourceText,
+                $"result=RETRY_EXISTING existing=R{id} requestedSource={sourceText} status={addResult.Reservation.Status} dataVersion={addResult.Reservation.DataVersion} action=continue_common_allocation_route newReservationId=False rule=release_contract");
+        }
+
+        if (projectedEvent is not null)
+        {
+            projectionMetadataStore.UpsertFromProjectedEvent(id, projectedEvent);
+            log.Add("PROJECTED_RESERVATION_METADATA", sourceText,
+                $"result=SAVED reservation=R{id} projectionState={projectedEvent.ProjectionState} sourceKind={projectedEvent.SourceKind} sourcePluginId={SafeProjectedEventLogValue(projectedEvent.SourcePluginId)} sourceEventKey={SafeProjectedEventLogValue(projectedEvent.SourceEventKey)} projectedEventId={SafeProjectedEventLogValue(projectedEvent.Key.Value)} dbEventExists={projectedEvent.DbEventExists} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eid={r.EventId} rule=projected_reservation_contract");
+        }
+        log.Add("Reservation", addResult.Reactivated ? "Retry" : "Add",
+            $"{(addResult.Reactivated ? "予約再試行" : "予約追加")}: service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] id=R{id} source={sourceText} {r.StartTime:HH:mm}〜{r.EndTime:HH:mm} newReservationId={!addResult.Reactivated} rule=release_contract");
+
+        var isImmediate = r.Source == ReservationSource.Immediate;
+
+        // INTERACTIVE_RESERVATION_ALLOCATION_ORDER_INVARIANT — 変更禁止:
+        // 番組表の通常予約/今すぐ録画は、予約追加後に共通割当single-flightの確定結果を待ってからAPI応答する。
+        // pending batchへの合流だけで応答すると、割当未確定予約がUI/Due監視へ露出し、
+        // 物理Tuner、イベント単位優先順位、競合結果、チェーン固定Tunerが未確定のまま次状態へ進み得るため禁止する。
+        // 一方、当該ユーザーMutationと無関係なKeywordMatcher全件照合とProgramRule再生成は同期クリティカルパスへ混載しない。
+        // Tuner確定、競合判定、PreRecEpg/Wake更新、Starting CAS、worker開始の正規順序は共通割当ルートで維持する。
+        var allocationResult = allocationRoute.Run(new ReservationAllocationRouteRequest(
             Source: routeSource,
             Action: "Add",
-            RunKeywordMatcher: true,
-            SyncProgramRuleReservations: true,
+            // UI直結の手動予約/今すぐ録画では、予約Mutationと無関係な全件Keyword照合・ProgramRule再生成を
+            // 同期クリティカルパスへ混載しない。Tuner再評価/競合/PreRec/Wakeは共通割当ルートで必ず維持する。
+            RunKeywordMatcher: false,
+            SyncProgramRuleReservations: false,
             ReevaluateAllocations: true,
             RefreshPreRecordEpgEntries: true,
             RefreshWakeTask: true,
             EmitConflictLogs: true,
             ConflictLogCategory: "Reservation",
-            ConflictLogTitle: "Conflict"));
+            ConflictLogTitle: "Conflict",
+            WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce),
+            waitForActiveSingleFlight: true);
 
         var added = store.GetById(id);
+        commitEvents();
+        log.Add("PLUGIN_TYPED_EVENT_OUTBOX", sourceText, $"result=COMMITTED operation=ReservationAdd reservation=R{id} rule=typed_event_outbox");
 
-        // release_contract: EPG取得中の新規予約は、UI確認で了承された場合だけEPG全体をキャンセルする。
-        // 了承しない場合は予約追加のみ行い、既存の実行中EPGは継続する。
-
-
-        return Results.Ok(new { id, message = "予約しました。", isConflicted = added?.IsConflicted ?? false });
+        // EPG実行中はそのwave占有を固定し、後着の予約／今すぐ録画は共通競合判定へ委ねる。
+        // 録画要求からEPGを自動停止・縮小・再配置しない。EPG停止はVisible/Silent各UIの明示キャンセルだけが所有する。
+        return Results.Ok(new
+        {
+            id,
+            message = isImmediate
+                ? (allocationResult.Deferred ? "録画準備を受け付けました。" : "録画準備を開始しました。")
+                : (addResult.Reactivated ? "録画を再試行しました。" : "予約しました。"),
+            isConflicted = added?.IsConflicted ?? false,
+            reused = addResult.Reactivated,
+            reactivated = addResult.Reactivated,
+            preparing = isImmediate && (allocationResult.Deferred || added?.Status == ReservationStatus.Scheduled),
+            allocationDeferred = allocationResult.Deferred,
+            allocationReason = allocationResult.Reason,
+            reservation = presentation.GetReservation(id)
+        });
     }
     catch (Exception ex)
     {
@@ -5975,24 +6035,32 @@ app.MapPost("/api/reservations", (HttpRequest request, Reservation r, Reservatio
 
 
 // ユーザー明示チェーン予約（番組表の緑「チェーン」ボタンからのみ使用）
-app.MapPost("/api/reservations/chain", (Reservation r, ReservationStore store, EpgStore epgStore, ChannelFileLoader channelLoader, ReservationAllocationRouteService allocationRoute, IniSettingsService ini, LogRepository log, UserEventLogService userEvents) =>
+app.MapPost("/api/reservations/chain", (HttpRequest request, Reservation r, ReservationStore store, IProgramEventSource programEvents, ReservationProjectionMetadataStore projectionMetadataStore, ChannelFileLoader channelLoader, ReservationAllocationRouteService allocationRoute, IniSettingsService ini, PluginTypedEventHub typedEvents, LogRepository log, UserEventLogService userEvents) =>
 {
+    using var eventScope = typedEvents.BeginOutboxScope(out var commitEvents);
     try
     {
         // release_contract: チェーン予約は「後番組優先ON＋チェーン録画ON」を利用条件にしたうえで、
         // ユーザーが番組表のチェーンボタンで明示指定した場合だけ成立する予約契約。
-        // 自動救済ではなく、同一SID連続番組だけをAPI入口でも強制検証する。
+        // 自動救済ではなく、共通ChainReservationEligibilityContractをAPI入口とStore Transactionで再検証する。
         log.Add("RESERVE_ENTRY", "UserChainPolicy",
             $"later={ini.LaterProgramPriority} chain={ini.PseudoContinuousRecording} explicitButton=True title=[{ReservationUserTitleLogValue(r.Title)}] service=[{r.ServiceName}] rule=release_contract");
 
-        var requestEvent = r.EventId == 0 ? null : epgStore.GetOne(r.NetworkId, r.TransportStreamId, r.ServiceId, r.EventId);
-
-        if (!(ini.LaterProgramPriority && ini.PseudoContinuousRecording))
+        var projectedEventId = ReadProjectedEventIdFromRequest(request);
+        var forceProjectedFallback = ReadForceProjectedFallbackFromRequest(request);
+        var projectedEvent = ResolveProjectedReservationEvent(projectedEventId, r, programEvents, log, "UserChain", forceProjectedFallback);
+        if ((forceProjectedFallback || !string.IsNullOrWhiteSpace(projectedEventId)) && projectedEvent is null)
         {
-            log.Add("RESERVE_ENTRY", "UserChainRejected",
-                $"チェーン予約拒否: reason=chain_requires_prefer_later_program_and_pseudo_continuous later={ini.LaterProgramPriority} chain={ini.PseudoContinuousRecording}");
-            return Results.Conflict(new { message = "チェーン予約は後番組優先＋チェーン予約オプションが有効な場合のみ使用できます。" });
+            log.Add("PROJECTED_RESERVATION_REQUEST", "UserChain",
+                $"result=REJECTED reason=projected_event_not_found fallbackForced={forceProjectedFallback} projectedEventId={SafeProjectedEventLogValue(projectedEventId)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eid={r.EventId} rule=projected_reservation_contract");
+            return Results.NotFound(new { message = "投影番組が見つかりません。" });
         }
+        if (projectedEvent is not null)
+        {
+            ApplyProjectedEventToReservation(r, projectedEvent);
+        }
+
+        var requestEvent = projectedEvent?.ToEpgEvent() ?? (r.EventId == 0 ? null : programEvents.GetByEventKey(r.NetworkId, r.TransportStreamId, r.ServiceId, r.EventId)?.ToEpgEvent());
 
         if (!r.UserChainPreviousId.HasValue)
             return Results.BadRequest(new { message = "チェーン元予約が指定されていません。" });
@@ -6000,19 +6068,15 @@ app.MapPost("/api/reservations/chain", (Reservation r, ReservationStore store, E
         var predecessor = store.GetById(r.UserChainPreviousId.Value);
         if (predecessor is null)
             return Results.BadRequest(new { message = "チェーン元予約が見つかりません。" });
-        if (predecessor.Status is not (ReservationStatus.Scheduled or ReservationStatus.Recording))
-            return Results.Conflict(new { message = "チェーン元予約が有効な予約状態ではありません。" });
-        if (!predecessor.IsEnabled)
-            return Results.Conflict(new { message = "チェーン元予約が無効化されています。" });
         var predecessorTuner = !string.IsNullOrWhiteSpace(predecessor.ActualTunerName)
             ? predecessor.ActualTunerName
             : predecessor.TunerName;
-        if (predecessor.IsConflicted || string.IsNullOrWhiteSpace(predecessorTuner))
-            return Results.Conflict(new { message = "チェーン元予約のチューナーが未確定です。" });
 
-        var predecessorEvent = predecessor.EventId == 0
-            ? null
-            : epgStore.GetOne(predecessor.NetworkId, predecessor.TransportStreamId, predecessor.ServiceId, predecessor.EventId);
+        // CHAIN_CREATION_ALLOCATION_INVARIANT:
+        // チェーンボタンは親子トポロジーを原子的に確定し、その直後に共通割当ルートへ渡す。
+        // 初の子だけ、親予約のINSERT後から共通割当完了までTunerNameが一時的に空になり得る。
+        // ここで未確定Tunerを拒否すると、同じ操作を二度押しした時だけ成功する競合窓になる。
+        // 作成時の物理Tuner正本はFinalConflictPlanであり、API入口で空きTunerを推測・待機・再試行しない。
 
         r.StartTime = r.StartTime.ToLocalTime();
         r.EndTime   = r.EndTime.ToLocalTime();
@@ -6021,30 +6085,44 @@ app.MapPost("/api/reservations/chain", (Reservation r, ReservationStore store, E
             return Results.BadRequest(new { message = rawTitleError });
 
         var chainGapSeconds = (int)Math.Round((r.StartTime - predecessor.EndTime).TotalSeconds);
+        var chainEligibility = ChainReservationEligibilityContract.EvaluatePair(
+            predecessor,
+            r.NetworkId,
+            r.TransportStreamId,
+            r.ServiceId,
+            r.StartTime,
+            ini.LaterProgramPriority && ini.PseudoContinuousRecording);
+        if (!chainEligibility.IsEligible)
+        {
+            log.Add("RESERVE_ENTRY", "UserChainRejected",
+                $"reason={chainEligibility.ReasonToken} predecessor=R{predecessor.Id} prevNid={predecessor.NetworkId} prevTsid={predecessor.TransportStreamId} prevSid={predecessor.ServiceId} nextNid={r.NetworkId} nextTsid={r.TransportStreamId} nextSid={r.ServiceId} gapSec={chainGapSeconds} prevEnd={predecessor.EndTime:MM/dd HH:mm:ss} nextStart={r.StartTime:MM/dd HH:mm:ss} rule=release_contract");
+            return Results.Conflict(new
+            {
+                message = chainEligibility.Reason switch
+                {
+                    ChainReservationEligibilityContract.FailureReason.FeatureDisabled => "チェーン予約は後番組優先＋チェーン予約オプションが有効な場合のみ使用できます。",
+                    ChainReservationEligibilityContract.FailureReason.PredecessorNotActive => "チェーン元予約が有効な予約状態ではありません。",
+                    ChainReservationEligibilityContract.FailureReason.PredecessorDisabled => "チェーン元予約が無効化されています。",
+                    ChainReservationEligibilityContract.FailureReason.PredecessorConflicted => "チェーン元予約が競合しています。",
+                    ChainReservationEligibilityContract.FailureReason.NotSameService => "チェーン予約は同一局（同一NID/TSID/SID）の連続番組のみ使用できます。",
+                    ChainReservationEligibilityContract.FailureReason.NotAdjacent => "チェーン予約は同一時刻を跨ぐ連続番組のみ使用できます。",
+                    _ => "チェーン予約を作成できません。"
+                }
+            });
+        }
+
         var chainSameNetwork = predecessor.NetworkId == r.NetworkId;
         var chainSameTransport = predecessor.TransportStreamId == r.TransportStreamId;
         var chainSameService = predecessor.ServiceId == r.ServiceId;
-        var chainSameChannel = chainSameNetwork && chainSameTransport && chainSameService;
+        var chainSameChannel = ChainReservationEligibilityContract.IsSameService(predecessor, r.NetworkId, r.TransportStreamId, r.ServiceId);
         var chainAdjacent = ChainReservationContract.IsAdjacent(predecessor.EndTime, r.StartTime);
-
-        if (!chainSameChannel)
-        {
-            log.Add("RESERVE_ENTRY", "UserChainRejected",
-                $"reason=chain_requires_same_sid predecessor=R{predecessor.Id} sameNetwork={chainSameNetwork} sameTransport={chainSameTransport} sameService={chainSameService} prevNid={predecessor.NetworkId} prevTsid={predecessor.TransportStreamId} prevSid={predecessor.ServiceId} nextNid={r.NetworkId} nextTsid={r.TransportStreamId} nextSid={r.ServiceId} rule=release_contract");
-            return Results.Conflict(new { message = "チェーン予約は同一局（同一NID/TSID/SID）の連続番組のみ使用できます。" });
-        }
-
-        if (!chainAdjacent)
-        {
-            log.Add("RESERVE_ENTRY", "UserChainRejected",
-                $"reason=chain_requires_adjacent_program predecessor=R{predecessor.Id} gapSec={chainGapSeconds} prevEnd={predecessor.EndTime:MM/dd HH:mm:ss} nextStart={r.StartTime:MM/dd HH:mm:ss} rule=release_contract");
-            return Results.Conflict(new { message = "チェーン予約は同一時刻を跨ぐ連続番組のみ使用できます。" });
-        }
 
         var existingReservation = store.GetActiveByEvent(r.NetworkId, r.TransportStreamId, r.ServiceId, r.EventId);
 
         r.Source = ReservationSource.Manual;
         r.IsUserChain = true;
+        // 親に確定済みTunerがあれば初期投影として引き継ぐが、空でもチェーン作成を許可する。
+        // 最終的な親子共通Tunerは直後の共通割当ルートだけが確定する。
         r.TunerName = predecessorTuner;
         r.UserChainRootId = predecessor.UserChainRootId ?? predecessor.Id;
 
@@ -6062,47 +6140,78 @@ app.MapPost("/api/reservations/chain", (Reservation r, ReservationStore store, E
 
         var chainExecutionMode = "ChainDirectRecorder";
 
-        log.Add("RESERVE_ENTRY", "UserChain", $"共通入口要求 source=UserChain service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] predecessor=R{predecessor.Id} root=R{r.UserChainRootId} inheritTuner=[{predecessorTuner}] nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} start={r.StartTime:MM/dd HH:mm} end={r.EndTime:MM/dd HH:mm} executionMode={chainExecutionMode} commonRoute=ALLOC_ROUTE rule=release_contract");
+        log.Add("RESERVE_ENTRY", "UserChain", $"共通入口要求 source=UserChain service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] predecessor=R{predecessor.Id} root=R{r.UserChainRootId} inheritTuner=[{(string.IsNullOrWhiteSpace(predecessorTuner) ? "pending-final-plan" : predecessorTuner)}] nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} start={r.StartTime:MM/dd HH:mm} end={r.EndTime:MM/dd HH:mm} executionMode={chainExecutionMode} commonRoute=ALLOC_ROUTE rule=release_contract");
         log.Add("CHAIN_COMMON_ENTRY", $"R{predecessor.Id}->pending",
-            $"button=Chain route=ALLOC_ROUTE executionMode={chainExecutionMode} normalRecordingRouteTouched=False prevService=[{predecessor.ServiceName}] prevTitle=[{ReservationUserTitleLogValue(predecessor.Title)}] nextService=[{r.ServiceName}] nextTitle=[{ReservationUserTitleLogValue(r.Title)}] prevTuner={predecessorTuner} prevActualTuner={(string.IsNullOrWhiteSpace(predecessor.ActualTunerName) ? "-" : predecessor.ActualTunerName)} root=R{r.UserChainRootId} rule=release_contract");
+            $"button=Chain route=ALLOC_ROUTE executionMode={chainExecutionMode} normalRecordingRouteTouched=False prevService=[{predecessor.ServiceName}] prevTitle=[{ReservationUserTitleLogValue(predecessor.Title)}] nextService=[{r.ServiceName}] nextTitle=[{ReservationUserTitleLogValue(r.Title)}] prevTuner={(string.IsNullOrWhiteSpace(predecessorTuner) ? "pending-final-plan" : predecessorTuner)} prevActualTuner={(string.IsNullOrWhiteSpace(predecessor.ActualTunerName) ? "-" : predecessor.ActualTunerName)} root=R{r.UserChainRootId} rule=release_contract");
         log.Add("CHAIN_PAIR_EVAL", $"R{predecessor.Id}->pending",
-            $"result=READY_FOR_COMMON_ALLOC_ROUTE sameNetwork={chainSameNetwork} sameTransport={chainSameTransport} sameService={chainSameService} sameChannel={chainSameChannel} adjacent={chainAdjacent} gapSec={chainGapSeconds} userChain=True executionMode={chainExecutionMode} contract=same_sid_adjacent_explicit_button note=execution_layer_scaffold_only prevStart={predecessor.StartTime:MM/dd HH:mm:ss} prevEnd={predecessor.EndTime:MM/dd HH:mm:ss} nextStart={r.StartTime:MM/dd HH:mm:ss} nextEnd={r.EndTime:MM/dd HH:mm:ss} rule=release_contract");
+            $"result=READY_FOR_COMMON_ALLOC_ROUTE sameNetwork={chainSameNetwork} sameTransport={chainSameTransport} sameService={chainSameService} sameChannel={chainSameChannel} adjacent={chainAdjacent} gapSec={chainGapSeconds} userChain=True executionMode={chainExecutionMode} contract=same_sid_adjacent_explicit_button executionOwner=ReservationScheduler.StopRestartHandoff prevStart={predecessor.StartTime:MM/dd HH:mm:ss} prevEnd={predecessor.EndTime:MM/dd HH:mm:ss} nextStart={r.StartTime:MM/dd HH:mm:ss} nextEnd={r.EndTime:MM/dd HH:mm:ss} rule=release_contract");
         log.Add("CHAIN_CONTRACT_WARNING", $"R{predecessor.Id}->pending",
             $"accepted=True frontSegmentMayBeCut=True successorCompletenessPriority=True sameSidOnly=True userExplicitButton=True message=チェーン予約では前番組の後半がカットされる可能性があります rule=release_contract");
 
-        int id;
-        if (existingReservation is not null)
+        var chainMutation = store.AddOrPromoteUserChain(r, predecessor.Id, r.UserChainRootId.Value, ini.LaterProgramPriority && ini.PseudoContinuousRecording);
+        if (!chainMutation.Applied)
         {
-            id = existingReservation.Id;
-            store.UpdateUserChainLink(id, predecessor.Id, r.UserChainRootId.Value);
-            log.Add("Reservation", "ChainConvert", $"既存予約をチェーン予約へ昇格: service=[{existingReservation.ServiceName}] title=[{ReservationUserTitleLogValue(existingReservation.Title)}] id=R{id} predecessor=R{predecessor.Id} tuner=[{predecessorTuner}] executionMode={chainExecutionMode} wasConflicted={existingReservation.IsConflicted} {existingReservation.StartTime:HH:mm}〜{existingReservation.EndTime:HH:mm} rule=release_contract");
-            log.Add("CHAIN_EXECUTION_MODE", $"R{id}", $"mode={chainExecutionMode} stage=existing_reservation_converted commonRoute=ALLOC_ROUTE normalExecutorFrozen=True bridgeHandoffImplemented=False predecessor=R{predecessor.Id} rule=release_contract");
+            log.Add("CHAIN_MUTATION", $"R{predecessor.Id}->pending",
+                $"result=REJECTED reason={chainMutation.Reason} existing=R{(chainMutation.ReservationId == 0 ? "-" : chainMutation.ReservationId.ToString())} rule=release_contract");
+            return Results.Conflict(new
+            {
+                message = chainMutation.Reason switch
+                {
+                    "predecessor_already_has_successor" => "チェーン元予約には既に別の後続予約があります。",
+                    "successor_already_has_predecessor" => "対象予約は既に別のチェーンに属しています。",
+                    "chain_cycle_detected" => "循環するチェーン予約は作成できません。",
+                    "chain_depth_exceeded" => "チェーン予約の長さが上限を超えています。",
+                    "chain_broken_predecessor" => "既存チェーンの参照が壊れているため追加できません。",
+                    "chain_root_mismatch" => "既存チェーンのルートが一致しません。",
+                    "compare_and_set_failed" => "予約が同時に更新されたため、再読み込みしてください。",
+                    _ => "チェーン予約の構造検証に失敗しました。"
+                },
+                reason = chainMutation.Reason,
+                reservationId = chainMutation.ReservationId
+            });
+        }
+
+        var id = chainMutation.ReservationId;
+        existingReservation = chainMutation.Added ? null : existingReservation ?? chainMutation.Reservation;
+        if (projectedEvent is not null)
+        {
+            projectionMetadataStore.UpsertFromProjectedEvent(id, projectedEvent);
+            log.Add("PROJECTED_RESERVATION_METADATA", "UserChain",
+                $"result=SAVED reservation=R{id} projectionState={projectedEvent.ProjectionState} sourceKind={projectedEvent.SourceKind} sourcePluginId={SafeProjectedEventLogValue(projectedEvent.SourcePluginId)} sourceEventKey={SafeProjectedEventLogValue(projectedEvent.SourceEventKey)} projectedEventId={SafeProjectedEventLogValue(projectedEvent.Key.Value)} dbEventExists={projectedEvent.DbEventExists} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eid={r.EventId} rule=projected_reservation_contract");
+        }
+        if (chainMutation.Added)
+        {
+            log.Add("Reservation", "ChainAdd", $"チェーン予約追加: service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] id=R{id} predecessor=R{predecessor.Id} tuner=[{(string.IsNullOrWhiteSpace(predecessorTuner) ? "pending-final-plan" : predecessorTuner)}] executionMode={chainExecutionMode} {r.StartTime:HH:mm}〜{r.EndTime:HH:mm} rule=release_contract");
+            log.Add("CHAIN_EXECUTION_MODE", $"R{id}", $"mode={chainExecutionMode} stage=new_chain_reservation_added commonRoute=ALLOC_ROUTE normalExecutorFrozen=True handoffMode=stop_restart handoffImplemented=True predecessor=R{predecessor.Id} rule=release_contract");
         }
         else
         {
-            id = store.Add(r);
-            log.Add("Reservation", "ChainAdd", $"チェーン予約追加: service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] id=R{id} predecessor=R{predecessor.Id} tuner=[{predecessorTuner}] executionMode={chainExecutionMode} {r.StartTime:HH:mm}〜{r.EndTime:HH:mm} rule=release_contract");
-            log.Add("CHAIN_EXECUTION_MODE", $"R{id}", $"mode={chainExecutionMode} stage=new_chain_reservation_added commonRoute=ALLOC_ROUTE normalExecutorFrozen=True bridgeHandoffImplemented=False predecessor=R{predecessor.Id} rule=release_contract");
+            var promoted = chainMutation.Reservation ?? existingReservation;
+            log.Add("Reservation", "ChainConvert", $"既存予約をチェーン予約へ昇格: service=[{promoted?.ServiceName}] title=[{ReservationUserTitleLogValue(promoted?.Title ?? string.Empty)}] id=R{id} predecessor=R{predecessor.Id} tuner=[{(string.IsNullOrWhiteSpace(predecessorTuner) ? "pending-final-plan" : predecessorTuner)}] executionMode={chainExecutionMode} wasConflicted={promoted?.IsConflicted} {(promoted?.StartTime.ToString("HH:mm") ?? "-")}〜{(promoted?.EndTime.ToString("HH:mm") ?? "-")} rule=release_contract");
+            log.Add("CHAIN_EXECUTION_MODE", $"R{id}", $"mode={chainExecutionMode} stage=existing_reservation_converted commonRoute=ALLOC_ROUTE normalExecutorFrozen=True handoffMode=stop_restart handoffImplemented=True predecessor=R{predecessor.Id} rule=release_contract");
         }
 
         allocationRoute.Run(new ReservationAllocationRouteRequest(
             Source: "UserChainReservation",
             Action: "Add",
             RunKeywordMatcher: false,
-            SyncProgramRuleReservations: true,
+            SyncProgramRuleReservations: false,
             ReevaluateAllocations: true,
             RefreshPreRecordEpgEntries: true,
             RefreshWakeTask: true,
             EmitConflictLogs: true,
             ConflictLogCategory: "Reservation",
             ConflictLogTitle: "Conflict",
-            ExecutionMode: chainExecutionMode));
+            ExecutionMode: chainExecutionMode,
+            WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce));
 
         var added = store.GetById(id);
         log.Add("CHAIN_COMMON_ENTRY", $"R{id}", $"result=ROUTED_TO_ALLOC_ROUTE executionMode={chainExecutionMode} isConflicted={(added?.IsConflicted.ToString() ?? "-")} assignedTuner={(string.IsNullOrWhiteSpace(added?.TunerName) ? "-" : added!.TunerName)} actualTuner={(string.IsNullOrWhiteSpace(added?.ActualTunerName) ? "-" : added!.ActualTunerName)} predecessor=R{predecessor.Id} normalRecordingRouteTouched=False rule=release_contract");
         if (added is not null)
-            userEvents.AddChainReservationAdded(predecessor, added, id, existingReservation is not null);
-        return Results.Ok(new { id, message = existingReservation is null ? "チェーン予約しました。" : "既存予約をチェーン予約に変更しました。", isConflicted = added?.IsConflicted ?? false, tunerName = added?.TunerName ?? "" });
+            userEvents.AddChainReservationAdded(predecessor, added, id, !chainMutation.Added);
+        commitEvents();
+        log.Add("PLUGIN_TYPED_EVENT_OUTBOX", "UserChain", $"result=COMMITTED operation=ChainReservation reservation=R{id} rule=typed_event_outbox");
+        return Results.Ok(new { id, message = chainMutation.Added ? "チェーン予約しました。" : "既存予約をチェーン予約に変更しました。", isConflicted = added?.IsConflicted ?? false, tunerName = added?.TunerName ?? "" });
     }
     catch (Exception ex)
     {
@@ -6112,18 +6221,17 @@ app.MapPost("/api/reservations/chain", (Reservation r, ReservationStore store, E
 // 予約キャンセル/物理削除
 // scheduled はキャンセル状態へ移行し、completed/failed/cancelled は物理削除する。
 // ユーザー明示チェーンは GetUserChainCancelTargets で対象範囲を決定し、
-// 解除後も必ず共通割り当てルートで再評価する。
-app.MapDelete("/api/reservations/{id}", (int id, ReservationStore store, ReservationAllocationRouteService allocationRoute, LogRepository log, UserEventLogService userEvents) =>
+// 単独／チェーン範囲とも同じ原子的取消・確定ID応答・共通割り当て出口へ通す。
+// 番組表／予約一覧など呼出画面を処理所有者にせず、解除後は必ず共通割り当てルートで再評価する。
+app.MapDelete("/api/reservations/{id}", (int id, ReservationStore store, ReservationProjectionMetadataStore projectionMetadataStore, ReservationAllocationRouteService allocationRoute, PluginTypedEventHub typedEvents, LogRepository log, UserEventLogService userEvents) =>
 {
+    using var eventScope = typedEvents.BeginOutboxScope(out var commitEvents);
     var r = store.GetById(id);
     if (r is null) return Results.NotFound();
 
     // release_contract: 番組表セルが内部用の録画前EPG確認(SystemEpg)を拾ってしまっても、
     // 取消対象は親の実録画予約へ向ける。SystemEpgは番組表上の通常予約として扱わない。
-    if (r.Source == ReservationSource.Epg
-        && r.SourceRuleId.HasValue
-        && (string.Equals(r.SourceRuleName, "PreRecEpg", StringComparison.OrdinalIgnoreCase)
-            || r.Title.StartsWith("EPG確認", StringComparison.Ordinal)))
+    if (r.SourceRuleId.HasValue && ReservationIntentContract.IsPreRecordEpg(r))
     {
         var parent = store.GetById(r.SourceRuleId.Value);
         if (parent is not null && parent.Status != ReservationStatus.Completed && parent.Status != ReservationStatus.Failed && parent.Status != ReservationStatus.Cancelled)
@@ -6143,7 +6251,19 @@ app.MapDelete("/api/reservations/{id}", (int id, ReservationStore store, Reserva
         r.Status == ReservationStatus.Failed ||
         r.Status == ReservationStatus.Cancelled)
     {
-        store.Delete(id);
+        // PHYSICAL_DELETE_ORDER_INVARIANT:
+        // 予約本体・チェーントポロジーの原子的CAS削除を先にcommitし、成功後だけ投影メタデータを削除する。
+        // CAS拒否時も予約本体と投影メタデータの整合を同じ順序で維持する。
+        if (!store.TryDeleteTerminalReservationAtomicCas(r, out _))
+        {
+            log.Add("RESERVATION_PHYSICAL_DELETE_CAS", $"R{id}",
+                $"result=REJECTED status={r.Status} dataVersion={r.DataVersion} action=reload_and_retry_manually rule=release_contract");
+            return Results.Conflict(new { message = "予約状態またはチェーン構造が更新されたため、最新状態を確認してからもう一度削除してください。" });
+        }
+
+        projectionMetadataStore.Delete(id);
+        commitEvents();
+        log.Add("PLUGIN_TYPED_EVENT_OUTBOX", "ReservationDelete", $"result=COMMITTED operation=PhysicalDelete reservation=R{id} rule=typed_event_outbox");
         return Results.Ok(new { message = "削除しました。" });
     }
 
@@ -6164,9 +6284,21 @@ app.MapDelete("/api/reservations/{id}", (int id, ReservationStore store, Reserva
         $"operation=ReservationCancel service={TitleGuardLogValue(policyHead?.ServiceName)} title={ReservationUserTitleLogValue(policyHead?.Title)} rawTitleBlank={ReservationTitleDisplayContract.RawBlankFlag(policyHead?.Title)} result={(targetIds.Count > 1 ? "CANCEL_CHAIN_RANGE" : "CANCEL_SINGLE")} reason=explicit_reservation_cancel cancelSuccessors={(targetIds.Count > 1)} stopOperation=False targetCount={targetIds.Count} targets=[{policyTargetText}] rule=release_contract");
     foreach (var target in chainTargets.Where(x => x.Source == ReservationSource.Keyword && x.Status == ReservationStatus.Scheduled))
         store.AddKeywordCancelOnce(target);
-    store.UpdateStatusMany(targetIds, ReservationStatus.Cancelled);
-
     var isChainCancel = targetIds.Count > 1 || chainTargets.Any(x => x.IsUserChain || x.UserChainPreviousId.HasValue || x.UserChainRootId.HasValue);
+    if (!store.TryCancelReservationsAtomicCas(
+            chainTargets.ToList(),
+            new Dictionary<string, string?>
+            {
+                ["suppressUserEvent"] = isChainCancel ? "chain_cancel_specialized" : "reservation_cancel_specialized"
+            },
+            out var cancelledTargets))
+    {
+        log.Add("RESERVATION_CANCEL_BATCH_CAS", $"R{id}",
+            $"result=REJECTED action=reload_and_retry_manually targets=[{string.Join(",", chainTargets.Select(x => $"R{x.Id}:v{x.DataVersion}"))}] rule=release_contract");
+        return Results.Conflict(new { message = "予約状態が更新されたため、最新状態を確認してからもう一度キャンセルしてください。" });
+    }
+    chainTargets = cancelledTargets;
+    targetIds = chainTargets.Select(x => x.Id).ToList();
     if (isChainCancel)
     {
         userEvents.AddChainReservationCancelled(chainTargets.ToList(), id);
@@ -6194,10 +6326,10 @@ app.MapDelete("/api/reservations/{id}", (int id, ReservationStore store, Reserva
     }
 
     allocationRoute.Run(new ReservationAllocationRouteRequest(
-        Source: "ReservationList",
+        Source: "ReservationMutation",
         Action: targetIds.Count > 1 ? "ChainCancel" : "Cancel",
         RunKeywordMatcher: false,
-        SyncProgramRuleReservations: true,
+        SyncProgramRuleReservations: false,
         ReevaluateAllocations: true,
         RefreshPreRecordEpgEntries: true,
         RefreshWakeTask: true,
@@ -6205,7 +6337,16 @@ app.MapDelete("/api/reservations/{id}", (int id, ReservationStore store, Reserva
         ConflictLogCategory: "Reservation",
         ConflictLogTitle: "Conflict"));
 
-    return Results.Ok(new { message = targetIds.Count > 1 ? $"チェーン予約を{targetIds.Count}件キャンセルしました。" : "キャンセルしました。", cancelledIds = targetIds });
+    commitEvents();
+    log.Add("PLUGIN_TYPED_EVENT_OUTBOX", "ReservationCancel", $"result=COMMITTED operation={(targetIds.Count > 1 ? "ChainCancel" : "Cancel")} reservation=R{id} targetCount={targetIds.Count} rule=typed_event_outbox");
+    return Results.Ok(new
+    {
+        message = targetIds.Count > 1 ? $"チェーン予約を{targetIds.Count}件キャンセルしました。" : "キャンセルしました。",
+        changed = true,
+        mutation = "cancel",
+        affectedReservationIds = targetIds,
+        cancelledIds = targetIds
+    });
 });
 
 
@@ -6239,11 +6380,7 @@ app.MapPost("/api/reservations/{id}/stop", (int id, ReservationStore store, Rese
     var r = store.GetById(id);
     if (r is null) return Results.NotFound(new { message = "予約が見つかりません。" });
 
-    if (r.Source == ReservationSource.Epg
-        && r.SourceRuleId.HasValue
-        && (string.Equals(r.SourceRuleName, "PreRecEpg", StringComparison.OrdinalIgnoreCase)
-            || r.Title.StartsWith("EPG確認", StringComparison.Ordinal)
-            || EpgTitleProjectionGuard.IsInternalPurposeTitle(r.Title)))
+    if (r.SourceRuleId.HasValue && ReservationIntentContract.IsPreRecordEpg(r))
     {
         var parent = store.GetById(r.SourceRuleId.Value);
         if (parent is not null && parent.Status == ReservationStatus.Recording)
@@ -6258,26 +6395,87 @@ app.MapPost("/api/reservations/{id}/stop", (int id, ReservationStore store, Rese
     if (r.Status != ReservationStatus.Recording)
         return Results.BadRequest(new { message = "録画中ではありません。" });
 
-    log.Add("REC_STOP_ROUTE", $"R{id}",
-        $"result=REQUESTED source={r.Source} service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] status={r.Status} tuner=[{r.TunerName}] actualTuner=[{r.ActualTunerName}] route=ReservationApiStop->ReservationScheduler.StopRecording commonRoute=recording_stop_all_sources rule=release_contract");
+    try
+    {
+        log.Add("REC_STOP_ROUTE", $"R{id}",
+            $"result=REQUESTED source={r.Source} service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] status={r.Status} tuner=[{r.TunerName}] actualTuner=[{r.ActualTunerName}] route=ReservationApiStop->ReservationScheduler.StopRecording commonRoute=recording_stop_all_sources rule=release_contract");
+    }
+    catch
+    {
+        // 受付前診断ログの失敗で停止要求を拒否しない。
+    }
 
-    scheduler.StopRecording(id);
+    var stopResult = scheduler.StopRecording(id);
 
     // StopSessionAsync側が停止完了後の再評価/Wake再構築を正本として実行する。
     // API入口では停止要求を即時受理し、二重の同期再評価でUI応答を待たせない。
-    log.Add("REC_STOP_ROUTE", $"R{id}",
-        $"result=ACCEPTED_DEFER_REALLOCATION source={r.Source} service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] route=ReservationApiStop->StopSessionAsyncReevaluation apiSynchronousAllocation=False rule=release_contract");
+    try
+    {
+        log.Add("REC_STOP_ROUTE", $"R{id}",
+            $"result={(stopResult.Accepted ? "ACCEPTED_DEFER_REALLOCATION" : stopResult.Pending ? "ALREADY_PENDING" : "REJECTED")} source={r.Source} service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] route=ReservationApiStop->StopSessionAsyncReevaluation apiSynchronousAllocation=False rule=release_contract");
+    }
+    catch
+    {
+        // 停止要求の確定結果をログ基盤障害で変更しない。
+    }
 
-    return Results.Ok(new { message = "録画を停止しました。", stoppedId = id, source = r.Source.ToString(), accepted = true });
+    if (stopResult.Pending)
+        return Results.Ok(new { message = stopResult.Message, stoppedId = id, source = r.Source.ToString(), accepted = false, pending = true });
+    if (!stopResult.Accepted)
+        return Results.Problem(statusCode: StatusCodes.Status500InternalServerError, title: stopResult.Message);
+
+    return Results.Ok(new { message = stopResult.Message, stoppedId = id, source = r.Source.ToString(), accepted = true, pending = false });
 });
 
 // 録画ON/OFF切り替え（ユーザーによる能動的な有効/無効化）
-app.MapPatch("/api/reservations/{id}/enabled", (int id, EnabledRequest req, ReservationStore store, ReservationAllocationRouteService allocationRoute, LogRepository log) =>
+app.MapPatch("/api/reservations/{id}/enabled", (int id, EnabledRequest req, ReservationStore store, ReservationPresentationService presenter, ReservationAllocationRouteService allocationRoute, PluginTypedEventHub typedEvents, LogRepository log) =>
 {
+    using var eventScope = typedEvents.BeginOutboxScope(out var commitEvents);
     var r = store.GetById(id);
     if (r is null) return Results.NotFound(new { message = "予約が見つかりません。" });
     log.Add("RESERVE_ENTRY", "EnabledToggle", $"共通入口要求 action=EnabledToggle service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] id=R{id} source={r.Source} enabled={r.IsEnabled}->{req.IsEnabled} start={r.StartTime:MM/dd HH:mm}");
-    store.UpdateEnabled(id, req.IsEnabled);
+    if (r.IsEnabled != req.IsEnabled && !ReservationOperationPolicy.CanToggleEnabled(r))
+    {
+        log.Add("RESERVE_ENTRY", "EnabledToggle",
+            $"共通入口結果 action=EnabledToggle id=R{id} result=REJECTED reason=status_not_toggleable status={r.Status} enabled={r.IsEnabled} requested={req.IsEnabled} rule=reservation_operation_policy_contract");
+        return Results.Conflict(new
+        {
+            message = "この予約状態では録画ON/OFFを変更できません。最新状態を再取得してください。",
+            changed = false,
+            reason = "status_not_toggleable",
+            enabled = r.IsEnabled,
+            dataVersion = r.DataVersion,
+            reservation = presenter.GetReservation(id)
+        });
+    }
+    var enabledUpdate = store.UpdateEnabledIfChanged(id, req.IsEnabled);
+    if (!enabledUpdate.Found)
+        return Results.NotFound(new { message = "予約が見つかりません。" });
+    if (!enabledUpdate.Changed)
+    {
+        if (enabledUpdate.Reason == "compare_and_set_failed")
+            return Results.Conflict(new
+            {
+                message = "予約状態が同時に変更されました。最新状態を再取得してください。",
+                changed = false,
+                reason = enabledUpdate.Reason,
+                enabled = enabledUpdate.CurrentEnabled,
+                dataVersion = enabledUpdate.CurrentDataVersion,
+                reservation = presenter.GetReservation(id)
+            });
+
+        log.Add("RESERVE_ENTRY", "EnabledToggle", $"共通入口結果 action=EnabledToggle id=R{id} result=NO_CHANGE enabled={enabledUpdate.CurrentEnabled} dataVersion={enabledUpdate.CurrentDataVersion} reason={enabledUpdate.Reason} allocationSkipped=True wakeSkipped=True eventsSkipped=True rule=release_contract");
+        return Results.Ok(new
+        {
+            message = req.IsEnabled ? "すでに録画ONです。" : "すでに録画OFFです。",
+            changed = false,
+            reason = enabledUpdate.Reason,
+            enabled = enabledUpdate.CurrentEnabled,
+            dataVersion = enabledUpdate.CurrentDataVersion,
+            reservation = presenter.GetReservation(id)
+        });
+    }
+
     if (!req.IsEnabled)
     {
         var deletedPreRec = store.DeleteScheduledPreRecordEpgEntriesForParent(id);
@@ -6288,17 +6486,28 @@ app.MapPatch("/api/reservations/{id}/enabled", (int id, EnabledRequest req, Rese
         Source: "ReservationList",
         Action: "EnabledToggle",
         RunKeywordMatcher: false,
-        SyncProgramRuleReservations: true,
+        SyncProgramRuleReservations: false,
         ReevaluateAllocations: true,
         RefreshPreRecordEpgEntries: true,
         RefreshWakeTask: true,
         EmitConflictLogs: true,
         ConflictLogCategory: "ReservationAPI",
-        ConflictLogTitle: "EnabledToggleConflict"));
+        ConflictLogTitle: "EnabledToggleConflict",
+        WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce));
     var updated = store.GetById(id);
+    commitEvents();
+    log.Add("PLUGIN_TYPED_EVENT_OUTBOX", "EnabledToggle", $"result=COMMITTED operation=EnabledToggle reservation=R{id} rule=typed_event_outbox");
     if (updated is not null)
-        log.Add("RESERVE_ENTRY", "EnabledToggle", $"共通入口結果 action=EnabledToggle service=[{updated.ServiceName}] title=[{ReservationUserTitleLogValue(updated.Title)}] id=R{id} source={updated.Source} enabled={updated.IsEnabled} tuner=[{updated.TunerName}] conflicted={updated.IsConflicted}");
-    return Results.Ok(new { message = req.IsEnabled ? "録画ONにしました。" : "録画OFFにしました。" });
+        log.Add("RESERVE_ENTRY", "EnabledToggle", $"共通入口結果 action=EnabledToggle service=[{updated.ServiceName}] title=[{ReservationUserTitleLogValue(updated.Title)}] id=R{id} source={updated.Source} enabled={updated.IsEnabled} tuner=[{updated.TunerName}] conflicted={updated.IsConflicted} changed=True dataVersion={updated.DataVersion}");
+    return Results.Ok(new
+    {
+        message = req.IsEnabled ? "録画ONにしました。" : "録画OFFにしました。",
+        changed = true,
+        reason = enabledUpdate.Reason,
+        enabled = req.IsEnabled,
+        dataVersion = updated?.DataVersion ?? enabledUpdate.CurrentDataVersion,
+        reservation = presenter.GetReservation(id)
+    });
 });
 
 // ─── キーワードルール API ─────────────────────────────────────────
@@ -6377,7 +6586,7 @@ app.MapGet("/api/keyword-rules/export", (ReservationStore store) =>
     return Results.File(bytes, "application/json; charset=utf-8", fileName);
 });
 
-app.MapPost("/api/keyword-rules/import", async (HttpRequest request, ReservationStore store, ReservationAllocationRouteService allocationRoute, LogRepository log) =>
+app.MapPost("/api/keyword-rules/import", async (HttpRequest request, ReservationStore store, KeywordMatcher matcher, ReservationAllocationRouteService allocationRoute, LogRepository log, ChannelFileLoader channelLoader) =>
 {
     if (!request.HasFormContentType)
         return Results.BadRequest(new { message = "インポートファイルを指定してください。" });
@@ -6417,7 +6626,9 @@ app.MapPost("/api/keyword-rules/import", async (HttpRequest request, Reservation
     var nextId = Math.Max(ordered.Count, ordered.Where(r => r.Id > 0).DefaultIfEmpty(new KeywordRule { Id = 0 }).Max(r => r.Id)) + 1;
     for (var i = 0; i < ordered.Count; i++)
     {
-        NormalizeKeywordRule(ordered[i]);
+        var serviceIdentityError = NormalizeKeywordRule(ordered[i], channelLoader);
+        if (serviceIdentityError is not null)
+            return Results.BadRequest(new { message = $"{i + 1}件目: {serviceIdentityError}" });
         ordered[i].SortOrder = i + 1;
         if (ordered[i].Id <= 0) ordered[i].Id = nextId++;
         while (!usedIds.Add(ordered[i].Id)) ordered[i].Id = nextId++;
@@ -6426,8 +6637,23 @@ app.MapPost("/api/keyword-rules/import", async (HttpRequest request, Reservation
             return Results.BadRequest(new { message = $"{i + 1}件目: {err}" });
     }
 
-    var removed = store.DeleteAllScheduledKeywordReservations();
+    var previousRuleIds = store.GetKeywordRules().Select(x => x.Id).ToHashSet();
+    var importedRuleIds = ordered.Select(x => x.Id).ToHashSet();
+
     store.ReplaceKeywordRules(ordered);
+
+    var preserved = 0;
+    var removed = 0;
+    foreach (var rule in ordered)
+    {
+        var reconcile = matcher.ReconcileScheduledReservationsForRule(rule);
+        preserved += reconcile.Preserved;
+        removed += reconcile.Removed;
+    }
+
+    foreach (var removedRuleId in previousRuleIds.Except(importedRuleIds))
+        removed += store.DeleteScheduledByRuleId(removedRuleId);
+
     allocationRoute.Run(new ReservationAllocationRouteRequest(
         Source: "KeywordRule",
         Action: "Import",
@@ -6438,12 +6664,15 @@ app.MapPost("/api/keyword-rules/import", async (HttpRequest request, Reservation
         RefreshWakeTask: true,
         EmitConflictLogs: true,
         ConflictLogCategory: "KeywordRule",
-        ConflictLogTitle: "Conflict"));
-    log.Add("KEYWORD_RULE", "Import", $"自動検索予約ルールをインポート: {ordered.Count}件 / scheduled再生成対象 {removed}件 / file={file.FileName}");
+        ConflictLogTitle: "Conflict",
+        WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce));
+    log.Add("KEYWORD_RULE", "Import",
+        $"自動検索予約ルールをインポート: {ordered.Count}件 / preservedScheduled={preserved} removedScheduled={removed} / file={file.FileName}");
 
     return Results.Ok(new
     {
         importedCount = ordered.Count,
+        preservedReservations = preserved,
         removedReservations = removed,
         message = $"{ordered.Count}件のルールをインポートしました。"
     });
@@ -6462,11 +6691,12 @@ app.MapGet("/api/keyword-rule-reservations", (ReservationPresentationService pre
     }
 });
 
-app.MapPost("/api/keyword-rules", (KeywordRule r, ReservationStore store, ReservationAllocationRouteService allocationRoute, LogRepository log) =>
+app.MapPost("/api/keyword-rules", (KeywordRule r, ReservationStore store, ReservationAllocationRouteService allocationRoute, LogRepository log, ChannelFileLoader channelLoader) =>
 {
+    var serviceIdentityError = NormalizeKeywordRule(r, channelLoader);
+    if (serviceIdentityError is not null) return Results.BadRequest(new { message = serviceIdentityError });
     var err = ValidateKeywordRule(r);
     if (err is not null) return Results.BadRequest(new { message = err });
-    NormalizeKeywordRule(r);
     r.CreatedAt = r.UpdatedAt = DateTime.Now;
     var id = store.AddKeywordRule(r);
     log.Add("KEYWORD_RULE", $"Rule{id}", $"ルール作成: enabled={r.Enabled} name=[{r.Name}] pattern=[{r.Pattern}] exclude=[{r.ExcludePattern}] allChannels={r.UseAllChannels}");
@@ -6480,15 +6710,17 @@ app.MapPost("/api/keyword-rules", (KeywordRule r, ReservationStore store, Reserv
         RefreshWakeTask: true,
         EmitConflictLogs: true,
         ConflictLogCategory: "KeywordRule",
-        ConflictLogTitle: "Conflict"));
+        ConflictLogTitle: "Conflict",
+        WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce));
     return Results.Ok(new { id, message = "自動検索予約ルールを登録しました。" });
 });
 
-app.MapPost("/api/keyword-rules/preview", (KeywordRule r, KeywordMatcher matcher) =>
+app.MapPost("/api/keyword-rules/preview", (KeywordRule r, KeywordMatcher matcher, ChannelFileLoader channelLoader) =>
 {
+    var serviceIdentityError = NormalizeKeywordRule(r, channelLoader);
+    if (serviceIdentityError is not null) return Results.BadRequest(new { message = serviceIdentityError });
     var err = ValidateKeywordRule(r);
     if (err is not null) return Results.BadRequest(new { message = err });
-    NormalizeKeywordRule(r);
     var preview = matcher.PreviewRule(r);
     return Results.Ok(new
     {
@@ -6513,20 +6745,18 @@ app.MapPost("/api/keyword-rules/preview", (KeywordRule r, KeywordMatcher matcher
     });
 });
 
-app.MapPut("/api/keyword-rules/{id}", (int id, KeywordRule r, ReservationStore store, ReservationAllocationRouteService allocationRoute, LogRepository log) =>
+app.MapPut("/api/keyword-rules/{id}", (int id, KeywordRule r, ReservationStore store, KeywordMatcher matcher, ReservationAllocationRouteService allocationRoute, LogRepository log, ChannelFileLoader channelLoader) =>
 {
+    var serviceIdentityError = NormalizeKeywordRule(r, channelLoader);
+    if (serviceIdentityError is not null) return Results.BadRequest(new { message = serviceIdentityError });
     var err = ValidateKeywordRule(r);
     if (err is not null) return Results.BadRequest(new { message = err });
-    NormalizeKeywordRule(r);
     r.Id = id;
 
-    // ルール更新時はリアルタイム整合性のため、
-    // 旧ルール由来の scheduled キーワード予約を物理削除してから更新・再マッチングする。
-    // これによりルール内容変更・有効/無効切り替え問わず予約リストが最新状態に保たれる。
-    // recording/completed/failed/cancelled は触らない(ユーザーの録画行為や履歴は保持)。
-    var removed = store.DeleteScheduledByRuleId(id);
     store.UpdateKeywordRule(r);
-    log.Add("KEYWORD_RULE", $"Rule{id}", $"ルール更新: enabled={r.Enabled} name=[{r.Name}] pattern=[{r.Pattern}] removedScheduled={removed}");
+    var reconcile = matcher.ReconcileScheduledReservationsForRule(r);
+    log.Add("KEYWORD_RULE", $"Rule{id}",
+        $"ルール更新: enabled={r.Enabled} name=[{r.Name}] pattern=[{r.Pattern}] preservedScheduled={reconcile.Preserved} preservedSourceMissing={reconcile.PreservedSourceMissing} removedScheduled={reconcile.Removed}");
 
     allocationRoute.Run(new ReservationAllocationRouteRequest(
         Source: "KeywordRule",
@@ -6538,13 +6768,29 @@ app.MapPut("/api/keyword-rules/{id}", (int id, KeywordRule r, ReservationStore s
         RefreshWakeTask: true,
         EmitConflictLogs: true,
         ConflictLogCategory: "KeywordRule",
-        ConflictLogTitle: "Conflict"));
+        ConflictLogTitle: "Conflict",
+        WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce));
 
-    if (removed > 0)
-        log.Add("KEYWORD_RULE", $"Rule{id}",
-            $"ルール更新に伴い旧ヒット予約を解放: {removed}件 (有効={r.Enabled})");
-
-    return Results.Ok(new { message = "更新しました。" });
+    var updatedRule = store.GetKeywordRules().FirstOrDefault(x => x.Id == id);
+    var hitCount = updatedRule is not null && updatedRule.Enabled
+        ? matcher.GetRuleHitCounts(new[] { updatedRule }).GetValueOrDefault(id)
+        : 0;
+    return Results.Ok(new
+    {
+        message = "更新しました。",
+        preservedReservations = reconcile.Preserved,
+        removedReservations = reconcile.Removed,
+        rule = updatedRule is null ? null : new
+        {
+            updatedRule.Id, updatedRule.Name, updatedRule.Pattern, updatedRule.ExcludePattern,
+            updatedRule.UseRegex, updatedRule.SearchFields, updatedRule.SearchTitle,
+            updatedRule.SearchOutline, updatedRule.SearchDetail, updatedRule.SearchCast,
+            updatedRule.TargetGenres, updatedRule.TargetServices, updatedRule.TargetDays,
+            updatedRule.UseTimeRange, updatedRule.StartTime, updatedRule.EndTime,
+            updatedRule.Enabled, updatedRule.UseAllChannels, updatedRule.ExpiresOn,
+            updatedRule.SortOrder, HitCount = hitCount
+        }
+    });
 });
 
 app.MapPost("/api/keyword-rules/reorder", (KeywordRuleOrderRequest req, ReservationStore store, ReservationAllocationRouteService allocationRoute, LogRepository log) =>
@@ -6565,7 +6811,8 @@ app.MapPost("/api/keyword-rules/reorder", (KeywordRuleOrderRequest req, Reservat
         RefreshWakeTask: true,
         EmitConflictLogs: true,
         ConflictLogCategory: "KeywordRule",
-        ConflictLogTitle: "Conflict"));
+        ConflictLogTitle: "Conflict",
+        WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce));
     return Results.Ok(new { message = "並び順を更新しました。" });
 });
 
@@ -6590,7 +6837,8 @@ app.MapDelete("/api/keyword-rules/{id}", (int id, ReservationStore store, Reserv
         RefreshWakeTask: true,
         EmitConflictLogs: true,
         ConflictLogCategory: "KeywordRule",
-        ConflictLogTitle: "Conflict"));
+        ConflictLogTitle: "Conflict",
+        WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce));
 
     if (removed > 0)
         log.Add("KEYWORD_RULE", $"Rule{id}",
@@ -6616,17 +6864,67 @@ string? ValidateKeywordRule(KeywordRule r)
     return null;
 }
 
-void NormalizeKeywordRule(KeywordRule r)
+string? NormalizeKeywordRule(KeywordRule r, ChannelFileLoader channelLoader)
 {
     r.SearchFields = "title";
     r.Pattern = r.Pattern?.Trim() ?? "";
     r.ExcludePattern = r.ExcludePattern?.Trim() ?? "";
-    r.TargetServices = string.Join(",", (r.TargetServices ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
-    if (r.UseAllChannels) r.TargetServices = "";
+
+    if (r.UseAllChannels)
+    {
+        r.TargetServices = "";
+    }
+    else
+    {
+        IReadOnlyList<ChannelTarget> targets;
+        try
+        {
+            targets = channelLoader.Load().Targets.ToList();
+        }
+        catch (Exception ex)
+        {
+            return $"対象局の現在情報を読み取れません: {ex.GetType().Name}";
+        }
+
+        var normalized = new List<string>();
+        foreach (var token in (r.TargetServices ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (ServiceIdentityContract.TryParseKey(token, out var exact))
+            {
+                normalized.Add(exact.ToString());
+                continue;
+            }
+
+            // Legacy keyword-rule compatibility: SID-only rows may be migrated only when the
+            // current channel metadata resolves that SID to exactly one service identity.
+            // Ambiguous or malformed values must not be newly persisted as service identity.
+            if (!ushort.TryParse(token, out var legacySid))
+                return $"対象局の識別子が不正です: {token}";
+
+            var matches = targets
+                .Where(t => t.ServiceId == legacySid)
+                .Select(ServiceIdentityContract.From)
+                .Distinct()
+                .Take(2)
+                .ToList();
+            if (matches.Count != 1)
+                return matches.Count == 0
+                    ? $"旧形式の対象局 SID={legacySid} を現在の局情報から一意に解決できません。対象局を選び直してください。"
+                    : $"旧形式の対象局 SID={legacySid} は複数局に一致します。対象局を選び直してください。";
+
+            normalized.Add(matches[0].ToString());
+        }
+
+        r.TargetServices = string.Join(",", normalized.Distinct(StringComparer.Ordinal));
+        if (string.IsNullOrWhiteSpace(r.TargetServices))
+            return "対象局を1局以上選択してください。";
+    }
+
     r.TargetGenres = string.Join(",", (r.TargetGenres ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(s => s.ToUpperInvariant()));
     r.TargetDays = string.Join(",", (r.TargetDays ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
     r.StartTime = string.IsNullOrWhiteSpace(r.StartTime) ? "00:00" : r.StartTime;
     r.EndTime = string.IsNullOrWhiteSpace(r.EndTime) ? "23:59" : r.EndTime;
+    return null;
 }
 
 // ─── プログラム予約ルール API ─────────────────────────────────────
@@ -6652,7 +6950,8 @@ app.MapPost("/api/program-rules", (ProgramRule r, ReservationStore store, Reserv
         RefreshWakeTask: true,
         EmitConflictLogs: true,
         ConflictLogCategory: "ProgramRule",
-        ConflictLogTitle: "Conflict"));
+        ConflictLogTitle: "Conflict",
+        WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce));
     return Results.Ok(new { id, message = "プログラム予約を登録しました。" });
 });
 
@@ -6674,8 +6973,13 @@ app.MapPut("/api/program-rules/{id}", (int id, ProgramRule r, ReservationStore s
         RefreshWakeTask: true,
         EmitConflictLogs: true,
         ConflictLogCategory: "ProgramRule",
-        ConflictLogTitle: "Conflict"));
-    return Results.Ok(new { message = "更新しました。" });
+        ConflictLogTitle: "Conflict",
+        WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce));
+    return Results.Ok(new
+    {
+        message = "更新しました。",
+        rule = store.GetProgramRules().FirstOrDefault(x => x.Id == id)
+    });
 });
 
 app.MapDelete("/api/program-rules/{id}", (int id, ReservationStore store, ReservationAllocationRouteService allocationRoute, LogRepository log) =>
@@ -6692,142 +6996,115 @@ app.MapDelete("/api/program-rules/{id}", (int id, ReservationStore store, Reserv
         RefreshWakeTask: true,
         EmitConflictLogs: true,
         ConflictLogCategory: "ProgramRule",
-        ConflictLogTitle: "Conflict"));
+        ConflictLogTitle: "Conflict",
+        WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce));
     return Results.Ok(new { message = "削除しました。" });
 });
 
+static bool FixedTimePasswordEquals(string left, string right)
+{
+    var leftBytes = System.Text.Encoding.UTF8.GetBytes(left ?? string.Empty);
+    var rightBytes = System.Text.Encoding.UTF8.GetBytes(right ?? string.Empty);
+    var length = Math.Max(leftBytes.Length, rightBytes.Length);
+    var leftPadded = new byte[length];
+    var rightPadded = new byte[length];
+    Buffer.BlockCopy(leftBytes, 0, leftPadded, 0, leftBytes.Length);
+    Buffer.BlockCopy(rightBytes, 0, rightPadded, 0, rightBytes.Length);
+    return leftBytes.Length == rightBytes.Length
+        && System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(leftPadded, rightPadded);
+}
+
 // ─── 設定 API ────────────────────────────────────────────────────
 
-// 設定取得（iniの現在値を返す。初回起動時も個人環境由来のパスは自動入力しない）
-app.MapGet("/api/settings", (IniSettingsService ini, IOptions<TvTestSettings> tvTestOpts, IOptions<AppSettings> appOpts) =>
+// 設定取得。保存値の投影はIniSettingsService.ToDtoだけを正本とする。
+// 初回Host値も構築時にRuntime/Persisted snapshotへ取り込まれているため、API側で再補完しない。
+app.MapGet("/api/settings", (IniSettingsService ini) => Results.Ok(ini.ToWebDto()));
+
+app.MapGet("/api/settings/password/{kind}", (string kind, IniSettingsService ini, HttpContext context) =>
 {
-    var dto = ini.ToDto();
-    // release_contract: 初回設定画面で TVTest/BonDriver/.ch2 の個人環境パスを推定表示しない。
-    // appsettings.json は安全な空欄既定値のみ保持し、サンプルは appsettings.example.json へ分離する。
-    if (ini.IsFirstRun)
+    context.Response.Headers.CacheControl = "no-store";
+    context.Response.Headers.Pragma = "no-cache";
+
+    // 保存済み資格情報の平文表示は、このWindowsユーザーが操作するローカルUIだけに限定する。
+    // LANセッションには設定済み状態と文字数だけを投影し、平文は境界を越えて返さない。
+    if (!NetworkAccessSecurity.IsLoopback(context.Connection.RemoteIpAddress))
+        return Results.Json(new { message = "TvAIrを起動しているPCで確認してください。" }, statusCode: StatusCodes.Status403Forbidden);
+
+    string? plain = kind.ToLowerInvariant() switch
     {
-        var app = appOpts.Value;
-        if (string.IsNullOrWhiteSpace(dto.DataDirectory))
-            dto.DataDirectory = string.IsNullOrWhiteSpace(app.DataDirectory) ? "data" : app.DataDirectory;
-    }
-    dto.EffectiveDataDirectory = ini.ResolveDataDirectory(dto.DataDirectory);
-    return Results.Ok(dto);
+        "windows" => CredentialProtector.Decrypt(ini.TaskPasswordEncrypted),
+        "network" => CredentialProtector.Decrypt(ini.NetworkPasswordEncrypted),
+        _ => null
+    };
+
+    if (plain is null)
+        return Results.NotFound(new { message = "表示できるパスワードがありません。" });
+    return Results.Ok(new { password = plain });
 });
 
-app.MapGet("/api/settings-theme-state", (IniSettingsService ini) =>
+app.MapGet("/api/settings-selection-contract", () => Results.Ok(new
+{
+    epgHours = SettingsDefaults.EpgHourOptions,
+    epgMinutes = SettingsDefaults.EpgMinuteOptions,
+    epgPreRecordMinutes = SettingsDefaults.EpgPreRecordMinuteOptions,
+    epgDepthProfiles = SettingsDefaults.EpgDepthOptions.Select((value, index) => new
+    {
+        value,
+        label = SettingsDefaults.EpgDepthDisplayLabels[index],
+        seconds = EpgDurationPolicy.BaseSecondsForDepth(value)
+    }),
+    preStartMarginSeconds = SettingsDefaults.PreStartMarginSecondOptions,
+    postEndMarginSeconds = SettingsDefaults.PostEndMarginSecondOptions,
+    recordingAfterActionDelayMinutes = SettingsDefaults.RecordingAfterActionDelayMinuteOptions,
+    bounds = new
+    {
+        portMin = SettingsDefaults.PortMin,
+        portMax = SettingsDefaults.PortMax,
+        networkSessionLifetimeMinutesMin = SettingsDefaults.NetworkSessionLifetimeMinutesMin,
+        networkSessionLifetimeMinutesMax = SettingsDefaults.NetworkSessionLifetimeMinutesMax,
+        networkPasswordMinLength = SettingsDefaults.NetworkPasswordMinLength
+    },
+    defaults = new
+    {
+        port = SettingsDefaults.Port,
+        epgHour = SettingsDefaults.EpgHour,
+        epgMinute = SettingsDefaults.EpgMinute,
+        epgDepth = SettingsDefaults.EpgDepth,
+        epgPreRecordMinutes = SettingsDefaults.EpgPreRecordMinutes,
+        preStartMarginSeconds = SettingsDefaults.PreStartMarginSeconds,
+        postEndMarginSeconds = SettingsDefaults.PostEndMarginSeconds,
+        networkSessionLifetimeMinutes = SettingsDefaults.NetworkSessionLifetimeMinutes,
+        recordingAfterActionDelayMinutes = SettingsDefaults.RecordingAfterActionDelayMinutes
+    }
+}));
+
+app.MapGet("/api/settings-theme-state", (IniSettingsService ini, SettingsRuntimeState runtimeState) =>
 {
     var theme = IniSettingsService.NormalizeSystemTheme(ini.SystemTheme);
     return Results.Ok(new
     {
         systemTheme = theme,
         selectedTheme = theme,
-        revision = Interlocked.Read(ref settingsThemeRuntimeRevision),
+        revision = runtimeState.ThemeRevision,
         rule = "release_contract"
     });
 });
 
-// 設定保存（iniファイルに書き込む。ポート変更は次回起動時に有効）
-app.MapPut("/api/settings", (IniSettingsDto dto, IniSettingsService ini, ChannelFileLoader channelLoader, EpgScheduler epgScheduler, StartupRegistryService startupSvc, ReservationAllocationRouteService allocationRoute, LogRepository log) =>
+// 設定保存。Web/WinFormsを問わずSettingsChangeApplicationServiceを単一出口とする。
+app.MapPut("/api/settings", (WebSettingsUpdateDto dto, SettingsChangeApplicationService application) =>
 {
-    var before = ini.ToDto();
-    var channelMapChanged =
-        !string.Equals(before.GrChannelFilePath, dto.GrChannelFilePath, StringComparison.OrdinalIgnoreCase) ||
-        !string.Equals(before.GrChSetFilePath, dto.GrChSetFilePath, StringComparison.OrdinalIgnoreCase) ||
-        !string.Equals(before.BscsChannelFilePath, dto.BscsChannelFilePath, StringComparison.OrdinalIgnoreCase) ||
-        !string.Equals(before.BscsChSetFilePath, dto.BscsChSetFilePath, StringComparison.OrdinalIgnoreCase);
-
-    var tunerTopologyChanged =
-        !string.Equals(before.TvTestExecutablePath, dto.TvTestExecutablePath, StringComparison.OrdinalIgnoreCase) ||
-        !string.Equals(before.ViewingTvTestExecutablePath, dto.ViewingTvTestExecutablePath, StringComparison.OrdinalIgnoreCase) ||
-        !string.Equals(before.BonDriverDirectory, dto.BonDriverDirectory, StringComparison.OrdinalIgnoreCase) ||
-        before.UseMinOption != dto.UseMinOption ||
-        before.UseNodshowOption != dto.UseNodshowOption ||
-        !string.Equals(
-            BuildTunerTopologySignature(before.Tuners),
-            BuildTunerTopologySignature(dto.Tuners),
-            StringComparison.OrdinalIgnoreCase);
-
-    var requiresRestart =
-        !string.Equals(before.TvTestExecutablePath, dto.TvTestExecutablePath, StringComparison.OrdinalIgnoreCase) ||
-        !string.Equals(before.BonDriverDirectory, dto.BonDriverDirectory, StringComparison.OrdinalIgnoreCase) ||
-        !string.Equals(before.DataDirectory, dto.DataDirectory, StringComparison.OrdinalIgnoreCase) ||
-        before.Port != dto.Port ||
-        before.UseMinOption != dto.UseMinOption ||
-        before.UseNodshowOption != dto.UseNodshowOption ||
-        !string.Equals(before.ViewingTvTestExecutablePath, dto.ViewingTvTestExecutablePath, StringComparison.OrdinalIgnoreCase) ||
-        tunerTopologyChanged;
-
-    var recordingPolicyChanged =
-        before.LaterProgramPriority != dto.LaterProgramPriority ||
-        before.PseudoContinuousRecording != dto.PseudoContinuousRecording ||
-        before.PreStartMarginSeconds != dto.PreStartMarginSeconds ||
-        before.PostEndMarginSeconds != dto.PostEndMarginSeconds ||
-        !string.Equals(before.RecordingAfterAction, dto.RecordingAfterAction, StringComparison.OrdinalIgnoreCase) ||
-        before.RecordingAfterActionDelayMinutes != dto.RecordingAfterActionDelayMinutes;
-
-    var beforeSystemTheme = IniSettingsService.NormalizeSystemTheme(before.SystemTheme);
-    var afterSystemTheme = IniSettingsService.NormalizeSystemTheme(dto.SystemTheme);
-    var systemThemeChanged = !string.Equals(beforeSystemTheme, afterSystemTheme, StringComparison.OrdinalIgnoreCase);
-
-    // release_contract: チューナー変更は再起動必須。保存はするが、稼働中RuntimeTopologyへは即時反映しない。
-    // release_contract: ch2/ChSetはRuntimeTopologyではなくChannelMap契約として扱い、保存直後にChannelFileLoaderのcacheを明示破棄する。
-    ini.Save(dto, applyTunerTopologyToRuntime: !tunerTopologyChanged);
-    if (channelMapChanged)
+    try
     {
-        channelLoader.Invalidate();
-        log.Add("CHANNEL_MAP_SETTINGS_HOT_RELOAD", "Settings",
-            $"changed=True grCh2={SafePathForLog(before.GrChannelFilePath)}->{SafePathForLog(dto.GrChannelFilePath)} grChSet={SafePathForLog(before.GrChSetFilePath)}->{SafePathForLog(dto.GrChSetFilePath)} bscsCh2={SafePathForLog(before.BscsChannelFilePath)}->{SafePathForLog(dto.BscsChannelFilePath)} bscsChSet={SafePathForLog(before.BscsChSetFilePath)}->{SafePathForLog(dto.BscsChSetFilePath)} action=invalidate_channel_cache dbMutation=none tunerTopologyMutation={tunerTopologyChanged} rule=release_contract");
+        return Results.Ok(application.Apply(dto));
     }
-    var themeRevision = systemThemeChanged ? Interlocked.Increment(ref settingsThemeRuntimeRevision) : Interlocked.Read(ref settingsThemeRuntimeRevision);
-    log.Add("SETTINGS_THEME_HOT_RELOAD", "Theme",
-        $"changed={systemThemeChanged} before={beforeSystemTheme} after={afterSystemTheme} revision={themeRevision} bridge=settings-theme-state frontend=TvAIrTheme.syncRuntime rule=release_contract");
-    log.Add("SETTINGS_HOT_RELOAD", "RecordingPolicy",
-        $"changed={recordingPolicyChanged} beforeLater={before.LaterProgramPriority} afterLater={dto.LaterProgramPriority} beforeChain={before.PseudoContinuousRecording} afterChain={dto.PseudoContinuousRecording} pre={before.PreStartMarginSeconds}->{dto.PreStartMarginSeconds} post={before.PostEndMarginSeconds}->{dto.PostEndMarginSeconds} afterAction={before.RecordingAfterAction}->{IniSettingsService.NormalizeRecordingAfterAction(dto.RecordingAfterAction)} afterActionDelayMin={before.RecordingAfterActionDelayMinutes}->{IniSettingsService.NormalizeRecordingAfterActionDelayMinutes(dto.RecordingAfterActionDelayMinutes)}");
-    log.Add("SETTINGS_EFFECTIVE_STATE", "Server",
-        $"afterSave later={ini.LaterProgramPriority} chain={ini.PseudoContinuousRecording} afterAction={ini.RecordingAfterAction} afterActionDelayMin={ini.RecordingAfterActionDelayMinutes} dtoLater={dto.LaterProgramPriority} dtoChain={dto.PseudoContinuousRecording} dtoAfterAction={dto.RecordingAfterAction} dtoAfterActionDelayMin={dto.RecordingAfterActionDelayMinutes}");
-    log.Add("SETTINGS_RECORDING_OPTIONS", "Recording",
-        $"curServiceOnly={before.TvTestRecordCurServiceOnly}->{dto.TvTestRecordCurServiceOnly} subtitle={before.TvTestRecordSubtitle}->{dto.TvTestRecordSubtitle} dataCarrousel={before.TvTestRecordDataCarrousel}->{dto.TvTestRecordDataCarrousel} showTvAIrEpgRecTaskbarIcon={before.ShowTvAIrEpgRecTaskbarIcon}->{dto.ShowTvAIrEpgRecTaskbarIcon} trayBlinkContract=recording_epg_epgcheck rule=release_contract");
-    log.Add("EPG_SETTINGS_SAVE_AUDIT", "Settings",
-        $"enabled={before.EpgEnabled}->{dto.EpgEnabled} time={before.EpgHour:D2}:{before.EpgMinute:D2}->{Math.Clamp(dto.EpgHour,0,23):D2}:{Math.Clamp(dto.EpgMinute,0,59):D2} depth={before.EpgDepth}->{dto.EpgDepth} preRecordMinutes={before.EpgPreRecordMinutes}->{dto.EpgPreRecordMinutes} timePolicy=BROADCAST_CLOCK_PASSIVE_ONLY ntp=removed_code_path broadcastClock=observe_only_no_internal_offset route=SettingsSave->EpgScheduler.UpdateConfig->ALLOC_ROUTE/Wake rule=release_contract");
-    if (tunerTopologyChanged)
+    catch (SettingsValidationException ex)
     {
-        log.Add("TUNER_TOPOLOGY_RESTART_REQUIRED", "Settings",
-            $"result=PENDING_RESTART applyRuntimeTopology=False runtimeTunerCount={before.Tuners.Count} savedTunerCount={(dto.Tuners?.Count ?? 0)} runtimeSignature={SafePathForLog(BuildTunerTopologySignature(before.Tuners))} pendingSignature={SafePathForLog(BuildTunerTopologySignature(dto.Tuners))} affected=Wake,TunerPool,EPG,PreRecEpg,PluginUiContext,ExternalTuner,ViewingProtection rule=release_contract");
+        return Results.BadRequest(new
+        {
+            message = ex.Message,
+            field = ex.Field
+        });
     }
-
-    // EPGスケジュール設定を動的反映（再起動不要）
-    epgScheduler.UpdateConfig(dto.EpgEnabled, dto.EpgHour, dto.EpgMinute, dto.EpgDepth);
-    // スタートアップ登録を動的反映（HKCU\...\Run）
-    startupSvc.Set(dto.StartupEnabled);
-    allocationRoute.Run(new ReservationAllocationRouteRequest(
-        Source: "Settings",
-        Action: "Save",
-        RunKeywordMatcher: false,
-        SyncProgramRuleReservations: true,
-        ReevaluateAllocations: true,
-        RefreshPreRecordEpgEntries: !tunerTopologyChanged,
-        RefreshWakeTask: !tunerTopologyChanged,
-        EmitConflictLogs: true,
-        ConflictLogCategory: "Settings",
-        ConflictLogTitle: "Conflict"));
-    return Results.Ok(new
-    {
-        message = tunerTopologyChanged
-            ? "設定を保存しました。チューナー変更はTvAIrの再起動後に反映されます。"
-            : (requiresRestart ? "設定を保存しました。今回の変更は再起動後に有効になります。" : "設定を保存しました。"),
-        requiresRestart,
-        tunerTopologyChanged,
-        tunerTopologyRestartRequired = tunerTopologyChanged,
-        runtimeTopologyUpdated = !tunerTopologyChanged,
-        recordingPolicyHotReloaded = !tunerTopologyChanged,
-        themeHotReloaded = true,
-        systemTheme = afterSystemTheme,
-        selectedTheme = afterSystemTheme,
-        themeRevision,
-        laterProgramPriority = ini.LaterProgramPriority,
-        pseudoContinuousRecording = ini.PseudoContinuousRecording,
-        effectiveDataDirectory = ini.ResolveDataDirectory(dto.DataDirectory)
-    });
 });
 
 // アプリ再起動（設定変更後の反映用）
@@ -6864,22 +7141,21 @@ app.MapGet("/api/settings/bondrivers", (string dir) =>
 });
 
 // ファイル選択ダイアログ（filter: exe / ch2 / chset / folder）
-// 多重起動防止フラグ
-var _browseInProgress = false;
+// 多重起動防止フラグ。HTTP要求は並行実行されるため、boolの確認・設定を分離しない。
+var browseInProgress = 0;
 app.MapGet("/api/settings/browse", (string filter) =>
 {
-    // 多重起動防止
-    if (_browseInProgress)
+    if (Interlocked.CompareExchange(ref browseInProgress, 1, 0) != 0)
         return Results.Ok(new { cancelled = true, path = (string?)null });
-    _browseInProgress = true;
 
     string? selected = null;
     var thread = new Thread(() =>
     {
+        System.Windows.Forms.NativeWindow? owner = null;
         try
         {
             // ダイアログを最前面に出すためのダミーオーナーウィンドウ
-            var owner = new System.Windows.Forms.NativeWindow();
+            owner = new System.Windows.Forms.NativeWindow();
             owner.CreateHandle(new System.Windows.Forms.CreateParams
             {
                 ExStyle = 0x00000008 // WS_EX_TOPMOST
@@ -6913,11 +7189,11 @@ app.MapGet("/api/settings/browse", (string filter) =>
                 if (dlg.ShowDialog(owner) == System.Windows.Forms.DialogResult.OK)
                     selected = dlg.FileName;
             }
-            owner.DestroyHandle();
         }
         finally
         {
-            _browseInProgress = false;
+            try { owner?.DestroyHandle(); } catch { }
+            Volatile.Write(ref browseInProgress, 0);
         }
     });
     thread.SetApartmentState(ApartmentState.STA);
@@ -6936,13 +7212,10 @@ app.Lifetime.ApplicationStarted.Register(() =>
     // 起動時にスタートアップ登録（HKCU\...\Run）とWakeタスクの状態を同期する
     try
     {
-        var taskSvc    = app.Services.GetRequiredService<TaskSchedulerService>();
         var startupSvc = app.Services.GetRequiredService<StartupRegistryService>();
         var iniSvc     = app.Services.GetRequiredService<IniSettingsService>();
-        var log        = app.Services.GetRequiredService<LogRepository>();
         startupSvc.Set(iniSvc.StartupEnabled);
-        taskSvc.UpdateWakeTask();
-        log.Add("Startup", "Wake(StartupSync)", "起動時のWakeタスク同期を実行しました。");
+        // Wake同期はEpgScheduler StartupFinalizeが、起動時予約Mutation確定後に一度だけ所有する。
     }
     catch { /* スタートアップ・タスクスケジューラー同期失敗は無視 */ }
 
@@ -6968,7 +7241,8 @@ app.Lifetime.ApplicationStarted.Register(() =>
             app.Services.GetRequiredService<TunerPool>(),
             app.Services.GetRequiredService<EpgScheduler>(),
             app.Services.GetRequiredService<LogRepository>(),
-            app.Services.GetRequiredService<PluginDefaultMenuActionService>());
+            app.Services.GetRequiredService<PluginDefaultMenuActionService>(),
+            app.Services.GetRequiredService<IniSettingsService>());
         trayIconService.Start();
     }
     catch { /* トレイアイコン起動失敗は無視 */ }
@@ -6984,21 +7258,6 @@ app.Lifetime.ApplicationStopped.Register(() =>
     try { singleInstanceMutex.Dispose(); } catch { }
 });
 
-
-static string BuildTunerTopologySignature(IEnumerable<TunerProfileDto>? tuners)
-{
-    return string.Join(";", (tuners ?? Enumerable.Empty<TunerProfileDto>())
-        .Select(t =>
-        {
-            var group = TunerDisplayName.NormalizeGroup(t.Group);
-            var did = (t.Did ?? string.Empty).Trim().ToUpperInvariant();
-            var role = IniSettingsService.NormalizeTunerRole(t.Role);
-            var bon = (t.BonDriverFileName ?? string.Empty).Trim();
-            var name = TunerDisplayName.ForUi(t.Name, group, did);
-            return $"{name}|{bon}|{group}|{did}|{role}";
-        })
-        .OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
-}
 
 // release_contract: Windows アプリテーマ取得。current 選択時のフロントテーマ決定に使う。
 // AppsUseLightTheme: 0=dark, 1=light
@@ -7033,6 +7292,7 @@ app.MapGet("/api/system-theme", () =>
 
 
 
+[System.Diagnostics.Conditional("TVAIR_DEVELOPER_DIAGNOSTICS")]
 static void EmitTvAIrEpgRecRuntimePrerequisiteAudit(LogRepository log, TvTestSettings settings)
 {
     try
@@ -7060,12 +7320,12 @@ static void EmitTvAIrEpgRecRuntimePrerequisiteAudit(LogRepository log, TvTestSet
             $"b25Decoder={(b25Exists ? "OK" : "MISSING")} " +
             $"winscard={(winSCardExists ? "OK_OR_NOT_REQUIRED" : "MISSING_OR_NOT_REQUIRED")} winscardIni={(winSCardIniExists ? "OK" : "MISSING_OR_NOT_REQUIRED")} " +
             $"tvTestIni={(tvTestIniExists ? "OK" : "MISSING")} " +
-            $"paths=diagnostic_only note=runtime_prerequisite_summary rule=runtime_prerequisite_release_candidate_trim");
+            $"paths=diagnostic_only note=runtime_prerequisite_summary rule=runtime_prerequisite_release_trim");
     }
     catch (Exception ex)
     {
         log.Add("TVAIREPGREC_RUNTIME_PREREQUISITE", "WARN",
-            $"result=CHECK_FAILED error={SafeRuntimePrereqLogValue(ex.GetType().Name)} message={SafeRuntimePrereqLogValue(ex.Message)} rule=runtime_prerequisite_release_candidate_trim");
+            $"result=CHECK_FAILED error={SafeRuntimePrereqLogValue(ex.GetType().Name)} message={SafeRuntimePrereqLogValue(ex.Message)} rule=runtime_prerequisite_release_trim");
     }
 }
 
@@ -7074,9 +7334,6 @@ static void EmitTvAIrEpgRecRuntimePrerequisiteAudit(LogRepository log, TvTestSet
 
 static string ProgramGuideServiceKey3(ushort networkId, ushort transportStreamId, ushort serviceId)
     => $"{networkId}:{transportStreamId}:{serviceId}";
-
-static string ProgramGuideEventServiceKey(EpgEvent e)
-    => ProgramGuideServiceKey3(e.NetworkId, e.TransportStreamId, e.ServiceId);
 
 static string ProgramGuideChannelServiceKey(ChannelTarget ch)
     => ProgramGuideServiceKey3(ch.OriginalNetworkId, ch.TransportStreamId, ch.ServiceId);
@@ -7087,6 +7344,12 @@ static IReadOnlyList<ChannelTarget> BuildCurrentProgramGuideChannels(ChannelFile
 static HashSet<string> BuildProgramGuideChannelServiceKeySet(IEnumerable<ChannelTarget> channels)
     => channels.Select(ProgramGuideChannelServiceKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+static string SafeProgramGuideProjectionLogValue(string? value)
+{
+    if (string.IsNullOrWhiteSpace(value)) return "-";
+    return value.Replace("\r", " ").Replace("\n", " ").Replace("\t", " ").Replace("|", "/").Replace("\"", "'").Trim();
+}
+
 static string NormalizeProgramGuideServiceName(string? value)
 {
     if (string.IsNullOrWhiteSpace(value)) return string.Empty;
@@ -7095,246 +7358,11 @@ static string NormalizeProgramGuideServiceName(string? value)
     return new string(chars);
 }
 
-static ProgramGuideProjectionFallbackContext BuildProgramGuideProjectionFallbackContext(IReadOnlyList<EpgEvent> events)
-{
-    var ctx = new ProgramGuideProjectionFallbackContext();
-
-    foreach (var g in events.GroupBy(e => $"{ProgramGuideWaveGroupFromNetworkId(e.NetworkId)}:{e.ServiceId}:{NormalizeProgramGuideServiceName(e.ServiceName)}", StringComparer.OrdinalIgnoreCase))
-    {
-        if (string.IsNullOrWhiteSpace(g.Key) || g.Key.EndsWith(":", StringComparison.Ordinal)) continue;
-        var identityCount = g.Select(e => ProgramGuideEventServiceKey(e)).Distinct(StringComparer.OrdinalIgnoreCase).Count();
-        if (identityCount == 1)
-            ctx.ByNameSid[g.Key] = g.OrderBy(e => e.Start).ThenBy(e => e.End).ThenBy(e => e.EventId).ToList();
-    }
-
-    foreach (var g in events.GroupBy(e => $"{ProgramGuideWaveGroupFromNetworkId(e.NetworkId)}:{e.ServiceId}", StringComparer.OrdinalIgnoreCase))
-    {
-        var identityCount = g.Select(e => ProgramGuideEventServiceKey(e)).Distinct(StringComparer.OrdinalIgnoreCase).Count();
-        if (identityCount == 1)
-            ctx.ByGroupSidUnique[g.Key] = g.OrderBy(e => e.Start).ThenBy(e => e.End).ThenBy(e => e.EventId).ToList();
-    }
-
-    return ctx;
-}
-
-
-static bool ProgramGuideOverlapsDay(EpgEvent e, DateTime dayStart, DateTime dayEnd)
-    => e.End > dayStart && e.Start < dayEnd;
-
-static IReadOnlyList<EpgEvent> ResolveProgramGuideChannelEvents(
-    ChannelTarget ch,
-    IReadOnlyDictionary<string, IReadOnlyList<EpgEvent>> byKey,
-    ProgramGuideProjectionFallbackContext fallbackContext,
-    DateTime dayStart,
-    DateTime dayEnd,
-    out string resolveSource)
-{
-    var exactKey = ProgramGuideChannelServiceKey(ch);
-    if (byKey.TryGetValue(exactKey, out var exact) && exact.Any(e => ProgramGuideOverlapsDay(e, dayStart, dayEnd)))
-    {
-        resolveSource = "exact";
-        return exact;
-    }
-
-    var waveGroup = ProgramGuideWaveGroupFromNetworkId(ch.OriginalNetworkId);
-    var nameKey = $"{waveGroup}:{ch.ServiceId}:{NormalizeProgramGuideServiceName(ch.Name)}";
-    if (fallbackContext.ByNameSid.TryGetValue(nameKey, out var byNameSid) && byNameSid.Any(e => ProgramGuideOverlapsDay(e, dayStart, dayEnd)))
-    {
-        resolveSource = "name_sid_unique";
-        return byNameSid;
-    }
-
-    var groupSidKey = $"{waveGroup}:{ch.ServiceId}";
-    if (fallbackContext.ByGroupSidUnique.TryGetValue(groupSidKey, out var byGroupSid) && byGroupSid.Any(e => ProgramGuideOverlapsDay(e, dayStart, dayEnd)))
-    {
-        resolveSource = "group_sid_unique";
-        return byGroupSid;
-    }
-
-    if (byKey.TryGetValue(exactKey, out var exactAny))
-    {
-        resolveSource = "exact_no_day_overlap";
-        return exactAny;
-    }
-
-    resolveSource = "none";
-    return Array.Empty<EpgEvent>();
-}
-
-
-
-static string SafeProgramGuideProjectionLogValue(string? value)
-{
-    if (string.IsNullOrWhiteSpace(value)) return "-";
-    return value.Replace("\r", " ").Replace("\n", " ").Replace("\t", " ").Replace("|", "/").Replace("\"", "'").Trim();
-}
-
-
-static IReadOnlyList<EpgEvent> ProgramGuideNormalizeServiceDayEvents(
-    IEnumerable<EpgEvent> events,
-    DateTime dayStart,
-    DateTime dayEnd)
-{
-    // release_contract: keep one row per broadcast event identity.  Collapse only
-    // duplicate table rows for the exact same event/time; never collapse by
-    // service key alone.
-    var candidates = events
-        .Where(e => ProgramGuideOverlapsDay(e, dayStart, dayEnd))
-        .GroupBy(e => $"{e.NetworkId}:{e.TransportStreamId}:{e.ServiceId}:{e.EventId}:{e.Start.Ticks}:{e.End.Ticks}", StringComparer.OrdinalIgnoreCase)
-        .Select(g => g
-            .OrderBy(e => e.TableId == 0x4E ? 0 : 1)
-            .ThenBy(e => e.TableId)
-            .ThenBy(e => e.EventId)
-            .First())
-        .OrderBy(e => e.Start)
-        .ThenBy(e => e.End)
-        .ThenBy(e => e.TableId)
-        .ThenBy(e => e.EventId)
-        .ToList();
-
-    // If one row encloses several other rows for the same service, keeping the
-    // enclosing row first makes the later per-column cursor suppress the real
-    // schedule.  Treat that as a projection duplicate/container and drop only
-    // the container row.  Long genuine programmes are preserved when they do
-    // not contain multiple independent events.
-    var filtered = candidates
-        .Where(e => candidates.Count(other =>
-            other.EventId != e.EventId &&
-            other.Start >= e.Start &&
-            other.End <= e.End &&
-            other.End > other.Start) < 2)
-        .ToList();
-
-    return filtered.Count > 0 ? filtered : candidates;
-}
-
-static IReadOnlyList<EpgEvent> BuildProgramGuideTimelineEvents(
-    IReadOnlyList<EpgEvent> sortedEvents,
-    IReadOnlyList<ChannelTarget> channels,
-    DateTime dayStart,
-    DateTime dayEnd,
-    EpgStore store,
-    LogRepository log,
-    DateOnly baseDate)
-{
-    // release_contract: use the actual day-overlapping event list as the unit of
-    // projection.  release_contract showed NHK General had dbEvents=61 but
-    // renderedCells=1, which means the service-level join was present but
-    // event multiplicity was lost in the timeline projection.
-    var daySortedEvents = sortedEvents
-        .Where(e => ProgramGuideOverlapsDay(e, dayStart, dayEnd))
-        .OrderBy(e => ProgramGuideServiceKey3(e.NetworkId, e.TransportStreamId, e.ServiceId), StringComparer.OrdinalIgnoreCase)
-        .ThenBy(e => e.Start)
-        .ThenBy(e => e.End)
-        .ThenBy(e => e.TableId)
-        .ThenBy(e => e.EventId)
-        .ToList();
-
-    var result = new List<EpgEvent>(daySortedEvents.Count + channels.Count * 2);
-    var byKey = daySortedEvents
-        .GroupBy(e => ProgramGuideServiceKey3(e.NetworkId, e.TransportStreamId, e.ServiceId), StringComparer.OrdinalIgnoreCase)
-        .ToDictionary(
-            g => g.Key,
-            g => ProgramGuideNormalizeServiceDayEvents(g, dayStart, dayEnd),
-            StringComparer.OrdinalIgnoreCase);
-
-    var fallbackContext = BuildProgramGuideProjectionFallbackContext(daySortedEvents);
-    var fallbackHits = new List<string>();
-
-    foreach (var ch in channels)
-    {
-        var key = ProgramGuideServiceKey3(ch.OriginalNetworkId, ch.TransportStreamId, ch.ServiceId);
-        var list = ResolveProgramGuideChannelEvents(ch, byKey, fallbackContext, dayStart, dayEnd, out var resolveSource);
-        if (!string.Equals(resolveSource, "exact", StringComparison.OrdinalIgnoreCase) && list.Count > 0 && fallbackHits.Count < 12)
-        {
-            fallbackHits.Add($"{SafeProgramGuideProjectionLogValue(ch.Name)}:{key}->{ProgramGuideServiceKey3(list[0].NetworkId, list[0].TransportStreamId, list[0].ServiceId)}:{resolveSource}:events={list.Count}");
-        }
-        var cursor = dayStart;
-        foreach (var ev in list)
-        {
-            if (ev.End <= dayStart || ev.Start >= dayEnd) continue;
-
-            var evStart = ev.Start < dayStart ? dayStart : ev.Start;
-            var evEnd = ev.End > dayEnd ? dayEnd : ev.End;
-            if (evEnd <= evStart) continue;
-
-            var displayEvent = ev;
-
-            // release_contract: ProgramGuide timeline projection must not render overlapping
-            // cells in the same service column.  DB/raw EPG facts are left intact;
-            // only the display timeline is裁定済みにする。
-            if (evStart < cursor)
-            {
-                if (evEnd <= cursor)
-                    continue;
-
-                displayEvent = CloneProgramGuideTimelineEvent(ev, cursor, evEnd);
-                evStart = cursor;
-            }
-
-            if (evStart > cursor)
-                AddProgramGuideGapFrame(result, ch, cursor, evStart);
-
-            result.Add(displayEvent);
-            if (evEnd > cursor) cursor = evEnd;
-        }
-        if (cursor < dayEnd)
-            AddProgramGuideGapFrame(result, ch, cursor, dayEnd);
-    }
-
-    if (fallbackHits.Count > 0)
-    {
-        log.Add("PROGRAMGUIDE_SERVICE_PROJECTION_FALLBACK", "APPLIED",
-            $"result=APPLIED date={baseDate:yyyy-MM-dd} count={fallbackHits.Count} sample={SafeProgramGuideProjectionLogValue(string.Join('|', fallbackHits))} rule=release_contract");
-    }
-
-    return result;
-}
-
-
-static EpgEvent CloneProgramGuideTimelineEvent(EpgEvent source, DateTime start, DateTime end)
-{
-    var durationSeconds = (int)Math.Max(0, Math.Round((end - start).TotalSeconds));
-    return new EpgEvent
-    {
-        NetworkId = source.NetworkId,
-        TransportStreamId = source.TransportStreamId,
-        ServiceId = source.ServiceId,
-        EventId = source.EventId,
-        ServiceName = source.ServiceName,
-        Title = source.Title,
-        Description = source.Description,
-        Genre = source.Genre,
-        GenreCodes = source.GenreCodes,
-        TableId = source.TableId,
-        SectionNumber = source.SectionNumber,
-        VersionNumber = source.VersionNumber,
-        RawDescriptorLoopHex = source.RawDescriptorLoopHex,
-        RawShortEventDescriptorHex = source.RawShortEventDescriptorHex,
-        RawExtendedEventDescriptorHex = source.RawExtendedEventDescriptorHex,
-        RawContentDescriptorHex = source.RawContentDescriptorHex,
-        DurationSeconds = durationSeconds,
-        Start = start,
-        End = end,
-        UpdatedAt = source.UpdatedAt
-    };
-}
-
-static void AddProgramGuideGapFrame(
-    List<EpgEvent> result,
-    ChannelTarget ch,
-    DateTime gapStart,
-    DateTime gapEnd)
-{
-    return;
-}
-
-
 static ProgramGuideEpgEventDto NormalizeProgramGuideEventForDisplay(EpgEvent e, IReadOnlyDictionary<string, string>? serviceDisplayNameByKey = null)
 {
-    // release_contract: ProgramGuide legacy body route purge.
+    // release_contract: ProgramGuideの廃止済みbody routeは再導入しない。
     // 番組表セル/API投影はDB raw descriptorから作ったCellTextを正本にする。
-    // 旧description/extendedDescription/decodedExtendedTextの本文経路はここで切断する。
+    // 番組表セル本文は現在のCellText正本だけから生成する。
     var cellText = ProgramGuideCellTextDecoder.Decode(e);
     var displayServiceName = serviceDisplayNameByKey is not null
         && serviceDisplayNameByKey.TryGetValue(ProgramGuideServiceKey3(e.NetworkId, e.TransportStreamId, e.ServiceId), out var currentName)
@@ -7365,9 +7393,806 @@ static ProgramGuideEpgEventDto NormalizeProgramGuideEventForDisplay(EpgEvent e, 
         e.RawExtendedEventDescriptorHex,
         e.RawDescriptorLoopHex,
         cellText,
+        ProjectedEventKey.FromDb(e).Value,
+        ProjectedEventStates.DbOnly,
+        ProjectedEventSourceKinds.TvAirDb,
+        string.Empty,
+        $"db:{e.NetworkId}:{e.TransportStreamId}:{e.ServiceId}:{e.EventId}",
         "db.raw_descriptor.common_cell_decoder",
         true);
 }
+
+
+static string ProjectedProgramGuideEventServiceKey(ProjectedProgramEvent e)
+    => ProgramGuideServiceKey3(e.NetworkId, e.TransportStreamId, e.ServiceId);
+
+static bool ProjectedProgramGuideOverlapsDay(ProjectedProgramEvent e, DateTime dayStart, DateTime dayEnd)
+    => e.End > dayStart && e.Start < dayEnd;
+
+static bool ProgramGuideProjectedContains(string? value, string keyword)
+    => !string.IsNullOrEmpty(value)
+       && !string.IsNullOrEmpty(keyword)
+       && value.Contains(keyword, StringComparison.CurrentCultureIgnoreCase);
+
+static ProjectedProgramGuideProjectionFallbackContext BuildProjectedProgramGuideProjectionFallbackContext(IReadOnlyList<ProjectedProgramEvent> events)
+{
+    var ctx = new ProjectedProgramGuideProjectionFallbackContext();
+
+    static List<ProjectedProgramEvent> Ordered(IEnumerable<ProjectedProgramEvent> values)
+        => values.OrderBy(e => e.Start).ThenBy(e => e.End).ThenBy(e => e.EventId).ToList();
+
+    foreach (var g in events.GroupBy(e => $"{ProgramGuideWaveGroupFromNetworkId(e.NetworkId)}:{e.ServiceId}:{NormalizeProgramGuideServiceName(e.ServiceName)}", StringComparer.OrdinalIgnoreCase))
+    {
+        if (string.IsNullOrWhiteSpace(g.Key) || g.Key.EndsWith(":", StringComparison.Ordinal)) continue;
+        var identityCount = g.Select(ProjectedProgramGuideEventServiceKey).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        if (identityCount == 1)
+            ctx.ByNameSid[g.Key] = Ordered(g);
+    }
+
+    foreach (var g in events.GroupBy(e => $"{ProgramGuideWaveGroupFromNetworkId(e.NetworkId)}:{e.ServiceId}", StringComparer.OrdinalIgnoreCase))
+    {
+        var identityCount = g.Select(ProjectedProgramGuideEventServiceKey).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        if (identityCount == 1)
+            ctx.ByGroupSidUnique[g.Key] = Ordered(g);
+    }
+
+    // External EPG may use a different ONID/TSID authority from the TvAIr
+    // display channel list.  These keys intentionally ignore the external
+    // network identity and are used only for runtime projection-to-display
+    // assignment; they never write back to epg_events.
+    foreach (var g in events.GroupBy(e => $"{e.ServiceId}:{NormalizeProgramGuideServiceName(e.ServiceName)}", StringComparer.OrdinalIgnoreCase))
+    {
+        if (string.IsNullOrWhiteSpace(g.Key) || g.Key.EndsWith(":", StringComparison.Ordinal)) continue;
+        ctx.BySidName[g.Key] = Ordered(g);
+    }
+
+    foreach (var g in events.GroupBy(e => NormalizeProgramGuideServiceName(e.ServiceName), StringComparer.OrdinalIgnoreCase))
+    {
+        if (string.IsNullOrWhiteSpace(g.Key)) continue;
+        ctx.ByNameOnly[g.Key] = Ordered(g);
+    }
+
+    foreach (var g in events
+        .Where(e => !e.DbEventExists)
+        .GroupBy(ProjectedProgramGuideOverlayGroupKey, StringComparer.OrdinalIgnoreCase))
+    {
+        ctx.OverlayOnlyGroupsByIdentity[g.Key] = Ordered(g);
+    }
+
+    return ctx;
+}
+
+static IReadOnlyList<ProjectedProgramEvent> ResolveProjectedProgramGuideChannelEvents(
+    ChannelTarget ch,
+    IReadOnlyDictionary<string, IReadOnlyList<ProjectedProgramEvent>> byKey,
+    ProjectedProgramGuideProjectionFallbackContext fallbackContext,
+    DateTime dayStart,
+    DateTime dayEnd,
+    out string resolveSource)
+{
+    var exactKey = ProgramGuideChannelServiceKey(ch);
+    var waveGroup = ProgramGuideWaveGroupFromNetworkId(ch.OriginalNetworkId);
+    var nameKey = $"{waveGroup}:{ch.ServiceId}:{NormalizeProgramGuideServiceName(ch.Name)}";
+    var groupSidKey = $"{waveGroup}:{ch.ServiceId}";
+
+    var sources = new List<string>();
+    var candidates = new List<ProjectedProgramEvent>();
+
+    void AddCandidateSet(string source, IReadOnlyList<ProjectedProgramEvent>? values)
+    {
+        if (values is null || values.Count == 0) return;
+        var dayValues = values
+            .Where(e => ProjectedProgramGuideOverlapsDay(e, dayStart, dayEnd))
+            .ToList();
+        if (dayValues.Count == 0) return;
+        candidates.AddRange(dayValues);
+        sources.Add(source);
+    }
+
+    if (byKey.TryGetValue(exactKey, out var exact))
+    {
+        var exactDay = exact
+            .Where(e => ProjectedProgramGuideOverlapsDay(e, dayStart, dayEnd))
+            .ToList();
+        if (exactDay.Count > 0)
+        {
+            // Exact NID/TSID/SID is the display authority. Fallback identities are
+            // only a recovery path when the exact service has no event in this day.
+            // Mixing fallback rows into an already-resolved exact service creates a
+            // second projection authority and can overwrite the canonical timeline.
+            resolveSource = "exact";
+            return ProjectedProgramGuideNormalizeServiceDayEvents(exactDay, dayStart, dayEnd);
+        }
+    }
+
+    if (fallbackContext.ByNameSid.TryGetValue(nameKey, out var byNameSid))
+        AddCandidateSet("name_sid_unique", byNameSid);
+
+    if (fallbackContext.ByGroupSidUnique.TryGetValue(groupSidKey, out var byGroupSid))
+        AddCandidateSet("group_sid_unique", byGroupSid);
+
+    var sidNameKey = $"{ch.ServiceId}:{NormalizeProgramGuideServiceName(ch.Name)}";
+    if (fallbackContext.BySidName.TryGetValue(sidNameKey, out var bySidName))
+        AddCandidateSet("sid_name_display_identity", bySidName);
+
+    var nameOnlyKey = NormalizeProgramGuideServiceName(ch.Name);
+    if (fallbackContext.ByNameOnly.TryGetValue(nameOnlyKey, out var byNameOnly))
+        AddCandidateSet("name_display_identity", byNameOnly);
+
+    if (candidates.Count > 0)
+    {
+        resolveSource = string.Join("+", sources.Distinct(StringComparer.OrdinalIgnoreCase));
+        return ProjectedProgramGuideNormalizeServiceDayEvents(candidates, dayStart, dayEnd);
+    }
+
+    if (byKey.TryGetValue(exactKey, out var exactAny) && exactAny.Count > 0)
+    {
+        resolveSource = "exact_no_day_overlap";
+        return exactAny;
+    }
+
+    resolveSource = "none";
+    return Array.Empty<ProjectedProgramEvent>();
+}
+
+static string ProjectedProgramGuideOverlayGroupKey(ProjectedProgramEvent e)
+{
+    var serviceName = NormalizeProgramGuideServiceName(e.ServiceName);
+    if (!string.IsNullOrWhiteSpace(serviceName))
+        return $"name:{serviceName}";
+
+    return $"identity:{e.SourcePluginId}:{e.NetworkId}:{e.TransportStreamId}:{e.ServiceId}";
+}
+
+static bool ProjectedProgramGuideHasAnyTimeOverlap(ProjectedProgramEvent overlay, IReadOnlyList<ProjectedProgramEvent> timeline)
+{
+    foreach (var ev in timeline)
+    {
+        if (ev.End <= overlay.Start || ev.Start >= overlay.End) continue;
+        return true;
+    }
+    return false;
+}
+
+static int ProjectedProgramGuideOverlayFitScore(IReadOnlyList<ProjectedProgramEvent> overlays, IReadOnlyList<ProjectedProgramEvent> baseEvents, ChannelTarget ch, DateTime dayStart, DateTime dayEnd)
+{
+    if (overlays.Count == 0) return int.MinValue;
+
+    var compatible = 0;
+    var overlap = 0;
+    var adjacency = 0;
+    var normalizedChannelName = NormalizeProgramGuideServiceName(ch.Name);
+
+    foreach (var overlay in overlays)
+    {
+        if (!ProjectedProgramGuideOverlapsDay(overlay, dayStart, dayEnd)) continue;
+        if (ProjectedProgramGuideHasAnyTimeOverlap(overlay, baseEvents))
+        {
+            overlap++;
+            continue;
+        }
+
+        compatible++;
+
+        var nearestBoundaryMinutes = double.PositiveInfinity;
+        foreach (var ev in baseEvents)
+        {
+            if (ev.End <= overlay.Start)
+                nearestBoundaryMinutes = Math.Min(nearestBoundaryMinutes, (overlay.Start - ev.End).Duration().TotalMinutes);
+            if (ev.Start >= overlay.End)
+                nearestBoundaryMinutes = Math.Min(nearestBoundaryMinutes, (ev.Start - overlay.End).Duration().TotalMinutes);
+        }
+
+        nearestBoundaryMinutes = Math.Min(nearestBoundaryMinutes, Math.Abs((overlay.Start - dayStart).TotalMinutes));
+        nearestBoundaryMinutes = Math.Min(nearestBoundaryMinutes, Math.Abs((dayEnd - overlay.End).TotalMinutes));
+
+        if (nearestBoundaryMinutes <= 15) adjacency += 8;
+        else if (nearestBoundaryMinutes <= 60) adjacency += 4;
+        else if (nearestBoundaryMinutes <= 180) adjacency += 1;
+    }
+
+    // Do not reject an overlay-only group only because every candidate row
+    // overlaps existing DB-backed timeline rows.  Assignment and DB-overlap
+    // suppression are separate steps: first bridge the overlay-only group to a
+    // display channel, then let BuildProjectedProgramGuideTimelineEvents count
+    // and suppress DB-overlapping rows.  Returning int.MinValue here leaves
+    // overlayAssignedCandidates at zero even though overlay-only rows exist.
+    var hasInRangeOverlay = compatible > 0 || overlap > 0;
+    if (!hasInRangeOverlay) return int.MinValue;
+
+    var identityBonus = 0;
+    foreach (var overlay in overlays.Take(3))
+    {
+        if (overlay.ServiceId == ch.ServiceId) identityBonus += 300;
+        if (string.Equals(NormalizeProgramGuideServiceName(overlay.ServiceName), normalizedChannelName, StringComparison.OrdinalIgnoreCase)) identityBonus += 500;
+        if (!string.IsNullOrWhiteSpace(overlay.SourceEventKey)
+            && !string.IsNullOrWhiteSpace(normalizedChannelName)
+            && NormalizeProgramGuideServiceName(overlay.SourceEventKey).Contains(normalizedChannelName, StringComparison.OrdinalIgnoreCase))
+        {
+            identityBonus += 200;
+        }
+    }
+
+    // The score is used only for runtime display assignment of overlay-only
+    // rows.  Penalize overlaps strongly, but do not require a unique service
+    // identity: the caller may use this as a bridge after the normal service
+    // fallback table has already proven the visible display services.
+    return compatible * 1000 + adjacency * 10 + identityBonus - overlap * 2000;
+}
+
+static Dictionary<string, string> BuildProjectedProgramGuideOverlayGroupChannelMap(
+    IReadOnlyList<ChannelTarget> channels,
+    IReadOnlyDictionary<string, IReadOnlyList<ProjectedProgramEvent>> byKey,
+    ProjectedProgramGuideProjectionFallbackContext fallbackContext,
+    DateTime dayStart,
+    DateTime dayEnd)
+{
+    var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    if (fallbackContext.OverlayOnlyGroupsByIdentity.Count == 0) return result;
+
+    var baseEventsByChannel = new Dictionary<string, IReadOnlyList<ProjectedProgramEvent>>(StringComparer.OrdinalIgnoreCase);
+    foreach (var ch in channels)
+    {
+        var channelEvents = ResolveProjectedProgramGuideChannelEvents(ch, byKey, fallbackContext, dayStart, dayEnd, out _);
+        baseEventsByChannel[ProgramGuideChannelServiceKey(ch)] = channelEvents
+            .Where(e => e.DbEventExists)
+            .OrderBy(e => e.Start)
+            .ThenBy(e => e.End)
+            .ThenBy(e => e.EventId)
+            .ToList();
+    }
+
+    foreach (var group in fallbackContext.OverlayOnlyGroupsByIdentity)
+    {
+        var overlays = group.Value
+            .Where(e => !e.DbEventExists && ProjectedProgramGuideOverlapsDay(e, dayStart, dayEnd))
+            .OrderBy(e => e.Start)
+            .ThenBy(e => e.End)
+            .ThenBy(e => e.EventId)
+            .ToList();
+        if (overlays.Count == 0) continue;
+
+        string? bestChannelKey = null;
+        var bestScore = int.MinValue;
+        var secondScore = int.MinValue;
+
+        foreach (var ch in channels)
+        {
+            var channelKey = ProgramGuideChannelServiceKey(ch);
+            var baseEvents = baseEventsByChannel.TryGetValue(channelKey, out var values) ? values : Array.Empty<ProjectedProgramEvent>();
+            var score = ProjectedProgramGuideOverlayFitScore(overlays, baseEvents, ch, dayStart, dayEnd);
+            if (score > bestScore)
+            {
+                secondScore = bestScore;
+                bestScore = score;
+                bestChannelKey = channelKey;
+            }
+            else if (score > secondScore)
+            {
+                secondScore = score;
+            }
+        }
+
+        if (bestChannelKey is null || bestScore == int.MinValue) continue;
+
+        // Overlay-only rows have already been proven to exist by the projection
+        // merge and the visible service fallback table is built separately.
+        // Do not drop the bridge merely because several visible channels have
+        // the same temporal score; use the deterministic best channel selected
+        // above and let the per-channel DB-overlap suppression reject unsafe
+        // rows.  This connects daySorted overlay-only rows to the displayed
+        // timeline instead of leaving overlayAssignedCandidates at zero.
+        result[group.Key] = bestChannelKey;
+    }
+
+    return result;
+}
+
+
+static IReadOnlyList<ProjectedProgramEvent> ProjectedProgramGuideNormalizeServiceDayEvents(
+    IEnumerable<ProjectedProgramEvent> events,
+    DateTime dayStart,
+    DateTime dayEnd)
+{
+    var candidates = events
+        .Where(e => ProjectedProgramGuideOverlapsDay(e, dayStart, dayEnd))
+        .GroupBy(e => $"{e.NetworkId}:{e.TransportStreamId}:{e.ServiceId}:{e.EventId}:{e.Start.Ticks}:{e.End.Ticks}:{e.SourceKind}:{e.SourcePluginId}:{e.SourceEventKey}", StringComparer.OrdinalIgnoreCase)
+        .Select(g => g
+            .OrderBy(e => e.DbEventExists ? 0 : 1)
+            .ThenBy(e => e.EventId)
+            .ThenBy(e => e.SourceKind, StringComparer.OrdinalIgnoreCase)
+            .First())
+        .OrderBy(e => e.Start)
+        .ThenBy(e => e.End)
+        .ThenBy(e => e.EventId)
+        .ThenBy(e => e.SourceKind, StringComparer.OrdinalIgnoreCase)
+        .ToList();
+
+    var filtered = candidates
+        .Where(e => candidates.Count(other =>
+            other.EventId != e.EventId &&
+            other.Start >= e.Start &&
+            other.End <= e.End &&
+            other.End > other.Start) < 2)
+        .ToList();
+
+    return filtered.Count > 0 ? filtered : candidates;
+}
+
+static IReadOnlyList<ProjectedProgramEvent> BuildProjectedProgramGuideTimelineEvents(
+    IReadOnlyList<ProjectedProgramEvent> sortedEvents,
+    IReadOnlyList<ChannelTarget> channels,
+    DateTime dayStart,
+    DateTime dayEnd,
+    LogRepository log,
+    DateOnly baseDate)
+{
+    var daySortedEvents = sortedEvents
+        .Where(e => ProjectedProgramGuideOverlapsDay(e, dayStart, dayEnd))
+        .OrderBy(ProjectedProgramGuideEventServiceKey, StringComparer.OrdinalIgnoreCase)
+        .ThenBy(e => e.Start)
+        .ThenBy(e => e.End)
+        .ThenBy(e => e.EventId)
+        .ThenBy(e => e.SourceKind, StringComparer.OrdinalIgnoreCase)
+        .ToList();
+
+    var result = new List<ProjectedProgramEvent>(daySortedEvents.Count + channels.Count * 2);
+    var byKey = daySortedEvents
+        .GroupBy(ProjectedProgramGuideEventServiceKey, StringComparer.OrdinalIgnoreCase)
+        .ToDictionary(
+            g => g.Key,
+            g => ProjectedProgramGuideNormalizeServiceDayEvents(g, dayStart, dayEnd),
+            StringComparer.OrdinalIgnoreCase);
+
+    var fallbackContext = BuildProjectedProgramGuideProjectionFallbackContext(daySortedEvents);
+    var displaySidCounts = channels
+        .GroupBy(ch => ch.ServiceId)
+        .ToDictionary(g => g.Key, g => g.Count());
+    var displayExactKeys = channels
+        .Select(ProgramGuideChannelServiceKey)
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    var displayNames = channels
+        .Select(ch => NormalizeProgramGuideServiceName(ch.Name))
+        .Where(name => !string.IsNullOrWhiteSpace(name))
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    var overlayGroupChannelMap = BuildProjectedProgramGuideOverlayGroupChannelMap(channels, byKey, fallbackContext, dayStart, dayEnd);
+    var fallbackHits = new List<string>();
+    var overlayTotalInRange = daySortedEvents.Count(e => !e.DbEventExists);
+    var overlayAssignedCandidates = 0;
+    var overlayAcceptedTotal = 0;
+    var overlaySuppressedByDbOverlapTotal = 0;
+    var overlayOnlyIdentityExactCandidates = 0;
+    var overlayOnlyRejectedIdentityNotExact = 0;
+    var overlayOnlyRejectedSidOnly = 0;
+    var overlayOnlyRejectedNameOnly = 0;
+    var overlayOnlyRejectedBridgeOnly = 0;
+    var overlayOnlyRejectedDbOverlap = 0;
+    var overlayOnlyRejectedServiceUnmatched = 0;
+    var overlayOnlyRejectSamples = new List<string>();
+
+    void CountOverlayOnlyReject(ProjectedProgramEvent ev, string reason, string identityMatch, string matchedChannelKey = "-")
+    {
+        switch (reason)
+        {
+            case "bridge_only_not_allowed": overlayOnlyRejectedBridgeOnly++; break;
+            case "sid_only_not_allowed": overlayOnlyRejectedSidOnly++; break;
+            case "name_only_not_allowed": overlayOnlyRejectedNameOnly++; break;
+            case "db_overlap": overlayOnlyRejectedDbOverlap++; break;
+            case "service_unmatched": overlayOnlyRejectedServiceUnmatched++; break;
+            default: overlayOnlyRejectedIdentityNotExact++; break;
+        }
+
+        if (overlayOnlyRejectSamples.Count < 12)
+        {
+            overlayOnlyRejectSamples.Add(
+                $"reason={reason}:identityMatch={identityMatch}:channel={SafeProgramGuideProjectionLogValue(matchedChannelKey)}:nid={ev.NetworkId}:tsid={ev.TransportStreamId}:sid={ev.ServiceId}:eventId={ev.EventId}:start={ev.Start:MMddHHmm}:end={ev.End:MMddHHmm}:title={SafeProgramGuideProjectionLogValue(ev.Title)}");
+        }
+    }
+
+    foreach (var overlay in daySortedEvents.Where(e => !e.DbEventExists && ProjectedProgramGuideOverlapsDay(e, dayStart, dayEnd)))
+    {
+        var overlayServiceKey = ProjectedProgramGuideEventServiceKey(overlay);
+        if (displayExactKeys.Contains(overlayServiceKey))
+        {
+            overlayOnlyIdentityExactCandidates++;
+            if (ProjectedProgramGuideIsFullyCoveredByDbTimelineInDay(overlay, daySortedEvents, dayStart, dayEnd))
+                CountOverlayOnlyReject(overlay, "db_overlap", "exact", overlayServiceKey);
+            continue;
+        }
+
+        if (overlayGroupChannelMap.TryGetValue(ProjectedProgramGuideOverlayGroupKey(overlay), out var bridgeChannelKey))
+        {
+            CountOverlayOnlyReject(overlay, "bridge_only_not_allowed", "bridge", bridgeChannelKey);
+            continue;
+        }
+
+        if (displaySidCounts.ContainsKey(overlay.ServiceId))
+        {
+            CountOverlayOnlyReject(overlay, "sid_only_not_allowed", "sid", "-");
+            continue;
+        }
+
+        var normalizedOverlayName = NormalizeProgramGuideServiceName(overlay.ServiceName);
+        if (!string.IsNullOrWhiteSpace(normalizedOverlayName) && displayNames.Contains(normalizedOverlayName))
+        {
+            CountOverlayOnlyReject(overlay, "name_only_not_allowed", "name", "-");
+            continue;
+        }
+
+        CountOverlayOnlyReject(overlay, "service_unmatched", "none", "-");
+    }
+
+    foreach (var ch in channels)
+    {
+        var key = ProgramGuideChannelServiceKey(ch);
+        var list = ResolveProjectedProgramGuideChannelEvents(ch, byKey, fallbackContext, dayStart, dayEnd, out var resolveSource);
+        if (!string.Equals(resolveSource, "exact", StringComparison.OrdinalIgnoreCase) && list.Count > 0 && fallbackHits.Count < 12)
+        {
+            fallbackHits.Add($"{SafeProgramGuideProjectionLogValue(ch.Name)}:{key}->{ProjectedProgramGuideEventServiceKey(list[0])}:{resolveSource}:events={list.Count}");
+        }
+
+        var baseEvents = list
+            .Where(e => e.DbEventExists)
+            .OrderBy(e => e.Start)
+            .ThenBy(e => e.End)
+            .ThenBy(e => e.EventId)
+            .ToList();
+
+        // overlay-only is a hole-fill mechanism only.  Do not adopt rows reached
+        // through service fallback, SID-only, name-only, or bridge assignment.
+        // A displayed overlay-only row must already belong to this exact
+        // NID/TSID/SID service timeline.
+        var overlayOnlyEvents = byKey.TryGetValue(key, out var exactChannelEvents)
+            ? exactChannelEvents
+                .Where(e => !e.DbEventExists)
+                .Where(e => ProjectedProgramGuideOverlapsDay(e, dayStart, dayEnd))
+                .GroupBy(e => $"{e.SourcePluginId}:{e.SourceEventKey}:{e.NetworkId}:{e.TransportStreamId}:{e.ServiceId}:{e.EventId}:{e.Start.Ticks}:{e.End.Ticks}", StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.OrderBy(e => e.Start).ThenBy(e => e.End).ThenBy(e => e.EventId).First())
+                .OrderBy(e => e.Start)
+                .ThenBy(e => e.End)
+                .ThenBy(e => e.EventId)
+                .ToList()
+            : new List<ProjectedProgramEvent>();
+
+        var acceptedForChannel = new List<ProjectedProgramEvent>(baseEvents.Count + overlayOnlyEvents.Count);
+
+        var cursor = dayStart;
+        foreach (var ev in baseEvents)
+        {
+            if (ev.End <= dayStart || ev.Start >= dayEnd) continue;
+
+            var evStart = ev.Start < dayStart ? dayStart : ev.Start;
+            var evEnd = ev.End > dayEnd ? dayEnd : ev.End;
+            if (evEnd <= evStart) continue;
+
+            var displayEvent = ev;
+            if (evStart < cursor)
+            {
+                if (evEnd <= cursor)
+                    continue;
+
+                displayEvent = CloneProjectedProgramGuideTimelineEvent(ev, cursor, evEnd);
+                evStart = cursor;
+            }
+
+            acceptedForChannel.Add(displayEvent);
+            if (evEnd > cursor) cursor = evEnd;
+        }
+
+        var overlayAccepted = 0;
+        var overlaySuppressedByDbOverlap = 0;
+        overlayAssignedCandidates += overlayOnlyEvents.Count;
+        foreach (var overlay in overlayOnlyEvents)
+        {
+            if (overlay.End <= dayStart || overlay.Start >= dayEnd) continue;
+
+            var displayOverlay = ProjectedProgramGuideAlignOverlayToChannel(overlay, ch);
+            var uncoveredFragments = ProjectedProgramGuideSubtractDbTimeline(
+                displayOverlay,
+                acceptedForChannel,
+                dayStart,
+                dayEnd);
+
+            if (uncoveredFragments.Count == 0)
+            {
+                overlaySuppressedByDbOverlap++;
+                continue;
+            }
+
+            foreach (var fragment in uncoveredFragments)
+                acceptedForChannel.Add(fragment);
+
+            // Count the source occurrence once even when local DB inserts split its
+            // display geometry into multiple fragments. The ProjectedEventKey and
+            // SourceEventKey remain the original external occurrence identity, so
+            // reservation actions still resolve the authoritative full event.
+            overlayAccepted++;
+        }
+
+        overlayAcceptedTotal += overlayAccepted;
+        overlaySuppressedByDbOverlapTotal += overlaySuppressedByDbOverlap;
+
+        foreach (var ev in acceptedForChannel
+            .OrderBy(e => e.Start)
+            .ThenBy(e => e.End)
+            .ThenBy(e => e.DbEventExists ? 0 : 1)
+            .ThenBy(e => e.EventId))
+        {
+            result.Add(ev);
+        }
+    }
+
+
+    if (overlayTotalInRange > 0 || overlayAcceptedTotal > 0 || overlaySuppressedByDbOverlapTotal > 0)
+    {
+        var overlayUnmatched = Math.Max(0, overlayTotalInRange - overlayAssignedCandidates);
+        log.Add("PROGRAM_GUIDE_PROJECTED_OVERLAY_TIMELINE_SUMMARY", "API",
+            $"result=OK date={baseDate:yyyy-MM-dd} overlayTotalInRange={overlayTotalInRange} overlayAssignedCandidates={overlayAssignedCandidates} overlayAccepted={overlayAcceptedTotal} overlaySuppressedByDbOverlap={overlaySuppressedByDbOverlapTotal} overlayUnmatchedChannels={overlayUnmatched} displayTimelineEvents={result.Count} dbWrite=none rule=program_guide_projection_contract");
+
+        log.Add("OVERLAY_ONLY_ADOPTION_SUMMARY", "API",
+            $"result=OK date={baseDate:yyyy-MM-dd} acceptedExternalEvents=runtime_store mergeCandidates={overlayTotalInRange} overlayOnlyCandidates={overlayTotalInRange} identityExactCandidates={overlayOnlyIdentityExactCandidates} rejectedIdentityNotExact={overlayOnlyRejectedIdentityNotExact} rejectedSidOnly={overlayOnlyRejectedSidOnly} rejectedNameOnly={overlayOnlyRejectedNameOnly} rejectedBridgeOnly={overlayOnlyRejectedBridgeOnly} dbOverlapPreflight={overlayOnlyRejectedDbOverlap} rejectedDbOverlap={overlaySuppressedByDbOverlapTotal} rejectedSameServiceDbEvent={overlaySuppressedByDbOverlapTotal} rejectedServiceUnmatched={overlayOnlyRejectedServiceUnmatched} overlayOnlyDisplayed={overlayAcceptedTotal} dbWithOverlay=see_PROGRAM_GUIDE_PROJECTED_DISPLAY_HANDOFF sample={SafeProgramGuideProjectionLogValue(string.Join('|', overlayOnlyRejectSamples))} policy=exact_nid_tsid_sid_and_no_db_overlap bridge=column_resolution_only_not_adoption dbWrite=none rule=program_guide_overlay_only_strict_adoption");
+    }
+
+    if (fallbackHits.Count > 0)
+    {
+        log.Add("PROGRAMGUIDE_SERVICE_PROJECTION_FALLBACK", "APPLIED",
+            $"result=APPLIED date={baseDate:yyyy-MM-dd} count={fallbackHits.Count} sample={SafeProgramGuideProjectionLogValue(string.Join('|', fallbackHits))} rule=release_contract");
+    }
+
+    return result;
+}
+
+static ProjectedProgramEvent ProjectedProgramGuideAlignOverlayToChannel(ProjectedProgramEvent source, ChannelTarget ch)
+{
+    if (source.DbEventExists) return source;
+
+    if (source.NetworkId == ch.OriginalNetworkId
+        && source.TransportStreamId == ch.TransportStreamId
+        && source.ServiceId == ch.ServiceId)
+    {
+        return source;
+    }
+
+    return new ProjectedProgramEvent
+    {
+        Key = source.Key,
+        ProjectionState = source.ProjectionState,
+        NetworkId = ch.OriginalNetworkId,
+        TransportStreamId = ch.TransportStreamId,
+        ServiceId = ch.ServiceId,
+        EventId = source.EventId,
+        Start = source.Start,
+        End = source.End,
+        DurationSeconds = source.DurationSeconds,
+        CanonicalStart = source.CanonicalStart,
+        CanonicalEnd = source.CanonicalEnd,
+        IsTimelineFragment = source.IsTimelineFragment,
+        TimelineFragmentReason = source.TimelineFragmentReason,
+        ServiceName = string.IsNullOrWhiteSpace(ch.Name) ? source.ServiceName : ch.Name,
+        Title = source.Title,
+        ShortText = source.ShortText,
+        ExtendedText = source.ExtendedText,
+        CellText = source.CellText,
+        Genre = source.Genre,
+        GenreCodes = source.GenreCodes,
+        DbEventExists = false,
+        DbEvent = null,
+        SourceKind = source.SourceKind,
+        SourcePluginId = source.SourcePluginId,
+        SourceEventKey = source.SourceEventKey,
+        ProjectionTitleDbPresent = source.ProjectionTitleDbPresent,
+        ProjectionTitleOverlayCandidatePresent = source.ProjectionTitleOverlayCandidatePresent,
+        ProjectionTitleSource = source.ProjectionTitleSource,
+        ProjectionOutlineDbPresent = source.ProjectionOutlineDbPresent,
+        ProjectionOutlineOverlayCandidatePresent = source.ProjectionOutlineOverlayCandidatePresent,
+        ProjectionOutlineSource = source.ProjectionOutlineSource,
+        ProjectionDetailDbPresent = source.ProjectionDetailDbPresent,
+        ProjectionDetailOverlayCandidatePresent = source.ProjectionDetailOverlayCandidatePresent,
+        ProjectionDetailSource = source.ProjectionDetailSource
+    };
+}
+
+static IReadOnlyList<ProjectedProgramEvent> ProjectedProgramGuideSubtractDbTimeline(
+    ProjectedProgramEvent overlay,
+    IReadOnlyList<ProjectedProgramEvent> timeline,
+    DateTime dayStart,
+    DateTime dayEnd)
+{
+    var start = overlay.Start < dayStart ? dayStart : overlay.Start;
+    var end = overlay.End > dayEnd ? dayEnd : overlay.End;
+    if (end <= start) return Array.Empty<ProjectedProgramEvent>();
+
+    var covered = timeline
+        .Where(ev => ev.DbEventExists)
+        .Where(ev => ev.NetworkId == overlay.NetworkId
+                     && ev.TransportStreamId == overlay.TransportStreamId
+                     && ev.ServiceId == overlay.ServiceId)
+        .Select(ev => (Start: ev.Start < start ? start : ev.Start, End: ev.End > end ? end : ev.End))
+        .Where(x => x.End > x.Start)
+        .OrderBy(x => x.Start)
+        .ThenBy(x => x.End)
+        .ToList();
+
+    if (covered.Count == 0)
+        return new[] { CloneProjectedProgramGuideTimelineEvent(overlay, start, end) };
+
+    var merged = new List<(DateTime Start, DateTime End)>();
+    foreach (var interval in covered)
+    {
+        if (merged.Count == 0 || interval.Start > merged[^1].End)
+        {
+            merged.Add(interval);
+            continue;
+        }
+
+        if (interval.End > merged[^1].End)
+            merged[^1] = (merged[^1].Start, interval.End);
+    }
+
+    var fragments = new List<ProjectedProgramEvent>();
+    var cursor = start;
+    foreach (var interval in merged)
+    {
+        if (interval.Start > cursor)
+            fragments.Add(CloneProjectedProgramGuideTimelineEvent(overlay, cursor, interval.Start));
+
+        if (interval.End > cursor)
+            cursor = interval.End;
+        if (cursor >= end) break;
+    }
+
+    if (cursor < end)
+        fragments.Add(CloneProjectedProgramGuideTimelineEvent(overlay, cursor, end));
+
+    return fragments;
+}
+
+static bool ProjectedProgramGuideIsFullyCoveredByDbTimelineInDay(
+    ProjectedProgramEvent overlay,
+    IReadOnlyList<ProjectedProgramEvent> dayEvents,
+    DateTime dayStart,
+    DateTime dayEnd)
+{
+    return ProjectedProgramGuideSubtractDbTimeline(overlay, dayEvents, dayStart, dayEnd).Count == 0;
+}
+
+static ProjectedProgramEvent CloneProjectedProgramGuideTimelineEvent(ProjectedProgramEvent source, DateTime start, DateTime end)
+{
+    var durationSeconds = (int)Math.Max(0, Math.Round((end - start).TotalSeconds));
+    return new ProjectedProgramEvent
+    {
+        Key = source.Key,
+        ProjectionState = source.ProjectionState,
+        NetworkId = source.NetworkId,
+        TransportStreamId = source.TransportStreamId,
+        ServiceId = source.ServiceId,
+        EventId = source.EventId,
+        Start = start,
+        End = end,
+        DurationSeconds = durationSeconds,
+        CanonicalStart = source.CanonicalStart == default ? source.Start : source.CanonicalStart,
+        CanonicalEnd = source.CanonicalEnd == default ? source.End : source.CanonicalEnd,
+        IsTimelineFragment = source.IsTimelineFragment || start != source.Start || end != source.End,
+        TimelineFragmentReason = source.IsTimelineFragment ? source.TimelineFragmentReason : "display_range_clip",
+        ServiceName = source.ServiceName,
+        Title = source.Title,
+        ShortText = source.ShortText,
+        ExtendedText = source.ExtendedText,
+        CellText = source.CellText,
+        Genre = source.Genre,
+        GenreCodes = source.GenreCodes,
+        DbEventExists = source.DbEventExists,
+        DbEvent = source.DbEvent,
+        SourceKind = source.SourceKind,
+        SourcePluginId = source.SourcePluginId,
+        SourceEventKey = source.SourceEventKey,
+        ProjectionTitleDbPresent = source.ProjectionTitleDbPresent,
+        ProjectionTitleOverlayCandidatePresent = source.ProjectionTitleOverlayCandidatePresent,
+        ProjectionTitleSource = source.ProjectionTitleSource,
+        ProjectionOutlineDbPresent = source.ProjectionOutlineDbPresent,
+        ProjectionOutlineOverlayCandidatePresent = source.ProjectionOutlineOverlayCandidatePresent,
+        ProjectionOutlineSource = source.ProjectionOutlineSource,
+        ProjectionDetailDbPresent = source.ProjectionDetailDbPresent,
+        ProjectionDetailOverlayCandidatePresent = source.ProjectionDetailOverlayCandidatePresent,
+        ProjectionDetailSource = source.ProjectionDetailSource
+    };
+}
+
+static ProgramGuideEpgEventDto NormalizeProjectedProgramGuideEventForDisplay(ProjectedProgramEvent e, IReadOnlyDictionary<string, string>? serviceDisplayNameByKey = null)
+{
+    if (e.DbEvent is not null && e.DbEventExists && string.Equals(e.ProjectionState, ProjectedEventStates.DbOnly, StringComparison.OrdinalIgnoreCase))
+        return NormalizeProgramGuideEventForDisplay(e.DbEvent, serviceDisplayNameByKey);
+
+    var displayServiceName = serviceDisplayNameByKey is not null
+        && serviceDisplayNameByKey.TryGetValue(ProjectedProgramGuideEventServiceKey(e), out var currentName)
+        && !string.IsNullOrWhiteSpace(currentName)
+            ? currentName
+            : e.ServiceName;
+
+    var cellText = BuildProjectedProgramGuideCellText(e);
+    return new ProgramGuideEpgEventDto(
+        e.NetworkId,
+        e.TransportStreamId,
+        e.ServiceId,
+        e.EventId,
+        displayServiceName,
+        cellText.Title,
+        cellText.Outline,
+        e.Genre,
+        e.GenreCodes,
+        e.DurationSeconds,
+        e.Start,
+        e.End,
+        ProgramGuideWaveGroupFromNetworkId(e.NetworkId),
+        false,
+        null,
+        string.Empty,
+        e.DbEvent?.TableId ?? 0,
+        e.DbEvent?.SectionNumber ?? 0,
+        e.DbEvent?.VersionNumber ?? 0,
+        e.DbEvent?.RawShortEventDescriptorHex ?? string.Empty,
+        e.DbEvent?.RawExtendedEventDescriptorHex ?? string.Empty,
+        e.DbEvent?.RawDescriptorLoopHex ?? string.Empty,
+        cellText,
+        e.Key.Value,
+        e.ProjectionState,
+        e.SourceKind,
+        e.SourcePluginId,
+        e.SourceEventKey,
+        e.DbEventExists ? "db.raw_descriptor.with_external_projection" : "external_epg.projected_event",
+        e.DbEventExists);
+}
+
+static ProgramGuideCellText BuildProjectedProgramGuideCellText(ProjectedProgramEvent e)
+{
+    if (e.DbEvent is not null && e.DbEventExists && string.Equals(e.ProjectionState, ProjectedEventStates.DbOnly, StringComparison.OrdinalIgnoreCase))
+        return ProgramGuideCellTextDecoder.Decode(e.DbEvent);
+
+    var title = FirstProjectedText(e.Title, e.DbEvent is null ? null : EpgProjection.Title(e.DbEvent));
+    var outline = FirstProjectedText(e.ShortText, e.DbEvent is null ? null : EpgProjection.ShortText(e.DbEvent));
+    var detail = FirstProjectedText(e.ExtendedText);
+    if (detail.Length == 0 && e.CellText.Length > 0)
+        detail = e.CellText;
+
+    return new ProgramGuideCellText(
+        title,
+        outline,
+        detail,
+        string.Empty,
+        e.DbEvent?.RawShortEventDescriptorHex ?? string.Empty,
+        e.DbEvent?.RawExtendedEventDescriptorHex ?? string.Empty,
+        e.DbEventExists ? "db.raw_descriptor.with_external_projection" : "external_epg.projected_event");
+}
+
+static string FirstProjectedText(params string?[] values)
+{
+    foreach (var value in values)
+    {
+        var text = (value ?? string.Empty).Trim();
+        if (text.Length > 0) return text;
+    }
+    return string.Empty;
+}
+
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+static string SafeProgramGuideDiagnosticValue(string? value)
+{
+    if (string.IsNullOrWhiteSpace(value)) return "-";
+    var text = value.Replace("\r", " ").Replace("\n", " ").Replace("|", "/").Trim();
+    return text.Length <= 160 ? text : text[..160] + "…";
+}
+
+static int ProgramGuideHexByteLength(string? value)
+{
+    if (string.IsNullOrWhiteSpace(value)) return 0;
+    var hexDigits = 0;
+    foreach (var ch in value)
+    {
+        if (Uri.IsHexDigit(ch)) hexDigits++;
+    }
+    return hexDigits / 2;
+}
+#endif
 
 static string SafeRuntimePrereqLogValue(string? value)
 {
@@ -7379,10 +8204,20 @@ static string SafeRuntimePrereqLogValue(string? value)
 
 app.Run();
 
-sealed class ProgramGuideProjectionFallbackContext
+enum PluginPresentationLifecycleHint
 {
-    public Dictionary<string, List<EpgEvent>> ByNameSid { get; } = new(StringComparer.OrdinalIgnoreCase);
-    public Dictionary<string, List<EpgEvent>> ByGroupSidUnique { get; } = new(StringComparer.OrdinalIgnoreCase);
+    None,
+    Enable,
+    Disable
+}
+
+sealed class ProjectedProgramGuideProjectionFallbackContext
+{
+    public Dictionary<string, List<ProjectedProgramEvent>> ByNameSid { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, List<ProjectedProgramEvent>> ByGroupSidUnique { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, List<ProjectedProgramEvent>> BySidName { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, List<ProjectedProgramEvent>> ByNameOnly { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, List<ProjectedProgramEvent>> OverlayOnlyGroupsByIdentity { get; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
 
@@ -7412,72 +8247,13 @@ public sealed record ProgramGuideEpgEventDto(
     [property: System.Text.Json.Serialization.JsonIgnore] string RawExtendedEventDescriptorHex,
     [property: System.Text.Json.Serialization.JsonIgnore] string RawDescriptorLoopHex,
     ProgramGuideCellText CellText,
+    string ProjectedEventId,
+    string ProjectionState,
+    string SourceKind,
+    string SourcePluginId,
+    string SourceEventKey,
     string TitleSource,
     bool TitleRawPassthrough);
-
-sealed class ViewerRetuneDelayedDeathAudit
-{
-    private sealed record State(DateTime RetunedAt, ushort NetworkId, ushort TransportStreamId, ushort ServiceId, string Group, string Did, string BonDriver);
-
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, State> LastRetuneByPid = new();
-
-    public static void MarkRetuned(int pid, ushort networkId, ushort transportStreamId, ushort serviceId, string? group, string? did, string? bonDriver)
-    {
-        if (pid <= 0) return;
-        LastRetuneByPid[pid] = new State(
-            DateTime.Now,
-            networkId,
-            transportStreamId,
-            serviceId,
-            string.IsNullOrWhiteSpace(group) ? "-" : group.Trim(),
-            string.IsNullOrWhiteSpace(did) ? "-" : did.Trim(),
-            string.IsNullOrWhiteSpace(bonDriver) ? "-" : Path.GetFileName(bonDriver.Trim()));
-    }
-
-    public static DelayedDeathResult MarkDetectedDead(int pid)
-    {
-        var detectedAt = DateTime.Now;
-        if (pid <= 0 || !LastRetuneByPid.TryRemove(pid, out var state))
-        {
-            return new DelayedDeathResult(
-                "UNKNOWN_LAST_RETUNE",
-                "-",
-                detectedAt.ToString("O", CultureInfo.InvariantCulture),
-                "-",
-                "-",
-                "-",
-                "-",
-                "-",
-                "-",
-                "-");
-        }
-
-        var elapsedMs = Math.Max(0, (long)(detectedAt - state.RetunedAt).TotalMilliseconds);
-        return new DelayedDeathResult(
-            "DETECTED",
-            state.RetunedAt.ToString("O", CultureInfo.InvariantCulture),
-            detectedAt.ToString("O", CultureInfo.InvariantCulture),
-            elapsedMs.ToString(CultureInfo.InvariantCulture),
-            state.NetworkId.ToString(CultureInfo.InvariantCulture),
-            state.TransportStreamId.ToString(CultureInfo.InvariantCulture),
-            state.ServiceId.ToString(CultureInfo.InvariantCulture),
-            state.Group,
-            state.Did,
-            state.BonDriver);
-    }
-}
-
-public sealed record DelayedDeathResult(
-    string Result,
-    string LastRetuneAtText,
-    string DetectedDeadAtText,
-    string ElapsedMsText,
-    string NetworkIdText,
-    string TransportStreamIdText,
-    string ServiceIdText,
-    string Group,
-    string Did,
-    string BonDriver);
 
 sealed class PluginSeeOtherResult : IResult
 {
@@ -7492,16 +8268,6 @@ sealed class PluginSeeOtherResult : IResult
     }
 }
 
-public sealed record ViewerProfileProjectionResult(
-    IReadOnlyList<ViewerProfileContractDto> Profiles,
-    IReadOnlyList<ViewerProfileContractDto> SelectableProfiles,
-    int EnabledRealProfileCount,
-    int ViewingTunerCount,
-    bool SelectorVisibleRecommended,
-    string DefaultViewerProfile,
-    string ProfileIds,
-    string SelectableProfileIds);
-
 public sealed record ViewerProfileContractDto(
     string Id,
     string Name,
@@ -7513,171 +8279,100 @@ public sealed record ViewerProfileContractDto(
     string Source,
     string Note,
     int TvTestFrameIndex = 0,
-    IReadOnlyList<string>? AvailableGroups = null);
+    IReadOnlyList<string>? AvailableGroups = null,
+    string LogicalViewerSlotId = "",
+    bool IsShared = false,
+    string ErrorCode = "");
 
 
 static class ViewerProfileContract
 {
     public static IReadOnlyList<ViewerProfileContractDto> BuildProfiles(TvTestSettings settings, IniSettingsService ini, IReadOnlyList<TunerProfile> tunerProfiles)
     {
-        var path = !string.IsNullOrWhiteSpace(ini.ViewingTvTestExecutablePath) ? ini.ViewingTvTestExecutablePath : ini.TvTestExecutablePath;
-        if (string.IsNullOrWhiteSpace(path))
-            path = !string.IsNullOrWhiteSpace(settings.ViewingTvTestExecutablePath) ? settings.ViewingTvTestExecutablePath : settings.ExecutablePath;
-        var executableKey = NormalizePathKey(path);
-
         var profiles = new List<ViewerProfileContractDto>();
-        var effectiveTuners = BuildEffectiveTunerProfiles(ini, tunerProfiles);
-        var viewingTuners = effectiveTuners
+        var viewingTuners = TunerRuntimeProfileSource.Build(ini, tunerProfiles)
             .Where(t => string.Equals(IniSettingsService.NormalizeTunerRole(t.Role), "Viewing", StringComparison.OrdinalIgnoreCase))
-            .OrderBy(t => TunerDisplayName.NormalizeGroup(t.Group))
-            .ThenBy(t => string.IsNullOrWhiteSpace(t.Name) ? "~" : t.Name, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(t => string.IsNullOrWhiteSpace(t.Did) ? "~" : t.Did, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        var groupedViewingTuners = viewingTuners
-            .GroupBy(t => TunerDisplayName.NormalizeGroup(t.Group), StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(
-                g => g.Key,
-                g => g.OrderBy(t => string.IsNullOrWhiteSpace(t.Name) ? "~" : t.Name, StringComparer.OrdinalIgnoreCase)
-                      .ThenBy(t => string.IsNullOrWhiteSpace(t.Did) ? "~" : t.Did, StringComparer.OrdinalIgnoreCase)
-                      .ToList(),
-                StringComparer.OrdinalIgnoreCase);
-
-        var frameCount = groupedViewingTuners.Values.Select(v => v.Count).DefaultIfEmpty(0).Max();
-        for (var frameIndex = 1; frameIndex <= frameCount; frameIndex++)
+        var order = 0;
+        foreach (var tuner in viewingTuners)
         {
-            var id = $"tvtest{frameIndex}";
+            var supportedGroups = SupportedGroupsForTuner(tuner.Group);
+            var frameIndex = tuner.DeviceNumber;
+            if (frameIndex <= 0) continue;
+
+            var logicalId = NormalizeLogicalViewerSlotId(tuner.LogicalViewerSlotId);
+            if (string.IsNullOrWhiteSpace(logicalId)) continue;
+            var profileId = $"viewer-slot-{logicalId}";
             var name = $"TVTest{frameIndex}";
-            var availableGroups = BuildAvailableGroups(groupedViewingTuners, frameIndex);
-            var note = BuildTvTestFrameNote(groupedViewingTuners, frameIndex, availableGroups);
-            var key = $"viewer-profile:{id}:tvtest-frame:{frameIndex}";
-            profiles.Add(new ViewerProfileContractDto(id, name, true, frameIndex == 1, frameIndex, false, key, "tunerpool-viewing-tvtest-frame", note, frameIndex, availableGroups));
+            var isShared = supportedGroups.Count == 2;
+            var note = $"logicalViewerSlotId={logicalId}; supportedGroups={string.Join(",", supportedGroups)}; tuner={tuner.Name}; deviceNumber={frameIndex}; source=settings_device_number";
+            profiles.Add(new ViewerProfileContractDto(profileId, name, true, order == 0, ++order, false,
+                $"viewer-profile:{profileId}", "tunerpool-viewing-logical-slot", note,
+                frameIndex, supportedGroups, logicalId, isShared));
         }
-
-        if (profiles.Count == 0 && !string.IsNullOrWhiteSpace(executableKey))
-            profiles.Add(new ViewerProfileContractDto("tvtest1", "TVTest1", true, true, 1, false, "viewer-profile:tvtest1:legacy-default", "legacy-default-viewer", "Viewing role未定義の後方互換profile", 1, new[] { "GR", "BSCS", "HYBRID" }));
-
         return profiles;
     }
 
-    public static ViewerProfileContractDto ResolveRequestedProfile(string? requested, TvTestSettings settings, IniSettingsService ini, IReadOnlyList<TunerProfile> tunerProfiles)
+    public static ViewerProfileContractDto ResolveRequestedProfile(string? requested, string? requestedGroup, TvTestSettings settings, IniSettingsService ini, IReadOnlyList<TunerProfile> tunerProfiles)
     {
-        var id = NormalizeProfileId(requested);
         var profiles = BuildProfiles(settings, ini, tunerProfiles);
-        var match = profiles.FirstOrDefault(p => string.Equals(NormalizeProfileId(p.Id), id, StringComparison.OrdinalIgnoreCase));
-        if (match is not null) return match;
+        var raw = (requested ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(raw) || raw.Equals("auto", StringComparison.OrdinalIgnoreCase) || raw.Equals("default", StringComparison.OrdinalIgnoreCase))
+            return profiles.FirstOrDefault(p => p.IsDefault) ?? Disabled("", "viewer_profile_unavailable");
 
-        if (TryParseTvTestOrdinal(id, out var ordinal))
-            return new ViewerProfileContractDto(id, $"TVTest{ordinal}", false, false, ordinal, false, string.Empty, "not-configured", "TVTest枠数を超える未設定profile", ordinal, Array.Empty<string>());
+        var stable = profiles.FirstOrDefault(p => string.Equals(p.Id, raw, StringComparison.OrdinalIgnoreCase));
+        if (stable is not null) return stable;
 
-        return profiles.FirstOrDefault(p => string.Equals(p.Id, "tvtest1", StringComparison.OrdinalIgnoreCase))
-            ?? new ViewerProfileContractDto("tvtest1", "TVTest1", false, true, 1, false, string.Empty, "not-configured", "TVTest1が構成されていません", 1, Array.Empty<string>());
+        if (TryParseTvTestOrdinal(raw, out var ordinal))
+        {
+            var group = NormalizeProfileGroup(requestedGroup);
+            var candidates = profiles.Where(p => p.TvTestFrameIndex == ordinal && ProfileSupportsGroup(p, group)).ToList();
+            if (candidates.Count == 1) return candidates[0];
+            if (candidates.Count > 1) return Disabled(raw, "ambiguous_legacy_viewer_profile");
+            return Disabled(raw, "viewer_profile_unavailable");
+        }
+        return Disabled(raw, "viewer_profile_unavailable");
     }
 
     public static bool ProfileSupportsGroup(ViewerProfileContractDto profile, string? requestedGroup)
     {
         if (!profile.Enabled) return false;
         var group = NormalizeProfileGroup(requestedGroup);
+        if (string.IsNullOrWhiteSpace(group)) return true;
         var available = profile.AvailableGroups ?? Array.Empty<string>();
-        if (available.Count == 0) return true;
-        return available.Any(g => string.Equals(NormalizeProfileGroup(g), group, StringComparison.OrdinalIgnoreCase)
-                               || string.Equals(NormalizeProfileGroup(g), "HYBRID", StringComparison.OrdinalIgnoreCase));
+        return available.Any(g => string.Equals(NormalizeProfileGroup(g), group, StringComparison.OrdinalIgnoreCase));
     }
 
     public static string BuildViewerClientId(string pluginId, string viewerProfileId)
-    {
-        var profile = NormalizeProfileId(viewerProfileId);
-        return $"{pluginId}:viewer:{profile}";
-    }
+        => $"{pluginId}:viewer:{viewerProfileId.Trim().ToLowerInvariant()}";
 
     public static bool LeaseMatchesProfile(ExternalTunerLeaseDto lease, ViewerProfileContractDto profile)
-        => string.Equals(NormalizeProfileId(lease.ViewerProfileId), NormalizeProfileId(profile.Id), StringComparison.OrdinalIgnoreCase);
+        => string.Equals(lease.ViewerProfileId?.Trim(), profile.Id, StringComparison.OrdinalIgnoreCase);
 
     public static string TvTestPathKeyForResolvedProfile(ViewerProfileContractDto profile)
-        => !string.IsNullOrWhiteSpace(profile.TvTestPathKey) ? profile.TvTestPathKey : NormalizeProfileId(profile.Id);
+        => !string.IsNullOrWhiteSpace(profile.TvTestPathKey) ? profile.TvTestPathKey : profile.Id;
 
-    private static IReadOnlyList<string> BuildAvailableGroups(IReadOnlyDictionary<string, List<TunerProfile>> groupedViewingTuners, int frameIndex)
+    private static ViewerProfileContractDto Disabled(string requested, string errorCode)
+        => new(requested, requested, false, false, 0, false, string.Empty, "not-configured", errorCode, 0, Array.Empty<string>(), string.Empty, false, errorCode);
+
+    private static IReadOnlyList<string> SupportedGroupsForTuner(string? tunerGroup)
     {
-        var groups = new List<string>();
-        var hasHybrid = groupedViewingTuners.TryGetValue("HYBRID", out var hybridTuners)
-            && frameIndex >= 1 && frameIndex <= hybridTuners.Count;
-
-        // HYBRID is a single TVTest frame capable of GR and BS/CS.
-        // Keep HYBRID as a capability marker, and also expose GR/BSCS so plugin UIs can
-        // enable ordinary wave buttons without knowing the underlying tuner topology.
-        if (hasHybrid)
+        var group = TunerDisplayName.NormalizeGroup(tunerGroup);
+        return group switch
         {
-            groups.Add("GR");
-            groups.Add("BSCS");
-            groups.Add("HYBRID");
-            return groups;
-        }
-
-        foreach (var group in new[] { "GR", "BSCS" })
-        {
-            if (groupedViewingTuners.TryGetValue(group, out var tuners) && frameIndex >= 1 && frameIndex <= tuners.Count)
-                groups.Add(group);
-        }
-        return groups;
-    }
-
-    private static string BuildTvTestFrameNote(IReadOnlyDictionary<string, List<TunerProfile>> groupedViewingTuners, int frameIndex, IReadOnlyList<string> availableGroups)
-    {
-        static string Part(IReadOnlyDictionary<string, List<TunerProfile>> groups, string group, int index)
-        {
-            if (!groups.TryGetValue(group, out var tuners) || index < 1 || index > tuners.Count)
-                return $"{group}=-";
-            var tuner = tuners[index - 1];
-            var did = string.IsNullOrWhiteSpace(tuner.Did) ? "-" : tuner.Did.Trim().ToUpperInvariant();
-            var name = string.IsNullOrWhiteSpace(tuner.Name) ? "-" : tuner.Name.Trim();
-            var bon = Path.GetFileName(tuner.BonDriverFileName ?? string.Empty);
-            return $"{TunerDisplayName.GroupLabel(group)}={name}/DID {did}/{bon}";
-        }
-
-        var parts = new[]
-        {
-            Part(groupedViewingTuners, "GR", frameIndex),
-            Part(groupedViewingTuners, "BSCS", frameIndex),
-            Part(groupedViewingTuners, "HYBRID", frameIndex),
-            "availableGroups=" + (availableGroups.Count == 0 ? "-" : string.Join(",", availableGroups))
+            "GR" => new[] { "GR" },
+            "BSCS" => new[] { "BSCS" },
+            "HYBRID" => new[] { "GR", "BSCS" },
+            _ => Array.Empty<string>()
         };
-        return $"TVTest frame {frameIndex}: " + string.Join("; ", parts);
     }
 
-    private static IReadOnlyList<TunerProfile> BuildEffectiveTunerProfiles(IniSettingsService ini, IReadOnlyList<TunerProfile> fallback)
+    private static string NormalizeLogicalViewerSlotId(string? value)
     {
-        if (ini?.Tuners is { Count: > 0 })
-        {
-            return ini.Tuners.Select(t =>
-            {
-                var group = TunerDisplayName.NormalizeGroup(t.Group);
-                var role = IniSettingsService.NormalizeTunerRole(t.Role);
-                var did = (t.Did ?? string.Empty).Trim().ToUpperInvariant();
-                return new TunerProfile
-                {
-                    Name = TunerDisplayName.ForUi(t.Name, group, did),
-                    BonDriverFileName = TunerIsolationPolicy.NormalizeBonDriverForRole(t.BonDriverFileName, group, role),
-                    Group = group,
-                    Did = did,
-                    Role = role,
-                };
-            })
-            .Where(t => !string.IsNullOrWhiteSpace(t.BonDriverFileName))
-            .ToList();
-        }
-
-        return fallback ?? Array.Empty<TunerProfile>();
-    }
-
-
-    private static string NormalizeProfileId(string? value)
-    {
-        var v = string.IsNullOrWhiteSpace(value) ? "tvtest1" : value.Trim().ToLowerInvariant();
-        if (v is "default" or "auto" or "") return "tvtest1";
-        if (v is "tvtest") return "tvtest1";
-        if (int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) && n > 0) return $"tvtest{n}";
-        if (TryParseTvTestOrdinal(v, out var ordinal)) return $"tvtest{ordinal}";
-        return "tvtest1";
+        var raw = (value ?? string.Empty).Trim().ToLowerInvariant();
+        if (raw.StartsWith("slot-", StringComparison.Ordinal)) raw = raw[5..];
+        return new string(raw.Where(ch => char.IsLetterOrDigit(ch) || ch == '-').ToArray()).Trim('-');
     }
 
     private static string NormalizeProfileGroup(string? group)
@@ -7687,7 +8382,6 @@ static class ViewerProfileContract
         {
             "BS" or "CS" or "BS/CS" or "BSCS" => "BSCS",
             "地上波" or "GR" or "GROUND" => "GR",
-            "HYBRID" or "GRBSCS" or "GR/BSCS" or "GR/BS/CS" or "地/BS/CS" or "地デジ/BS/CS" or "地上波/BS/CS" => "HYBRID",
             _ => g
         };
     }
@@ -7696,17 +8390,42 @@ static class ViewerProfileContract
     {
         ordinal = 0;
         if (string.IsNullOrWhiteSpace(value)) return false;
+        var v = value.Trim().ToLowerInvariant();
+        if (int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out ordinal) && ordinal > 0) return true;
+        if (v == "tvtest") { ordinal = 1; return true; }
         const string prefix = "tvtest";
-        if (!value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return false;
-        var suffix = value[prefix.Length..];
-        return int.TryParse(suffix, NumberStyles.Integer, CultureInfo.InvariantCulture, out ordinal) && ordinal > 0;
+        if (!v.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return false;
+        return int.TryParse(v[prefix.Length..], NumberStyles.Integer, CultureInfo.InvariantCulture, out ordinal) && ordinal > 0;
     }
+}
 
-    private static string NormalizePathKey(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
-        try { return Path.GetFullPath(value.Trim()).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).ToUpperInvariant(); }
-        catch { return value.Trim().ToUpperInvariant(); }
-    }
+file sealed record ChainCandidateEventFrame(
+    string Key,
+    ushort NetworkId,
+    ushort TransportStreamId,
+    ushort ServiceId,
+    ushort EventId,
+    DateTime Start,
+    DateTime End,
+    string Title);
+
+file sealed record ChainCandidatePreviewRequest(
+    bool LaterProgramPriorityEnabled,
+    bool PseudoContinuousRecordingEnabled,
+    IReadOnlyList<ChainCandidateEventFrame>? Events);
+
+file sealed record NetworkLoginRequest(string? Password);
+
+sealed class RuntimeUiActionHttpRequest
+{
+    public string PluginId { get; set; } = string.Empty;
+    public string RouteSegment { get; set; } = string.Empty;
+    public string Action { get; set; } = string.Empty;
+    public Dictionary<string, string> Payload { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public string ActionToken { get; set; } = string.Empty;
+    public string ResponseMode { get; set; } = "json";
+    public string WindowId { get; set; } = string.Empty;
+    public string RefreshTarget { get; set; } = "content";
+    public bool PreserveScroll { get; set; } = true;
 }
 

@@ -1,11 +1,13 @@
-namespace TvAIr.Epg;
+﻿namespace TvAIr.Epg;
 
 internal sealed class EitSectionReader
 {
-    private readonly Dictionary<(ushort Sid, byte TableId), SectionTracker> sections = new();
+    private readonly Dictionary<(ushort Sid, byte TableId, byte VersionNumber), SectionTracker> sections = new();
+    private readonly Dictionary<(ushort Sid, byte TableId), byte> captureSnapshotVersions = new();
     private readonly List<EpgTitleDecode> titleDecodes = new();
     private readonly List<EpgEventObservation> eventObservations = new();
     private readonly List<RawEitSectionSnapshot> rawSections = new();
+    private readonly List<EpgRejectedEventHeader> rejectedEventHeaders = new();
     // Program identity must include start/duration. event_id alone can be reused or appear in
     // multiple schedule-table fragments; merging only by event_id causes title/body from
     // different program instances to overwrite each other.
@@ -19,8 +21,17 @@ internal sealed class EitSectionReader
     private int rawSectionShortResolverCandidates;
     private int rawSectionShortResolverMerged;
     private int rawSectionShortResolverUnresolved;
+    private int rejectedEventHeaderCount;
+    private int rejectedBasicScheduleEventHeaderCount;
+    private int ignoredOtherTransportStreamEitSectionCount;
+    private int invalidEitSectionCount;
+    private int ignoredNonCurrentEitSectionCount;
+    private int ignoredDuplicateEitSectionCount;
+    private int ignoredVersionSwitchEitSectionCount;
+    private int ignoredBasicScheduleVersionSwitchEitSectionCount;
     private bool rawSectionShortResolverApplied;
     private const int MaxDecodes = 160;
+    private const int MaxRejectedEventHeaders = 24;
 
     public int EitSectionCount => eitSectionCount;
     public int ShortEventDescriptorCount => shortDescriptorCount;
@@ -32,6 +43,15 @@ internal sealed class EitSectionReader
     public int RawSectionShortResolverUnresolved => rawSectionShortResolverUnresolved;
     public IReadOnlyList<EpgTitleDecode> TitleDecodes => titleDecodes;
     public IReadOnlyList<EpgEventObservation> EventObservations => eventObservations;
+    public int RejectedEventHeaderCount => rejectedEventHeaderCount;
+    public int RejectedBasicScheduleEventHeaderCount => rejectedBasicScheduleEventHeaderCount;
+    public int IgnoredOtherTransportStreamEitSectionCount => ignoredOtherTransportStreamEitSectionCount;
+    public int InvalidEitSectionCount => invalidEitSectionCount;
+    public int IgnoredNonCurrentEitSectionCount => ignoredNonCurrentEitSectionCount;
+    public int IgnoredDuplicateEitSectionCount => ignoredDuplicateEitSectionCount;
+    public int IgnoredVersionSwitchEitSectionCount => ignoredVersionSwitchEitSectionCount;
+    public int IgnoredBasicScheduleVersionSwitchEitSectionCount => ignoredBasicScheduleVersionSwitchEitSectionCount;
+    public IReadOnlyList<EpgRejectedEventHeader> RejectedEventHeaders => rejectedEventHeaders;
 
     public bool TryRead(ReadOnlySpan<byte> section)
     {
@@ -39,12 +59,39 @@ internal sealed class EitSectionReader
         var tableId = section[0];
         if (tableId < 0x4E || tableId > 0x6F) return false;
 
-        var sectionLength = ((section[1] & 0x0F) << 8) | section[2];
-        var sectionEnd = Math.Min(section.Length, 3 + sectionLength);
-        var dataEnd = sectionEnd - 4;
-        if (dataEnd < 14) return false;
+        // 0x4F and 0x60-0x6F are EIT for another transport stream. TvAIr's
+        // capture/import unit is the currently tuned TS, so those sections must
+        // not enter the same accumulator or DB import scope as actual-TS EIT.
+        if (tableId == 0x4F || tableId >= 0x60)
+        {
+            ignoredOtherTransportStreamEitSectionCount++;
+            return false;
+        }
 
-        eitSectionCount++;
+        var sectionLength = ((section[1] & 0x0F) << 8) | section[2];
+        var sectionEnd = 3 + sectionLength;
+        if ((section[1] & 0x80) == 0 || sectionLength < 15 || sectionEnd > section.Length)
+        {
+            invalidEitSectionCount++;
+            return false;
+        }
+        var exactSection = section.Slice(0, sectionEnd);
+        if (!HasValidMpegSectionCrc(exactSection))
+        {
+            invalidEitSectionCount++;
+            return false;
+        }
+        section = exactSection;
+        var dataEnd = sectionEnd - 4;
+
+        // current_next_indicator=0 announces a not-yet-applicable table version.
+        // It must not be merged into the current schedule accumulator or DB import.
+        if ((section[5] & 0x01) == 0)
+        {
+            ignoredNonCurrentEitSectionCount++;
+            return false;
+        }
+
         var serviceId = U16(section, 3);
         var sectionNumber = section[6];
         var lastSectionNumber = section[7];
@@ -52,10 +99,44 @@ internal sealed class EitSectionReader
         var transportStreamId = U16(section, 8);
         var networkId = U16(section, 10);
         var segmentLastSectionNumber = section[12];
+        var lastTableId = section[13];
 
+        if (!IsConsistentSectionHeader(tableId, sectionNumber, lastSectionNumber, segmentLastSectionNumber, lastTableId))
+        {
+            invalidEitSectionCount++;
+            return false;
+        }
+
+        // A single capture must represent one coherent current-version snapshot per
+        // service/table. If the broadcaster switches version during this capture,
+        // do not merge old/new descriptors into the same event accumulator. The
+        // first accepted current version remains authoritative until the next capture.
+        var snapshotKey = (serviceId, tableId);
+        if (!captureSnapshotVersions.TryGetValue(snapshotKey, out var snapshotVersion))
+        {
+            captureSnapshotVersions[snapshotKey] = versionNumber;
+        }
+        else if (snapshotVersion != versionNumber)
+        {
+            ignoredVersionSwitchEitSectionCount++;
+            if (tableId >= 0x50 && tableId <= 0x57) ignoredBasicScheduleVersionSwitchEitSectionCount++;
+            return false;
+        }
+
+        var trackResult = TrackSection(serviceId, tableId, versionNumber, sectionNumber, lastSectionNumber, segmentLastSectionNumber, lastTableId);
+        if (trackResult == SectionTrackResult.Inconsistent)
+        {
+            invalidEitSectionCount++;
+            return false;
+        }
+        if (trackResult == SectionTrackResult.Duplicate)
+        {
+            ignoredDuplicateEitSectionCount++;
+            return false;
+        }
+
+        eitSectionCount++;
         rawSections.Add(new RawEitSectionSnapshot(networkId, transportStreamId, serviceId, tableId, sectionNumber, lastSectionNumber, versionNumber, section.Slice(0, sectionEnd).ToArray()));
-
-        TrackSection(serviceId, tableId, sectionNumber, lastSectionNumber, segmentLastSectionNumber);
 
         var pos = 14;
         while (pos + 12 <= dataEnd)
@@ -71,10 +152,25 @@ internal sealed class EitSectionReader
             var previousTailStart = Math.Max(14, eventOffset - 24);
             var previousTailHex = eventOffset > previousTailStart ? Hex(section.Slice(previousTailStart, eventOffset - previousTailStart)) : string.Empty;
             var eventHeaderHex = Hex(section.Slice(eventOffset, Math.Min(12, Math.Max(0, dataEnd - eventOffset))));
+            var headerRejectReason = GetEventHeaderRejectReason(section.Slice(pos + 2, 5), section.Slice(pos + 7, 3), start, duration);
+            if (headerRejectReason is not null)
+            {
+                rejectedEventHeaderCount++;
+                if (tableId >= 0x50 && tableId <= 0x57) rejectedBasicScheduleEventHeaderCount++;
+                if (rejectedEventHeaders.Count < MaxRejectedEventHeaders)
+                {
+                    rejectedEventHeaders.Add(new EpgRejectedEventHeader(
+                        networkId, transportStreamId, serviceId, eventId, tableId, sectionNumber,
+                        start, duration, descLoopLength, eventHeaderHex, headerRejectReason));
+                }
+                if (descEnd > dataEnd) break;
+                pos = descEnd;
+                continue;
+            }
+
             if (descEnd > dataEnd)
             {
                 AddNoDescriptorDecode(networkId, transportStreamId, serviceId, eventId, tableId, sectionNumber, lastSectionNumber, descLoopLength, descStart, "descriptor_loop_range_invalid");
-                EnsureEvent(networkId, transportStreamId, serviceId, eventId, tableId, sectionNumber, versionNumber, start, duration, string.Empty, string.Empty, string.Empty, string.Empty, "none", "not_attempted", "descriptor_loop_range_invalid", string.Empty, string.Empty, string.Empty, string.Empty);
                 break;
             }
 
@@ -181,6 +277,7 @@ internal sealed class EitSectionReader
             .ThenBy(e => e.EventId)
             .Select(e =>
             {
+                var hasBasicScheduleObservation = e.SourceTables.Any(IsScheduleTitleCarrierTable);
                 var hasScheduleTitleCarrier = e.ShortSourceTables.Any(IsScheduleTitleCarrierTable);
                 var hasScheduleBodyCarrier = e.ExtendedSourceTables.Any(IsScheduleBodyTable);
                 var hasExpectedPair = e.ExtendedSourceTables
@@ -203,6 +300,7 @@ internal sealed class EitSectionReader
                     Tables(e.ExtendedSourceTables),
                     !string.IsNullOrWhiteSpace(e.RawShortEventDescriptorHex),
                     !string.IsNullOrWhiteSpace(e.RawExtendedEventDescriptorHex),
+                    hasBasicScheduleObservation,
                     hasScheduleTitleCarrier,
                     hasScheduleBodyCarrier,
                     hasExpectedPair,
@@ -249,19 +347,26 @@ internal sealed class EitSectionReader
             .Select(kv =>
             {
                 var st = kv.Value;
-                var expected = st.LastSectionNumber + 1;
                 var segExpected = st.SegmentExpected.Values.Sum(x => (int)x);
                 var segSeen = st.SegmentSeen.Values.Sum(x => x.Count);
-                var missing = st.SegmentExpected
-                    .Where(x => !st.SegmentSeen.TryGetValue(x.Key, out var seen) || seen.Count < x.Value)
-                    .Select(x => x.Key)
-                    .OrderBy(x => x)
-                    .Take(16)
-                    .ToArray();
-                return new EpgSectionStatus(kv.Key.Sid, kv.Key.TableId, st.LastSectionNumber, st.Seen.Count, expected, segSeen, segExpected, missing);
+                var expected = kv.Key.TableId == 0x4E
+                    ? st.LastSectionNumber + 1
+                    : segExpected;
+                var missing = kv.Key.TableId == 0x4E
+                    ? Array.Empty<byte>()
+                    : st.SegmentExpected
+                        .Where(segment =>
+                            !st.SegmentSeen.TryGetValue(segment.Key, out var seenInSegment)
+                            || seenInSegment.Count < segment.Value)
+                        .Select(segment => segment.Key)
+                        .OrderBy(x => x)
+                        .Take(16)
+                        .ToArray();
+                return new EpgSectionStatus(kv.Key.Sid, kv.Key.TableId, kv.Key.VersionNumber, st.LastTableId, st.LastSectionNumber, st.Seen.Count, expected, segSeen, segExpected, missing);
             })
             .OrderBy(x => x.ServiceId)
             .ThenBy(x => x.TableId)
+            .ThenBy(x => x.VersionNumber)
             .ToArray();
     }
 
@@ -295,6 +400,7 @@ internal sealed class EitSectionReader
             parsed.EventNameLength,
             parsed.EventNameBytes.Length,
             ShortEventDescriptorReader.Hex(parsed.EventNameBytes, 48),
+            AribEventNameTrace.Build(parsed.EventNameBytes),
             title.Route,
             title.Status,
             title.Text,
@@ -423,20 +529,42 @@ internal sealed class EitSectionReader
             nid, tsid, sid, eid, tableId, sectionNumber, lastSectionNumber,
             descriptorLoopLength, descriptorOffset, 0,
             reason, string.Empty, 0, 0, string.Empty,
+            "empty",
             "none", "not_attempted", string.Empty, 0,
             0, 0, string.Empty, string.Empty, reason));
     }
 
-    private void TrackSection(ushort sid, byte tableId, byte sectionNumber, byte lastSectionNumber, byte segmentLastSectionNumber)
+    private static bool IsConsistentSectionHeader(byte tableId, byte sectionNumber, byte lastSectionNumber, byte segmentLastSectionNumber, byte lastTableId)
     {
-        var key = (sid, tableId);
+        if (sectionNumber > lastSectionNumber) return false;
+        if (tableId == 0x4E) return segmentLastSectionNumber == lastSectionNumber && lastTableId == 0x4E;
+        if (lastTableId < tableId || lastTableId < 0x50 || lastTableId > 0x5F) return false;
+
+        var firstInSegment = (byte)((sectionNumber >> 3) << 3);
+        var maximumInSegment = (byte)Math.Min(lastSectionNumber, firstInSegment + 7);
+        return segmentLastSectionNumber >= sectionNumber
+            && segmentLastSectionNumber >= firstInSegment
+            && segmentLastSectionNumber <= maximumInSegment;
+    }
+
+    private SectionTrackResult TrackSection(ushort sid, byte tableId, byte versionNumber, byte sectionNumber, byte lastSectionNumber, byte segmentLastSectionNumber, byte lastTableId)
+    {
+        var key = (sid, tableId, versionNumber);
         if (!sections.TryGetValue(key, out var tracker))
         {
-            tracker = new SectionTracker();
+            tracker = new SectionTracker
+            {
+                LastSectionNumber = lastSectionNumber,
+                LastTableId = lastTableId
+            };
             sections[key] = tracker;
         }
-        if (lastSectionNumber > tracker.LastSectionNumber) tracker.LastSectionNumber = lastSectionNumber;
-        tracker.Seen.Add(sectionNumber);
+        else if (tracker.LastSectionNumber != lastSectionNumber || tracker.LastTableId != lastTableId)
+        {
+            return SectionTrackResult.Inconsistent;
+        }
+
+        if (!tracker.Seen.Add(sectionNumber)) return SectionTrackResult.Duplicate;
 
         if (tableId >= 0x50 && tableId <= 0x6F)
         {
@@ -458,6 +586,8 @@ internal sealed class EitSectionReader
             if (!tracker.SegmentSeen.TryGetValue(seg, out var seen)) tracker.SegmentSeen[seg] = seen = new HashSet<byte>();
             seen.Add(sectionNumber);
         }
+
+        return SectionTrackResult.Accepted;
     }
 
     private void EnsureEvent(ushort nid, ushort tsid, ushort sid, ushort eid, byte tableId, byte sectionNumber, byte versionNumber, DateTime start, int durationSeconds, string? title, string? description, string? extendedDescription, string? genreCodes, string? decodeRoute, string? decodeStatus, string? boundaryStatus, string? rawDescriptorLoopHex, string? rawShortEventDescriptorHex, string? rawExtendedEventDescriptorHex, string? rawContentDescriptorHex)
@@ -590,7 +720,7 @@ internal sealed class EitSectionReader
     }
 
     private static bool IsShortCarrierTable(byte tableId)
-        => tableId == 0x4E || tableId == 0x4F || (tableId >= 0x50 && tableId <= 0x57);
+        => tableId == 0x4E || (tableId >= 0x50 && tableId <= 0x57);
 
     private RawShortSectionHit? TryFindStrictRawShortInSection(RawEitSectionSnapshot snapshot, MutableEvent target)
     {
@@ -695,12 +825,6 @@ internal sealed class EitSectionReader
         return (hex.Length & 1) == 1 ? hex[..^1] : hex;
     }
 
-    private static string PreferRaw(string? current, string? incoming)
-    {
-        if (string.IsNullOrWhiteSpace(current)) return incoming ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(incoming)) return current ?? string.Empty;
-        return incoming.Length > current.Length ? incoming : current;
-    }
 
     private static string ReadContentDescriptorGenreCodes(ReadOnlySpan<byte> section, int descriptorOffset, int descriptorLength)
     {
@@ -743,6 +867,43 @@ internal sealed class EitSectionReader
         return NormalizeGenreCodes(left + "," + right);
     }
 
+    private string? GetEventHeaderRejectReason(ReadOnlySpan<byte> startBytes, ReadOnlySpan<byte> durationBytes, DateTime start, int durationSeconds)
+    {
+        if (!IsValidBcd(startBytes, 2, 3)) return "invalid_start_bcd";
+        if (!IsValidBcd(durationBytes, 0, 3)) return "invalid_duration_bcd";
+        if (start == DateTime.MinValue) return "invalid_start_time";
+        if (durationSeconds <= 0) return "invalid_duration";
+
+        DateTime end;
+        try { end = start.AddSeconds(durationSeconds); }
+        catch { return "invalid_end_time"; }
+        if (end <= start) return "invalid_end_time";
+
+        return null;
+    }
+
+    private static bool HasValidMpegSectionCrc(ReadOnlySpan<byte> section)
+    {
+        uint crc = 0xFFFFFFFF;
+        foreach (var value in section)
+        {
+            crc ^= (uint)value << 24;
+            for (var bit = 0; bit < 8; bit++)
+                crc = (crc & 0x80000000) != 0 ? (crc << 1) ^ 0x04C11DB7 : crc << 1;
+        }
+        return crc == 0;
+    }
+
+    private static bool IsValidBcd(ReadOnlySpan<byte> bytes, int offset, int count)
+    {
+        if (offset < 0 || count < 0 || offset + count > bytes.Length) return false;
+        for (var i = offset; i < offset + count; i++)
+        {
+            if ((bytes[i] >> 4) > 9 || (bytes[i] & 0x0F) > 9) return false;
+        }
+        return true;
+    }
+
     private static DateTime DecodeJst(ReadOnlySpan<byte> b)
     {
         if (b.Length < 5 || b[0] == 0xFF) return DateTime.MinValue;
@@ -772,9 +933,17 @@ internal sealed class EitSectionReader
 
     private sealed record RawShortSectionHit(byte TableId, byte SectionNumber, byte VersionNumber, string RawDescriptorLoopHex, string RawShortEventDescriptorHex, string DecodedTitle, string DecodedText, string DecodeRoute, string DecodeStatus, string BoundaryStatus);
 
+    private enum SectionTrackResult
+    {
+        Accepted,
+        Duplicate,
+        Inconsistent
+    }
+
     private sealed class SectionTracker
     {
         public byte LastSectionNumber;
+        public byte LastTableId;
         public readonly HashSet<byte> Seen = new();
         public readonly Dictionary<byte, byte> SegmentExpected = new();
         public readonly Dictionary<byte, HashSet<byte>> SegmentSeen = new();

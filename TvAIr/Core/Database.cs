@@ -1,4 +1,4 @@
-using Microsoft.Data.Sqlite;
+﻿using Microsoft.Data.Sqlite;
 
 namespace TvAIr.Core;
 
@@ -25,11 +25,17 @@ public sealed class Database
     /// <summary>接続を開いて返す。呼び出し元でusingすること。</summary>
     public SqliteConnection Open()
     {
+        var con = OpenConnection();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = "PRAGMA foreign_keys=ON;";
+        cmd.ExecuteNonQuery();
+        return con;
+    }
+
+    private SqliteConnection OpenConnection()
+    {
         var con = new SqliteConnection($"Data Source={dbPath}");
         con.Open();
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;";
-        cmd.ExecuteNonQuery();
         return con;
     }
 
@@ -37,9 +43,15 @@ public sealed class Database
 
     private void Initialize()
     {
-        using var con = Open();
+        using var con = OpenConnection();
+        using (var pragma = con.CreateCommand())
+        {
+            pragma.CommandText = "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;";
+            pragma.ExecuteNonQuery();
+        }
         CreateTables(con);
         Migrate(con);
+        CreatePostMigrationIndexes(con);
     }
 
     private static void CreateTables(SqliteConnection con)
@@ -101,8 +113,14 @@ public sealed class Database
                 is_user_chain       INTEGER NOT NULL DEFAULT 0,
                 user_chain_previous_id INTEGER NULL,
                 user_chain_root_id  INTEGER NULL,
+                recording_recovery_chain_id TEXT NOT NULL DEFAULT '',
+                recovery_parent_reservation_id INTEGER NULL,
                 created_at          TEXT    NOT NULL DEFAULT '',
-                updated_at          TEXT    NOT NULL DEFAULT ''
+                updated_at          TEXT    NOT NULL DEFAULT '',
+                data_version        INTEGER NOT NULL DEFAULT 0,
+                reservation_intent   TEXT    NOT NULL DEFAULT 'unspecified',
+                created_through      TEXT    NOT NULL DEFAULT '',
+                created_by_plugin_id TEXT    NOT NULL DEFAULT ''
             );
 
             CREATE INDEX IF NOT EXISTS idx_reservations_start
@@ -110,6 +128,57 @@ public sealed class Database
 
             CREATE INDEX IF NOT EXISTS idx_reservations_status
                 ON reservations (status, start_time);
+
+            CREATE TABLE IF NOT EXISTS recording_start_failure_provenance (
+                reservation_id      INTEGER PRIMARY KEY,
+                failure_kind        TEXT    NOT NULL DEFAULT '',
+                reason              TEXT    NOT NULL DEFAULT '',
+                failed_at           TEXT    NOT NULL DEFAULT '',
+                data_version        INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(reservation_id) REFERENCES reservations(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_recording_start_failure_provenance_kind
+                ON recording_start_failure_provenance (failure_kind, failed_at);
+
+            CREATE TABLE IF NOT EXISTS runtime_generations (
+                key   TEXT    PRIMARY KEY,
+                value INTEGER NOT NULL DEFAULT 0
+            );
+
+            INSERT OR IGNORE INTO runtime_generations (key, value)
+            VALUES ('allocation', 0);
+
+            CREATE TABLE IF NOT EXISTS reservation_projection_metadata (
+                reservation_id              INTEGER PRIMARY KEY,
+                projection_state            TEXT    NOT NULL DEFAULT '',
+                projection_source_kind      TEXT    NOT NULL DEFAULT '',
+                projection_source_plugin_id TEXT    NOT NULL DEFAULT '',
+                projection_source_event_key TEXT    NOT NULL DEFAULT '',
+                projected_event_id          TEXT    NOT NULL DEFAULT '',
+                overlay_network_id          INTEGER NOT NULL DEFAULT 0,
+                overlay_transport_stream_id INTEGER NOT NULL DEFAULT 0,
+                overlay_service_id          INTEGER NOT NULL DEFAULT 0,
+                overlay_event_id            INTEGER NOT NULL DEFAULT 0,
+                overlay_start_time          TEXT    NOT NULL DEFAULT '',
+                overlay_end_time            TEXT    NOT NULL DEFAULT '',
+                overlay_title               TEXT    NOT NULL DEFAULT '',
+                matched_db_network_id       INTEGER NOT NULL DEFAULT 0,
+                matched_db_transport_stream_id INTEGER NOT NULL DEFAULT 0,
+                matched_db_service_id       INTEGER NOT NULL DEFAULT 0,
+                matched_db_event_id         INTEGER NOT NULL DEFAULT 0,
+                promoted_at                 TEXT    NOT NULL DEFAULT '',
+                source_missing_at           TEXT    NOT NULL DEFAULT '',
+                created_at                  TEXT    NOT NULL DEFAULT '',
+                updated_at                  TEXT    NOT NULL DEFAULT '',
+                FOREIGN KEY(reservation_id) REFERENCES reservations(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_reservation_projection_metadata_source
+                ON reservation_projection_metadata (projection_source_kind, projection_source_plugin_id, projection_source_event_key);
+
+            CREATE INDEX IF NOT EXISTS idx_reservation_projection_metadata_overlay
+                ON reservation_projection_metadata (overlay_network_id, overlay_transport_stream_id, overlay_service_id, overlay_event_id, overlay_start_time, overlay_end_time);
 
             CREATE TABLE IF NOT EXISTS keyword_rules (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -158,6 +227,7 @@ public sealed class Database
                 network_id          INTEGER NOT NULL DEFAULT 0,
                 transport_stream_id INTEGER NOT NULL DEFAULT 0,
                 service_id          INTEGER NOT NULL DEFAULT 0,
+                event_id            INTEGER NOT NULL DEFAULT 0,
                 start_time          TEXT    NOT NULL DEFAULT '',
                 end_time            TEXT    NOT NULL DEFAULT '',
                 title_hash          TEXT    NOT NULL DEFAULT '',
@@ -209,6 +279,21 @@ public sealed class Database
                 actionability TEXT  NOT NULL DEFAULT '',
                 reservation_source TEXT NOT NULL DEFAULT '',
                 program_title TEXT  NOT NULL DEFAULT '',
+                reservation_id TEXT NOT NULL DEFAULT '',
+                recording_id TEXT NOT NULL DEFAULT '',
+                recording_recovery_chain_id TEXT NOT NULL DEFAULT '',
+                power_resume_cycle_id TEXT NOT NULL DEFAULT '',
+                service_name TEXT NOT NULL DEFAULT '',
+                scheduled_start TEXT NOT NULL DEFAULT '',
+                scheduled_end TEXT NOT NULL DEFAULT '',
+                actual_start TEXT NOT NULL DEFAULT '',
+                actual_end TEXT NOT NULL DEFAULT '',
+                drop_count INTEGER NULL,
+                error_count INTEGER NULL,
+                scramble_count INTEGER NULL,
+                file_path TEXT NOT NULL DEFAULT '',
+                completion_reason TEXT NOT NULL DEFAULT '',
+                details_json TEXT NOT NULL DEFAULT '{}',
                 detail      TEXT    NOT NULL DEFAULT ''
             );
 
@@ -277,11 +362,24 @@ public sealed class Database
         cmd.ExecuteNonQuery();
     }
 
+    private static void CreatePostMigrationIndexes(SqliteConnection con)
+    {
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = """
+            CREATE INDEX IF NOT EXISTS idx_user_event_logs_recovery_chain
+                ON user_event_logs (recording_recovery_chain_id, created_at);
+
+            CREATE INDEX IF NOT EXISTS idx_user_event_logs_resume_cycle
+                ON user_event_logs (power_resume_cycle_id, created_at);
+            """;
+        cmd.ExecuteNonQuery();
+    }
+
     /// <summary>
     /// カラム追加などの後方互換マイグレーション。
     /// テーブルが存在する前提で、不足カラムのみADD COLUMNする。
     /// ※ CreateTables() で定義済みのカラムはここに記載不要だが、
-    ///    旧バージョンDBからの移行のため残している。
+    ///    既存DBからの移行互換のため保持する。
     /// </summary>
     private static void Migrate(SqliteConnection con)
     {
@@ -319,6 +417,65 @@ public sealed class Database
         EnsureColumn(con, "reservations", "is_user_chain",     "INTEGER NOT NULL DEFAULT 0");
         EnsureColumn(con, "reservations", "user_chain_previous_id", "INTEGER NULL");
         EnsureColumn(con, "reservations", "user_chain_root_id", "INTEGER NULL");
+        EnsureColumn(con, "reservations", "recording_recovery_chain_id", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(con, "reservations", "recovery_parent_reservation_id", "INTEGER NULL");
+        EnsureColumn(con, "reservations", "data_version", "INTEGER NOT NULL DEFAULT 0");
+        EnsureColumn(con, "reservations", "reservation_intent", "TEXT NOT NULL DEFAULT 'unspecified'");
+        EnsureColumn(con, "reservations", "created_through", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(con, "reservations", "created_by_plugin_id", "TEXT NOT NULL DEFAULT ''");
+
+        // 既存形式のPlugin予約は、起動時に一度だけ構造化された所有者へ移行する。
+        // 実行時の操作可否・更新・取消は CreatedThrough / CreatedByPluginId だけを参照する。
+        using (var migratePluginReservationOwner = con.CreateCommand())
+        {
+            migratePluginReservationOwner.CommandText = """
+                UPDATE reservations
+                SET created_through = 'Plugin',
+                    created_by_plugin_id = trim(substr(source_rule_name, 8))
+                WHERE created_through = ''
+                  AND created_by_plugin_id = ''
+                  AND lower(source_rule_name) LIKE 'plugin:%'
+                  AND trim(substr(source_rule_name, 8)) <> '';
+
+                UPDATE reservations
+                SET source_rule_name = ''
+                WHERE lower(created_through) = 'plugin'
+                  AND created_by_plugin_id <> ''
+                  AND lower(source_rule_name) = lower('Plugin:' || created_by_plugin_id);
+                """;
+            migratePluginReservationOwner.ExecuteNonQuery();
+        }
+
+        // 既存DBのSystem EPG行にreservation_intentが無い場合だけ、一度構造化して正本へ揃える。
+        // 通常実行・表示はreservation_intentだけを参照し、Title / SourceRuleNameを判定fallbackに使わない。
+        using (var migrateSystemEpgIntent = con.CreateCommand())
+        {
+            migrateSystemEpgIntent.CommandText = """
+                UPDATE reservations
+                SET reservation_intent = $preRecordIntent
+                WHERE source = 'epg'
+                  AND reservation_intent IN ('unspecified', 'system')
+                  AND (source_rule_name = 'PreRecEpg'
+                       OR title LIKE 'EPG確認%'
+                       OR title LIKE '録画前EPG確認%');
+
+                UPDATE reservations
+                SET reservation_intent = $dailyIntent
+                WHERE source = 'epg'
+                  AND reservation_intent IN ('unspecified', 'system')
+                  AND title LIKE 'EPG取得%';
+
+                UPDATE reservations
+                SET source_rule_name = ''
+                WHERE source = 'epg'
+                  AND reservation_intent IN ($preRecordIntent, $dailyIntent);
+                """;
+            migrateSystemEpgIntent.Parameters.AddWithValue("$preRecordIntent", ReservationIntentContract.SystemPreRecordEpgStorageValue);
+            migrateSystemEpgIntent.Parameters.AddWithValue("$dailyIntent", ReservationIntentContract.SystemDailyEpgStorageValue);
+            migrateSystemEpgIntent.ExecuteNonQuery();
+        }
+
+        EnsureColumn(con, "manual_stopped_occurrences", "event_id", "INTEGER NOT NULL DEFAULT 0");
 
         // release_contract: ユーザー運用ログは /api/log からの推測ではなく、
         // UserOperationEvent 正本として報告用メタ属性を保持する。
@@ -334,6 +491,21 @@ public sealed class Database
         EnsureColumn(con, "user_event_logs", "actionability", "TEXT NOT NULL DEFAULT ''");
         EnsureColumn(con, "user_event_logs", "reservation_source", "TEXT NOT NULL DEFAULT ''");
         EnsureColumn(con, "user_event_logs", "program_title", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(con, "user_event_logs", "reservation_id", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(con, "user_event_logs", "recording_id", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(con, "user_event_logs", "recording_recovery_chain_id", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(con, "user_event_logs", "power_resume_cycle_id", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(con, "user_event_logs", "service_name", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(con, "user_event_logs", "scheduled_start", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(con, "user_event_logs", "scheduled_end", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(con, "user_event_logs", "actual_start", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(con, "user_event_logs", "actual_end", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(con, "user_event_logs", "drop_count", "INTEGER NULL");
+        EnsureColumn(con, "user_event_logs", "error_count", "INTEGER NULL");
+        EnsureColumn(con, "user_event_logs", "scramble_count", "INTEGER NULL");
+        EnsureColumn(con, "user_event_logs", "file_path", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(con, "user_event_logs", "completion_reason", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(con, "user_event_logs", "details_json", "TEXT NOT NULL DEFAULT '{}'");
         EnsureColumn(con, "user_event_logs", "detail", "TEXT NOT NULL DEFAULT ''");
         // keyword_rules はJSON export/importで持ち越すユーザー資産。
         EnsureColumn(con, "keyword_rules", "exclude_pattern", "TEXT NOT NULL DEFAULT ''");

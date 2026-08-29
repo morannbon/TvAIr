@@ -1,24 +1,35 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 
 <html lang="ja">
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>キーワード検索 — TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.1.0"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.1.0"/>
-<link href="/tvair-notification.css?v=1.1.0" rel="stylesheet"/>
-<script src="/tvair-theme.js?v=1.1.0"></script>
-<link href="/tvair-epg-panel.css?v=1.1.0" rel="stylesheet"/>
-<link href="/tvair-keyword.css?v=1.1.0" rel="stylesheet"/>
-<link href="/tvair-ui-foundation.css?v=1.1.0" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.1.0" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.1.0" rel="stylesheet"/>
-<link href="/tvair-list-module.css?v=1.1.0" rel="stylesheet"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.0"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.0"/>
+
+<link href="/tvair-ui-foundation.css?v=1.2.0" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.0-theme206" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.0-modules251" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.2.0-list206" rel="stylesheet"/>
+<link href="/tvair-keyword.css?v=1.2.0-owner203" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.0-owner203" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.0" rel="stylesheet"/>
+
+<script src="/tvair-theme.js?v=1.2.0"></script>
+<script src="/tvair-action-button-state.js?v=1.2.0"></script>
+<script src="/tvair-program-time-action.js?v=1.2.0"></script>
+
+
+
+
+
+
+
 </head>
 <body class="tvair-non-program-page tvair-keyword-page tvair-split-page">
 <div class="tvair-topnav" id="nav">
-<a class="nav-btn" href="/" title="番組表">番組表</a>
+<a class="nav-btn" href="/">番組表</a>
 <a class="nav-btn" href="/reservations.html">予約リスト</a>
 <a class="nav-btn active" href="/keyword.html">キーワード検索</a>
 <a class="nav-btn" href="/program-rules.html">自動検索予約</a>
@@ -26,7 +37,7 @@
 <div class="spacer"></div>
 <span class="nav-brand-text">TvAIr</span>
 <div id="page-menu-wrap">
-<button aria-label="メニュー" id="page-menu-btn" data-tvair-menu-entry="page" aria-controls="page-menu-dropdown" title="メニュー" type="button">☰</button>
+<button aria-label="メニュー" id="page-menu-btn" data-tvair-menu-entry="page" aria-controls="page-menu-dropdown" type="button">☰</button>
 <div data-tvair-menu-host="1" id="page-menu-dropdown"></div>
 </div>
 </div>
@@ -107,7 +118,9 @@
 const DOW_LABELS=['日','月','火','水','木','金','土'];
 let channels=[];
 let selectedCh=new Set();
-let reservedKeys=new Set();
+let reservedByKey=new Map();
+let lastSearchEvents=[];
+let lastSearchTotal=0;
 let keywordDeepLinkApplied=false;
 
 function p2(n){return String(n).padStart(2,'0')}
@@ -164,11 +177,11 @@ async function loadChannels(){
     const list=document.getElementById('ch-list');
     list.innerHTML='';
     channels.forEach(ch=>{
-      const key=String(ch.serviceId);
+      const key=`${ch.networkId}:${ch.transportStreamId}:${ch.serviceId}`;
       selectedCh.add(key);
       const div=document.createElement('div');
       div.className='ch-item selected';
-      div.dataset.sid=key;
+      div.dataset.serviceKey=key;
       div.textContent=ch.name;
       div.onclick=()=>toggleCh(div,key);
       list.appendChild(div);
@@ -182,7 +195,7 @@ function toggleCh(el,key){
   else{selectedCh.add(key);el.classList.add('selected');}
 }
 function selAllCh(){
-  document.querySelectorAll('.ch-item').forEach(el=>{selectedCh.add(el.dataset.sid);el.classList.add('selected');});
+  document.querySelectorAll('.ch-item').forEach(el=>{selectedCh.add(el.dataset.serviceKey);el.classList.add('selected');});
 }
 function selNoneCh(){
   selectedCh.clear();
@@ -199,13 +212,16 @@ function applyProgramGuideTitleKeywordDeepLink(){
   const q=params.get('q') || params.get('title') || '';
   if(q) document.getElementById('kw-title').value=q;
   const source=(params.get('source')||'').toLowerCase();
+  const nid=params.get('nid') || params.get('networkId') || '';
+  const tsid=params.get('tsid') || params.get('transportStreamId') || '';
   const sid=params.get('sid') || params.get('serviceId') || '';
-  if(source==='programguidetitle' && sid){
+  if(source==='programguidetitle' && nid && tsid && sid){
+    const serviceKey=`${nid}:${tsid}:${sid}`;
     selectedCh.clear();
     document.querySelectorAll('.ch-item').forEach(el=>{
-      const hit=String(el.dataset.sid||'')===String(sid);
+      const hit=String(el.dataset.serviceKey||'')===serviceKey;
       el.classList.toggle('selected', hit);
-      if(hit) selectedCh.add(String(sid));
+      if(hit) selectedCh.add(serviceKey);
     });
   }
   keywordDeepLinkApplied=true;
@@ -216,9 +232,9 @@ async function loadReserved(){
   try{
     const res=await fetch('/api/reservations');
     const rsvs=await res.json();
-    reservedKeys=new Set((rsvs||[])
-      .filter(r=>r.status==='scheduled'||r.status==='recording')
-      .map(r=>`${r.networkId}:${r.transportStreamId}:${r.serviceId}:${r.eventId}`));
+    reservedByKey=new Map((rsvs||[])
+      .filter(r=>['scheduled','starting','recording','stopping'].includes(String(r.status||'').toLowerCase()))
+      .map(r=>[`${r.networkId}:${r.transportStreamId}:${r.serviceId}:${r.eventId}`,r]));
   }catch(e){}
 }
 
@@ -231,7 +247,7 @@ async function doSearch(){
   if(kw) params.set('q',kw);
   if(document.getElementById('opt-desc-search').checked) params.set('desc','true');
   if(selectedCh.size>0 && selectedCh.size<channels.length)
-    params.set('sids',[...selectedCh].join(','));
+    params.set('services',[...selectedCh].join(','));
   const checkedDow=[...document.querySelectorAll('#dow-row input:checked')].map(i=>i.value);
   if(checkedDow.length<7 && checkedDow.length>0)
     params.set('dow',checkedDow.join(','));
@@ -245,13 +261,14 @@ async function doSearch(){
   if(dt) params.set('dateTo',dt);
 
   const btn=document.getElementById('search-btn');
-  btn.textContent='検索中...';btn.disabled=true;
+  const buttonState=window.TvAirActionButtonState.begin(btn);
   try{
     const res=await fetch('/api/epg/search?'+params.toString());
     const d=await res.json();
-    renderResults(d.events||[],d.count||0);
+    lastSearchEvents=d.events||[]; lastSearchTotal=d.count||0;
+    renderResults(lastSearchEvents,lastSearchTotal);
   }catch(e){showToast('検索エラー: '+e.message);}
-  finally{btn.textContent='🔍 検索';btn.disabled=false;}
+  finally{window.TvAirActionButtonState.finish(btn,buttonState,'🔍 検索');}
 }
 
 function renderResults(events,total){
@@ -265,12 +282,23 @@ function renderResults(events,total){
   empty.style.display='none';
   tbody.innerHTML=events.map(e=>{
     const key=evKey(e);
-    const isRsv=reservedKeys.has(key);
-    const btnHtml=isRsv
-      ?`<span class="rsv-state-label program-cell-action-btn program-cell-action-btn--list-context" data-state-role="program-reserved-state" data-state-label="予約済" data-state-context="keyword-search-result-row">予約済</span>`
-      :`<button class="rsv-btn tvair-action-button program-cell-action-btn program-cell-action-btn--list-context" data-program-action="reserve" data-action-role="program-reserve" data-action-label="予約" data-action-context="keyword-search-result-row" onclick='reserve(${JSON.stringify(e).replace(/'/g,"&#39;")},this)'>予約</button>`;
+    const reservation=reservedByKey.get(key)||null;
+    const status=String(reservation?.status||'').toLowerCase();
+    const timeAction=window.TvAirProgramTimeAction.resolve(e, 'keywordsearch');
+    let btnHtml='';
+    if(reservation){
+      if(status==='recording'){
+        btnHtml=`<button class="rsv-btn tvair-action-button program-cell-action-btn program-cell-action-btn--list-context" data-program-action="stop" data-action-context="keyword-search-result-row" onclick="stopKeywordReservation(${Number(reservation.id)||0},this)">録画停止</button>`;
+      }else if(status==='scheduled' && timeAction.action==='reserve'){
+        btnHtml=`<button class="rsv-btn tvair-action-button program-cell-action-btn program-cell-action-btn--list-context" data-program-action="cancel" data-action-context="keyword-search-result-row" onclick="cancelKeywordReservation(${Number(reservation.id)||0},this)">予約取消</button>`;
+      }else{
+        btnHtml=`<button class="rsv-btn tvair-action-button program-cell-action-btn program-cell-action-btn--list-context" disabled aria-busy="true">${window.TvAirActionButtonState.processingText}</button>`;
+      }
+    }else if(timeAction.action!=='none'){
+      btnHtml=`<button class="rsv-btn tvair-action-button program-cell-action-btn program-cell-action-btn--list-context" data-program-action="${timeAction.action}" data-action-role="program-${timeAction.action}" data-action-label="${timeAction.label}" data-action-context="keyword-search-result-row" onclick='reserve(${JSON.stringify(e).replace(/'/g,"&#39;")},this)'>${timeAction.label}</button>`;
+    }
     const sub=e.description?`<div class="sub">${esc(e.description)}</div>`:'';
-    return `<tr class="${isRsv?'reserved':''}">
+    return `<tr class="${reservation?'reserved':''}">
       <td data-cell-role="date-time-metadata"><div class="td-date">${fmtDate(e.start)}</div><div class="td-time">${fmtTime(e.start,e.end)}</div></td>
       <td class="td-ch" data-cell-role="service-metadata">${esc(e.serviceName||'—')}</td>
       <td class="td-title" data-cell-role="title-data">${esc(e.title)}${sub}</td>
@@ -280,36 +308,80 @@ function renderResults(events,total){
   }).join('');
 }
 
-async function reserve(ev,btn){
-  const cancelEpg = await (window.TvAIrNotification?.confirmEpgCancelBeforeReservation?.() || Promise.resolve(false));
-  btn.disabled=true;btn.textContent='送信中...';
-  try{
-    const reservationUrl = '/api/reservations' + (cancelEpg ? '?cancelEpgIfRunning=true' : '');
-    const res=await fetch(reservationUrl,{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({
-        networkId:ev.networkId,transportStreamId:ev.transportStreamId,
-        serviceId:ev.serviceId,eventId:ev.eventId,
-        title:ev.title,startTime:ev.start,endTime:ev.end,
-        status:'scheduled',source:'keywordsearch'
-      })
-    });
-    let d={};try{d=await res.json();}catch(_){}
-    if(res.ok){
-      btn.className='rsv-btn rsv-btn-done';btn.textContent='予約済';
-      reservedKeys.add(evKey(ev));
-      btn.closest('tr').classList.add('reserved');
-      showToast('「'+ev.title+'」を予約しました。');
-    }else{btn.disabled=false;btn.textContent='予約';showToast(d.message||'予約に失敗しました。');}
-  }catch(e){btn.disabled=false;btn.textContent='予約';showToast('通信エラー');}
+async function waitForKeywordReservation(ev, expectedAction, timeoutMs=15000){
+  const key=evKey(ev);
+  const deadline=Date.now()+timeoutMs;
+  while(Date.now()<deadline){
+    await loadReserved();
+    const r=reservedByKey.get(key)||null;
+    const status=String(r?.status||'').toLowerCase();
+    if(expectedAction==='reserve' && r && status==='scheduled') return r;
+    if(expectedAction==='record-now' && r && status==='recording') return r;
+    await new Promise(resolve=>setTimeout(resolve,350));
+  }
+  await loadReserved();
+  return reservedByKey.get(key)||null;
 }
 
-function showToast(msg,ms=2800){
-  const t=document.getElementById('toast');
-  t.textContent=msg;t.classList.add('show');
-  clearTimeout(t._timer);
-  t._timer=setTimeout(()=>t.classList.remove('show'),ms);
+async function reserve(ev,btn){
+  const timeAction=window.TvAirProgramTimeAction.resolve(ev, 'keywordsearch');
+  if(timeAction.action==='none' || btn.dataset.programAction!==timeAction.action){
+    btn.remove();
+    return;
+  }
+  const buttonState=window.TvAirActionButtonState.begin(btn);
+  try{
+    const reservationParams = new URLSearchParams();
+    if(ev.projectedEventId || ev.ProjectedEventId) reservationParams.set('projectedEventId', ev.projectedEventId || ev.ProjectedEventId);
+    const reservationUrl = '/api/reservations' + (reservationParams.toString() ? '?'+reservationParams.toString() : '');
+    const res=await fetch(reservationUrl,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({networkId:ev.networkId,transportStreamId:ev.transportStreamId,serviceId:ev.serviceId,eventId:ev.eventId,title:ev.title,startTime:ev.start,endTime:ev.end,status:timeAction.status,source:timeAction.source})
+    });
+    let d={};try{d=await res.json();}catch(_){}
+    if(!res.ok){showToast(d.message||'予約に失敗しました。'); return;}
+    await waitForKeywordReservation(ev,timeAction.action);
+    renderResults(lastSearchEvents,lastSearchTotal);
+    showToast('「'+ev.title+'」を予約しました。');
+  }catch(e){showToast('通信エラー');}
+  finally{
+    if(btn && btn.isConnected) window.TvAirActionButtonState.finish(btn,buttonState,timeAction.label);
+  }
 }
+
+async function cancelKeywordReservation(id,btn){
+  if(!id)return;
+  const buttonState=window.TvAirActionButtonState.begin(btn);
+  try{
+    const res=await fetch(`/api/reservations/${id}`,{method:'DELETE'});
+    const d=await res.json().catch(()=>({}));
+    if(!res.ok){showToast(d.message||'予約取消に失敗しました。'); return;}
+    await loadReserved();
+    renderResults(lastSearchEvents,lastSearchTotal);
+  }catch(e){showToast('通信エラー');}
+  finally{if(btn && btn.isConnected) window.TvAirActionButtonState.finish(btn,buttonState,'予約取消');}
+}
+
+async function stopKeywordReservation(id,btn){
+  if(!id)return;
+  const buttonState=window.TvAirActionButtonState.begin(btn);
+  try{
+    const res=await fetch(`/api/reservations/${id}/stop`,{method:'POST'});
+    const d=await res.json().catch(()=>({}));
+    if(!res.ok){showToast(d.message||'停止に失敗しました。'); return;}
+    const deadline=Date.now()+15000;
+    while(Date.now()<deadline){
+      await loadReserved();
+      const active=[...reservedByKey.values()].some(r=>Number(r.id)===Number(id));
+      if(!active) break;
+      await new Promise(resolve=>setTimeout(resolve,350));
+    }
+    await loadReserved();
+    renderResults(lastSearchEvents,lastSearchTotal);
+  }catch(e){showToast('通信エラー');}
+  finally{if(btn && btn.isConnected) window.TvAirActionButtonState.finish(btn,buttonState,'録画停止');}
+}
+
 
 document.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey) doSearch();});
 
@@ -321,12 +393,12 @@ loadChannels();
 // URLパラメータ ?q= / ?source=programGuideTitle は loadChannels 完了後に
 // applyProgramGuideTitleKeywordDeepLink() で処理する。
 
-/* release_contract MenuLegacyEntryCleanupContract: page menu ownership is centralized in tvair-menu-spine.js. */
+/* Page menu behavior is owned by tvair-menu-spine.js. */
 
 </script>
-<script src="/tvair-notification.js?v=1.1.0"></script>
-<script src="/tvair-epg-run-contract.js?v=1.1.0"></script>
-<script src="/tvair-epg-widget.js?v=1.1.0"></script>
-<script src="/tvair-menu-spine.js?v=1.1.0"></script>
+<script src="/tvair-notification.js?v=1.2.0"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.0"></script>
+<script src="/tvair-settings-host.js?v=1.2.0"></script>
+<script src="/tvair-menu-spine.js?v=1.2.0"></script>
 </body>
 </html>

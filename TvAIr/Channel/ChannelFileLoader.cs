@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using Microsoft.Extensions.Options;
 using TvAIr.Core;
 
@@ -231,22 +231,6 @@ public sealed class ChannelFileLoader
         return path;
     }
 
-    private static string? ResolveExistingPathCaseInsensitive(string path)
-    {
-        if (File.Exists(path)) return path;
-        var dir = Path.GetDirectoryName(path);
-        var name = Path.GetFileName(path);
-        if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir)) return null;
-        try
-        {
-            return Directory.EnumerateFiles(dir, "*", SearchOption.TopDirectoryOnly)
-                .FirstOrDefault(p => string.Equals(Path.GetFileName(p), name, StringComparison.OrdinalIgnoreCase));
-        }
-        catch
-        {
-            return null;
-        }
-    }
 
     private static bool LooksLikeChSetFile(string path)
     {
@@ -398,8 +382,8 @@ public sealed class ChannelFileLoader
             return $"/ch {resolvedChannelIndex}";
         }
 
-        // BS/CSは release_contract 以前のTVTest通常録画ルートへ戻す。
-        // ChSetのTSID→BonDriverチャンネルを /chi として渡すことで、TVTest側の録画名・復号ルートを維持する。
+        // BS/CSも現在の共通チャンネル解決経路へ投影する。
+        // ChSetのTSID→BonDriverチャンネルを /chi として渡し、TVTestの物理選局経路と一致させる。
         // ただしフジテレビONE/TWO/NEXT等の同一TS内複数サービスは /chi だけでは既定サービスに潰れるため、
         // /sid だけを最小追加する。/nid /tsid /reccurservice は復号事故の原因になるため使わない。
         if (!bscsChSet.TryGetValue(tsId, out var bscsEntry))

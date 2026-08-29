@@ -23,6 +23,34 @@ public static class EpgProjection
     public static string GenreCodes(EpgEvent e)
         => FirstNonEmpty(e.GenreCodes);
 
+    public static string GenreLabel(string? genre, string? genreCodes)
+    {
+        var explicitGenre = FirstNonEmpty(genre);
+        if (explicitGenre.Length > 0) return explicitGenre;
+
+        var first = string.IsNullOrWhiteSpace(genreCodes)
+            ? string.Empty
+            : genreCodes.Split(',', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim().ToUpperInvariant() ?? string.Empty;
+        if (first.StartsWith("0X", StringComparison.OrdinalIgnoreCase)) first = first[2..];
+        if (first.Length == 0) return string.Empty;
+        return first[0] switch
+        {
+            '0' => "ニュース/報道",
+            '1' => "スポーツ",
+            '2' => "情報/ワイドショー",
+            '3' => "ドラマ",
+            '4' => "音楽",
+            '5' => "バラエティ",
+            '6' => "映画",
+            '7' => "アニメ/特撮",
+            '8' => "ドキュメンタリー/教養",
+            '9' => "劇場/公演",
+            'A' => "趣味/教育",
+            'B' => "福祉",
+            _ => "その他"
+        };
+    }
+
     private static string FirstNonEmpty(params string?[] values)
     {
         foreach (var v in values)

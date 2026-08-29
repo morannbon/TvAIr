@@ -1,4 +1,4 @@
-/*
+﻿/*
  * TvAIr user operational log module - release_contract
  *
  * Scope:
@@ -18,7 +18,7 @@
 
 /* release_contract UserLogActionAndTableBoundary
    Log-tab operation controls and log-table text/severity layout are user-log operations.
-   This file owns the log report/clear host, legacy log action ids, message clipping,
+   This file owns the log report/clear host, compatibility log action ids, message presentation mode,
    datetime/code formatting and severity colors. Reservation row-state/genre guards
    remain in tvair-list-module.css. */
 #filter-tabs[data-list-role="log"] .tvair-log-action-host{display:inline-flex;align-items:flex-end;gap:2px;margin-bottom:0}
@@ -37,11 +37,11 @@
 }
 .tvair-log-action-button:hover{background:var(--tvair-log-action-hover-bg,var(--tvair-reservation-toolbar-hover-bg))}
 .tvair-log-action-button[data-action-role="log-clear"]{
-  background:var(--tvair-log-action-danger-bg,var(--tvair-reservation-action-cancel-bg));
-  border-color:var(--tvair-log-action-danger-border,var(--tvair-reservation-action-cancel-border));
-  color:var(--tvair-log-action-danger-fg,var(--tvair-reservation-action-cancel-fg));
+  background:var(--tvair-log-action-danger-bg);
+  border-color:var(--tvair-log-action-danger-border);
+  color:var(--tvair-log-action-danger-fg);
 }
-.tvair-log-action-button[data-action-role="log-clear"]:hover{background:var(--tvair-log-action-danger-hover-bg,var(--tvair-reservation-action-cancel-hover-bg))}
+.tvair-log-action-button[data-action-role="log-clear"]:hover{background:var(--tvair-log-action-danger-hover-bg)}
 
 #report-log-btn,#clear-log-btn{
   display:none;
@@ -83,38 +83,30 @@ body.tvair-reservation-page #rsv-table[data-table-schema="log"] tr{
 }
 
 #rsv-table.log-mode td.tvair-user-log-result-cell{
-  white-space:nowrap;
-  overflow:hidden;
-  text-overflow:clip;
   font-weight:normal;
   letter-spacing:0;
 }
 
-#rsv-table.log-mode td.tvair-user-log-target-cell{
+/* release_contract UserLogCellTextModeOwner
+   Result/target/content wrapping is controlled only by generic textMode
+   classes and data-text-mode. Column names define schema placement, not
+   presentation mode. */
+#rsv-table.log-mode td.tvair-user-log-result-cell[data-text-mode="singleline"],
+#rsv-table.log-mode td.tvair-user-log-target-cell[data-text-mode="singleline"],
+#rsv-table.log-mode td.tvair-user-log-message-cell[data-text-mode="singleline"]{
   white-space:nowrap;
   overflow:hidden;
   text-overflow:ellipsis;
 }
 
-#rsv-table.log-mode td.tvair-user-log-message-cell{
-  white-space:nowrap;
-  overflow:hidden;
+#rsv-table.log-mode td.tvair-user-log-result-cell[data-text-mode="multiline"],
+#rsv-table.log-mode td.tvair-user-log-target-cell[data-text-mode="multiline"],
+#rsv-table.log-mode td.tvair-user-log-message-cell[data-text-mode="multiline"]{
+  white-space:pre-wrap;
+  overflow:visible;
   text-overflow:clip;
-  line-height:22px;
-  height:22px;
-  padding:0 4px;
-  max-width:none;
 }
 
-#rsv-table.log-mode .tvair-user-log-message-text{
-  display:block;
-  width:100%;
-  max-width:100%;
-  min-width:0;
-  white-space:nowrap;
-  overflow:hidden;
-  text-overflow:ellipsis;
-}
 
 
 
@@ -145,17 +137,11 @@ body.tvair-reservation-page #rsv-table[data-table-schema="log"] th[data-cell-rol
 body.tvair-reservation-page #rsv-table[data-table-schema="log"] td[data-cell-role="log-content"],
 body.tvair-reservation-page #rsv-table[data-table-schema="log"] td.tvair-user-log-message-cell{
   min-width:0;
-  overflow:hidden;
-  text-overflow:ellipsis;
-  white-space:nowrap;
 }
 body.tvair-reservation-page #rsv-table.log-mode .tvair-user-log-message-text,
 body.tvair-reservation-page #rsv-table[data-table-schema="log"] .tvair-user-log-message-text{
   display:block;
   min-width:0;
-  overflow:hidden;
-  text-overflow:ellipsis;
-  white-space:nowrap;
 }
 body.tvair-reservation-page #rsv-table.log-mode .user-log-error > td,
 body.tvair-reservation-page #rsv-table[data-table-schema="log"] .user-log-error > td{
@@ -174,4 +160,29 @@ body.tvair-reservation-page #rsv-table.log-mode td.col-code,
 body.tvair-reservation-page #rsv-table[data-table-schema="log"] td.col-code{
   font-weight:normal;
   font-size:11px;
+}
+
+/* release_contract UserLogMultilinePresentationMode
+   Log rows opt into generic text presentation classes; wrapping behavior is owned by
+   tvair-ui-foundation.css, not by a late reservation-log override. */
+body.tvair-reservation-page #rsv-table.log-mode tbody tr[data-list-role="log"],
+body.tvair-reservation-page #rsv-table[data-table-schema="log"] tbody tr[data-list-role="log"]{
+  min-height:26px;
+  height:auto;
+  overflow:visible;
+  contain:none;
+}
+body.tvair-reservation-page #rsv-table.log-mode tbody tr[data-list-role="log"] > td,
+body.tvair-reservation-page #rsv-table[data-table-schema="log"] tbody tr[data-list-role="log"] > td{
+  height:auto;
+  min-height:26px;
+  align-items:flex-start;
+  padding-top:4px;
+  padding-bottom:4px;
+}
+body.tvair-reservation-page #rsv-table.log-mode td[data-cell-role="log-content"],
+body.tvair-reservation-page #rsv-table.log-mode td.tvair-user-log-message-cell,
+body.tvair-reservation-page #rsv-table[data-table-schema="log"] td[data-cell-role="log-content"],
+body.tvair-reservation-page #rsv-table[data-table-schema="log"] td.tvair-user-log-message-cell{
+  padding:4px;
 }

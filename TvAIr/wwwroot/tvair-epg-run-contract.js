@@ -1,5 +1,6 @@
 /* TvAIr Manual EPG Run Contract release_contract
-   Owns the manual EPG run request shape for Web surfaces.
+   Owns the manual EPG run request shape for Web surfaces only.
+   Tray EPG is Host-owned by TrayIconService and does not pass through this JavaScript contract.
    API boundary uses scope. targetScope remains server/internal state terminology only. */
 (function(){
   'use strict';
@@ -11,8 +12,7 @@
     hamburger:'hamburger',
     page:'page',
     context:'context',
-    epgPanel:'epgPanel',
-    tray:'tray'
+    epgPanel:'epgPanel'
   });
 
   function normalizeScope(scope){
@@ -29,12 +29,11 @@
     if(v === SURFACES.hamburger || v === 'menu') return SURFACES.hamburger;
     if(v === SURFACES.page) return SURFACES.page;
     if(v === SURFACES.context || v === 'webContextMenu') return SURFACES.context;
-    if(v === SURFACES.tray) return SURFACES.tray;
     return SURFACES.epgPanel;
   }
 
   function defaultSilent(surface){
-    return normalizeSurface(surface) === SURFACES.tray;
+    return false;
   }
 
   function sourceFor(surface, silent){
@@ -42,7 +41,6 @@
     if(s === SURFACES.hamburger) return 'WebMenu.HamburgerEpg';
     if(s === SURFACES.page) return 'WebMenu.PageEpg';
     if(s === SURFACES.context) return 'WebContextMenu.Epg';
-    if(s === SURFACES.tray) return 'TrayMenu.SilentEpg';
     return silent ? 'WebApi.SilentEpg' : 'WebEpgPanel.Epg';
   }
 

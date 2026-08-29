@@ -1,4 +1,4 @@
-using System.Text.Json.Serialization;
+﻿using System.Text.Json.Serialization;
 using TvAIr.Core;
 
 namespace TvAIr.Schedule;

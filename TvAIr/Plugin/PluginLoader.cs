@@ -1,21 +1,25 @@
-using System.Reflection;
-using System.Text.Json;
+﻿using System.Reflection;
 using System.Runtime.Loader;
 using Microsoft.Extensions.Options;
 using TvAIr.Channel;
 using TvAIr.Core;
 using TvAIr.Epg;
+using TvAIr.Epg.Projection;
 using TvAIr.Schedule;
 using TvAIr.Tuner;
+using TvAIr.Plugin.RuntimeHost;
 using TvAIrPlugin;
+using TvAIrPlugin.Runtime;
+using TvAIrPlugin.Assets;
+using TvAIrPlugin.Surfaces;
+using TvAIrPlugin.Windows;
 
 namespace TvAIr.Plugin;
 
 /// <summary>
-/// Plugins/ ディレクトリの DLL を起動時に探索し、
-/// ITvAIrPlugin 実装を Initialize → OnStart の順で呼び出す。
-/// シャットダウン時に OnStop を呼び出す。
-/// 例外はログ出力のみ。本体の動作には影響しない。
+/// Plugins/ ディレクトリの DLL を起動時に探索し、Runtime descriptorを正本として登録する。
+/// Runtime capability typeだけを生成・登録し、descriptorとRuntime契約を唯一のロード境界とする。
+/// Runtime契約を実装しない型はロード対象外とし、例外はログ出力のみで本体動作へ波及させない。
 /// </summary>
 internal sealed class PluginLoader : IHostedService
 {
@@ -23,19 +27,36 @@ internal sealed class PluginLoader : IHostedService
 
     private readonly LogRepository _log;
     private readonly UserEventLogService _userEvents;
-    private readonly string _dataDirectory;
     private readonly PluginRegistry _registry;
     private readonly PluginAllowListService _allowList;
-    private readonly EpgStore _epgStore;
-    private readonly ReservationStore _reservationStore;
-    private readonly TunerPool _tunerPool;
+    private readonly ExternalEpgSourceStore _externalEpgSources;
+    private readonly LogPresentationStore _logPresentationStore;
+    private readonly PluginScopedServiceFactory _pluginScopedServices;
+    private readonly PluginReadModelSource _pluginReadModels;
+    private readonly PluginReservationOperationService _pluginReservationOperations;
+    private readonly PluginReservationPlanningService _pluginReservationPlanning;
+    private readonly TvTestSettings _tvTestSettings;
+    private readonly IReadOnlyList<TunerProfile> _tunerProfiles;
     private readonly ReservationAllocationRouteService _allocationRoute;
-    private readonly ChannelFileLoader _channelLoader;
-    private readonly TaskSchedulerService _taskScheduler;
+    private readonly ProgramProjectionReservationSyncService _projectionReservationSync;
+    private readonly PluginSystemReadService _pluginSystemReads;
+    private readonly PluginPresentationReadService _pluginPresentationReads;
+    private readonly PluginOperationalReadService _pluginOperationalReads;
     private readonly EpgScheduler _epgScheduler;
-    private readonly LiveCommentStore _liveComments;
+    private readonly TimedTextStreamStore _timedTextStreams;
     private readonly ExternalTunerLeaseService _externalTuners;
-    private readonly List<ITvAIrPlugin> _loaded = new();
+    private readonly ViewerSessionRegistry _viewerSessions;
+    private readonly ViewerOperationService _viewerOperations;
+    private readonly IniSettingsService _ini;
+    private readonly PluginWindowSessionStore _windowSessions;
+    private readonly PluginToolWindowHostService _toolWindows;
+    private readonly PluginPathPickerHostService _pathPickerHost;
+    private readonly PluginTypedEventHub _typedEvents;
+    private readonly RecordingResultStore _recordingResults;
+    private readonly PlaybackProgressStore _playbackProgress;
+    private readonly ReservationScheduler _reservationScheduler;
+    private readonly List<(ITvAirRuntimeCapabilityPlugin Plugin, string PluginId)> _loadedRuntimeCapabilities = new();
+    private readonly List<PluginRuntimeContext> _runtimeContexts = new();
 
     // Plugins/ ディレクトリは実行ファイルの隣に固定
     private static string PluginsDirectory
@@ -44,35 +65,66 @@ internal sealed class PluginLoader : IHostedService
     public PluginLoader(
         LogRepository log,
         UserEventLogService userEvents,
-        IOptions<AppSettings> appSettings,
         PluginRegistry registry,
         PluginAllowListService allowList,
-        EpgStore epgStore,
-        ReservationStore reservationStore,
-        TunerPool tunerPool,
+        ExternalEpgSourceStore externalEpgSources,
+        LogPresentationStore logPresentationStore,
+        PluginScopedServiceFactory pluginScopedServices,
+        PluginReadModelSource pluginReadModels,
+        PluginReservationOperationService pluginReservationOperations,
+        PluginReservationPlanningService pluginReservationPlanning,
+        PluginSystemReadService pluginSystemReads,
+        PluginPresentationReadService pluginPresentationReads,
+        PluginOperationalReadService pluginOperationalReads,
+        IOptions<TvTestSettings> tvTestOptions,
+        IReadOnlyList<TunerProfile> tunerProfiles,
         ReservationAllocationRouteService allocationRoute,
-        ChannelFileLoader channelLoader,
-        TaskSchedulerService taskScheduler,
+        ProgramProjectionReservationSyncService projectionReservationSync,
         EpgScheduler epgScheduler,
-        LiveCommentStore liveComments,
-        ExternalTunerLeaseService externalTuners)
+        TimedTextStreamStore timedTextStreams,
+        ExternalTunerLeaseService externalTuners,
+        ViewerSessionRegistry viewerSessions,
+        ViewerOperationService viewerOperations,
+        IniSettingsService ini,
+        PluginWindowSessionStore windowSessions,
+        PluginToolWindowHostService toolWindows,
+        PluginPathPickerHostService pathPickerHost,
+        PluginTypedEventHub typedEvents,
+        RecordingResultStore recordingResults,
+        PlaybackProgressStore playbackProgress,
+        ReservationScheduler reservationScheduler)
     {
         EnsurePluginSdkResolver();
         _log = log;
         _userEvents = userEvents;
         _registry = registry;
         _allowList = allowList;
-        _epgStore = epgStore;
-        _reservationStore = reservationStore;
-        _tunerPool = tunerPool;
+        _externalEpgSources = externalEpgSources;
+        _logPresentationStore = logPresentationStore;
+        _pluginScopedServices = pluginScopedServices;
+        _pluginReadModels = pluginReadModels;
+        _pluginReservationOperations = pluginReservationOperations;
+        _pluginReservationPlanning = pluginReservationPlanning;
+        _pluginSystemReads = pluginSystemReads;
+        _pluginPresentationReads = pluginPresentationReads;
+        _pluginOperationalReads = pluginOperationalReads;
+        _tvTestSettings = tvTestOptions.Value;
+        _tunerProfiles = tunerProfiles;
         _allocationRoute = allocationRoute;
-        _channelLoader = channelLoader;
-        _taskScheduler = taskScheduler;
+        _projectionReservationSync = projectionReservationSync;
         _epgScheduler = epgScheduler;
-        _liveComments = liveComments;
+        _timedTextStreams = timedTextStreams;
         _externalTuners = externalTuners;
-        var dataDir = string.IsNullOrWhiteSpace(appSettings.Value.DataDirectory) ? "data" : appSettings.Value.DataDirectory.Trim();
-        _dataDirectory = Path.GetFullPath(Path.IsPathRooted(dataDir) ? dataDir : Path.Combine(AppContext.BaseDirectory, dataDir));
+        _viewerSessions = viewerSessions;
+        _viewerOperations = viewerOperations;
+        _ini = ini;
+        _windowSessions = windowSessions;
+        _toolWindows = toolWindows;
+        _pathPickerHost = pathPickerHost;
+        _typedEvents = typedEvents;
+        _recordingResults = recordingResults;
+        _playbackProgress = playbackProgress;
+        _reservationScheduler = reservationScheduler;
     }
 
     /// <summary>
@@ -88,7 +140,7 @@ internal sealed class PluginLoader : IHostedService
 
         Assembly ResolveTvAIrPlugin(AssemblyName name)
         {
-            return typeof(ITvAIrPlugin).Assembly;
+            return typeof(ITvAirRuntimeCapabilityPlugin).Assembly;
         }
 
         AssemblyLoadContext.Default.Resolving += (_, assemblyName) =>
@@ -111,6 +163,7 @@ internal sealed class PluginLoader : IHostedService
     {
         LoadAll();
         StartAll();
+        LogRuntimeInventory();
         return Task.CompletedTask;
     }
 
@@ -128,11 +181,10 @@ internal sealed class PluginLoader : IHostedService
         // Plugins フォルダがなければ自動生成する（初回起動時にDLLを置く場所を用意）
         Directory.CreateDirectory(PluginsDirectory);
 
-        var dllPaths = Directory.EnumerateFiles(PluginsDirectory, "*.dll", SearchOption.AllDirectories)
+        var dllPaths = Directory.EnumerateFiles(PluginsDirectory, "*.dll", SearchOption.TopDirectoryOnly)
             .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        var hasNewAirrhythm = dllPaths.Any(IsNewAirrhythmDll);
         foreach (var dllPath in dllPaths)
         {
             if (IsPluginSdkContractDll(dllPath))
@@ -140,20 +192,10 @@ internal sealed class PluginLoader : IHostedService
                 _log.Add("Plugin", Path.GetFileName(dllPath), $"[Plugin] SDK ignored: use host TvAIrPlugin.dll stable contract rule={TvAIrVersionContract.PublicContractName}");
                 continue;
             }
-            if (hasNewAirrhythm && IsLegacyAirrithmDll(dllPath))
-            {
-                _log.Add("Plugin", Path.GetFileName(dllPath), $"[Plugin] Compatibility alias ignored: AIrhythm.BasicPlugin.dll exists, skip AIrithm.BasicPlugin.dll rule={TvAIrVersionContract.PublicContractName}");
-                continue;
-            }
             LoadFromFile(dllPath);
         }
     }
 
-    private static bool IsNewAirrhythmDll(string path)
-        => string.Equals(Path.GetFileName(path), "AIrhythm.BasicPlugin.dll", StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsLegacyAirrithmDll(string path)
-        => string.Equals(Path.GetFileName(path), "AIrithm.BasicPlugin.dll", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsPluginSdkContractDll(string path)
         => string.Equals(Path.GetFileName(path), "TvAIrPlugin.dll", StringComparison.OrdinalIgnoreCase);
@@ -171,401 +213,182 @@ internal sealed class PluginLoader : IHostedService
                 return;
             }
 
-            var externalManifestContract = LoadExternalManifestContract(dllPath);
-            if (IsPreFoundationPluginContract(externalManifestContract))
-            {
-                var message = $"対応外のPlugin SDK契約のため読み込みませんでした。TvAIrPlugin SDK {TvAIrVersionContract.PluginSdkVersion} 以降で再ビルドしてください。";
-                _userEvents.AddPluginLoadFailed(fileName, message);
-                _log.Add("Plugin", fileName, $"[Plugin] Rejected: pre_foundation_sdk requiredSdk={TvAIrVersionContract.PluginSdkVersion} rule={TvAIrVersionContract.PublicContractName}");
-                return;
-            }
-
-            if (IsUnsupportedPluginContract(externalManifestContract))
-            {
-                var message = $"対応外のPlugin Host契約です。TvAIrPlugin SDK {TvAIrVersionContract.PluginSdkVersion} 系で再ビルドしてください。";
-                _userEvents.AddPluginLoadFailed(fileName, message);
-                _log.Add("Plugin", fileName, $"[Plugin] Rejected: unsupported_plugin_contract supportedMajor={TvAIrVersionContract.PluginCompatibilityMajor} minimum={TvAIrVersionContract.MinimumSupportedPluginHostContractVersion} rule={TvAIrVersionContract.PublicContractName}");
-                return;
-            }
-
             var assembly = Assembly.LoadFrom(dllPath);
-            var pluginTypes = assembly.GetTypes()
-                .Where(t => t.IsClass && !t.IsAbstract &&
-                            typeof(ITvAIrPlugin).IsAssignableFrom(t));
+            var exportedTypes = assembly.GetTypes()
+                .Where(t => t.IsClass && !t.IsAbstract)
+                .ToList();
 
-            foreach (var type in pluginTypes)
+            var runtimeCapabilityTypes = exportedTypes
+                .Where(t => typeof(ITvAirRuntimeCapabilityPlugin).IsAssignableFrom(t));
+            foreach (var type in runtimeCapabilityTypes)
             {
-                LoadType(type, fileName, dllPath, externalManifestContract);
+                LoadRuntimeCapabilityType(type, fileName);
             }
         }
         catch (ReflectionTypeLoadException ex)
         {
             var loaderMessages = string.Join(" | ", ex.LoaderExceptions.Where(e => e != null).Select(e => e!.Message).Distinct().Take(5));
             _userEvents.AddPluginLoadFailed(fileName, "プラグインの読み込みに失敗しました。");
-            _log.Add("Plugin", fileName, $"[Plugin] Error: load_failed message={SafePluginLog(ex.Message)} loader={SafePluginLog(loaderMessages)} sdk={typeof(ITvAIrPlugin).Assembly.GetName().Version} rule={TvAIrVersionContract.PublicContractName}");
+            _log.Add("Plugin", fileName, $"[Plugin] Error: load_failed message={SafePluginLog(ex.Message)} loader={SafePluginLog(loaderMessages)} sdk={typeof(ITvAirRuntimeCapabilityPlugin).Assembly.GetName().Version} rule={TvAIrVersionContract.PublicContractName}");
         }
         catch (Exception ex)
         {
             var inner = UnwrapPluginException(ex);
             _userEvents.AddPluginLoadFailed(fileName, "プラグインの読み込みに失敗しました。");
-            _log.Add("Plugin", fileName, $"[Plugin] Error: load_failed type={SafePluginLog(inner.GetType().Name)} message={SafePluginLog(inner.Message)} sdk={typeof(ITvAIrPlugin).Assembly.GetName().Version} rule={TvAIrVersionContract.PublicContractName}");
+            _log.Add("Plugin", fileName, $"[Plugin] Error: load_failed type={SafePluginLog(inner.GetType().Name)} message={SafePluginLog(inner.Message)} sdk={typeof(ITvAirRuntimeCapabilityPlugin).Assembly.GetName().Version} rule={TvAIrVersionContract.PublicContractName}");
         }
     }
 
-    private void LoadType(Type type, string fileName, string dllPath, PluginExternalManifestContract? externalManifestContract)
+    private void LoadRuntimeCapabilityType(Type type, string fileName)
     {
         try
         {
-            if (Activator.CreateInstance(type) is not ITvAIrPlugin plugin)
+            if (Activator.CreateInstance(type) is not ITvAirRuntimeCapabilityPlugin plugin)
             {
                 _userEvents.AddPluginLoadFailed(fileName, $"インスタンス生成失敗 ({type.FullName})");
-                _log.Add("Plugin", fileName, $"[Plugin] Error: インスタンス生成失敗 ({type.FullName})");
+                _log.Add("Plugin", fileName, $"[Plugin] Error: runtime_capability_instance_failed ({type.FullName})");
                 return;
             }
 
-            var context = new PluginContext(_log, _epgStore, _reservationStore, _tunerPool, _allocationRoute, _channelLoader, _taskScheduler, _epgScheduler, _liveComments, _externalTuners, plugin.Name, _dataDirectory);
+            var descriptor = plugin.Descriptor;
+            ValidateRuntimeUiDescriptor(descriptor, plugin is ITvAirRuntimeUiPlugin);
+            var pluginId = _pluginScopedServices.NormalizePluginId(
+                descriptor.PluginId,
+                Path.GetFileNameWithoutExtension(fileName));
 
-            try
-            {
-                plugin.Initialize(context);
-            }
-            catch (Exception ex)
-            {
-                _userEvents.AddPluginLoadFailed(plugin.Name, ex.Message);
-                _log.Add("Plugin", plugin.Name, $"[Plugin] Error: initialize_failed type={SafePluginLog(UnwrapPluginException(ex).GetType().Name)} message={SafePluginLog(UnwrapPluginException(ex).Message)} rule={TvAIrVersionContract.PublicContractName}");
-                return; // Initialize 失敗のプラグインは OnStart しない
-            }
+            var resolvedPermissions = PluginPermissionResolver.Resolve(
+                descriptor.RequiredPermissions ?? Array.Empty<PluginPermission>());
 
-            ApplyExternalManifestContract(plugin, externalManifestContract);
+            var hostApiContext = new PluginCapabilityContext(
+                _log,
+                _pluginScopedServices,
+                _externalEpgSources,
+                _projectionReservationSync,
+                _logPresentationStore,
+                _pluginReadModels,
+                _pluginReservationOperations,
+                _pluginReservationPlanning,
+                _pluginSystemReads,
+                _pluginPresentationReads,
+                _pluginOperationalReads,
+                _externalTuners,
+                _viewerSessions,
+                _viewerOperations,
+                _timedTextStreams,
+                _tvTestSettings,
+                _tunerProfiles,
+                _epgScheduler,
+                _registry,
+                _ini,
+                _windowSessions,
+                _toolWindows,
+                _typedEvents,
+                _recordingResults,
+                _playbackProgress,
+                _reservationScheduler,
+                pluginId,
+                descriptor.DisplayName,
+                PluginsDirectory,
+                resolvedPermissions);
 
-            _loaded.Add(plugin);
-            _registry.Register(plugin, externalManifestContract);
-            var kind = plugin is IAnalysisPlugin ? "Analysis" : plugin is IViewerPlugin ? "Viewer" : plugin is IUiPlugin ? "UI" : "Utility";
-            var manifest = plugin is IManifestPlugin mp ? $" manifestId={mp.Manifest.Id} permissions={string.Join(",", mp.Manifest.Permissions)}" : string.Empty;
-            _log.Add("Plugin", plugin.Name, $"[Plugin] Loaded: {plugin.Name} v{plugin.Version} kind={kind}{manifest}");
+            var context = new PluginRuntimeContext(hostApiContext, descriptor, type.Assembly, _log, _pluginScopedServices, resolvedPermissions, _pathPickerHost,
+                viewerSessionId =>
+                {
+                    var active = _externalTuners.GetActiveLeases();
+                    var session = _viewerSessions.Synchronize(active).FirstOrDefault(x =>
+                        string.Equals(x.ViewerSessionId, viewerSessionId, StringComparison.OrdinalIgnoreCase));
+                    return session?.ProcessId is > 0
+                        ? new VideoOverlayViewerTarget(session.ViewerSessionId, session.Generation, session.ProcessId.Value)
+                        : null;
+                });
+            plugin.Initialize(context);
+            _runtimeContexts.Add(context);
+            _loadedRuntimeCapabilities.Add((plugin, pluginId));
+            _registry.RegisterRuntime(plugin);
+            _log.Add("PLUGIN_RUNTIME_DESCRIPTOR_REGISTRATION", pluginId,
+                $"result=REGISTERED permissions={descriptor.RequiredPermissions?.Count ?? 0} assets={descriptor.Assets?.Count ?? 0} windows={descriptor.Windows?.Count ?? 0} surfaces={descriptor.Surfaces?.Count ?? 0} menuActions={descriptor.MenuActions?.Count ?? 0} uiDefinitions={descriptor.UiDefinitions?.Count ?? 0} rule=runtime_descriptor_single_source");
+            _log.Add("Plugin", pluginId, $"[Plugin] Loaded runtime capability: {descriptor.DisplayName} v{descriptor.Version} contract={descriptor.SdkContractVersion}");
         }
         catch (Exception ex)
         {
-            _userEvents.AddPluginLoadFailed(fileName, ex.Message);
-            _log.Add("Plugin", fileName, $"[Plugin] Error: load_type_failed type={SafePluginLog(UnwrapPluginException(ex).GetType().Name)} message={SafePluginLog(UnwrapPluginException(ex).Message)} rule={TvAIrVersionContract.PublicContractName}");
+            var inner = UnwrapPluginException(ex);
+            _userEvents.AddPluginLoadFailed(fileName, inner.Message);
+            _log.Add("Plugin", fileName, $"[Plugin] Error: runtime_capability_load_failed type={SafePluginLog(inner.GetType().Name)} message={SafePluginLog(inner.Message)} rule={TvAIrVersionContract.PublicContractName}");
         }
     }
 
 
-
-    private PluginExternalManifestContract? LoadExternalManifestContract(string dllPath)
+    private static void ValidateRuntimeUiDescriptor(TvAirPluginRuntimeDescriptor descriptor, bool implementsRuntimeUi)
     {
-        try
+        var uiDefinitions = descriptor.UiDefinitions ?? Array.Empty<RuntimeUiDefinition>();
+        if (uiDefinitions.Count == 0)
         {
-            var dir = Path.GetDirectoryName(dllPath) ?? string.Empty;
-            var baseName = Path.GetFileNameWithoutExtension(dllPath);
-            var candidates = new[]
-            {
-                Path.Combine(dir, "plugin.json"),
-                Path.Combine(dir, $"{baseName}.plugin.json"),
-                Path.Combine(dir, $"{baseName}.json")
-            };
-
-            var jsonPath = candidates.FirstOrDefault(File.Exists);
-            if (string.IsNullOrWhiteSpace(jsonPath)) return null;
-
-            using var doc = JsonDocument.Parse(File.ReadAllText(jsonPath));
-            var root = doc.RootElement;
-            var manifest = TryGetObject(root, "manifest", "Manifest");
-            var ui = TryGetObject(root, "ui", "Ui", "descriptor", "Descriptor");
-            var window = TryGetObject(root, "window", "Window", "toolWindow", "ToolWindow");
-            var menu = TryGetObject(root, "menu", "Menu", "defaultMenuAction", "DefaultMenuAction");
-            var compatibility = TryGetObject(root, "compatibility", "Compatibility");
-            var metadata = TryGetObject(root, "metadata", "Metadata");
-
-            var contract = new PluginExternalManifestContract
-            {
-                SourcePath = jsonPath,
-                Id = ReadStringAny(new[] { "id", "Id", "pluginId", "PluginId" }, root, manifest, metadata),
-                Name = ReadStringAny(new[] { "name", "Name", "displayName", "DisplayName" }, root, manifest, metadata),
-                Version = ReadStringAny(new[] { "version", "Version" }, root, manifest, metadata),
-                Route = ReadStringAny(new[] { "route", "Route", "routeSegment", "RouteSegment" }, root, manifest, ui),
-                Entry = ReadStringAny(new[] { "entry", "Entry", "entryPoint", "EntryPoint" }, root, manifest),
-                Description = ReadStringAny(new[] { "description", "Description" }, root, manifest, ui, metadata),
-                Vendor = ReadStringAny(new[] { "vendor", "Vendor", "author", "Author", "publisher", "Publisher" }, root, manifest, metadata),
-                Icon = ReadStringAny(new[] { "icon", "Icon", "iconPath", "IconPath" }, root, manifest, ui, metadata),
-                HostContractVersion = ReadStringAny(new[] { "hostContractVersion", "HostContractVersion", "contractVersion", "ContractVersion" }, root, manifest, compatibility),
-                SdkVersion = ReadStringAny(new[] { "sdkVersion", "SdkVersion", "pluginSdkVersion", "PluginSdkVersion", "tvairPluginSdkVersion", "TvAIrPluginSdkVersion" }, root, manifest, compatibility, metadata),
-                Kind = ReadStringArrayAny(new[] { "kind", "Kind", "kinds", "Kinds" }, root, manifest),
-                Capabilities = ReadStringArrayAny(new[] { "capabilities", "Capabilities" }, root, manifest, ui),
-                Permissions = ReadStringArrayAny(new[] { "permissions", "Permissions" }, root, manifest),
-                Tags = ReadStringArrayAny(new[] { "tags", "Tags" }, root, manifest, metadata),
-                ToolWindowWidth = ReadIntAny(new[] { "toolWindowWidth", "ToolWindowWidth", "width", "Width" }, root, manifest, ui, window),
-                ToolWindowHeight = ReadIntAny(new[] { "toolWindowHeight", "ToolWindowHeight", "height", "Height" }, root, manifest, ui, window),
-                ToolWindowMinWidth = ReadIntAny(new[] { "toolWindowMinWidth", "ToolWindowMinWidth", "minWidth", "MinWidth", "toolWindowMinWidthPx", "ToolWindowMinWidthPx" }, root, manifest, ui, window),
-                ToolWindowMinHeight = ReadIntAny(new[] { "toolWindowMinHeight", "ToolWindowMinHeight", "minHeight", "MinHeight", "toolWindowMinHeightPx", "ToolWindowMinHeightPx" }, root, manifest, ui, window),
-                ToolWindowTitle = FirstNonEmpty(
-                    ReadStringAny(new[] { "toolWindowTitle", "ToolWindowTitle" }, ui, manifest, root),
-                    ReadStringAny(new[] { "title", "Title" }, window)),
-                DefaultMenuActionKind = FirstNonEmpty(
-                    ReadStringAny(new[] { "defaultMenuActionKind", "DefaultMenuActionKind" }, root, manifest, ui),
-                    ReadStringAny(new[] { "kind", "Kind" }, menu)),
-                DefaultMenuActionLabel = FirstNonEmpty(
-                    ReadStringAny(new[] { "defaultMenuActionLabel", "DefaultMenuActionLabel" }, root, manifest, ui),
-                    ReadStringAny(new[] { "label", "Label" }, menu)),
-                DefaultMenuActionPriority = ReadIntAny(new[] { "defaultMenuActionPriority", "DefaultMenuActionPriority", "priority", "Priority" }, root, manifest, ui, menu),
-                ToolWindowShowInTaskbar = ReadBoolAny(new[] { "toolWindowShowInTaskbar", "ToolWindowShowInTaskbar", "showInTaskbar", "ShowInTaskbar" }, root, manifest, ui, window)
-            };
-
-            if (string.IsNullOrWhiteSpace(contract.Id) && string.IsNullOrWhiteSpace(contract.Name) && string.IsNullOrWhiteSpace(contract.Version)
-                && string.IsNullOrWhiteSpace(contract.Route) && string.IsNullOrWhiteSpace(contract.Entry) && string.IsNullOrWhiteSpace(contract.Description)
-                && string.IsNullOrWhiteSpace(contract.Vendor) && string.IsNullOrWhiteSpace(contract.Icon) && string.IsNullOrWhiteSpace(contract.HostContractVersion) && string.IsNullOrWhiteSpace(contract.SdkVersion)
-                && contract.Kind.Count == 0 && contract.Capabilities.Count == 0 && contract.Permissions.Count == 0 && contract.Tags.Count == 0
-                && contract.ToolWindowWidth <= 0 && contract.ToolWindowHeight <= 0 && contract.ToolWindowMinWidth <= 0 && contract.ToolWindowMinHeight <= 0
-                && string.IsNullOrWhiteSpace(contract.ToolWindowTitle)
-                && string.IsNullOrWhiteSpace(contract.DefaultMenuActionKind) && string.IsNullOrWhiteSpace(contract.DefaultMenuActionLabel)
-                && contract.DefaultMenuActionPriority <= 0 && contract.ToolWindowShowInTaskbar is null)
-            {
-                return null;
-            }
-
-            return contract;
-        }
-        catch (Exception ex)
-        {
-            _log.Add("PLUGIN_EXTERNAL_MANIFEST", Path.GetFileName(dllPath), $"result=FAILED message={SafePluginLog(ex.Message)} rule={TvAIrVersionContract.PublicContractName}");
-            return null;
-        }
-    }
-
-    private void ApplyExternalManifestContract(ITvAIrPlugin plugin, PluginExternalManifestContract? external)
-    {
-        if (external is null) return;
-
-        var manifest = (plugin as IManifestPlugin)?.Manifest;
-        var ui = (plugin as IUiPlugin)?.Ui;
-        var applied = new List<string>();
-
-        if (manifest is not null)
-        {
-            if (string.IsNullOrWhiteSpace(manifest.Id) && !string.IsNullOrWhiteSpace(external.Id)) { manifest.Id = external.Id; applied.Add("manifest.id"); }
-            if (string.IsNullOrWhiteSpace(manifest.Name) && !string.IsNullOrWhiteSpace(external.Name)) { manifest.Name = external.Name; applied.Add("manifest.name"); }
-            if (string.IsNullOrWhiteSpace(manifest.Version) && !string.IsNullOrWhiteSpace(external.Version)) { manifest.Version = external.Version; applied.Add("manifest.version"); }
-            if (string.IsNullOrWhiteSpace(manifest.Route) && !string.IsNullOrWhiteSpace(external.Route)) { manifest.Route = external.Route; applied.Add("manifest.route"); }
-            if (string.IsNullOrWhiteSpace(manifest.Entry) && !string.IsNullOrWhiteSpace(external.Entry)) { manifest.Entry = external.Entry; applied.Add("manifest.entry"); }
-            if (string.IsNullOrWhiteSpace(manifest.Description) && !string.IsNullOrWhiteSpace(external.Description)) { manifest.Description = external.Description; applied.Add("manifest.description"); }
-            if (string.IsNullOrWhiteSpace(manifest.Vendor) && !string.IsNullOrWhiteSpace(external.Vendor)) { manifest.Vendor = external.Vendor; applied.Add("manifest.vendor"); }
-            if (string.IsNullOrWhiteSpace(manifest.Icon) && !string.IsNullOrWhiteSpace(external.Icon)) { manifest.Icon = external.Icon; applied.Add("manifest.icon"); }
-            if (string.IsNullOrWhiteSpace(manifest.ToolWindowTitle) && !string.IsNullOrWhiteSpace(external.ToolWindowTitle)) { manifest.ToolWindowTitle = external.ToolWindowTitle; applied.Add("manifest.toolWindowTitle"); }
-            if (string.IsNullOrWhiteSpace(manifest.HostContractVersion) && !string.IsNullOrWhiteSpace(external.HostContractVersion)) { manifest.HostContractVersion = external.HostContractVersion; applied.Add("manifest.hostContractVersion"); }
-            if (string.IsNullOrWhiteSpace(manifest.SdkVersion) && !string.IsNullOrWhiteSpace(external.SdkVersion)) { manifest.SdkVersion = external.SdkVersion; applied.Add("manifest.sdkVersion"); }
-            if (manifest.Kind.Count == 0 && external.Kind.Count > 0) { manifest.Kind = external.Kind; applied.Add("manifest.kind"); }
-            if (manifest.Capabilities.Count == 0 && external.Capabilities.Count > 0) { manifest.Capabilities = external.Capabilities; applied.Add("manifest.capabilities"); }
-            if (manifest.Tags.Count == 0 && external.Tags.Count > 0) { manifest.Tags = external.Tags; applied.Add("manifest.tags"); }
-            if (manifest.Permissions.Count == 0 && external.Permissions.Count > 0)
-            {
-                var permissions = ParsePermissions(external.Permissions);
-                if (permissions.Count > 0) { manifest.Permissions = permissions; applied.Add("manifest.permissions"); }
-            }
-            if (manifest.ToolWindowWidth <= 0 && external.ToolWindowWidth > 0) { manifest.ToolWindowWidth = external.ToolWindowWidth; applied.Add("manifest.width"); }
-            if (manifest.ToolWindowHeight <= 0 && external.ToolWindowHeight > 0) { manifest.ToolWindowHeight = external.ToolWindowHeight; applied.Add("manifest.height"); }
-            if (manifest.ToolWindowMinWidth <= 0 && external.ToolWindowMinWidth > 0) { manifest.ToolWindowMinWidth = external.ToolWindowMinWidth; applied.Add("manifest.minWidth"); }
-            if (manifest.ToolWindowMinHeight <= 0 && external.ToolWindowMinHeight > 0) { manifest.ToolWindowMinHeight = external.ToolWindowMinHeight; applied.Add("manifest.minHeight"); }
-            if (string.IsNullOrWhiteSpace(manifest.DefaultMenuActionKind) && !string.IsNullOrWhiteSpace(external.DefaultMenuActionKind)) { manifest.DefaultMenuActionKind = external.DefaultMenuActionKind; applied.Add("manifest.defaultActionKind"); }
-            if (string.IsNullOrWhiteSpace(manifest.DefaultMenuActionLabel) && !string.IsNullOrWhiteSpace(external.DefaultMenuActionLabel)) { manifest.DefaultMenuActionLabel = external.DefaultMenuActionLabel; applied.Add("manifest.defaultActionLabel"); }
-            if (manifest.DefaultMenuActionPriority == 1000 && external.DefaultMenuActionPriority > 0) { manifest.DefaultMenuActionPriority = external.DefaultMenuActionPriority; applied.Add("manifest.defaultActionPriority"); }
-            if (!manifest.ToolWindowShowInTaskbar && external.ToolWindowShowInTaskbar == true) { manifest.ToolWindowShowInTaskbar = true; applied.Add("manifest.showInTaskbar"); }
-            if (string.IsNullOrWhiteSpace(manifest.ToolWindowTitle) && !string.IsNullOrWhiteSpace(external.ToolWindowTitle)) { manifest.ToolWindowTitle = external.ToolWindowTitle; applied.Add("manifest.toolWindowTitle"); }
+            if (implementsRuntimeUi)
+                throw new InvalidOperationException($"Runtime UI plugin '{descriptor.PluginId}' must declare at least one UiDefinitions entry.");
+            return;
         }
 
-        if (ui is not null)
-        {
-            if (string.IsNullOrWhiteSpace(ui.RouteSegment) && !string.IsNullOrWhiteSpace(external.Route)) { ui.RouteSegment = external.Route; applied.Add("ui.route"); }
-            if (string.IsNullOrWhiteSpace(ui.MenuText) && !string.IsNullOrWhiteSpace(external.Name)) { ui.MenuText = external.Name; applied.Add("ui.menuText"); }
-            if (string.IsNullOrWhiteSpace(ui.Description) && !string.IsNullOrWhiteSpace(external.Description)) { ui.Description = external.Description; applied.Add("ui.description"); }
-            if (string.IsNullOrWhiteSpace(ui.Icon) && !string.IsNullOrWhiteSpace(external.Icon)) { ui.Icon = external.Icon; applied.Add("ui.icon"); }
-            if (ui.Capabilities.Count == 0 && external.Capabilities.Count > 0) { ui.Capabilities = external.Capabilities; applied.Add("ui.capabilities"); }
-            if (ui.ToolWindowWidth <= 0 && external.ToolWindowWidth > 0) { ui.ToolWindowWidth = external.ToolWindowWidth; applied.Add("ui.width"); }
-            if (ui.ToolWindowHeight <= 0 && external.ToolWindowHeight > 0) { ui.ToolWindowHeight = external.ToolWindowHeight; applied.Add("ui.height"); }
-            if (ui.ToolWindowMinWidth <= 0 && external.ToolWindowMinWidth > 0) { ui.ToolWindowMinWidth = external.ToolWindowMinWidth; applied.Add("ui.minWidth"); }
-            if (ui.ToolWindowMinHeight <= 0 && external.ToolWindowMinHeight > 0) { ui.ToolWindowMinHeight = external.ToolWindowMinHeight; applied.Add("ui.minHeight"); }
-            if (string.IsNullOrWhiteSpace(ui.DefaultMenuActionKind) && !string.IsNullOrWhiteSpace(external.DefaultMenuActionKind)) { ui.DefaultMenuActionKind = external.DefaultMenuActionKind; applied.Add("ui.defaultActionKind"); }
-            if (string.IsNullOrWhiteSpace(ui.DefaultMenuActionLabel) && !string.IsNullOrWhiteSpace(external.DefaultMenuActionLabel)) { ui.DefaultMenuActionLabel = external.DefaultMenuActionLabel; applied.Add("ui.defaultActionLabel"); }
-            if (ui.DefaultMenuActionPriority == 1000 && external.DefaultMenuActionPriority > 0) { ui.DefaultMenuActionPriority = external.DefaultMenuActionPriority; applied.Add("ui.defaultActionPriority"); }
-            if (!ui.ToolWindowShowInTaskbar && external.ToolWindowShowInTaskbar == true) { ui.ToolWindowShowInTaskbar = true; applied.Add("ui.showInTaskbar"); }
-            if (string.IsNullOrWhiteSpace(ui.ToolWindowTitle) && !string.IsNullOrWhiteSpace(external.ToolWindowTitle)) { ui.ToolWindowTitle = external.ToolWindowTitle; applied.Add("ui.toolWindowTitle"); }
-        }
+        if (!implementsRuntimeUi)
+            throw new InvalidOperationException($"Runtime descriptor '{descriptor.PluginId}' declares UiDefinitions but the plugin does not implement ITvAirRuntimeUiPlugin.");
 
-        _log.Add("PLUGIN_EXTERNAL_MANIFEST", plugin.Name,
-            $"result=MERGED source={Path.GetFileName(external.SourcePath)} contract=release_contract fields=id|name|version|route|kind|capabilities|permissions|ui|menu|window toolWindowSize={external.ToolWindowWidth}x{external.ToolWindowHeight} toolWindowMinSize={external.ToolWindowMinWidth}x{external.ToolWindowMinHeight} applied={(applied.Count == 0 ? "none" : string.Join(',', applied))} rule={TvAIrVersionContract.PublicContractName}");
-    }
+        var duplicateUiId = uiDefinitions
+            .GroupBy(ui => ui.UiDefinitionId, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault(group => string.IsNullOrWhiteSpace(group.Key) || group.Count() > 1);
+        if (duplicateUiId is not null)
+            throw new InvalidOperationException($"Runtime descriptor '{descriptor.PluginId}' contains an empty or duplicate UI definition id.");
 
-    private static JsonElement? TryGetObject(JsonElement root, params string[] names)
-    {
-        foreach (var name in names)
+        var duplicateRoute = uiDefinitions
+            .GroupBy(ui => (ui.Route ?? string.Empty).Trim().Trim('/'), StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault(group => string.IsNullOrWhiteSpace(group.Key) || group.Count() > 1);
+        if (duplicateRoute is not null)
+            throw new InvalidOperationException($"Runtime descriptor '{descriptor.PluginId}' contains an empty or duplicate UI route.");
+
+        var windowIds = (descriptor.Windows ?? Array.Empty<PluginWindowDefinition>())
+            .Select(window => window.WindowDefinitionId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var surfaceIds = (descriptor.Surfaces ?? Array.Empty<PluginSurfaceDefinition>())
+            .Select(surface => surface.SurfaceDefinitionId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var assetIds = (descriptor.Assets ?? Array.Empty<PluginAssetDefinition>())
+            .Select(asset => asset.LogicalPath)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var ui in uiDefinitions)
         {
-            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Object)
+            if (!string.IsNullOrWhiteSpace(ui.WindowDefinitionId) && !windowIds.Contains(ui.WindowDefinitionId))
+                throw new InvalidOperationException($"Runtime UI '{ui.UiDefinitionId}' references unknown window definition '{ui.WindowDefinitionId}'.");
+            if (!string.IsNullOrWhiteSpace(ui.SurfaceDefinitionId) && !surfaceIds.Contains(ui.SurfaceDefinitionId))
+                throw new InvalidOperationException($"Runtime UI '{ui.UiDefinitionId}' references unknown surface definition '{ui.SurfaceDefinitionId}'.");
+            foreach (var assetPath in ui.AssetPaths ?? Array.Empty<string>())
             {
-                return value;
+                if (!assetIds.Contains(assetPath))
+                    throw new InvalidOperationException($"Runtime UI '{ui.UiDefinitionId}' references unknown asset '{assetPath}'.");
             }
         }
-        return null;
-    }
-
-    private static string FirstNonEmpty(params string[] values)
-        => values.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v)) ?? string.Empty;
-
-    private static int ReadIntAny(string[] names, params JsonElement?[] elements)
-    {
-        foreach (var element in elements)
-        {
-            if (element is null || element.Value.ValueKind != JsonValueKind.Object) continue;
-            foreach (var name in names)
-            {
-                if (!element.Value.TryGetProperty(name, out var value)) continue;
-                if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var n)) return n;
-                if (value.ValueKind == JsonValueKind.String && int.TryParse(value.GetString(), out n)) return n;
-            }
-        }
-        return 0;
-    }
-
-    private static string ReadStringAny(string[] names, params JsonElement?[] elements)
-    {
-        foreach (var element in elements)
-        {
-            if (element is null || element.Value.ValueKind != JsonValueKind.Object) continue;
-            foreach (var name in names)
-            {
-                if (element.Value.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String)
-                {
-                    return value.GetString() ?? string.Empty;
-                }
-            }
-        }
-        return string.Empty;
-    }
-
-    private static IReadOnlyList<string> ReadStringArrayAny(string[] names, params JsonElement?[] elements)
-    {
-        foreach (var element in elements)
-        {
-            if (element is null || element.Value.ValueKind != JsonValueKind.Object) continue;
-            foreach (var name in names)
-            {
-                if (!element.Value.TryGetProperty(name, out var value)) continue;
-                if (value.ValueKind == JsonValueKind.Array)
-                {
-                    return value.EnumerateArray()
-                        .Select(x => x.ValueKind == JsonValueKind.String ? (x.GetString() ?? string.Empty) : x.ToString())
-                        .Select(x => x.Trim())
-                        .Where(x => !string.IsNullOrWhiteSpace(x))
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .ToArray();
-                }
-                if (value.ValueKind == JsonValueKind.String)
-                {
-                    var text = value.GetString() ?? string.Empty;
-                    return text.Split(new[] { ',', ';', '|', ' ' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                        .Where(x => !string.IsNullOrWhiteSpace(x))
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .ToArray();
-                }
-            }
-        }
-        return Array.Empty<string>();
-    }
-
-    private static bool? ReadBoolAny(string[] names, params JsonElement?[] elements)
-    {
-        foreach (var element in elements)
-        {
-            if (element is null || element.Value.ValueKind != JsonValueKind.Object) continue;
-            foreach (var name in names)
-            {
-                if (!element.Value.TryGetProperty(name, out var value)) continue;
-                if (value.ValueKind == JsonValueKind.True) return true;
-                if (value.ValueKind == JsonValueKind.False) return false;
-                if (value.ValueKind == JsonValueKind.String && bool.TryParse(value.GetString(), out var b)) return b;
-            }
-        }
-        return null;
-    }
-
-    private static IReadOnlyList<PluginPermission> ParsePermissions(IReadOnlyList<string> values)
-    {
-        var parsed = new List<PluginPermission>();
-        foreach (var value in values)
-        {
-            if (Enum.TryParse<PluginPermission>(value, ignoreCase: true, out var permission) && !parsed.Contains(permission))
-            {
-                parsed.Add(permission);
-            }
-        }
-        return parsed;
-    }
-
-    private static int ReadInt(JsonElement root, JsonElement? manifest, JsonElement? ui, params string[] names)
-    {
-        foreach (var element in new JsonElement?[] { root, manifest, ui })
-        {
-            if (element is null || element.Value.ValueKind != JsonValueKind.Object) continue;
-            foreach (var name in names)
-            {
-                if (!element.Value.TryGetProperty(name, out var value)) continue;
-                if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var n)) return n;
-                if (value.ValueKind == JsonValueKind.String && int.TryParse(value.GetString(), out n)) return n;
-            }
-        }
-        return 0;
-    }
-
-    private static string ReadString(JsonElement root, JsonElement? manifest, JsonElement? ui, params string[] names)
-    {
-        foreach (var element in new JsonElement?[] { root, manifest, ui })
-        {
-            if (element is null || element.Value.ValueKind != JsonValueKind.Object) continue;
-            foreach (var name in names)
-            {
-                if (element.Value.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String)
-                {
-                    return value.GetString() ?? string.Empty;
-                }
-            }
-        }
-        return string.Empty;
-    }
-
-    private static bool? ReadBool(JsonElement root, JsonElement? manifest, JsonElement? ui, params string[] names)
-    {
-        foreach (var element in new JsonElement?[] { root, manifest, ui })
-        {
-            if (element is null || element.Value.ValueKind != JsonValueKind.Object) continue;
-            foreach (var name in names)
-            {
-                if (!element.Value.TryGetProperty(name, out var value)) continue;
-                if (value.ValueKind == JsonValueKind.True) return true;
-                if (value.ValueKind == JsonValueKind.False) return false;
-                if (value.ValueKind == JsonValueKind.String && bool.TryParse(value.GetString(), out var b)) return b;
-            }
-        }
-        return null;
     }
 
 
-
-    private static bool IsPreFoundationPluginContract(PluginExternalManifestContract? contract)
-        => contract is not null && (
-            TvAIrVersionContract.IsPreFoundationPluginContract(contract.HostContractVersion) ||
-            TvAIrVersionContract.IsPreFoundationPluginContract(contract.SdkVersion));
-
-    private static bool IsUnsupportedPluginContract(PluginExternalManifestContract? contract)
+    private void LogRuntimeInventory()
     {
-        if (contract is null) return false;
-        return IsUnsupportedPluginVersion(contract.HostContractVersion)
-            || IsUnsupportedPluginVersion(contract.SdkVersion);
-    }
-
-    private static bool IsUnsupportedPluginVersion(string? version)
-    {
-        if (string.IsNullOrWhiteSpace(version)) return false;
-        return !TvAIrVersionContract.IsPreFoundationPluginContract(version)
-            && !TvAIrVersionContract.IsSupportedPluginContract(version);
+        var runtimePlugins = _registry.GetRuntimePlugins();
+        var runtimeIds = runtimePlugins
+            .Select(x => PluginIdentity.Normalize(x.Descriptor.PluginId))
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x)
+            .ToArray();
+        var runtimeUiIds = runtimePlugins
+            .Where(x => x is ITvAirRuntimeUiPlugin && x.Descriptor.UiDefinitions.Count > 0)
+            .Select(x => PluginIdentity.Normalize(x.Descriptor.PluginId))
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x)
+            .ToArray();
+        _log.Add("PLUGIN_RUNTIME_INVENTORY", "Summary",
+            $"result=OK runtimeUiRegistrationCount={runtimeUiIds.Length} runtimeCount={runtimePlugins.Count} " +
+            $"runtimeUiRegistrations=[{string.Join(',', runtimeUiIds)}] runtime=[{string.Join(',', runtimeIds)}] " +
+            "lifecycleOwner=runtime_descriptor registrationOwner=runtime_descriptor uiOwner=runtime_ui_contract " +
+            "target=runtime_context_only rule=plugin_runtime_inventory_contract");
     }
 
     private static Exception UnwrapPluginException(Exception ex)
@@ -583,15 +406,18 @@ internal sealed class PluginLoader : IHostedService
     /// <summary>ロード済み全プラグインの OnStart を呼び出す。</summary>
     private void StartAll()
     {
-        foreach (var plugin in _loaded)
+        foreach (var entry in _loadedRuntimeCapabilities)
         {
+            if (entry.Plugin is not ITvAirRuntimeLifecyclePlugin lifecycle
+                || !entry.Plugin.Descriptor.Lifecycle.StartAutomatically) continue;
             try
             {
-                plugin.OnStart();
+                lifecycle.OnStart();
+                _log.Add("PLUGIN_RUNTIME_LIFECYCLE", entry.PluginId, "action=start result=OK source=runtime_descriptor rule=runtime_lifecycle_contract");
             }
             catch (Exception ex)
             {
-                _log.Add("Plugin", plugin.Name, $"[Plugin] Error: OnStart 失敗 - {ex.Message}");
+                _log.Add("PLUGIN_RUNTIME_LIFECYCLE", entry.PluginId, $"action=start result=ERROR exceptionType={SafePluginLog(ex.GetType().Name)} message={SafePluginLog(ex.Message)} rule=runtime_lifecycle_contract");
             }
         }
     }
@@ -599,16 +425,29 @@ internal sealed class PluginLoader : IHostedService
     /// <summary>ロード済み全プラグインの OnStop を呼び出す。</summary>
     private void StopAll()
     {
-        foreach (var plugin in _loaded)
+        for (var i = _loadedRuntimeCapabilities.Count - 1; i >= 0; i--)
         {
+            var entry = _loadedRuntimeCapabilities[i];
+            if (entry.Plugin is not ITvAirRuntimeLifecyclePlugin lifecycle
+                || !entry.Plugin.Descriptor.Lifecycle.StopOnHostShutdown) continue;
             try
             {
-                plugin.OnStop();
+                lifecycle.OnStop();
+                _log.Add("PLUGIN_RUNTIME_LIFECYCLE", entry.PluginId, "action=stop result=OK source=runtime_descriptor rule=runtime_lifecycle_contract");
             }
             catch (Exception ex)
             {
-                _log.Add("Plugin", plugin.Name, $"[Plugin] Error: OnStop 失敗 - {ex.Message}");
+                _log.Add("PLUGIN_RUNTIME_LIFECYCLE", entry.PluginId, $"action=stop result=ERROR exceptionType={SafePluginLog(ex.GetType().Name)} message={SafePluginLog(ex.Message)} rule=runtime_lifecycle_contract");
             }
         }
+        for (var i = _runtimeContexts.Count - 1; i >= 0; i--)
+        {
+            try { _runtimeContexts[i].Dispose(); }
+            catch (Exception ex)
+            {
+                _log.Add("PLUGIN_RUNTIME_LIFECYCLE", "runtime", $"action=dispose result=ERROR exceptionType={SafePluginLog(ex.GetType().Name)} message={SafePluginLog(ex.Message)} rule=runtime_lifecycle_contract");
+            }
+        }
+        _runtimeContexts.Clear();
     }
 }

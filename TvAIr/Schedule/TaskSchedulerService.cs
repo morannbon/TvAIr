@@ -1,116 +1,74 @@
-/* release_contract wake-credential-probe-diagnostics: Wake本線を変えず、CredentialProbeの必要判定・実行理由・probeタスク名を診断ログへ露出する。 */
-/* release_contract wake-responsibility-log-cleanup: Wake本線の挙動を維持し、plan読取副作用・CredentialProbe名前空間・ログ分類を整理する。 */
-/* release_contract wake-log-alignment-cleanup: release_contractのWAKE本線は維持し、個別登録rule名・差分適用next表示・activeExtra監査名だけを整理する。 */
-/* release_contract wake-coverage-required-deferred-fix: Task Schedulerは起床だけ。Coverageは直近必須範囲と将来Deferredを分離し、未来予約をmissing扱いしない。 */
-/* release_contract wake-tvrock-style-minimal-wakeup: Task Schedulerは起床時刻だけ、TvAIr本体がWakeCoverage/予約DBから判断する。通常Wake本数目標は録画チューナー数、13本は非常用上限。 */
-﻿/* release_contract wake-coverage-complete: WAKE時刻スロット化をWakeCoverageItemへ完全分離し、TaskScheduler登録単位と予約メタ属性を混在させない。 */
-/* release_contract wake-time-slot-coverage-simplification: Task Scheduler側の主単位を起床時刻へ寄せ、予約/目的メタ属性はWakeCoverageへ分離する。 */
-/* release_contract wake-stale-orphan-quarantine-fix: 削除不能な旧世代WakeSlotを現行Wake判定から隔離し、current_processで消せないタスクへ資格情報削除を連発しない。 */
-/* release_contract wake-diff-apply-generation-log-fix: WakeSlot世代を安定化し、計画変更時の全削除/全登録とOVERFLOW誤用を抑制、再構築中要求を最新pendingへ集約する。 */
-/* release_contract wake-slot-dynamic-cap-contract: WakeSlot上限を「録画チューナー総数×2＋制御用1」に定義化し、固定13から動的算出へ変更する。 */
-/* release_contract wake-slot-overflow-cleanup: 遅延Wake再構築中でもTask Scheduler上のWakeSlot過剰残骸を即時検出・掃除し、一覧増殖を抑止する。 */
-/* release_contract task-management-local-maintenance-fix: WakeSlot削除/掃除はローカルタスク管理として現在プロセストークンを先行し、資格情報失敗ノイズと掃除遅延を抑制する。 */
-/* release_contract wake-credential-context-record-verdict-crosscheck: Wake操作の資格情報コンテキストを横串化し、録画結果判定の後段TS検証を統合する。 */
-/* release_contract wake-log-polish-quality-wording-noise-reduce: 安定経路を変えず、Wake/品質/周期ログの誤解とノイズを抑制する。 */
-/* release_contract wake-stale-task-safe-cleanup: WakePlan世代登録成功後に旧世代/旧固定/同世代余剰WakeSlotだけを安全削除する。 */
-/* release_contract wake-plan-generation-slot-guard: WakeSlot世代をアプリ版固定からWakePlan単位へ移し、同世代余剰Wakeの実行をslotId照合で防ぐ。 */
-/* release_contract wake-generation-credential-probe: WakeSlotを世代化し、旧世代/削除不能タスクを現行Wake同期から分離する。 */
-/* release_contract wake-slot-rebuild: Primary/Backup固定名の上書き再登録をやめ、予約時刻入りのWakeSlotタスクを最大13本生成して既存固定名権限不整合を回避する。 */
-/* release_contract near-wake-immediate-rebuild: 近接予約のWake再構築はデバウンスせず即時実行し、スリープ前にWakeタスク実体を作る。 */
-/* release_contract wake-register-fallback-contract: Password方式Wake登録がアクセス拒否等で失敗した場合、InteractiveToken方式へフォールバックし、失敗時はWAKE_REGISTER_CRITICALで明示する。 */
-/* release_contract wake-fixed-slot-recovery-scheduler: Wakeタスク起動時は --wake-task を単一インスタンス合流シグナルとして扱い、既存TvAIrがいる場合は本体二重起動せず signal ファイル経由で常駐プロセスへ合流する。 */
-/* release_contract wake-plan-hash-trigger-limit: Wake計画ハッシュが不変なら短時間内のschtasks照合も省略し、再構築発火をさらに抑制する。 */
-/* release_contract wake-contract-validated-kept-tasks: 既存Wakeタスクを名前一致だけでkeptにせず、Action/WakeToRun/StartWhenAvailable/ExecutionTimeLimit/Triggerを検証して不一致なら再登録する。 */
-/* release_contract wake-task-nochange-skip: Wakeタスク計画が前回適用済みで実体も一致する場合は削除→再登録を省略し、不要なschtasks I/Oを抑制する。 */
-/* release_contract wake-task-clean-rebuild: TvAIr_Wake_* を再構築前に完全削除し、現在必要なWakeタスクだけ再登録する。 */
-/* release_contract STOP_PHASE_WAKE_GUARD: 録画停止フェーズ中のWake再構築は即時実行せず遅延・バッチ化する。 */
+﻿// Windows Task Scheduler には起床時刻スロットだけを登録する。
+// 予約・EPG・チェーン等の意味は WakeCoverage としてTvAIr内部に保持し、起床後は各共通経路で再評価する。
+// Wake計画は世代単位で差分適用し、現行世代の必要タスクを保護したまま旧世代・余剰タスクを整理する。
+// 登録結果は実体を再読取して検証し、資格情報方式が使えない場合だけ対話トークン方式へ限定フォールバックする。
+
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Security.Principal;
 using TvAIr.Core;
+using TvAIr.Epg;
+using TvAIr.Tuner;
 
 namespace TvAIr.Schedule;
 
 /// <summary>
-/// Windowsタスクスケジューラーへの登録・削除を schtasks.exe 経由で行うサービス。
-///
-/// ///   固定2タスク + 複数Trigger 方式を廃止し、
-///   release_contract:
-///   固定名 Primary/Backup/SystemEpg の削除・上書き方式を廃止し、
-///   Wake時刻・種別・予約IDを含む TvAIr_WakeSlot_* を「録画チューナー総数×2＋制御用1」の上限で生成する。
-///
-///   目的:
-///     - 旧固定名タスクの作成者/権限不整合に録画Wakeを巻き込ませないこと
-///     - 近接予約追加時に当日分Wakeを即時作成すること
-///     - Register後に Query /XML で WakeToRun / LogonType / RunLevel を検証できること
-///
-///   重要仕様:
-///     - TaskUserName / TaskPasswordEncrypted が未設定なら Wake タスクは作らない。
-///     - Password + LeastPrivilege + WakeToRun=true を本線とする。
-///     - 旧 TvAIr_Wake_Primary/Backup/SystemEpg は削除・上書きしない。
-///     - 管理対象タスクは TvAIr_WakeSlot_* のみ。
+/// Windows Task Schedulerへ起床時刻スロットを登録・検証・整理するサービス。
+/// 管理対象はTvAIr_WakeSlot_*で、予約やEPGの意味はWakeCoverageとしてTvAIr内部に保持する。
+/// 登録はPassword + LeastPrivilege + WakeToRun=trueを基本とし、登録後に実体を再読取して検証する。
+/// 過去形式の固定名タスクは現行計画へ混在させず、互換掃除の対象としてのみ扱う。
 /// </summary>
 public sealed class TaskSchedulerService
 {
-    private const string WakeTaskPrefix    = "TvAIr_Wake_";
-    private const string WakeEpgTaskPrefix = "TvAIr_Wake_Epg_";
-    private const string WakeRecTaskPrefix = "TvAIr_Wake_Rec_";
-
-    // release_contract:
-    // 固定名 Primary/Backup を毎回削除・上書きする方式は、Windows側で既存タスクの
-    // 作成者/権限が食い違った瞬間にアクセス拒否で詰む。録画失敗を避けるため、
-    // 新しい名前空間の時刻入りWakeSlotを必要分だけ生成し、既存固定名タスクには触らない。
+    // 現行Wakeタスクは時刻入りWakeSlot名で管理し、過去形式の固定名タスクとは分離する。
     private const string WakeSlotTaskPrefix = "TvAIr_WakeSlot_";
     private const string WakeProbeTaskPrefix = "TvAIr_WakeProbe_";
     private const string WakeSlotGenerationFallback = "g01013";
     private const int WakeSlotControlTaskCount = 1;
-    // release_contract:
-    // WakeSlot名に含める世代を計画内容ハッシュから安定世代へ変更する。
-    // 計画変更ごとに全WakeSlot名が変わると、同じ時刻/種別/予約のタスクまで毎回13本総入替になり、
-    // 連続予約追加時のTask Scheduler I/Oが重くなる。stale判定は active-slots で担保する。
+    // WakeSlot名は安定世代を使い、計画差分だけを登録・削除する。世代外判定はactive-slotsで行う。
     private const string WakeSlotStableGeneration = "gWAKEDIFF";
 
-    // 旧設計の固定名タスクと残骸掃除用プレフィックス
+    // 過去形式の固定名タスクを現行計画から隔離して整理するための識別子。
     private const string LegacyWakeTaskName    = "TvAIr_Wake";
     private const string LegacyWakeEpgTaskName = "TvAIr_Wake_Epg";
     private const string LegacyWakeRecTaskName = "TvAIr_Wake_Rec";
 
     private readonly ReservationStore   _store;
     private readonly IniSettingsService _ini;
+    private readonly IReadOnlyList<TunerProfile> _runtimeTunerProfiles;
     private readonly LogRepository      _log;
     private readonly UserEventLogService _userEvents;
+    private readonly EpgScheduler _epgScheduler;
 
     private static readonly TimeSpan FullValidationInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan WakeOverdueGrace = TimeSpan.FromMinutes(2);
 
     private string?  _lastPlanSignature;
     private DateTime _lastFullValidationUtc = DateTime.MinValue;
-    private bool     _legacyCleanupAttempted;
+    private bool     _legacyFixedTaskPresenceChecked;
     private bool     _missingCredentialLogged;
     private DateTime _lastRuntimeAuditUtc = DateTime.MinValue;
     private string _lastEpgWakePlanLogKey = string.Empty;
     private DateTime _lastEpgWakePlanLogUtc = DateTime.MinValue;
     private List<string> _lastWakeCoverageLines = new();
 
-    // release_contract:
+    // 
     // 自動検索予約更新・UI操作直後に schtasks の削除/登録を同期実行すると、
     // ブラウザ描画や外部LIVETest視聴と負荷が重なりやすい。
-    // Wake計画変更は数秒デバウンスし、同一更新内の多重要求を1回に集約する。
+    // Wake計画変更は有界時間内に集約し、同一更新内の多重要求を1回にまとめる。
     private readonly object _wakeUpdateGate = new();
     private readonly object _deferredWakeGate = new();
     private static readonly TimeSpan DeferredWakeDefaultDelay = TimeSpan.FromMinutes(2);
-    private static readonly TimeSpan DeferredWakeQuietPeriod = TimeSpan.FromSeconds(45);
-    private static readonly TimeSpan DeferredWakeMaxHold = TimeSpan.FromMinutes(10);
-    private static readonly TimeSpan DeferredWakeUrgentWindow = TimeSpan.FromMinutes(30);
     private static readonly TimeSpan DeferredWakeImmediateWindow = TimeSpan.FromMinutes(30);
 
     private DateTime _deferredWakeDueUtc = DateTime.MinValue;
-    private DateTime _deferredWakeFirstRequestUtc = DateTime.MinValue;
-    private DateTime _deferredWakeLastRequestUtc = DateTime.MinValue;
     private string _deferredWakeReason = string.Empty;
     private int _deferredWakeRequestCount;
+    private long _deferredWakePlanVersion;
 
-    // release_contract:
+    public event Action<long, string>? WakeRefreshCompleted;
+
+    // 
     // Wake再構築中に別操作が入った場合、単に already-running で捨てず、
     // 最新要求だけを保持し、実行完了後に1回だけ再実行する。
     private readonly object _wakePendingGate = new();
@@ -121,13 +79,17 @@ public sealed class TaskSchedulerService
     public TaskSchedulerService(
         ReservationStore   store,
         IniSettingsService ini,
+        IReadOnlyList<TunerProfile> runtimeTunerProfiles,
         LogRepository      log,
-        UserEventLogService userEvents)
+        UserEventLogService userEvents,
+        EpgScheduler epgScheduler)
     {
         _store = store;
         _ini   = ini;
+        _runtimeTunerProfiles = runtimeTunerProfiles ?? Array.Empty<TunerProfile>();
         _log   = log;
         _userEvents = userEvents;
+        _epgScheduler = epgScheduler;
     }
 
     /// <summary>
@@ -139,14 +101,14 @@ public sealed class TaskSchedulerService
         UpdateWakeTaskCore("direct");
     }
 
-    private void UpdateWakeTaskCore(string triggerReason)
+    private bool UpdateWakeTaskCore(string triggerReason)
     {
         if (!System.Threading.Monitor.TryEnter(_wakeUpdateGate))
         {
             var pendingCount = MarkWakeRebuildPending(triggerReason);
             _log.Add("TaskScheduler", "WAKE_REBUILD_PENDING_COALESCED",
                 $"reason=already-running latest={CompactOneLine(triggerReason)} pendingCount={pendingCount} action=run_latest_after_current rule=release_contract");
-            return;
+            return false;
         }
 
         try
@@ -154,13 +116,13 @@ public sealed class TaskSchedulerService
         if (StopPhaseGate.TryDeferWakeRebuild("TaskSchedulerService.UpdateWakeTask", msg => _log.Add("TaskScheduler", "StopPhase", msg)))
         {
             _log.Add("TaskScheduler", "Wake", "Wakeタスク再構築延期: reason=stop-phase-active");
-            return;
+            return false;
         }
 
-        if (!_legacyCleanupAttempted)
+        if (!_legacyFixedTaskPresenceChecked)
         {
-            TryDeleteLegacyFixedTasks();
-            _legacyCleanupAttempted = true;
+            DetectLegacyFixedTasks();
+            _legacyFixedTaskPresenceChecked = true;
         }
 
         if (!HasWakeCredentials())
@@ -173,7 +135,7 @@ public sealed class TaskSchedulerService
                 _missingCredentialLogged = true;
             }
             _lastPlanSignature = "";
-            return;
+            return true;
         }
 
         _missingCredentialLogged = false;
@@ -187,7 +149,10 @@ public sealed class TaskSchedulerService
         var validationExpired = DateTime.UtcNow - _lastFullValidationUtc >= FullValidationInterval;
         var nextDesired = desired.OrderBy(t => t.When).FirstOrDefault();
         var nextDesiredText = nextDesired is null ? "none" : $"{nextDesired.When:MM/dd HH:mm:ss} {nextDesired.Name}";
-        var systemEpgDesired = desired.Where(t => string.Equals(t.Kind, "SYSTEM_EPG", StringComparison.OrdinalIgnoreCase)).OrderBy(t => t.When).FirstOrDefault();
+        var systemEpgDesired = desired
+            .Where(t => t.Purposes.Contains("SYSTEM_EPG", StringComparer.OrdinalIgnoreCase))
+            .OrderBy(t => t.When)
+            .FirstOrDefault();
         var epgWakePlanKey = systemEpgDesired is null
             ? $"none|future={HasFutureScheduledDailyEpg(DateTime.Now)}"
             : $"included|{systemEpgDesired.When:O}|{systemEpgDesired.Name}";
@@ -201,9 +166,9 @@ public sealed class TaskSchedulerService
             _lastEpgWakePlanLogUtc = DateTime.UtcNow;
             if (systemEpgDesired is not null)
             {
-                var systemCount = desired.Count(t => string.Equals(t.Kind, "SYSTEM_EPG", StringComparison.OrdinalIgnoreCase));
+                var systemCount = desired.Count(t => t.Purposes.Contains("SYSTEM_EPG", StringComparer.OrdinalIgnoreCase));
                 _log.Add("TaskScheduler", "EPG_WAKE_PLAN",
-                    $"result=INCLUDED systemEpgWakeCount={systemCount} next={systemEpgDesired.When:MM/dd HH:mm:ss} task={systemEpgDesired.Name} reservation=R{systemEpgDesired.Reservation.Id} title={CompactOneLine(systemEpgDesired.Reservation.Title)} warning=False reason=system_epg_wake_in_desired_plan rule=wake_log_polish_quality_wording_noise_reduce");
+                    $"result=INCLUDED systemEpgWakeCount={systemCount} next={systemEpgDesired.When:MM/dd HH:mm:ss} task={systemEpgDesired.Name} reservation={FormatWakeReservationId(systemEpgDesired.ReservationId)} title={CompactOneLine(systemEpgDesired.Title)} warning=False reason=system_epg_wake_in_desired_plan rule=wake_log_polish_quality_wording_noise_reduce");
             }
             else if (HasFutureScheduledDailyEpg(DateTime.Now))
             {
@@ -217,7 +182,7 @@ public sealed class TaskSchedulerService
         _log.Add("TaskScheduler", "WAKE_PLAN_HASH",
             $"class=summary before={previousHash} after={currentHash} changed={planChanged} validationExpired={validationExpired} desired={desired.Count} recordingTunerCount={recordingTunerCountForWakePlan} targetTaskCount={targetWakeSlotLimit} emergencyLimit={emergencyWakeSlotLimit} formula=recording_tuners_target_emergency_limit next={nextDesiredText}");
 
-        // release_contract:
+        // 
         // 予約追加/キャンセルを短時間に繰り返した場合、Wake再構築自体を遅延集約していても
         // Windowsタスクスケジューラの一覧には旧WakeSlotが先に積み上がって見える。
         // plan-hash fast skip や遅延待ちに入る前に、現行desired以外のWakeSlotが残っているかだけを軽量確認し、
@@ -225,7 +190,7 @@ public sealed class TaskSchedulerService
         CleanupWakeSlotOverflowIfNeeded(desiredGeneration, desired.Select(t => t.Name).ToHashSet(StringComparer.OrdinalIgnoreCase),
             reason: planChanged ? "plan_changed_preflight" : validationExpired ? "validation_preflight" : "fast_skip_preflight");
 
-        // release_contract:
+        // 
         // 録画終了後Tick・通常Tickなど、予約構造が変わっていない発火では
         // schtasks /Query すら行わない。Windows側の実体照合は5分に1回だけ通す。
         // 起動直後・予約構造変更時・検証期限切れ時は従来どおり実体照合し、
@@ -234,7 +199,7 @@ public sealed class TaskSchedulerService
         {
             _log.Add("TaskScheduler", "Wake",
                 $"Wakeタスク再構築省略: reason=plan-hash-nochange fast=true desired={desired.Count} next={nextDesiredText} rule=wake_log_polish_quality_wording_noise_reduce");
-            return;
+            return true;
         }
 
         var existing = GetManagedTaskNames(desiredGeneration);
@@ -244,12 +209,12 @@ public sealed class TaskSchedulerService
         var missingDesired = desiredNames.Where(name => !existing.Contains(name)).OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToList();
         var unexpectedExisting = existing.Where(name => !desiredNames.Contains(name)).OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToList();
 
-        // release_contract:
+        // 
         // 「登録できている」だけではWake保証にならない。Windows側で予定時刻を過ぎても
         // LastRunTime が未実行/0x41303 のまま残っている管理対象タスクを、削除前に監査する。
         AuditManagedWakeRuntimeState(existing, desiredNames, DateTime.Now, validationExpired || planChanged);
 
-        // release_contract:
+        // 
         // 名前と予定時刻が同じでも、Windowsタスクの中身が旧契約のままならWake保証にならない。
         // 既存タスクをkept扱いにする前に、Action / Arguments / StartBoundary / WakeToRun /
         // StartWhenAvailable / ExecutionTimeLimit / LogonType / RunLevel を検証し、
@@ -269,19 +234,20 @@ public sealed class TaskSchedulerService
             }
         }
 
-        // release_contract + release_contract:
+        // release_contract + 
         // 同じ予約状態でも、名前一致だけでは省略しない。契約検証まで一致した場合だけkeptにする。
         if (!planChanged && missingDesired.Count == 0 && unexpectedExisting.Count == 0 && contractMismatchDesired.Count == 0)
         {
-            // release_contract:
+            // 
             // 現行Wakeは正しく保持されていても、旧世代/旧固定/同世代余剰WakeSlotが
             // タスクスケジューラ上に積み上がると、一覧上も運用上も不安定に見える。
             // 契約検証OKのタイミングでだけ、現行desiredを保護しながら、録画チューナー数から算出した正式上限で安全掃除する。
             CleanupStaleWakeSlotTasksAfterSuccessfulApply(desiredGeneration, desiredNames, reason: "validated_nochange");
+            AuditWakePostCleanupConvergence(desiredGeneration, desiredNames, preCleanupUnexpectedCount: unexpectedExisting.Count, reason: "validated_nochange");
             _lastFullValidationUtc = DateTime.UtcNow;
             _log.Add("TaskScheduler", "Wake",
                 $"Wakeタスク再構築省略: reason=nochange contractValidated=true managed={existing.Count} desired={desired.Count} next={nextDesiredText} rule=wake_log_polish_quality_wording_noise_reduce");
-            return;
+            return true;
         }
 
         if (!planChanged || contractMismatchDesired.Count > 0)
@@ -290,8 +256,8 @@ public sealed class TaskSchedulerService
                 $"Wakeタスク実体差異検出: class=audit missing={missingDesired.Count} unexpected={unexpectedExisting.Count} contractMismatch={contractMismatchDesired.Count} managed={existing.Count} desired={desired.Count} rule=wake_log_polish_quality_wording_noise_reduce");
         }
 
-        // release_contract:
-        // release_contract:
+        // 
+        // 
         // 現行Wake保護を優先するため、Wake同期本線では削除を先行しない。
         // current generation の差分外タスクも登録成功後の後処理対象として扱い、旧世代/旧名の削除不能は
         // 現行Wake登録の成否と分離する。削除リトライで録画直前Wakeを巻き込まない。
@@ -309,7 +275,7 @@ public sealed class TaskSchedulerService
             _lastPlanSignature = deleteFailedCount == 0 ? "" : null;
             if (deleteFailedCount == 0)
                 _lastFullValidationUtc = DateTime.UtcNow;
-            return;
+            return true;
         }
 
         var registerNames = missingDesired
@@ -359,7 +325,7 @@ public sealed class TaskSchedulerService
             .FirstOrDefault();
 
         var keptCount = desired.Count - specsToRegister.Count;
-        // release_contract:
+        // 
         // 差分登録が「後方の1本」だけ発生した場合でも、サマリの next は registeredNext ではなく
         // 現在有効な desired 全体の最短Wakeを表示する。ユーザー/監査が「次に起きるべき時刻」を
         // 誤読しないよう、登録差分と実効最短Wakeを分離する。
@@ -384,9 +350,9 @@ public sealed class TaskSchedulerService
                 .OrderBy(r => r.Spec.When)
                 .Select(r => r.Spec)
                 .FirstOrDefault();
-            var failedTarget = firstFailed is null ? "none" : $"{firstFailed.When:MM/dd HH:mm:ss} {firstFailed.Name} R{firstFailed.Reservation.Id} {CompactOneLine(firstFailed.Reservation.Title)}";
+            var failedTarget = firstFailed is null ? "none" : $"{firstFailed.When:MM/dd HH:mm:ss} {firstFailed.Name} {FormatWakeReservationId(firstFailed.ReservationId)} {CompactOneLine(firstFailed.Title)}";
 
-            // release_contract:
+            // 
             // Wake registration failures are Task Scheduler diagnostics, not routine user-operation events.
             // Do not surface raw AccessDenied / kept / failed counters in the user log on every rebuild.
             // A user-facing wake event must be emitted only from a future WakeCoverage guarantee layer
@@ -396,7 +362,7 @@ public sealed class TaskSchedulerService
         }
         else if (deleteFailedCount > 0)
         {
-            // release_contract:
+            // 
             // 実証ログで、予定Wakeは kept/register 済みなのに、過去または差分外の WakeSlot 削除だけが
             // アクセス拒否になるケースを確認した。これは「次の復帰タスクが無い」危険とは別種なので、
             // 登録失敗と同じ WAKE_REGISTER_CRITICAL にはしない。desired 側の契約が満たせていれば
@@ -410,6 +376,7 @@ public sealed class TaskSchedulerService
         {
             WriteActiveWakePlan(desiredGeneration, desired);
             CleanupStaleWakeSlotTasksAfterSuccessfulApply(desiredGeneration, desiredNames, reason: "post_register_success");
+            AuditWakePostCleanupConvergence(desiredGeneration, desiredNames, preCleanupUnexpectedCount: unexpectedExisting.Count, reason: "post_register_success");
             _lastFullValidationUtc = DateTime.UtcNow;
         }
         }
@@ -423,6 +390,8 @@ public sealed class TaskSchedulerService
                 UpdateWakeTaskCore($"pending_flush:{pendingReason}");
             }
         }
+
+        return true;
     }
 
     private int MarkWakeRebuildPending(string reason)
@@ -456,42 +425,38 @@ public sealed class TaskSchedulerService
         }
     }
 
-    public void RequestWakeTaskRefreshSoon(string source, string action, TimeSpan? delay = null)
+    public void RequestWakeTaskRefreshSoon(string source, string action, TimeSpan? delay = null, long wakePlanVersion = 0)
     {
         var effectiveDelay = delay ?? DeferredWakeDefaultDelay;
         var reason = $"source={source} action={action}";
 
-        // release_contract:
+        // 
         // Wake再構築の遅延集約は大量更新時のI/O抑制には有効だが、
         // 近接予約では「スリープに入る前にWakeタスクが存在しない」事故になる。
         // 直近Wakeが30分以内なら、低優先扱いのAdd/Updateであっても同期的に再構築する。
-        if (TryRunImmediateWakeRefreshForNearWake(reason, effectiveDelay))
+        if (TryRunImmediateWakeRefreshForNearWake(reason, effectiveDelay, wakePlanVersion))
             return;
 
         var now = DateTime.UtcNow;
-        var due = now.Add(effectiveDelay);
         int count;
         DateTime currentDue;
         lock (_deferredWakeGate)
         {
-            // release_contract:
-            // 連続ON/OFF操作中に、前のdueがちょうどTickで拾われて schtasks 削除/登録が走ると、
-            // UIちらつき・LIVETestカクつき・操作中の見た目ズレを誘発する。
-            // 常に最後の操作時刻を記録し、実行側でも一定の無操作期間を確認する。
-            if (_deferredWakeFirstRequestUtc == DateTime.MinValue)
-                _deferredWakeFirstRequestUtc = now;
-            _deferredWakeDueUtc = due;
-            _deferredWakeLastRequestUtc = now;
+            // The first request opens one bounded coalescing window. Later requests are merged
+            // without moving the due time, so Wake refresh always runs within effectiveDelay.
+            if (_deferredWakeDueUtc == DateTime.MinValue)
+                _deferredWakeDueUtc = now.Add(effectiveDelay);
             _deferredWakeReason = reason;
             _deferredWakeRequestCount++;
+            _deferredWakePlanVersion = Math.Max(_deferredWakePlanVersion, wakePlanVersion);
             count = _deferredWakeRequestCount;
             currentDue = _deferredWakeDueUtc;
         }
 
-        _log.Add("TaskScheduler", "WakeDebounce",
-            $"Wakeタスク再構築を遅延予約: {reason} dueInMs={(int)effectiveDelay.TotalMilliseconds} requestCount={count} dueUtc={currentDue:O} quietMs={(int)DeferredWakeQuietPeriod.TotalMilliseconds} nearWindowMin={(int)DeferredWakeImmediateWindow.TotalMinutes} rule=release_contract");
+        _log.Add("TaskScheduler", "WakeCoalesce",
+            $"Wakeタスク再構築を有界集約: {reason} maxDelayMs={(int)effectiveDelay.TotalMilliseconds} requestCount={count} dueUtc={currentDue:O} duePolicy=first_request_fixed nearWindowMin={(int)DeferredWakeImmediateWindow.TotalMinutes} rule=release_contract");
 
-        // release_contract:
+        // 
         // Wake本体の再構築を遅延させる場合でも、一覧上の旧WakeSlot増殖はすぐ分かる。
         // 新規登録は行わず、現在のdesiredに含まれない残骸だけを安全掃除する。
         var desiredNow = BuildDesiredTasks(DateTime.Now, emitAudit: false);
@@ -500,7 +465,7 @@ public sealed class TaskSchedulerService
         CleanupWakeSlotOverflowIfNeeded(generationNow, desiredNamesNow, reason: "deferred_request_pre_cleanup");
     }
 
-    private bool TryRunImmediateWakeRefreshForNearWake(string reason, TimeSpan requestedDelay)
+    private bool TryRunImmediateWakeRefreshForNearWake(string reason, TimeSpan requestedDelay, long wakePlanVersion)
     {
         var nowLocal = DateTime.Now;
         var nextWake = BuildDesiredTasks(nowLocal, emitAudit: false).OrderBy(t => t.When).FirstOrDefault();
@@ -512,20 +477,38 @@ public sealed class TaskSchedulerService
             return false;
 
         int clearedRequests;
+        long clearedWakePlanVersion;
         lock (_deferredWakeGate)
         {
             clearedRequests = _deferredWakeRequestCount;
+            clearedWakePlanVersion = _deferredWakePlanVersion;
             _deferredWakeDueUtc = DateTime.MinValue;
-            _deferredWakeFirstRequestUtc = DateTime.MinValue;
-            _deferredWakeLastRequestUtc = DateTime.MinValue;
             _deferredWakeReason = string.Empty;
             _deferredWakeRequestCount = 0;
+            _deferredWakePlanVersion = 0;
+        }
+        var completionWakePlanVersion = Math.Max(clearedWakePlanVersion, wakePlanVersion);
+
+        _log.Add("TaskScheduler", "WakeCoalesce",
+            $"Wakeタスク再構築を即時実行: {reason} reason=near-wake next={nextWake.When:MM/dd HH:mm:ss} task={nextWake.Name} kind={nextWake.Kind} res={FormatWakeReservationId(nextWake.ReservationId)} delaySec={(int)Math.Max(0, nextDelay.TotalSeconds)} requestedDelayMs={(int)requestedDelay.TotalMilliseconds} clearedDeferredRequests={clearedRequests} action=update_now rule=release_contract");
+
+        if (UpdateWakeTaskCore($"near-wake:{reason}"))
+        {
+            if (completionWakePlanVersion > 0)
+                WakeRefreshCompleted?.Invoke(completionWakePlanVersion, $"near-wake:{reason}");
+            return true;
         }
 
-        _log.Add("TaskScheduler", "WakeDebounce",
-            $"Wakeタスク再構築を即時実行: {reason} reason=near-wake next={nextWake.When:MM/dd HH:mm:ss} task={nextWake.Name} kind={nextWake.Kind} res=R{nextWake.Reservation.Id} delaySec={(int)Math.Max(0, nextDelay.TotalSeconds)} requestedDelayMs={(int)requestedDelay.TotalMilliseconds} clearedDeferredRequests={clearedRequests} action=update_now rule=release_contract");
-
-        UpdateWakeTaskCore($"near-wake:{reason}");
+        // 別Wake再構築またはstop-phaseで即時適用できなかった場合は、
+        // requestを失わず短い有界遅延へ戻す。
+        lock (_deferredWakeGate)
+        {
+            if (_deferredWakeDueUtc == DateTime.MinValue)
+                _deferredWakeDueUtc = DateTime.UtcNow.AddSeconds(1);
+            _deferredWakeReason = reason;
+            _deferredWakeRequestCount += Math.Max(1, clearedRequests + 1);
+            _deferredWakePlanVersion = Math.Max(_deferredWakePlanVersion, completionWakePlanVersion);
+        }
         return true;
     }
 
@@ -541,45 +524,39 @@ public sealed class TaskSchedulerService
     {
         string reason;
         int count;
+        long wakePlanVersion;
         var now = DateTime.UtcNow;
         lock (_deferredWakeGate)
         {
             if (_deferredWakeDueUtc == DateTime.MinValue || now < _deferredWakeDueUtc)
                 return false;
 
-            var quietFor = now - _deferredWakeLastRequestUtc;
-            if (quietFor < DeferredWakeQuietPeriod)
-            {
-                _deferredWakeDueUtc = _deferredWakeLastRequestUtc.Add(DeferredWakeQuietPeriod);
-                _log.Add("TaskScheduler", "WakeDebounce",
-                    $"Wakeタスク遅延再構築を再延期: reason=quiet-period lastRequestUtc={_deferredWakeLastRequestUtc:O} quietMs={(int)quietFor.TotalMilliseconds} nextDueUtc={_deferredWakeDueUtc:O} requestCount={_deferredWakeRequestCount} rule=release_contract");
-                return false;
-            }
-
-            var firstRequestUtc = _deferredWakeFirstRequestUtc;
-            var heldFor = firstRequestUtc == DateTime.MinValue ? TimeSpan.Zero : now - firstRequestUtc;
-            var nextWake = BuildDesiredTasks(DateTime.Now, emitAudit: false).OrderBy(t => t.When).FirstOrDefault();
-            var nextWakeDelay = nextWake is null ? TimeSpan.MaxValue : nextWake.When - DateTime.Now;
-            if (nextWakeDelay > DeferredWakeUrgentWindow && heldFor < DeferredWakeMaxHold)
-            {
-                _deferredWakeDueUtc = now.Add(DeferredWakeDefaultDelay);
-                _log.Add("TaskScheduler", "WakeDebounce",
-                    $"Wakeタスク遅延再構築を再延期: reason=far-next-wake next={(nextWake is null ? "none" : nextWake.When.ToString("MM/dd HH:mm:ss"))} nextDelayMin={(nextWakeDelay == TimeSpan.MaxValue ? -1 : (int)nextWakeDelay.TotalMinutes)} heldMs={(int)heldFor.TotalMilliseconds} nextDueUtc={_deferredWakeDueUtc:O} requestCount={_deferredWakeRequestCount} rule=release_contract");
-                return false;
-            }
-
             reason = _deferredWakeReason;
             count = _deferredWakeRequestCount;
+            wakePlanVersion = _deferredWakePlanVersion;
             _deferredWakeDueUtc = DateTime.MinValue;
-            _deferredWakeFirstRequestUtc = DateTime.MinValue;
-            _deferredWakeLastRequestUtc = DateTime.MinValue;
             _deferredWakeReason = string.Empty;
             _deferredWakeRequestCount = 0;
+            _deferredWakePlanVersion = 0;
         }
 
-        _log.Add("TaskScheduler", "WakeDebounce",
-            $"Wakeタスク遅延再構築を実行: {reason} mergedRequests={count} rule=release_contract");
-        UpdateWakeTaskCore($"deferred:{reason}");
+        _log.Add("TaskScheduler", "WakeCoalesce",
+            $"Wakeタスク有界集約を実行: {reason} mergedRequests={count} wakePlanVersion={wakePlanVersion} duePolicy=first_request_fixed rule=release_contract");
+        if (!UpdateWakeTaskCore($"deferred:{reason}"))
+        {
+            lock (_deferredWakeGate)
+            {
+                if (_deferredWakeDueUtc == DateTime.MinValue)
+                    _deferredWakeDueUtc = DateTime.UtcNow.AddSeconds(1);
+                _deferredWakeReason = reason;
+                _deferredWakeRequestCount += Math.Max(1, count);
+                _deferredWakePlanVersion = Math.Max(_deferredWakePlanVersion, wakePlanVersion);
+            }
+            return false;
+        }
+
+        if (wakePlanVersion > 0)
+            WakeRefreshCompleted?.Invoke(wakePlanVersion, $"deferred:{reason}");
         return true;
     }
 
@@ -596,14 +573,14 @@ public sealed class TaskSchedulerService
 
         return new WakeTaskInfo(
             WakeAt:            next.When,
-            ReservationId:     next.Reservation.Id,
-            Title:             next.Reservation.Title,
-            StartTime:         next.Reservation.StartTime,
+            ReservationId:     next.ReservationId ?? 0,
+            Title:             next.Title,
+            StartTime:         next.StartTime,
             WakeMinutesBefore: _ini.WakeAdditionalSeconds / 60);
     }
 
     /// <summary>
-    /// release_contract: プラグインSDK/読み取りAPI向けのWake計画スナップショット。
+    /// プラグインSDK/読み取りAPI向けのWake計画スナップショット。
     /// Windowsタスクの直接操作情報ではなく、TvAIrが現在必要と判断している安全なWake計画だけを返す。
     /// </summary>
     public IReadOnlyList<WakeTaskPlanItem> GetWakePlanSnapshot(DateTime? from = null, DateTime? to = null, int limit = 100)
@@ -621,26 +598,31 @@ public sealed class TaskSchedulerService
             .Select(t => new WakeTaskPlanItem(
                 At: t.When,
                 Kind: t.Kind,
-                ReservationId: t.Reservation.Id,
-                Title: t.Reservation.Title,
+                ReservationId: t.ReservationId,
+                Title: t.Title,
                 TaskName: t.Name))
             .ToList();
     }
 
     private int GetRecordingWakeTunerCount()
     {
-        // release_contract:
+        // 
         // 通常Wake運用の目標は録画チューナー数。Viewingチューナーは録画Wakeの収容数へ入れない。
         // Recording/空欄など、Viewing以外は録画用として扱う。
-        var count = _ini.Tuners
-            .Count(t => !string.Equals(IniSettingsService.NormalizeTunerRole(t.Role), "Viewing", StringComparison.OrdinalIgnoreCase));
+        // SETTINGS_RUNTIME_TUNER_TOPOLOGY_CONTRACT
+        // Wake容量は保存済みINI行ではなく、このプロセス起動時に確定してTunerPool/Allocationへ渡したRuntime topologyを正本とする。
+        // 再起動待ちの保存値や、初回起動時appsettings fallbackを別経路で数え直してはならない。
+        var count = _runtimeTunerProfiles.Count(t =>
+            string.Equals(IniSettingsService.NormalizeTunerRole(t.Role), "Recording", StringComparison.OrdinalIgnoreCase) &&
+            TunerDisplayName.IsKnownGroup(t.Group) &&
+            !string.IsNullOrWhiteSpace(t.BonDriverFileName));
 
         return Math.Max(0, count);
     }
 
     private int GetWakeSlotLimit()
     {
-        // release_contract:
+        // 
         // 通常目標は既存Wake運用寄せで「録画チューナー数ぶんの起床時刻スロット」。
         // 13本(録画チューナー数×2+制御1)は常時目標ではなく、異常/非常時の上限としてログに残す。
         var recordingTunerCount = GetRecordingWakeTunerCount();
@@ -653,20 +635,77 @@ public sealed class TaskSchedulerService
         return Math.Max(WakeSlotControlTaskCount, recordingTunerCount * 2 + WakeSlotControlTaskCount);
     }
 
+    public PowerActionWakeProtectionBoundary? GetNextPowerActionWakeProtectionBoundary(DateTime now)
+    {
+        var preRecMin = SettingsDefaults.ResolveEnabledEpgPreRecordMinutes(_ini.EpgPreRecordMinutes);
+        var preStartSeconds = Math.Max(0, _ini.PreStartMarginSeconds);
+        var wakeAdditionalSeconds = Math.Max(0, _ini.WakeAdditionalSeconds);
+        var candidates = new List<PowerActionWakeProtectionBoundary>();
+
+        var scheduled = _store.GetByStatus(ReservationStatus.Scheduled)
+            .Where(r => r.IsEnabled)
+            .Where(r => r.Source != ReservationSource.Epg)
+            .Where(r => !r.IsConflicted)
+            .Where(r => !string.IsNullOrWhiteSpace(r.TunerName))
+            .Where(r => r.StartTime > now)
+            .ToList();
+
+        foreach (var reservation in scheduled)
+        {
+            var recordingWakeAt = reservation.StartTime
+                .AddSeconds(-preStartSeconds)
+                .AddSeconds(-wakeAdditionalSeconds);
+            candidates.Add(new PowerActionWakeProtectionBoundary(
+                "REC", recordingWakeAt, reservation.StartTime, reservation.Id, reservation.Title));
+
+            if (_ini.EpgPreRecordMinutes > 0
+                && !reservation.IsUserChain
+                && (reservation.Source == ReservationSource.Manual
+                    || reservation.Source == ReservationSource.KeywordSearch
+                    || reservation.Source == ReservationSource.Keyword))
+            {
+                var preRecordWakeAt = reservation.StartTime
+                    .AddMinutes(-preRecMin)
+                    .AddSeconds(-wakeAdditionalSeconds);
+                candidates.Add(new PowerActionWakeProtectionBoundary(
+                    "PRE_EPG", preRecordWakeAt, reservation.StartTime, reservation.Id, reservation.Title));
+            }
+        }
+
+        foreach (var scheduledAt in _epgScheduler.GetScheduledDailyWakeStarts(now))
+        {
+            var systemEpgWakeAt = scheduledAt.AddMinutes(-1).AddSeconds(-wakeAdditionalSeconds);
+            candidates.Add(new PowerActionWakeProtectionBoundary(
+                "SYSTEM_EPG", systemEpgWakeAt, scheduledAt, null, "定時EPG取得"));
+        }
+
+        return candidates
+            .OrderBy(x => x.WakeAt)
+            .ThenBy(x => KindPriority(x.Purpose))
+            .ThenBy(x => x.StartTime)
+            .ThenBy(x => x.ReservationId ?? int.MaxValue)
+            .FirstOrDefault();
+    }
+
     private List<WakeTaskSpec> BuildDesiredTasks(DateTime now, bool emitAudit = true)
     {
-        var scheduled = _store.GetByStatus(ReservationStatus.Scheduled)
-            .Where(r => !r.IsConflicted)
+        var allScheduled = _store.GetByStatus(ReservationStatus.Scheduled)
             .Where(r => r.IsEnabled)
             .Where(r => r.StartTime > now)
+            .ToList();
+
+        // 録画・録画前EPGのWakeは実際に録画可能な予約だけを対象とする。
+        // SYSTEM_EPG WakeはDaily ownerが確定したPlannedStartの投影であり、
+        // INIのcanonicalやSystemDailyEpg予約行からDaily計画を再構成しない。
+        var scheduled = allScheduled
+            .Where(r => !r.IsConflicted)
             .Where(r => !string.IsNullOrWhiteSpace(r.TunerName))
             .ToList();
 
-        var preRecMin  = (_ini.EpgPreRecordMinutes is 5 or 10 or 15 or 20 ? _ini.EpgPreRecordMinutes : 15);
+        var preRecMin = SettingsDefaults.ResolveEnabledEpgPreRecordMinutes(_ini.EpgPreRecordMinutes);
         var preMarSec  = Math.Max(0, _ini.PreStartMarginSeconds);
         var wakeAddSec = Math.Max(0, _ini.WakeAdditionalSeconds);
 
-        // release_contract:
         // WakeTaskSpec は Task Scheduler 登録専用。予約/目的/予約もと/チェーン等のメタ属性は
         // WakeCoverageItem に分離し、Reservation 契約を要求する既存メソッドへ疑似Specを流し込まない。
         // PRE_EPG / REC / SYSTEM_EPG は Task Scheduler の登録単位にせず、WakeCoverage として
@@ -680,11 +719,28 @@ public sealed class TaskSchedulerService
             coverageCandidates.Add(new WakeCoverageItem(
                 Purpose: purpose,
                 When: when,
-                Reservation: reservation,
-                SourceLabel: NormalizeWakeSourceLabel(reservation.Source),
+                ReservationId: reservation.Id,
+                Title: reservation.Title,
+                StartTime: reservation.StartTime,
+                SourceLabel: NormalizeWakeSourceLabel(reservation),
                 Route: ResolveWakeCoverageRoute(reservation),
                 ChainRoot: reservation.UserChainRootId,
                 ChainPrev: reservation.UserChainPreviousId));
+        }
+
+        void AddSystemEpgCoverage(DateTime when, DateTime scheduledAt)
+        {
+            if (when <= now) return;
+            coverageCandidates.Add(new WakeCoverageItem(
+                Purpose: "SYSTEM_EPG",
+                When: when,
+                ReservationId: null,
+                Title: "定時EPG取得",
+                StartTime: scheduledAt,
+                SourceLabel: "システム",
+                Route: "system_epg",
+                ChainRoot: null,
+                ChainPrev: null));
         }
 
         var userReservations = scheduled
@@ -709,28 +765,19 @@ public sealed class TaskSchedulerService
             }
         }
 
-        var scheduledDailyEpg = scheduled
-            .Where(IsDailyEpgScheduleEntry)
-            .OrderBy(r => r.StartTime)
-            .ThenBy(r => r.Id)
-            .ToList();
-
-        var nextDailyEpgGroup = scheduledDailyEpg
-            .GroupBy(r => r.StartTime.AddSeconds(-wakeAddSec))
-            .OrderBy(g => g.Key)
-            .FirstOrDefault(g => g.Key > now);
-
-        if (nextDailyEpgGroup is not null)
+        foreach (var scheduledAt in _epgScheduler.GetScheduledDailyWakeStarts(now))
         {
-            var representative = nextDailyEpgGroup.OrderBy(r => r.Id).First();
-            AddCoverage("SYSTEM_EPG", nextDailyEpgGroup.Key, representative);
+            // Daily ownerが確定した実予定時刻の1分前を準備基準とし、Wake追加秒を差し引く。
+            // WakeはPlannerではなく、確定済みDaily計画の外部投影に徹する。
+            var systemEpgWakeAt = scheduledAt.AddMinutes(-1).AddSeconds(-wakeAddSec);
+            AddSystemEpgCoverage(systemEpgWakeAt, scheduledAt);
         }
 
         var targetWakeSlotLimit = GetWakeSlotLimit();
         var emergencyWakeSlotLimit = GetWakeSlotEmergencyLimit();
 
-        // release_contract:
-        // release_contractでは全未来Coverageを必須扱いし、録画チューナー数ぶんに収まらないものを
+        // 
+        // 現在のWake設計では全未来Coverageを必須扱いし、録画チューナー数ぶんに収まらないものを
         // missingCoverage として出していた。これは「次に起こす」既存Wake運用寄せの意味ではなく、
         // 単なる未来予約の未登録一覧になってしまう。
         // ここでは、近い起床目的をWakeセッションへ束ね、録画チューナー数ぶんの直近Wakeだけを
@@ -739,8 +786,8 @@ public sealed class TaskSchedulerService
             .Where(c => c.When > now)
             .OrderBy(c => c.When)
             .ThenBy(c => KindPriority(c.Purpose))
-            .ThenBy(c => c.Reservation.StartTime)
-            .ThenBy(c => c.Reservation.Id)
+            .ThenBy(c => c.StartTime)
+            .ThenBy(c => c.ReservationId ?? int.MaxValue)
             .ToList();
 
         var wakeSessionGroups = BuildWakeCoverageSessionGroups(orderedCoverage, TimeSpan.FromMinutes(10));
@@ -756,25 +803,41 @@ public sealed class TaskSchedulerService
         {
             var representative = group.Items
                 .OrderBy(c => KindPriority(c.Purpose))
-                .ThenBy(c => c.Reservation.StartTime)
-                .ThenBy(c => c.Reservation.Id)
+                .ThenBy(c => c.StartTime)
+                .ThenBy(c => c.ReservationId ?? int.MaxValue)
                 .First();
 
+            var purposes = group.Items
+                .Select(c => c.Purpose)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(p => KindPriority(p))
+                .ToArray();
             var slotSpec = new WakeTaskSpec(
                 Name: BuildWakeSlotTaskName(planGeneration, "WAKE", group.WakeAt),
                 Kind: "WAKE",
                 When: group.WakeAt,
                 TunerName: "ALL",
-                Reservation: representative.Reservation,
+                ReservationId: representative.ReservationId,
+                Title: representative.Title,
+                StartTime: representative.StartTime,
+                Purposes: purposes,
                 CoverageCount: group.Items.Count);
             desired.Add(slotSpec);
 
             var covers = string.Join(",", group.Items
                 .OrderBy(c => c.When)
                 .ThenBy(c => KindPriority(c.Purpose))
-                .ThenBy(c => c.Reservation.Id)
-                .Select(c => $"R{c.Reservation.Id}:{c.Purpose}:{c.SourceLabel}:route={c.Route}:chainRoot={FormatNullableId(c.ChainRoot)}:chainPrev={FormatNullableId(c.ChainPrev)}:due={c.When:MM/dd HH:mm:ss}:{CompactOneLine(c.Reservation.Title)}"));
-            coverageLines.Add($"slot={group.WakeAt:O}; task={slotSpec.Name}; requiredCoverage=True; covers={covers}");
+                .ThenBy(c => c.ReservationId ?? int.MaxValue)
+                .Select(c => $"{FormatWakeReservationId(c.ReservationId)}:{c.Purpose}:{c.SourceLabel}:route={c.Route}:chainRoot={FormatNullableId(c.ChainRoot)}:chainPrev={FormatNullableId(c.ChainPrev)}:due={c.When:MM/dd HH:mm:ss}:{CompactOneLine(c.Title)}"));
+            var systemEpgStart = group.Items
+                .Where(c => string.Equals(c.Purpose, "SYSTEM_EPG", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(c => c.StartTime)
+                .Select(c => (DateTime?)c.StartTime)
+                .FirstOrDefault();
+            // wake-active-coverage.txt is the wake-session authority used after resume.  Keep the
+            // scheduled SYSTEM_EPG start explicitly on the slot so the existing instance can bridge
+            // wake -> scheduled run without guessing from task lead-time settings.
+            coverageLines.Add($"slot={group.WakeAt:O}; task={slotSpec.Name}; requiredCoverage=True; systemEpgStart={(systemEpgStart.HasValue ? systemEpgStart.Value.ToString("O") : "-")}; covers={covers}");
         }
 
         if (emitAudit)
@@ -823,16 +886,6 @@ public sealed class TaskSchedulerService
         return result;
     }
 
-    private static string BuildWakePlanGeneration(IEnumerable<WakeTaskSpec> specs)
-    {
-        // release_contract:
-        // 計画ハッシュ由来の世代名は、予約追加/キャンセルのたびに同一内容タスクの名前まで変え、
-        // 13本全削除→13本全登録を誘発していた。
-        // Wakeの鮮度判定は wake-active-slots.txt のスロットID照合で行うため、
-        // タスク名側の世代は安定値に固定し、差分適用を有効にする。
-        _ = specs;
-        return WakeSlotStableGeneration;
-    }
 
     private static string ResolveDesiredWakeGeneration(IReadOnlyCollection<WakeTaskSpec> desired)
     {
@@ -865,42 +918,25 @@ public sealed class TaskSchedulerService
          : string.Equals(kind, "WAKE", StringComparison.OrdinalIgnoreCase) ? 3
          : 9;
 
-    private static string NormalizeWakeSourceLabel(ReservationSource source)
-        => source switch
-        {
-            ReservationSource.Manual => "番組表",
-            ReservationSource.KeywordSearch or ReservationSource.Keyword => "自動検索",
-            ReservationSource.Program => "プログラム",
-            ReservationSource.Epg => "システム",
-            _ => source.ToString()
-        };
+    private static string NormalizeWakeSourceLabel(Reservation reservation)
+        => ReservationOriginClassifier.GetUserSourceLabel(reservation);
 
     private static string ResolveWakeCoverageRoute(Reservation reservation)
-        => reservation.IsUserChain ? "user_chain"
-         : reservation.Source == ReservationSource.Manual ? "program_guide"
-         : reservation.Source is ReservationSource.KeywordSearch or ReservationSource.Keyword ? "auto_search"
-         : reservation.Source == ReservationSource.Program ? "program"
-         : reservation.Source == ReservationSource.Epg ? "system_epg"
-         : reservation.Source.ToString();
+        => reservation.IsUserChain ? "user_chain" : ReservationOriginClassifier.GetOperationalRoute(reservation);
 
     private static string FormatNullableId(int? id)
         => id.HasValue && id.Value > 0 ? $"R{id.Value}" : "-";
 
-    private static bool IsDailyEpgScheduleEntry(Reservation r)
-        => r.Source == ReservationSource.Epg
-           && r.Title.StartsWith("EPG取得", StringComparison.Ordinal);
+    private static string FormatWakeReservationId(int? id)
+        => id.HasValue && id.Value > 0 ? $"R{id.Value}" : "system";
 
     private bool HasFutureScheduledDailyEpg(DateTime now)
-        => _store.GetByStatus(ReservationStatus.Scheduled)
-            .Any(r => r.IsEnabled
-                      && !r.IsConflicted
-                      && r.StartTime > now
-                      && IsDailyEpgScheduleEntry(r));
+        => _epgScheduler.GetScheduledDailyWakeStarts(now).Count > 0;
 
     private static string BuildPlanSignature(IEnumerable<WakeTaskSpec> specs)
         => string.Join("|", specs
             .OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase)
-            .Select(t => $"{t.Name}@{t.When:yyyyMMddHHmmss}"));
+            .Select(t => $"{t.Name}@{t.When:yyyyMMddHHmmss}@{string.Join(",", t.Purposes.OrderBy(p => p, StringComparer.OrdinalIgnoreCase))}"));
 
     private static string ShortHash(string? signature)
     {
@@ -943,7 +979,7 @@ public sealed class TaskSchedulerService
     {
         var kind = string.IsNullOrWhiteSpace(spec.Kind) ? "UNKNOWN" : spec.Kind.Trim();
         var generation = ExtractWakeGenerationFromTaskName(spec.Name);
-        // release_contract: Task Scheduler の起動引数に予約IDを主キーとして持たせない。
+        // Task Scheduler の起動引数に予約IDを主キーとして持たせない。
         // 予約/目的メタ属性は runtime/wake-active-coverage.txt を正として保持し、
         // 起床後は既存TvAIrが予約DBから再評価する。
         return $"--wake-task {kind} --wake-at {spec.When:yyyyMMddHHmmss} --wake-generation {generation} --wake-slot-id {SanitizeTaskSegment(spec.Name)} --wake-reservation-id -";
@@ -951,7 +987,7 @@ public sealed class TaskSchedulerService
 
     private WakeTaskApplyResult RegisterOrUpdateTask(WakeTaskSpec spec)
     {
-        // release_contract:
+        // 
         // 世代付きWakeSlotは衝突回避を名前で担保する。登録前削除はアクセス拒否を誘発しやすいため、
         // 同名契約不一致の再登録以外では行わない。ここでは新規登録/上書き登録だけに寄せる。
         var userName = _ini.TaskUserName;
@@ -964,7 +1000,7 @@ public sealed class TaskSchedulerService
         var workDir = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
         _log.Add("TaskScheduler", spec.Name,
-            $"Wakeタスク登録開始 kind={spec.Kind} tuner={spec.TunerName} coverage={spec.CoverageCount} at={spec.When:MM/dd HH:mm:ss} user=(configured) logon=Password runLevel=LeastPrivilege action=wake_task_signal_contract exe={CompactOneLine(wakeExe)} rule=release_contract");
+            $"Wakeタスク登録開始 kind={spec.Kind} tuner={spec.TunerName} coverage={spec.CoverageCount} at={spec.When:MM/dd HH:mm:ss} user=(configured) logon=Password runLevel=LeastPrivilege action=wake_task_signal_contract taskAcl=explicit_system_admin_current_configured_user exe={CompactOneLine(wakeExe)} rule=release_contract");
 
         if (string.IsNullOrWhiteSpace(userName) || string.IsNullOrWhiteSpace(password))
         {
@@ -987,8 +1023,34 @@ public sealed class TaskSchedulerService
         var interactiveResult = RegisterTaskFromXmlInteractive(spec.Name, interactiveXml);
         if (!interactiveResult.Success)
         {
+            // 
+            // Windows Task Scheduler は、同時更新・直前のQuery/Delete・サービス内部ロックにより、
+            // 正しい権限でも一時的に「アクセスが拒否されました」を返すことがある。
+            // 1回の失敗だけでWake保証喪失へ確定せず、同一名・同一契約のまま有界再試行する。
+            // 別名タスクを増殖させず、予約直前のWake計画を正本名で回復させる。
+            interactiveResult = RetryInteractiveWakeRegistration(spec, interactiveXml, interactiveResult);
+        }
+
+        if (!interactiveResult.Success)
+        {
+            // schtasks が失敗を返しても、Windows側で登録が完了している稀な競合を最後に確認する。
+            var readback = VerifyRegisteredTaskResult(spec, expectedLogon: "InteractiveToken", fallbackUsed: true);
+            if (readback.Success)
+            {
+                _log.Add("TaskScheduler", spec.Name,
+                    $"Wakeタスク登録結果回収 kind={spec.Kind} coverage={spec.CoverageCount} at={spec.When:MM/dd HH:mm:ss} result=EFFECTIVE_CONTRACT_OK registrationCommand=FAILED effectiveTask=VALID action=accept_verified_existing_or_raced_task rule=release_contract");
+                return readback;
+            }
+
             _log.Add("TaskScheduler", spec.Name,
-                $"Wakeタスク登録失敗 kind={spec.Kind} tuner={spec.TunerName} coverage={spec.CoverageCount} at={spec.When:MM/dd HH:mm:ss} passwordFallback=FAILED interactiveFallback=FAILED error={CompactOneLine(interactiveResult.Output)} risk=sleep_resume_not_guaranteed rule=release_contract");
+                $"Wakeタスク登録失敗 kind={spec.Kind} tuner={spec.TunerName} coverage={spec.CoverageCount} at={spec.When:MM/dd HH:mm:ss} passwordAttempt=FAILED interactiveAttempt=FAILED retries=2 effectiveContract=FAILED error={CompactOneLine(interactiveResult.Output)} risk=sleep_resume_not_guaranteed rule=release_contract");
+
+            var reservation = spec.ReservationId.HasValue ? _store.GetById(spec.ReservationId.Value) : null;
+            _userEvents.AddWakeRegistrationFailed(
+                reservation,
+                failedCount: 1,
+                detail: $"Wake予定 {spec.When:MM/dd HH:mm:ss} のWindowsタスク登録に失敗しました。TvAIrを終了またはスリープさせる前に、タスクスケジューラ設定を確認してください。",
+                createdAt: DateTime.Now);
             return new WakeTaskApplyResult(spec, false);
         }
 
@@ -998,21 +1060,90 @@ public sealed class TaskSchedulerService
         return VerifyRegisteredTaskResult(spec, expectedLogon: "InteractiveToken", fallbackUsed: true);
     }
 
+
+    private SchtasksResult RetryInteractiveWakeRegistration(WakeTaskSpec spec, string interactiveXml, SchtasksResult firstFailure)
+    {
+        var last = firstFailure;
+        var delaysMs = new[] { 250, 750 };
+        for (var i = 0; i < delaysMs.Length; i++)
+        {
+            Thread.Sleep(delaysMs[i]);
+            var attempt = i + 1;
+            _log.Add("TaskScheduler", spec.Name,
+                $"Wakeタスク登録再試行 attempt={attempt}/{delaysMs.Length} delayMs={delaysMs[i]} kind={spec.Kind} coverage={spec.CoverageCount} at={spec.When:MM/dd HH:mm:ss} previousError={CompactOneLine(last.Output)} rule=release_contract");
+
+            last = RegisterTaskFromXmlInteractive(spec.Name, interactiveXml);
+            if (last.Success)
+            {
+                _log.Add("TaskScheduler", spec.Name,
+                    $"Wakeタスク登録再試行成功 attempt={attempt}/{delaysMs.Length} kind={spec.Kind} coverage={spec.CoverageCount} at={spec.When:MM/dd HH:mm:ss} rule=release_contract");
+                return last;
+            }
+        }
+
+        return last;
+    }
+
     private WakeTaskApplyResult VerifyRegisteredTaskResult(WakeTaskSpec spec, string expectedLogon, bool fallbackUsed)
     {
-        var verify = VerifyTask(spec.Name);
-        var logonOk = string.Equals(verify.LogonType, expectedLogon, StringComparison.OrdinalIgnoreCase)
-                      || (fallbackUsed && string.Equals(verify.LogonType, "InteractiveToken", StringComparison.OrdinalIgnoreCase))
-                      || (!fallbackUsed && string.Equals(verify.LogonType, "Password", StringComparison.OrdinalIgnoreCase));
-
-        var runLevelReadback = string.IsNullOrWhiteSpace(verify.RunLevel) || verify.RunLevel.Contains("missing", StringComparison.OrdinalIgnoreCase)
+        // 
+        // Wake保証の正本は「直前のschtasks /Createがどの経路で返ったか」ではなく、
+        // 最終的に同名タスクが現在のdesired契約を完全に満たしていること。
+        // Password登録がAccessDeniedを返しても、競合/既存タスクにより正しい契約が既に存在する場合がある。
+        // 逆にQueryだけ成功した旧タスクを採用してはならないため、Action/Arguments/StartBoundary/
+        // WakeToRun/StartWhenAvailable/ExecutionTimeLimit/LogonType/RunLevelを同じ契約検証へ一本化する。
+        var contract = VerifyExistingTaskContract(spec);
+        var observed = VerifyTask(spec.Name);
+        var runLevelReadback = string.IsNullOrWhiteSpace(observed.RunLevel) || observed.RunLevel.Contains("missing", StringComparison.OrdinalIgnoreCase)
             ? "UNAVAILABLE"
-            : verify.RunLevel;
+            : observed.RunLevel;
         var runLevelEffective = runLevelReadback == "UNAVAILABLE" ? "ASSUMED_LEAST_PRIVILEGE" : runLevelReadback;
-        var success = verify.QuerySucceeded && verify.WakeToRun && verify.StartWhenAvailable && logonOk;
+        var registrationPath = fallbackUsed ? "interactive_fallback_attempted" : "password_attempted";
+
         _log.Add("TaskScheduler", spec.Name,
-            $"Wakeタスク登録 kind={spec.Kind} tuner={spec.TunerName} coverage={spec.CoverageCount} at={spec.When:MM/dd HH:mm:ss} verify WakeToRun={(verify.WakeToRun ? "OK" : "NG")} StartWhenAvailable={(verify.StartWhenAvailable ? "OK" : "NG")} LogonType={verify.LogonType} expectedLogon={expectedLogon} RunLevelRequested=LeastPrivilege RunLevelReadback={runLevelReadback} RunLevelEffective={runLevelEffective} Query={(verify.QuerySucceeded ? "OK" : "NG")} fallbackUsed={fallbackUsed} action=wake_task_signal_contract rule=release_contract");
-        return new WakeTaskApplyResult(spec, success);
+            $"Wakeタスク契約検証 kind={spec.Kind} tuner={spec.TunerName} coverage={spec.CoverageCount} at={spec.When:MM/dd HH:mm:ss} result={(contract.Matches ? "OK" : "NG")} contractReason={CompactOneLine(contract.Reason)} observedLogon={observed.LogonType} requestedLogon={expectedLogon} registrationPath={registrationPath} WakeToRun={(observed.WakeToRun ? "OK" : "NG")} StartWhenAvailable={(observed.StartWhenAvailable ? "OK" : "NG")} RunLevelRequested=LeastPrivilege RunLevelReadback={runLevelReadback} RunLevelEffective={runLevelEffective} Query={(observed.QuerySucceeded ? "OK" : "NG")} action=verify_effective_desired_task_contract rule=release_contract");
+        return new WakeTaskApplyResult(spec, contract.Matches);
+    }
+
+    private static string BuildWakeTaskSecurityDescriptor(string configuredUserName)
+    {
+        // 
+        // Password logonで登録したWakeSlotは、Windows側の既定ACLによって同一ユーザーの
+        // 非昇格TvAIrから /Delete が AccessDenied になる実機事象がある。
+        // 削除側で資格情報付きlocalhost操作へ逃げず、作成責務で管理ACLを確定する。
+        // LocalSystemを必ず保持し、Administrators、現在TvAIrユーザー、設定された実行ユーザーへ
+        // GenericAllを明示する。重複SIDは除去する。
+        var sids = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "SY", // LocalSystem
+            "BA"  // Built-in Administrators
+        };
+
+        try
+        {
+            var currentSid = WindowsIdentity.GetCurrent().User?.Value;
+            if (!string.IsNullOrWhiteSpace(currentSid))
+                sids.Add(currentSid);
+        }
+        catch { }
+
+        if (!string.IsNullOrWhiteSpace(configuredUserName))
+        {
+            try
+            {
+                var account = new NTAccount(configuredUserName.Trim());
+                var sid = (SecurityIdentifier)account.Translate(typeof(SecurityIdentifier));
+                if (!string.IsNullOrWhiteSpace(sid.Value))
+                    sids.Add(sid.Value);
+            }
+            catch
+            {
+                // UserId自体はTask Schedulerが検証する。SID変換不能時も、SYSTEM/Administrators/
+                // 現在ユーザーACLを残して登録契約を壊さない。
+            }
+        }
+
+        return "D:P" + string.Concat(sids.Select(sid => $"(A;;GA;;;{sid})"));
     }
 
     private static string BuildWakeTaskXml(WakeTaskSpec spec, string userName, string logonType, string wakeExe, string wakeArgs, string workDir)
@@ -1021,10 +1152,14 @@ public sealed class TaskSchedulerService
         var escapedWakeExe = System.Security.SecurityElement.Escape(wakeExe);
         var escapedWakeArgs = System.Security.SecurityElement.Escape(wakeArgs);
         var escapedWorkDir = System.Security.SecurityElement.Escape(workDir);
+        var escapedSecurityDescriptor = System.Security.SecurityElement.Escape(BuildWakeTaskSecurityDescriptor(userName));
 
         return $"""
             <?xml version="1.0" encoding="UTF-16"?>
             <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+              <RegistrationInfo>
+                <SecurityDescriptor>{escapedSecurityDescriptor}</SecurityDescriptor>
+              </RegistrationInfo>
               <Triggers>
                 <TimeTrigger>
                   <StartBoundary>{spec.When:yyyy-MM-ddTHH:mm:ss}</StartBoundary>
@@ -1064,8 +1199,8 @@ public sealed class TaskSchedulerService
         try
         {
             File.WriteAllText(tmpFile, xml, new UnicodeEncoding(false, true));
-            var args = $"/Create /TN \"{taskName}\" /XML \"{tmpFile}\" /F /RU \"{userName}\" /RP \"{password}\"";
-            return RunSchtasks(args);
+            return RunSchtasksArgumentList(
+                "/Create", "/TN", taskName, "/XML", tmpFile, "/F", "/RU", userName, "/RP", password);
         }
         catch (Exception ex)
         {
@@ -1083,8 +1218,8 @@ public sealed class TaskSchedulerService
         try
         {
             File.WriteAllText(tmpFile, xml, new UnicodeEncoding(false, true));
-            var args = $"/Create /TN \"{taskName}\" /XML \"{tmpFile}\" /F";
-            return RunSchtasks(args);
+            return RunSchtasksArgumentList(
+                "/Create", "/TN", taskName, "/XML", tmpFile, "/F");
         }
         catch (Exception ex)
         {
@@ -1115,18 +1250,7 @@ public sealed class TaskSchedulerService
         return user;
     }
 
-    private static string BuildTaskName(string prefix, string tunerToken, int reservationId, DateTime when)
-        => $"{prefix}{tunerToken}_{reservationId}_{when:yyyyMMdd_HHmmss}";
 
-    private static string BuildGroupedTaskName(string kind, DateTime when)
-    {
-        var prefix = string.Equals(kind, "SYSTEM_EPG", StringComparison.OrdinalIgnoreCase)
-            ? "TvAIr_Wake_SystemEpg_"
-            : (string.Equals(kind, "EPG", StringComparison.OrdinalIgnoreCase) || string.Equals(kind, "PRE_EPG", StringComparison.OrdinalIgnoreCase))
-                ? "TvAIr_Wake_PreEpg_"
-                : WakeRecTaskPrefix;
-        return $"{prefix}{when:yyyyMMdd_HHmmss}";
-    }
 
     private bool HasWakeCredentials()
         => !string.IsNullOrWhiteSpace(_ini.TaskUserName)
@@ -1170,7 +1294,7 @@ public sealed class TaskSchedulerService
             var taskName = firstField.Trim().Trim('"').Trim();
             taskName = taskName.TrimStart('\\');
 
-            // release_contract:
+            // 
             // 新方式のWakeSlotだけをTvAIr管理対象として扱う。
             // 旧Primary/Backup/SystemEpg固定名は、権限不整合で削除・上書きできない場合があるため、
             // ここでは管理対象に含めず、新規WakeSlot登録を阻害させない。
@@ -1218,7 +1342,7 @@ public sealed class TaskSchedulerService
 
     private void CleanupStaleWakeSlotTasksAfterSuccessfulApply(string activeGeneration, HashSet<string> desiredNames, string reason)
     {
-        // release_contract:
+        // 
         // 旧世代WakeSlotのうち current_process でも削除できないものは、通常同期で毎回Delete/Disableを試すと
         // アクセス拒否と資格情報NGを増幅し、現行Wake登録を重くする。現行世代 desired を唯一の管理対象とし、
         // 旧世代は wake-active-generation / wake-active-slots により実行時に無効化される orphan として隔離する。
@@ -1301,11 +1425,22 @@ public sealed class TaskSchedulerService
             }
             else
             {
-                // release_contract: current-generation extra tasks are non-blocking as long as desired WakeSlots are preserved.
+                // current-generation extra tasks are non-blocking as long as desired WakeSlots are preserved.
                 // Do not emit per-task identity diagnostics for those repeated access-denied failures in normal logs.
                 if (targetKind == "current_extra")
                 {
                     failedExtra++;
+                    // WAKE_EXTRA_DELETE_DIAGNOSTIC_INVARIANT:
+                    // current-generation extra の削除失敗は録画阻害ではないが、実残存時の原因を追跡できる必要がある。
+                    // 削除方式を推測で変更せず、AccessDenied / task state / ACL 等を確認できるよう、
+                    // 1件ごとのidentityとschtasks戻り値を通常ログへ残す。
+                    AuditWakeTaskIdentity(taskName, targetKind, activeGeneration, reason);
+                    var observed = VerifyTask(taskName);
+                    _log.Add("TaskScheduler", "WAKE_CURRENT_EXTRA_DELETE_FAILED",
+                        $"result=NG task={taskName} activeGeneration={activeGeneration} reason={reason} " +
+                        $"deletePath=current_process currentProcessUser={CompactOneLine(GetCurrentUserNameForTask())} isElevated={IsCurrentProcessElevated()} " +
+                        $"configuredUser={(string.IsNullOrWhiteSpace(_ini.TaskUserName) ? "(missing)" : "(configured)")} observedLogon={CompactOneLine(observed.LogonType)} " +
+                        $"deleteError={CompactOneLine(result.Output)} desiredPreserved=True recording_blocking=False action=diagnose_before_delete_contract_change rule=wake_current_extra_delete_diagnostic_contract");
                 }
                 else
                 {
@@ -1335,6 +1470,37 @@ public sealed class TaskSchedulerService
             _log.Add("TaskScheduler", "WAKE_CLEANUP_SUMMARY",
                 $"result=OK_CONVERGED desired={desiredNames.Count} active={preserved} extra=0 recording_blocking=False reason={reason} rule=wake_current_extra_nonblocking_policy");
         }
+    }
+
+    private void AuditWakePostCleanupConvergence(string activeGeneration, HashSet<string> desiredNames, int preCleanupUnexpectedCount, string reason)
+    {
+        // 
+        // Wakeタスク実体差異検出の unexpected は cleanup 前のスナップショットである。
+        // その値だけを通常ログへ出すと、直後の削除に成功していても「余剰が残った」と誤読できる。
+        // cleanup 後に current generation の実体を再取得し、desired 外が本当に残ったかを最終事実として記録する。
+        // 旧generation orphan は別契約で隔離されるため、この監査には含めない。
+        if (preCleanupUnexpectedCount <= 0)
+            return;
+
+        var postManaged = GetManagedTaskNames(activeGeneration);
+        var postUnexpected = postManaged
+            .Where(name => !desiredNames.Contains(name))
+            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var missingDesired = desiredNames
+            .Where(name => !postManaged.Contains(name))
+            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var result = postUnexpected.Count == 0 && missingDesired.Count == 0
+            ? "CONVERGED"
+            : postUnexpected.Count > 0 && missingDesired.Count == 0
+                ? "RESIDUAL_EXTRA_NONBLOCKING"
+                : "DESIRED_MISSING";
+        var sample = postUnexpected.Count == 0 ? "-" : CompactOneLine(string.Join(",", postUnexpected.Take(3)));
+
+        _log.Add("TaskScheduler", "WAKE_POST_CLEANUP_AUDIT",
+            $"result={result} preUnexpected={preCleanupUnexpectedCount} postUnexpected={postUnexpected.Count} missingDesired={missingDesired.Count} managed={postManaged.Count} desired={desiredNames.Count} sample={sample} activeGeneration={activeGeneration} reason={reason} recording_blocking={(missingDesired.Count > 0 ? "True" : "False")} rule=wake_post_cleanup_effective_state_contract");
     }
 
     private void AuditWakeTaskIdentity(string taskName, string targetKind, string activeGeneration, string reason)
@@ -1384,7 +1550,7 @@ public sealed class TaskSchedulerService
 
     private void CleanupWakeSlotOverflowIfNeeded(string activeGeneration, HashSet<string> desiredNames, string reason)
     {
-        // release_contract:
+        // 
         // allWakeSlots には削除不能な旧世代 orphan が含まれるため、上限超過判定にそのまま使わない。
         // リリース前Wake品質の正は、activeGeneration 配下で desired と照合できる managedActiveWakeSlots が
         // 「録画チューナー総数×2＋1」に収まること。旧世代は実行時slotId照合で無効化される別枠として隔離する。
@@ -1423,7 +1589,7 @@ public sealed class TaskSchedulerService
         }
 
         var desiredActivePreserved = activeWakeSlots.Count - activeExtra.Count >= desiredNames.Count;
-        // release_contract:
+        // 
         // activeExtra は「現行desiredは守れているが、同世代の余剰が残っている」監査であり、
         // overflow や plan changed と同じ警告名にしない。録画阻害ではないものは常に非阻害名へ寄せる。
         var currentExtraNonBlocking = activeExtra.Count > 0 && !activeOverflow;
@@ -1534,7 +1700,7 @@ public sealed class TaskSchedulerService
             EndTime = DateTime.Now.AddMinutes(11),
             TunerName = "ALL"
         };
-        var spec = new WakeTaskSpec(probeName, "PROBE", DateTime.Now.AddMinutes(2), "ALL", probeReservation);
+        var spec = new WakeTaskSpec(probeName, "PROBE", DateTime.Now.AddMinutes(2), "ALL", probeReservation.Id, probeReservation.Title, probeReservation.StartTime, new[] { "PROBE" });
         var userName = _ini.TaskUserName;
         var password = string.IsNullOrEmpty(_ini.TaskPasswordEncrypted)
             ? null
@@ -1559,12 +1725,13 @@ public sealed class TaskSchedulerService
         }
 
         var verify = VerifyTask(probeName);
+        var contract = VerifyExistingTaskContract(spec, requiredLogonType: "Password");
         var delete = DeleteTask(probeName);
-        var ok = verify.QuerySucceeded && verify.WakeToRun && verify.StartWhenAvailable && delete.Success;
+        var ok = contract.Matches && delete.Success;
         if (!ok)
         {
             _log.Add("TaskScheduler", "WAKE_CREDENTIAL_PROBE",
-                $"result=FAILED phase=verify reason={reason} query={(verify.QuerySucceeded ? "OK" : "NG")} WakeToRun={(verify.WakeToRun ? "OK" : "NG")} StartWhenAvailable={(verify.StartWhenAvailable ? "OK" : "NG")} LogonType={verify.LogonType} delete={(delete.Success ? "OK" : "NG")} action=keep_existing_generation");
+                $"result=FAILED phase=verify reason={reason} contract={(contract.Matches ? "OK" : "NG")} contractReason={CompactOneLine(contract.Reason)} query={(verify.QuerySucceeded ? "OK" : "NG")} WakeToRun={(verify.WakeToRun ? "OK" : "NG")} StartWhenAvailable={(verify.StartWhenAvailable ? "OK" : "NG")} LogonType={verify.LogonType} delete={(delete.Success ? "OK" : "NG")} action=keep_existing_generation");
         }
         return ok;
     }
@@ -1748,7 +1915,7 @@ public sealed class TaskSchedulerService
 
     private SchtasksResult DeleteTask(string taskName, bool suppressMaintenanceLog = false)
     {
-        // release_contract:
+        // 
         // ローカルWakeSlot削除は current_process のみを本線にする。
         // Delete失敗後の資格情報付きDelete/Disableは、/S localhost /U /P のローカル不可エラーを増幅するため通常同期では行わない。
         var args = $"/Delete /TN \"{taskName}\" /F";
@@ -1759,11 +1926,6 @@ public sealed class TaskSchedulerService
         return result;
     }
 
-    private SchtasksResult DisableTaskWithWakeCredentials(string taskName, string operation)
-    {
-        var args = $"/Change /TN \"{taskName}\" /DISABLE";
-        return RunSchtasksForLocalTaskMaintenance(args, operation, taskName);
-    }
 
     private SchtasksResult RunSchtasksForLocalTaskMaintenance(string arguments, string operation, string taskName, bool suppressMaintenanceLog = false)
     {
@@ -1772,7 +1934,7 @@ public sealed class TaskSchedulerService
         var elevated = IsCurrentProcessElevated();
         var configured = string.IsNullOrWhiteSpace(userName) ? "(missing)" : "(configured)";
 
-        // release_contract:
+        // 
         // ローカルの /Delete /Change は現在プロセストークンだけで実行する。
         // /S localhost /U /P はローカルタスク削除の権限昇格ではなく、
         // 「ユーザー資格情報がローカル コンピューターでは使用できません」を誘発する別失敗経路なので使わない。
@@ -1795,19 +1957,6 @@ public sealed class TaskSchedulerService
         return direct;
     }
 
-    private static string AddLocalCredentialSwitches(string arguments, string userName, string password)
-    {
-        // schtasks の /S /U /P は共通オプションとして Delete/Change/Query/Create に渡せる。
-        // 既存コマンドのサブコマンド直後に挿入し、/TN 以降の意味を変えない。
-        var trimmed = arguments.Trim();
-        var firstSpace = trimmed.IndexOf(' ');
-        if (firstSpace < 0)
-            return $"{trimmed} /S localhost /U \"{userName}\" /P \"{password}\"";
-
-        var head = trimmed[..firstSpace];
-        var rest = trimmed[(firstSpace + 1)..];
-        return $"{head} /S localhost /U \"{userName}\" /P \"{password}\" {rest}";
-    }
 
     private static bool IsCurrentProcessElevated()
     {
@@ -1823,9 +1972,9 @@ public sealed class TaskSchedulerService
         }
     }
 
-    private void TryDeleteLegacyFixedTasks()
+    private void DetectLegacyFixedTasks()
     {
-        // release_contract:
+        // 
         // 旧固定名Wakeタスクは、作成者/権限が現在のTvAIr実行コンテキストと食い違うと
         // Delete/Create がアクセス拒否になり、近接予約のWake登録を巻き込んで失敗させる。
         // 録画失敗回避を最優先し、ここでは削除を試みない。新規WakeSlot名前空間だけを使う。
@@ -1840,7 +1989,7 @@ public sealed class TaskSchedulerService
         }
     }
 
-    private ExistingTaskContractResult VerifyExistingTaskContract(WakeTaskSpec spec)
+    private ExistingTaskContractResult VerifyExistingTaskContract(WakeTaskSpec spec, string? requiredLogonType = null)
     {
         var result = RunSchtasks($"/Query /TN \"{spec.Name}\" /XML");
         if (!result.Success || string.IsNullOrWhiteSpace(result.Output))
@@ -1882,6 +2031,9 @@ public sealed class TaskSchedulerService
             reasons.Add($"MultipleInstancesPolicy:{ValueOrMissing(multipleInstancesPolicy)}");
         if (!IsAcceptedWakeLogonType(logonType))
             reasons.Add($"LogonType:{ValueOrMissing(logonType)}");
+        else if (!string.IsNullOrWhiteSpace(requiredLogonType)
+                 && !string.Equals(logonType, requiredLogonType, StringComparison.OrdinalIgnoreCase))
+            reasons.Add($"LogonType:{ValueOrMissing(logonType)}!=required:{requiredLogonType}");
         // schtasks /Query /XML may omit RunLevel even when LeastPrivilege was requested.
         // Treat a missing value as acceptable; only an explicit non-LeastPrivilege value is a contract mismatch.
         if (!string.IsNullOrWhiteSpace(runLevel)
@@ -1967,6 +2119,50 @@ public sealed class TaskSchedulerService
         return match.Success ? match.Groups[1].Value.Trim() : null;
     }
 
+    private static SchtasksResult RunSchtasksArgumentList(params string[] arguments)
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName               = "schtasks.exe",
+                UseShellExecute        = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError  = true,
+                CreateNoWindow         = true,
+            };
+            foreach (var argument in arguments)
+                psi.ArgumentList.Add(argument);
+
+            using var proc = System.Diagnostics.Process.Start(psi);
+            if (proc is null)
+                return new SchtasksResult(false, "Process.Start returned null.");
+
+            var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+            var stderrTask = proc.StandardError.ReadToEndAsync();
+            if (!proc.WaitForExit(15_000))
+            {
+                try { proc.Kill(entireProcessTree: false); } catch { }
+                try { proc.WaitForExit(2_000); } catch { }
+                var timeoutStdout = stdoutTask.IsCompletedSuccessfully ? stdoutTask.Result : string.Empty;
+                var timeoutStderr = stderrTask.IsCompletedSuccessfully ? stderrTask.Result : string.Empty;
+                var timeoutOutput = string.IsNullOrWhiteSpace(timeoutStderr) ? timeoutStdout : timeoutStderr;
+                return new SchtasksResult(false, $"schtasks timed out after 15000ms. {timeoutOutput}".Trim());
+            }
+
+            Task.WhenAll(stdoutTask, stderrTask).GetAwaiter().GetResult();
+            var stdout = stdoutTask.Result;
+            var stderr = stderrTask.Result;
+            var success = proc.ExitCode == 0;
+            var output = string.IsNullOrWhiteSpace(stderr) ? stdout : stderr;
+            return new SchtasksResult(success, output.Trim());
+        }
+        catch (Exception ex)
+        {
+            return new SchtasksResult(false, ex.Message);
+        }
+    }
+
     private static SchtasksResult RunSchtasks(string arguments)
     {
         try
@@ -1985,10 +2181,21 @@ public sealed class TaskSchedulerService
             if (proc is null)
                 return new SchtasksResult(false, "Process.Start returned null.");
 
-            var stdout = proc.StandardOutput.ReadToEnd();
-            var stderr = proc.StandardError.ReadToEnd();
-            proc.WaitForExit(15_000);
+            var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+            var stderrTask = proc.StandardError.ReadToEndAsync();
+            if (!proc.WaitForExit(15_000))
+            {
+                try { proc.Kill(entireProcessTree: false); } catch { }
+                try { proc.WaitForExit(2_000); } catch { }
+                var timeoutStdout = stdoutTask.IsCompletedSuccessfully ? stdoutTask.Result : string.Empty;
+                var timeoutStderr = stderrTask.IsCompletedSuccessfully ? stderrTask.Result : string.Empty;
+                var timeoutOutput = string.IsNullOrWhiteSpace(timeoutStderr) ? timeoutStdout : timeoutStderr;
+                return new SchtasksResult(false, $"schtasks timed out after 15000ms. {timeoutOutput}".Trim());
+            }
 
+            Task.WhenAll(stdoutTask, stderrTask).GetAwaiter().GetResult();
+            var stdout = stdoutTask.Result;
+            var stderr = stderrTask.Result;
             var success = proc.ExitCode == 0;
             var output = string.IsNullOrWhiteSpace(stderr) ? stdout : stderr;
             return new SchtasksResult(success, output.Trim());
@@ -2002,7 +2209,9 @@ public sealed class TaskSchedulerService
     private sealed record WakeCoverageItem(
         string Purpose,
         DateTime When,
-        Reservation Reservation,
+        int? ReservationId,
+        string Title,
+        DateTime StartTime,
         string SourceLabel,
         string Route,
         int? ChainRoot,
@@ -2017,7 +2226,10 @@ public sealed class TaskSchedulerService
         string Kind,
         DateTime When,
         string TunerName,
-        Reservation Reservation,
+        int? ReservationId,
+        string Title,
+        DateTime StartTime,
+        IReadOnlyList<string> Purposes,
         int CoverageCount = 1);
 
     private sealed record WakeTaskApplyResult(WakeTaskSpec Spec, bool Success);
@@ -2055,3 +2267,10 @@ public sealed record WakeTaskInfo(
     string   Title,
     DateTime StartTime,
     int      WakeMinutesBefore);
+public sealed record PowerActionWakeProtectionBoundary(
+    string Purpose,
+    DateTime WakeAt,
+    DateTime StartTime,
+    int? ReservationId,
+    string Title);
+

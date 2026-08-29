@@ -11,15 +11,16 @@ public sealed class PluginActionTokenStore
     private readonly object _gate = new();
     private readonly Dictionary<string, PluginActionTokenEntry> _tokens = new(StringComparer.OrdinalIgnoreCase);
     private readonly TimeSpan _ttl = TimeSpan.FromMinutes(30);
-    // release_contract: host-managed tool window は本体側safe-event host scriptから定期keepaliveされる。
-    // 同じHTMLに埋め込まれた既存tokenを延命し、長時間無操作後のtoken_not_found/expiredを避ける。
+    // plugin_action_token_keepalive_contract: 表示中のRuntime UIは既存tokenだけを定期Renewする。
+    // plugin_page_action_token_recovery_contract: Pageが履歴/BFCache等から復帰した時はtokenをValidateし、
+    // 失効済みならHostの正規 /plugin/{route} Renderへ戻す。失効tokenをここで復活・再発行しない。
 
     public PluginActionTokenEntry Issue(string pluginId, string routeSegment)
     {
         var entry = new PluginActionTokenEntry(
             Guid.NewGuid().ToString("N"),
-            Normalize(pluginId),
-            Normalize(routeSegment),
+            NormalizePluginId(pluginId),
+            NormalizeRoute(routeSegment),
             DateTimeOffset.Now.Add(_ttl));
         lock (_gate)
         {
@@ -53,8 +54,8 @@ public sealed class PluginActionTokenStore
                 return false;
             }
 
-            var requestedPlugin = Normalize(pluginId);
-            var requestedRoute = Normalize(routeSegment);
+            var requestedPlugin = NormalizePluginId(pluginId);
+            var requestedRoute = NormalizeRoute(routeSegment);
             if (!string.IsNullOrWhiteSpace(requestedPlugin)
                 && !string.Equals(entry.PluginId, requestedPlugin, StringComparison.OrdinalIgnoreCase))
             {
@@ -92,8 +93,8 @@ public sealed class PluginActionTokenStore
                 return false;
             }
 
-            var requestedPlugin = Normalize(pluginId);
-            var requestedRoute = Normalize(routeSegment);
+            var requestedPlugin = NormalizePluginId(pluginId);
+            var requestedRoute = NormalizeRoute(routeSegment);
             if (!string.IsNullOrWhiteSpace(requestedPlugin)
                 && !string.Equals(entry.PluginId, requestedPlugin, StringComparison.OrdinalIgnoreCase))
             {
@@ -122,7 +123,11 @@ public sealed class PluginActionTokenStore
         }
     }
 
-    private static string Normalize(string? value) => (value ?? string.Empty).Trim().Trim('/');
+    private static string NormalizePluginId(string? value)
+        => string.IsNullOrWhiteSpace(value) ? string.Empty : PluginIdentity.Normalize(value);
+
+    private static string NormalizeRoute(string? value)
+        => (value ?? string.Empty).Trim().Trim('/');
 }
 
 public sealed record PluginActionTokenEntry(string Token, string PluginId, string RouteSegment, DateTimeOffset ExpiresAt);

@@ -7,11 +7,10 @@ namespace TvAIr.Tuner;
 ///
 /// 管理単位 : TunerProfile 1本 = 物理チューナー1本。
 /// 占有種別 : EPG / Recording / Viewing の3種。
-/// 優先順位 : Recording > Viewing > EPG
 ///
-/// ・EPG は録画開始の WakeMinutesBefore 分前になると強制解放される。
-/// ・空きがあれば Recording / Viewing は即座に確保できる。
-/// ・全スロット埋まりかつ Viewing が競合する場合は ForceReleaseViewing を使う。
+/// ・Recording / EPG の実行可否は各owner側の契約で決定し、TunerPool自身は実行中ownerを用途都合でpreemptしない。
+/// ・Viewing Roleは視聴専用で、Recording / EPGから奪わない。
+/// ・各用途は割り当てられたRoleの物理Tunerだけを使用する。
 /// </summary>
 public sealed class TunerPool : IDisposable
 {
@@ -24,12 +23,16 @@ public sealed class TunerPool : IDisposable
         public string Did               { get; }   // 物理チューナー識別子 (A/B/C…)
         public string Group             { get; }
         public string Role              { get; }
+        public string LogicalViewerSlotId { get; }
         public int    SlotIndex         { get; }
 
         public TunerUsageKind UsageKind    { get; private set; } = TunerUsageKind.Free;
         public int?           ReservationId { get; private set; }
         public int?           ProcessId     { get; private set; }
         public DateTime?      PlannedEndTime{ get; private set; }
+        public Guid?          PoolLeaseId { get; private set; }
+        public long           OccupancyGeneration { get; private set; }
+        public TunerLeaseState LeaseState { get; private set; } = TunerLeaseState.Free;
         /// <summary>直近の Release が実行された時刻。Acquire 時のクールダウン計算用。</summary>
         public DateTime?      LastReleasedAt{ get; private set; }
         public bool IsFree => UsageKind == TunerUsageKind.Free;
@@ -37,23 +40,33 @@ public sealed class TunerPool : IDisposable
         // BonDriver名だけでは判定しない。
         public bool IsViewingReserved => string.Equals(Role, "Viewing", StringComparison.OrdinalIgnoreCase);
 
-        public Slot(string name, string bonDriverFileName, string did, string group, string role, int slotIndex)
+        public Slot(string name, string bonDriverFileName, string did, string group, string role, string logicalViewerSlotId, int slotIndex)
         {
             Name              = name;
             BonDriverFileName = bonDriverFileName;
             Did               = did;
             Group             = group;
             Role              = IniSettingsService.NormalizeTunerRole(role);
+            LogicalViewerSlotId = (logicalViewerSlotId ?? string.Empty).Trim();
             SlotIndex         = slotIndex;
         }
 
-        public void Occupy(TunerUsageKind kind, int? reservationId, int? processId, DateTime? plannedEndTime)
+        public TunerLeaseIdentity Occupy(TunerUsageKind kind, int? reservationId, int? processId, DateTime? plannedEndTime)
         {
+            OccupancyGeneration++;
+            PoolLeaseId = Guid.NewGuid();
+            LeaseState = TunerLeaseState.Active;
             UsageKind      = kind;
             ReservationId  = reservationId;
             ProcessId      = processId;
             PlannedEndTime = plannedEndTime;
+            return new TunerLeaseIdentity(PoolLeaseId.Value, OccupancyGeneration);
         }
+
+        public bool Matches(TunerLeaseIdentity identity)
+            => LeaseState == TunerLeaseState.Active
+               && PoolLeaseId == identity.PoolLeaseId
+               && OccupancyGeneration == identity.OccupancyGeneration;
 
         public void SetProcessId(int pid) => ProcessId = pid;
 
@@ -62,12 +75,14 @@ public sealed class TunerPool : IDisposable
             PlannedEndTime = plannedEndTime;
         }
 
-        public void Release()
+        public void Release(bool revoked = false)
         {
             UsageKind      = TunerUsageKind.Free;
             ReservationId  = null;
             ProcessId      = null;
             PlannedEndTime = null;
+            PoolLeaseId = null;
+            LeaseState = revoked ? TunerLeaseState.Revoked : TunerLeaseState.Free;
             LastReleasedAt = DateTime.Now;
         }
 
@@ -83,6 +98,53 @@ public sealed class TunerPool : IDisposable
     private readonly IniSettingsService _ini;
     private readonly object _gate = new();
     private long _snapshotVersion;
+    private TunerPoolLifecycleState _lifecycleState = TunerPoolLifecycleState.Running;
+    private TaskCompletionSource<long> _stateChanged = CreateStateChangeSignal();
+
+    private static TaskCompletionSource<long> CreateStateChangeSignal()
+        => new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private void PublishStateChangeUnsafe()
+    {
+        _snapshotVersion++;
+        var completed = _stateChanged;
+        _stateChanged = CreateStateChangeSignal();
+        completed.TrySetResult(_snapshotVersion);
+    }
+
+    private bool CanAcquireUnsafe(string operation, out string? rejectionLog)
+    {
+        if (_lifecycleState == TunerPoolLifecycleState.Running)
+        {
+            rejectionLog = null;
+            return true;
+        }
+
+        rejectionLog =
+            $"result=POOL_NOT_RUNNING operation={operation} lifecycle={_lifecycleState} version={_snapshotVersion}";
+        return false;
+    }
+
+    internal bool IsLeaseCurrent(Slot slot, TunerLeaseIdentity identity)
+    {
+        lock (_gate)
+            return _lifecycleState == TunerPoolLifecycleState.Running && slot.Matches(identity);
+    }
+
+    // LEASE_IDENTITY_OBSERVATION_INVARIANT:
+    // Dispose済みか、Pool lifecycleがRunningかとは独立して、同じlease identityが
+    // スロット正本へ残っているかを確認する。cleanup完了・DID再利用可否はこの判定を使う。
+    internal bool IsLeaseIdentityCurrent(Slot slot, TunerLeaseIdentity identity)
+    {
+        lock (_gate)
+            return slot.Matches(identity);
+    }
+
+    private string BuildStaleLeaseLogUnsafe(Slot slot, TunerLeaseIdentity identity, string operation)
+        => $"operation={operation} slot={slot.SlotIndex} name={slot.Name} did={slot.Did} " +
+           $"expectedLeaseId={identity.PoolLeaseId} expectedGeneration={identity.OccupancyGeneration} " +
+           $"actualLeaseId={(slot.PoolLeaseId.HasValue ? slot.PoolLeaseId.Value.ToString() : "-")} actualGeneration={slot.OccupancyGeneration} " +
+           $"leaseState={slot.LeaseState} usage={slot.UsageKind} reservationId={(slot.ReservationId.HasValue ? slot.ReservationId.Value.ToString() : "-")} version={_snapshotVersion}";
 
     public TunerPool(
         IReadOnlyList<TunerProfile> profiles,
@@ -92,9 +154,10 @@ public sealed class TunerPool : IDisposable
         _ini = ini;
         _log = log;
 
+        var effectiveProfiles = TunerRuntimeProfileSource.Build(ini, profiles);
         var idx = 0;
         var rejected = 0;
-        foreach (var p in profiles)
+        foreach (var p in effectiveProfiles)
         {
             var normalizedGroup = TunerDisplayName.NormalizeGroup(p.Group);
             var normalizedRole = IniSettingsService.NormalizeTunerRole(p.Role);
@@ -104,7 +167,7 @@ public sealed class TunerPool : IDisposable
                 rejected++;
                 continue;
             }
-            _slots.Add(new Slot(p.Name, normalizedBonDriver, p.Did, normalizedGroup, normalizedRole, idx++));
+            _slots.Add(new Slot(p.Name, normalizedBonDriver, p.Did, normalizedGroup, normalizedRole, p.LogicalViewerSlotId, idx++));
         }
 
         _log.Add("TunerPool", "Init",
@@ -119,9 +182,6 @@ public sealed class TunerPool : IDisposable
 
     }
 
-    private void TraceTuner(string title, string message)
-        => _log.Add("TUNER_TRACE", title, "[TUNER] " + message + " status=" + GetStatusSummaryUnsafe());
-
     // ─── 公開 API ────────────────────────────────────────────────
 
     /// <summary>
@@ -134,24 +194,48 @@ public sealed class TunerPool : IDisposable
     public TunerLease? AcquireForRecording(
         string group, int reservationId, DateTime plannedEndTime)
     {
+        TunerLease? lease = null;
+        string? resultLog = null;
+        string? traceEnter = null;
+        string? traceExit = null;
+        string? rejectionLog = null;
+
         lock (_gate)
         {
-            TraceTuner(group, $"stage=acquire_recording_enter group={group} reservationId={reservationId} plannedEnd={plannedEndTime:MM/dd HH:mm:ss}");
+            if (!CanAcquireUnsafe("acquire_recording", out rejectionLog))
+            {
+                // ログはPoolロック外で出す。
+            }
+            else
+            {
+
+            traceEnter = $"[TUNER] stage=acquire_recording_enter group={group} reservationId={reservationId} plannedEnd={plannedEndTime:MM/dd HH:mm:ss} status={GetStatusSummaryUnsafe()}";
             var slot = FindFree(group);
             if (slot is null)
             {
-                TraceTuner(group, $"stage=acquire_recording_fail group={group} reservationId={reservationId} reason=no_free_slot");
-                return null;
+                traceExit = $"[TUNER] stage=acquire_recording_fail group={group} reservationId={reservationId} reason=no_free_slot status={GetStatusSummaryUnsafe()}";
             }
-            var elapsedMs = GetElapsedSinceReleaseMs(slot);
-            slot.Occupy(TunerUsageKind.Recording, reservationId, null, plannedEndTime);
-            _snapshotVersion++;
-            _log.Add("TunerPool", group,
-                $"Recording 確保: slot={slot.SlotIndex} name={slot.Name} did={slot.Did} " +
-                $"reservationId={reservationId} elapsedSinceRelease={FormatElapsed(elapsedMs)}");
-            TraceTuner(group, $"stage=acquire_recording_ok group={group} reservationId={reservationId} slot={slot.SlotIndex} name={slot.Name} did={slot.Did} elapsedSinceRelease={FormatElapsed(elapsedMs)}");
-            return new TunerLease(slot, this, elapsedMs);
+            else
+            {
+                var elapsedMs = GetElapsedSinceReleaseMs(slot);
+                var leaseIdentity = slot.Occupy(TunerUsageKind.Recording, reservationId, null, plannedEndTime);
+                PublishStateChangeUnsafe();
+                resultLog =
+                    $"Recording 確保: slot={slot.SlotIndex} name={slot.Name} did={slot.Did} " +
+                    $"reservationId={reservationId} elapsedSinceRelease={FormatElapsed(elapsedMs)}";
+                traceExit =
+                    $"[TUNER] stage=acquire_recording_ok group={group} reservationId={reservationId} slot={slot.SlotIndex} " +
+                    $"name={slot.Name} did={slot.Did} elapsedSinceRelease={FormatElapsed(elapsedMs)} status={GetStatusSummaryUnsafe()}";
+                lease = new TunerLease(slot, this, elapsedMs, leaseIdentity);
+            }
+            }
         }
+
+        if (rejectionLog is not null) _log.Add("TUNER_LEASE_REJECTED", group, rejectionLog);
+        if (traceEnter is not null) _log.Add("TUNER_TRACE", group, traceEnter);
+        if (resultLog is not null) _log.Add("TunerPool", group, resultLog);
+        if (traceExit is not null) _log.Add("TUNER_TRACE", group, traceExit);
+        return lease;
     }
 
     /// <summary>
@@ -161,205 +245,223 @@ public sealed class TunerPool : IDisposable
     public TunerLease? AcquireForRecordingByName(
         string tunerName, int reservationId, DateTime plannedEndTime)
     {
+        TunerLease? lease = null;
+        string? group = null;
+        string? resultLog = null;
+        string? traceEnter = null;
+        string? traceExit = null;
+        string? rejectionLog = null;
+
         lock (_gate)
         {
-            TraceTuner(tunerName, $"stage=acquire_recording_by_name_enter tuner={tunerName} reservationId={reservationId} plannedEnd={plannedEndTime:MM/dd HH:mm:ss}");
+            if (!CanAcquireUnsafe("acquire_recording_by_name", out rejectionLog))
+            {
+                // ログはPoolロック外で出す。
+            }
+            else
+            {
+
+            traceEnter = $"[TUNER] stage=acquire_recording_by_name_enter tuner={tunerName} reservationId={reservationId} plannedEnd={plannedEndTime:MM/dd HH:mm:ss} status={GetStatusSummaryUnsafe()}";
             var slot = _slots.FirstOrDefault(
-                s => string.Equals(s.Name, tunerName, StringComparison.OrdinalIgnoreCase) && s.IsFree && !s.IsViewingReserved);
+                candidate => string.Equals(candidate.Name, tunerName, StringComparison.OrdinalIgnoreCase)
+                    && candidate.IsFree
+                    && !candidate.IsViewingReserved);
             if (slot is null)
             {
-                TraceTuner(tunerName, $"stage=acquire_recording_by_name_fail tuner={tunerName} reservationId={reservationId} reason=not_free_or_viewing_reserved");
-                return null;
+                traceExit = $"[TUNER] stage=acquire_recording_by_name_fail tuner={tunerName} reservationId={reservationId} reason=not_free_or_viewing_reserved status={GetStatusSummaryUnsafe()}";
             }
-            var elapsedMs = GetElapsedSinceReleaseMs(slot);
-            slot.Occupy(TunerUsageKind.Recording, reservationId, null, plannedEndTime);
-            _snapshotVersion++;
-            _log.Add("TunerPool", slot.Group,
-                $"Recording 確保(指定): slot={slot.SlotIndex} name={slot.Name} did={slot.Did} " +
-                $"reservationId={reservationId} elapsedSinceRelease={FormatElapsed(elapsedMs)}");
-            TraceTuner(slot.Group, $"stage=acquire_recording_by_name_ok tuner={tunerName} reservationId={reservationId} slot={slot.SlotIndex} name={slot.Name} did={slot.Did} elapsedSinceRelease={FormatElapsed(elapsedMs)}");
-            return new TunerLease(slot, this, elapsedMs);
+            else
+            {
+                group = slot.Group;
+                var elapsedMs = GetElapsedSinceReleaseMs(slot);
+                var leaseIdentity = slot.Occupy(TunerUsageKind.Recording, reservationId, null, plannedEndTime);
+                PublishStateChangeUnsafe();
+                resultLog =
+                    $"Recording 確保(指定): slot={slot.SlotIndex} name={slot.Name} did={slot.Did} " +
+                    $"reservationId={reservationId} elapsedSinceRelease={FormatElapsed(elapsedMs)}";
+                traceExit =
+                    $"[TUNER] stage=acquire_recording_by_name_ok tuner={tunerName} reservationId={reservationId} slot={slot.SlotIndex} " +
+                    $"name={slot.Name} did={slot.Did} elapsedSinceRelease={FormatElapsed(elapsedMs)} status={GetStatusSummaryUnsafe()}";
+                lease = new TunerLease(slot, this, elapsedMs, leaseIdentity);
+            }
+            }
         }
+
+        if (rejectionLog is not null) _log.Add("TUNER_LEASE_REJECTED", tunerName, rejectionLog);
+        if (traceEnter is not null) _log.Add("TUNER_TRACE", tunerName, traceEnter);
+        if (resultLog is not null) _log.Add("TunerPool", group ?? tunerName, resultLog);
+        if (traceExit is not null) _log.Add("TUNER_TRACE", group ?? tunerName, traceExit);
+        return lease;
     }
 
     /// <summary>
-    /// 外部視聴状態を監査し、明示検出できた衝突だけを扱う。
-    /// DID不明の外部TVTestを理由に録画候補を推測でずらさない。
+    /// TvAIr本体再起動後も生存している録画workerを、既存の物理チューナー占有として再Attachする。
+    /// 新規Acquireとは異なり、worker jobから検証済みのTuner名/DID/BonDriver/PIDを完全一致で要求する。
     /// </summary>
-    public TunerLease? AcquireForRecordingWithExternalGuard(
-        string group,
-        int reservationId,
-        DateTime plannedEndTime,
-        bool reserveUnknownExternalBuffer,
-        string reason)
-    {
-        lock (_gate)
-        {
-            TraceTuner(group, $"stage=acquire_recording_external_guard_enter group={group} reservationId={reservationId} plannedEnd={plannedEndTime:MM/dd HH:mm:ss} reserveUnknownExternalBuffer={reserveUnknownExternalBuffer} reason={reason}");
-            var slot = OrderedRecordableFreeSlots(group).FirstOrDefault();
-            if (reserveUnknownExternalBuffer)
-            {
-                _log.Add("TUNER_EXTERNAL_GUARD", group,
-                    $"result=NO_REROUTE reservationId={reservationId} assigned={(slot is null ? "-" : slot.Name + "/" + slot.Did)} reason={reason} rule=explicit_detected_state_only_no_unknown_did_buffer");
-            }
-            if (slot is null)
-            {
-                TraceTuner(group, $"stage=acquire_recording_external_guard_fail group={group} reservationId={reservationId} reason=no_free_slot reserveUnknownExternalBuffer={reserveUnknownExternalBuffer}");
-                return null;
-            }
-            var elapsedMs = GetElapsedSinceReleaseMs(slot);
-            slot.Occupy(TunerUsageKind.Recording, reservationId, null, plannedEndTime);
-            _snapshotVersion++;
-            _log.Add("TunerPool", group,
-                $"Recording 確保: slot={slot.SlotIndex} name={slot.Name} did={slot.Did} " +
-                $"reservationId={reservationId} elapsedSinceRelease={FormatElapsed(elapsedMs)} externalGuard={reserveUnknownExternalBuffer}");
-            TraceTuner(group, $"stage=acquire_recording_external_guard_ok group={group} reservationId={reservationId} slot={slot.SlotIndex} name={slot.Name} did={slot.Did} elapsedSinceRelease={FormatElapsed(elapsedMs)} reserveUnknownExternalBuffer={reserveUnknownExternalBuffer}");
-            return new TunerLease(slot, this, elapsedMs);
-        }
-    }
-
-    /// <summary>
-    /// 事前割当チューナーを明示指定で確保する。
-    /// DID不明の外部TVTestを理由に別録画用スロットへ逃がさない。
-    /// </summary>
-    public TunerLease? AcquireForRecordingByNameWithExternalGuard(
+    public TunerLease? AttachExistingRecording(
         string tunerName,
+        string did,
+        string bonDriverFileName,
         int reservationId,
-        DateTime plannedEndTime,
-        bool reserveUnknownExternalBuffer,
-        string reason)
+        int processId,
+        DateTime plannedEndTime)
     {
+        TunerLease? lease = null;
+        string logTitle = tunerName;
+        string? logMessage = null;
+        string? rejectionLog = null;
+
         lock (_gate)
         {
-            TraceTuner(tunerName, $"stage=acquire_recording_by_name_external_guard_enter tuner={tunerName} reservationId={reservationId} plannedEnd={plannedEndTime:MM/dd HH:mm:ss} reserveUnknownExternalBuffer={reserveUnknownExternalBuffer} reason={reason}");
-            var requested = _slots.FirstOrDefault(
-                s => string.Equals(s.Name, tunerName, StringComparison.OrdinalIgnoreCase) && s.IsFree && !s.IsViewingReserved);
-            var occupiedRequested = _slots.FirstOrDefault(
-                s => string.Equals(s.Name, tunerName, StringComparison.OrdinalIgnoreCase) && !s.IsFree);
-            if (requested is null && occupiedRequested is not null)
+            if (!CanAcquireUnsafe("attach_existing_recording", out rejectionLog))
             {
-                _log.Add("ACTIVE_RECORDING_DID_GUARD", occupiedRequested.Group,
-                    $"result=REQUESTED_BUSY tuner={tunerName} did={occupiedRequested.Did} usage={occupiedRequested.UsageKind} owner={(occupiedRequested.ReservationId.HasValue ? "R" + occupiedRequested.ReservationId.Value : "-")} pid={(occupiedRequested.ProcessId.HasValue ? occupiedRequested.ProcessId.Value.ToString() : "-")} requester=R{reservationId} action=do_not_reuse_busy_did rule=release_contract");
+                // ログはPoolロック外で出す。
             }
-            Slot? slot = requested;
-            if (requested is not null && reserveUnknownExternalBuffer)
+            else
             {
-                _log.Add("TUNER_EXTERNAL_GUARD", requested.Group,
-                    $"result=NO_REROUTE reservationId={reservationId} requested={requested.Name}/{requested.Did} assigned={requested.Name}/{requested.Did} reason={reason} rule=explicit_detected_state_only_no_unknown_did_buffer");
-            }
+
+            var normalizedBon = Path.GetFileName(bonDriverFileName ?? string.Empty);
+            var slot = _slots.FirstOrDefault(candidate =>
+                string.Equals(candidate.Name, tunerName, StringComparison.OrdinalIgnoreCase)
+                && string.Equals((candidate.Did ?? string.Empty).Trim(), (did ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase)
+                && string.Equals(Path.GetFileName(candidate.BonDriverFileName), normalizedBon, StringComparison.OrdinalIgnoreCase));
             if (slot is null)
             {
-                TraceTuner(tunerName, $"stage=acquire_recording_by_name_external_guard_fail tuner={tunerName} reservationId={reservationId} reason=not_free_or_viewing_reserved");
-                return null;
+                logMessage =
+                    $"result=REJECTED reason=physical_identity_not_found reservationId={reservationId} pid={processId} did={did} bonDriver={normalizedBon}";
             }
-            var elapsedMs = GetElapsedSinceReleaseMs(slot);
-            slot.Occupy(TunerUsageKind.Recording, reservationId, null, plannedEndTime);
-            _snapshotVersion++;
-            _log.Add("TunerPool", slot.Group,
-                $"Recording 確保(指定/外部視聴ガード): slot={slot.SlotIndex} name={slot.Name} did={slot.Did} " +
-                $"reservationId={reservationId} requested={tunerName} elapsedSinceRelease={FormatElapsed(elapsedMs)} externalGuard={reserveUnknownExternalBuffer}");
-            TraceTuner(slot.Group, $"stage=acquire_recording_by_name_external_guard_ok tuner={tunerName} reservationId={reservationId} slot={slot.SlotIndex} name={slot.Name} did={slot.Did} elapsedSinceRelease={FormatElapsed(elapsedMs)} reserveUnknownExternalBuffer={reserveUnknownExternalBuffer}");
-            return new TunerLease(slot, this, elapsedMs);
+            else if (!slot.IsFree)
+            {
+                logTitle = slot.Group;
+                logMessage =
+                    $"result=REJECTED reason=slot_not_free slot={slot.SlotIndex} name={slot.Name} reservationId={reservationId} pid={processId} " +
+                    $"currentUsage={slot.UsageKind} currentReservationId={(slot.ReservationId.HasValue ? slot.ReservationId.Value.ToString() : "-")} " +
+                    $"currentPid={(slot.ProcessId.HasValue ? slot.ProcessId.Value.ToString() : "-")}";
+            }
+            else
+            {
+                logTitle = slot.Group;
+                var identity = slot.Occupy(TunerUsageKind.Recording, reservationId, processId, plannedEndTime);
+                PublishStateChangeUnsafe();
+                logMessage =
+                    $"result=ATTACHED slot={slot.SlotIndex} name={slot.Name} did={slot.Did} bonDriver={slot.BonDriverFileName} " +
+                    $"reservationId={reservationId} pid={processId} poolLeaseId={identity.PoolLeaseId} generation={identity.OccupancyGeneration} " +
+                    $"plannedEnd={plannedEndTime:MM/dd HH:mm:ss}";
+                lease = new TunerLease(slot, this, GetElapsedSinceReleaseMs(slot), identity);
+            }
+            }
         }
+
+        if (rejectionLog is not null) _log.Add("TUNER_LEASE_REJECTED", tunerName, rejectionLog);
+        if (logMessage is not null) _log.Add("TUNER_ATTACH_EXISTING", logTitle, logMessage);
+        return lease;
     }
 
-
     /// <summary>
-    /// 録画前プリチューン用に、実録画予定チューナー名のEPG leaseを優先確保する。
-    /// 録画時と同じ物理DIDで事前選局・PAT/PMT/対象SID確認を行うための入口。
+    /// 呼び出し側が実行時に安全性を確認して選んだ物理Tuner名でEPG leaseを確保する。
+    /// 録画前EPG確認ではプリチューンを意味せず、本録画予定Tunerとの一致も要求しない。
     /// </summary>
     public TunerLease? AcquireForEpgByName(
         string tunerName,
         string group,
         DateTime plannedEndTime,
-        IReadOnlySet<(string BonDriverFileName, string Did)>? excludeTunerKeys = null,
-        string reason = "pre_record_pretune")
+        string reason = "epg_runtime_selected_tuner")
     {
+        TunerLease? lease = null;
+        string? resultLog = null;
+        string? traceEnter = null;
+        string? traceExit = null;
+        string? rejectionLog = null;
+
         lock (_gate)
         {
-            TraceTuner(tunerName, $"stage=acquire_epg_by_name_enter tuner={tunerName} group={group} plannedEnd={plannedEndTime:MM/dd HH:mm:ss} reason={reason}");
-            var slot = _slots.FirstOrDefault(s =>
-                string.Equals(s.Name, tunerName, StringComparison.OrdinalIgnoreCase)
-                && MatchGroup(s, group)
-                && s.IsFree
-                && !s.IsViewingReserved
-                && !IsExcludedForEpg(s, excludeTunerKeys));
+            if (!CanAcquireUnsafe("acquire_epg_by_name", out rejectionLog))
+            {
+                // ログはPoolロック外で出す。
+            }
+            else
+            {
+
+            traceEnter = $"[TUNER] stage=acquire_epg_by_name_enter tuner={tunerName} group={group} plannedEnd={plannedEndTime:MM/dd HH:mm:ss} reason={reason} status={GetStatusSummaryUnsafe()}";
+            var slot = _slots.FirstOrDefault(candidate =>
+                string.Equals(candidate.Name, tunerName, StringComparison.OrdinalIgnoreCase)
+                && MatchGroup(candidate, group)
+                && candidate.IsFree
+                && !candidate.IsViewingReserved);
 
             if (slot is null)
             {
-                TraceTuner(tunerName, $"stage=acquire_epg_by_name_fail tuner={tunerName} group={group} reason=not_free_or_excluded_or_viewing_reserved");
-                return null;
+                traceExit = $"[TUNER] stage=acquire_epg_by_name_fail tuner={tunerName} group={group} reason=not_free_or_viewing_reserved status={GetStatusSummaryUnsafe()}";
             }
-
-            var elapsedMs = GetElapsedSinceReleaseMs(slot);
-            slot.Occupy(TunerUsageKind.Epg, null, null, plannedEndTime);
-            _snapshotVersion++;
-            _log.Add("TunerPool", group,
-                $"EPG 確保(録画前プリチューン指定): slot={slot.SlotIndex} name={slot.Name} did={slot.Did} " +
-                $"requested={tunerName} elapsedSinceRelease={FormatElapsed(elapsedMs)} reason={reason}");
-            TraceTuner(group, $"stage=acquire_epg_by_name_ok tuner={tunerName} slot={slot.SlotIndex} name={slot.Name} did={slot.Did} elapsedSinceRelease={FormatElapsed(elapsedMs)} reason={reason}");
-            return new TunerLease(slot, this, elapsedMs);
+            else
+            {
+                var elapsedMs = GetElapsedSinceReleaseMs(slot);
+                var leaseIdentity = slot.Occupy(TunerUsageKind.Epg, null, null, plannedEndTime);
+                PublishStateChangeUnsafe();
+                resultLog =
+                    $"EPG 確保(実行時Tuner指定): slot={slot.SlotIndex} name={slot.Name} did={slot.Did} " +
+                    $"requested={tunerName} elapsedSinceRelease={FormatElapsed(elapsedMs)} reason={reason}";
+                traceExit =
+                    $"[TUNER] stage=acquire_epg_by_name_ok tuner={tunerName} slot={slot.SlotIndex} name={slot.Name} did={slot.Did} " +
+                    $"elapsedSinceRelease={FormatElapsed(elapsedMs)} reason={reason} status={GetStatusSummaryUnsafe()}";
+                lease = new TunerLease(slot, this, elapsedMs, leaseIdentity);
+            }
+            }
         }
-    }
 
-    private static bool IsExcludedForEpg(Slot s, IReadOnlySet<(string BonDriverFileName, string Did)>? excludeTunerKeys)
-    {
-        if (excludeTunerKeys is null || excludeTunerKeys.Count == 0) return false;
-        foreach (var ex in excludeTunerKeys)
-        {
-            if (string.Equals(s.BonDriverFileName, ex.BonDriverFileName, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(s.Did, ex.Did, StringComparison.OrdinalIgnoreCase))
-                return true;
-        }
-        return false;
+        if (rejectionLog is not null) _log.Add("TUNER_LEASE_REJECTED", group, rejectionLog);
+        if (traceEnter is not null) _log.Add("TUNER_TRACE", tunerName, traceEnter);
+        if (resultLog is not null) _log.Add("TunerPool", group, resultLog);
+        if (traceExit is not null) _log.Add("TUNER_TRACE", group, traceExit);
+        return lease;
     }
 
     /// <summary>
     /// EPG 用にチューナーを確保する。空きがなければ null を返す。
-    /// excludeTunerKeys を渡すと、(BonDriverFileName, Did) が一致するスロットを
-    /// 候補から除外する。LIVE視聴中の TVTest が使っている物理チューナーを避ける用途。
+    /// 候補はTvAIr自身のTunerPool状態だけから決定する。
     /// </summary>
     public TunerLease? AcquireForEpg(
         string group,
-        DateTime plannedEndTime,
-        IReadOnlySet<(string BonDriverFileName, string Did)>? excludeTunerKeys = null)
+        DateTime plannedEndTime)
     {
+        TunerLease? lease = null;
+        string? resultLog = null;
+        string? rejectionLog = null;
+
         lock (_gate)
         {
-            var slot = FindFreeForEpg(group, excludeTunerKeys);
-            if (slot is null) return null;
-            var elapsedMs = GetElapsedSinceReleaseMs(slot);
-            slot.Occupy(TunerUsageKind.Epg, null, null, plannedEndTime);
-            _snapshotVersion++;
-            _log.Add("TunerPool", group,
-                $"EPG 確保: slot={slot.SlotIndex} did={slot.Did} " +
-                $"elapsedSinceRelease={FormatElapsed(elapsedMs)}");
-            return new TunerLease(slot, this, elapsedMs);
+            if (!CanAcquireUnsafe("acquire_epg", out rejectionLog))
+            {
+                // ログはPoolロック外で出す。
+            }
+            else
+            {
+
+            var slot = FindFreeForEpg(group);
+            if (slot is not null)
+            {
+                var elapsedMs = GetElapsedSinceReleaseMs(slot);
+                var leaseIdentity = slot.Occupy(TunerUsageKind.Epg, null, null, plannedEndTime);
+                PublishStateChangeUnsafe();
+                resultLog =
+                    $"EPG 確保: slot={slot.SlotIndex} did={slot.Did} elapsedSinceRelease={FormatElapsed(elapsedMs)}";
+                lease = new TunerLease(slot, this, elapsedMs, leaseIdentity);
+            }
+            }
         }
+
+        if (rejectionLog is not null) _log.Add("TUNER_LEASE_REJECTED", group, rejectionLog);
+        if (resultLog is not null) _log.Add("TunerPool", group, resultLog);
+        return lease;
     }
 
     /// <summary>
-    /// EPG用の空きスロット検索。LIVE視聴中チューナーを除外できる版。
-    /// excludeTunerKeys に含まれる (BonDriver, Did) のスロットはスキップする。
+    /// EPG用の空きスロット検索。TvAIr自身のTunerPoolだけを正本にする。
     /// </summary>
-    private Slot? FindFreeForEpg(
-        string group,
-        IReadOnlySet<(string BonDriverFileName, string Did)>? excludeTunerKeys)
+    private Slot? FindFreeForEpg(string group)
     {
-        bool IsExcluded(Slot s)
-        {
-            if (excludeTunerKeys is null || excludeTunerKeys.Count == 0) return false;
-            foreach (var ex in excludeTunerKeys)
-            {
-                if (string.Equals(s.BonDriverFileName, ex.BonDriverFileName, StringComparison.OrdinalIgnoreCase)
-                    && string.Equals(s.Did, ex.Did, StringComparison.OrdinalIgnoreCase))
-                    return true;
-            }
-            return false;
-        }
-
         return _slots
-            .Where(s => MatchGroup(s, group) && s.IsFree && !s.IsViewingReserved && !string.IsNullOrWhiteSpace(s.BonDriverFileName) && !IsExcluded(s))
+            .Where(s => MatchGroup(s, group) && s.IsFree && !s.IsViewingReserved && !string.IsNullOrWhiteSpace(s.BonDriverFileName))
             .OrderBy(s => s.LastReleasedAt ?? DateTime.MinValue)
             .FirstOrDefault();
     }
@@ -367,86 +469,61 @@ public sealed class TunerPool : IDisposable
     /// <summary>
     /// 視聴用にチューナーを確保する。空きがなければ null を返す。
     /// </summary>
-    public TunerLease? AcquireForViewing(string group, int? processId = null, int viewerProfileFrameIndex = 0)
+    public TunerLease? AcquireForViewing(string logicalViewerSlotId, string group, int? processId = null)
     {
+        if (string.IsNullOrWhiteSpace(logicalViewerSlotId)) return null;
+
+        TunerLease? lease = null;
+        string? logMessage = null;
+        string? rejectionLog = null;
+        var normalizedLogicalId = logicalViewerSlotId.Trim();
+
         lock (_gate)
         {
-            var normalizedGroup = NormalizeViewingGroup(group);
-            var exactGroupSlots = _slots
-                .Where(s => NormalizeViewingGroup(s.Group) == normalizedGroup && s.IsViewingReserved)
-                .OrderBy(s => string.IsNullOrWhiteSpace(s.Name) ? "~" : s.Name, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(s => string.IsNullOrWhiteSpace(s.Did) ? "~" : s.Did, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(s => s.SlotIndex)
-                .ToList();
-            var hybridSlots = _slots
-                .Where(s => NormalizeViewingGroup(s.Group) == "HYBRID" && s.IsViewingReserved)
-                .OrderBy(s => string.IsNullOrWhiteSpace(s.Name) ? "~" : s.Name, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(s => string.IsNullOrWhiteSpace(s.Did) ? "~" : s.Did, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(s => s.SlotIndex)
-                .ToList();
-            var orderedViewingSlots = _slots
-                .Where(s => MatchGroup(s, group) && s.IsViewingReserved)
-                .OrderBy(s => s.LastReleasedAt ?? DateTime.MinValue)
-                .ThenBy(s => s.SlotIndex)
-                .ToList();
-
-            Slot? slot;
-            if (viewerProfileFrameIndex > 0)
+            if (!CanAcquireUnsafe("acquire_viewing", out rejectionLog))
             {
-                slot = exactGroupSlots.Skip(viewerProfileFrameIndex - 1).FirstOrDefault()
-                    ?? hybridSlots.Skip(viewerProfileFrameIndex - 1).FirstOrDefault();
-                if (slot is null || !slot.IsFree)
-                {
-                    _log.Add("TunerPool", group,
-                        $"Viewing 確保失敗: viewerProfileFrame={viewerProfileFrameIndex} reason=tvtest_frame_slot_unavailable pid={processId} " +
-                        $"exactCandidates={string.Join(",", exactGroupSlots.Select(s => $"#{s.SlotIndex}:{s.Name}/{s.Did}/{s.UsageKind}"))} " +
-                        $"hybridCandidates={string.Join(",", hybridSlots.Select(s => $"#{s.SlotIndex}:{s.Name}/{s.Did}/{s.UsageKind}"))} rule=release_contract");
-                    return null;
-                }
+                // ログはPoolロック外で出す。
             }
             else
             {
-                slot = orderedViewingSlots
-                    .Where(s => s.IsFree)
-                    .OrderBy(s => s.LastReleasedAt ?? DateTime.MinValue)
-                    .FirstOrDefault();
-                if (slot is null) return null;
-            }
 
-            var elapsedMs = GetElapsedSinceReleaseMs(slot);
-            slot.Occupy(TunerUsageKind.Viewing, null, processId, null);
-            _snapshotVersion++;
-            _log.Add("TunerPool", group,
-                $"Viewing 確保: slot={slot.SlotIndex} did={slot.Did} pid={processId} viewerProfileFrame={(viewerProfileFrameIndex > 0 ? viewerProfileFrameIndex.ToString() : "auto")} " +
-                $"elapsedSinceRelease={FormatElapsed(elapsedMs)} rule=release_contract");
-            return new TunerLease(slot, this, elapsedMs);
-        }
-    }
+            var slot = _slots.FirstOrDefault(candidate =>
+                candidate.IsViewingReserved
+                && string.Equals(candidate.LogicalViewerSlotId, normalizedLogicalId, StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>
-    /// 録画が迫っている予約リストを受け取り、WakeMinutesBefore 分以内に始まる
-    /// 録画のグループで動いている EPG スロットを強制解放する。
-    /// </summary>
-    public void PreemptEpgForUpcomingRecordings(IReadOnlyList<UpcomingRecording> upcoming)
-    {
-        lock (_gate)
-        {
-            var threshold = TimeSpan.FromMinutes(_ini.WakeMinutesBefore);
-            var now = DateTime.Now;
-            foreach (var rec in upcoming)
+            if (slot is null)
             {
-                if (rec.StartTime - now > threshold) continue;
-                var targets = _slots
-                    .Where(s => MatchGroup(s, rec.Group) && s.UsageKind == TunerUsageKind.Epg)
-                    .ToList();
-                if (targets.Count <= 0) continue;
-
-                _log.Add("EPG_PREEMPT_NOTICE", rec.Group,
-                    $"reservationId={rec.ReservationId} service={TrimForLog(rec.ServiceName, 32)} title={ReservationTitleDisplayContract.ForLog(rec.Title, 48)} start={rec.StartTime:HH:mm:ss} epgSlots={targets.Count} " +
-                    $"targets={string.Join(",", targets.Select(s => $"#{s.SlotIndex}:{s.Name}/{s.Did}/pid={(s.ProcessId.HasValue ? s.ProcessId.Value.ToString() : "-")}"))} " +
-                    "rule=release_contract action=recording_scheduler_preempt_by_tuner_pool_pid");
+                logMessage =
+                    $"Viewing 確保失敗: logicalViewerSlotId={normalizedLogicalId} reason=viewer_slot_not_found pid={processId} rule=release_contract";
+            }
+            else if (!MatchGroup(slot, group))
+            {
+                logMessage =
+                    $"Viewing 確保失敗: logicalViewerSlotId={normalizedLogicalId} slot={slot.SlotIndex} did={slot.Did} " +
+                    $"reason=viewer_slot_group_mismatch slotGroup={slot.Group} pid={processId} rule=release_contract";
+            }
+            else if (!slot.IsFree)
+            {
+                logMessage =
+                    $"Viewing 確保失敗: logicalViewerSlotId={normalizedLogicalId} slot={slot.SlotIndex} did={slot.Did} " +
+                    $"reason=viewer_slot_unavailable usage={slot.UsageKind} pid={processId} rule=release_contract";
+            }
+            else
+            {
+                var elapsedMs = GetElapsedSinceReleaseMs(slot);
+                var leaseIdentity = slot.Occupy(TunerUsageKind.Viewing, null, processId, null);
+                PublishStateChangeUnsafe();
+                logMessage =
+                    $"Viewing 確保: slot={slot.SlotIndex} did={slot.Did} pid={processId} logicalViewerSlotId={normalizedLogicalId} " +
+                    $"elapsedSinceRelease={FormatElapsed(elapsedMs)} rule=release_contract";
+                lease = new TunerLease(slot, this, elapsedMs, leaseIdentity);
+            }
             }
         }
+
+        if (rejectionLog is not null) _log.Add("TUNER_LEASE_REJECTED", group, rejectionLog);
+        if (logMessage is not null) _log.Add("TunerPool", group, logMessage);
+        return lease;
     }
 
     private static string TrimForLog(string? value, int max)
@@ -462,85 +539,97 @@ public sealed class TunerPool : IDisposable
             return _slots.Count(s => MatchGroup(s, group) && s.UsageKind == TunerUsageKind.Epg);
     }
 
-
-    /// <summary>
-    /// 録画開始直前のEPG退避で、TVTestプロセス終了を確認したPIDに対応するEPGスロットを即時解放する。
-    /// 通常のEPG workerのfinally任せにすると、録画開始側の空き確認と競争して本番録画を落とすため、
-    /// 録画優先プリエンプトでは録画側から明示的にTunerPool状態を閉じる。
-    /// </summary>
-    public bool ForceReleaseEpgByProcessId(string group, int processId, string? did, string? bonDriverFileName, string owner, string label)
+    public int CountEpgSlotsByName(string tunerName)
     {
-        if (processId <= 0 && string.IsNullOrWhiteSpace(did)) return false;
+        if (string.IsNullOrWhiteSpace(tunerName)) return 0;
         lock (_gate)
-        {
-            var slot = _slots.FirstOrDefault(s => MatchGroup(s, group)
-                && s.UsageKind == TunerUsageKind.Epg
-                && s.ProcessId == processId)
-                ?? _slots.FirstOrDefault(s => MatchGroup(s, group)
-                    && s.UsageKind == TunerUsageKind.Epg
-                    && string.Equals(s.Did, did, StringComparison.OrdinalIgnoreCase)
-                    && (string.IsNullOrWhiteSpace(bonDriverFileName) || string.Equals(s.BonDriverFileName, bonDriverFileName, StringComparison.OrdinalIgnoreCase)));
-            if (slot is null)
-            {
-                _log.Add("REC_TUNER_FORCE_RELEASE", group,
-                    $"result=MISS pid={processId} did={SafeValue(did)} bonDriver={SafeValue(bonDriverFileName)} owner={SafeValue(owner)} label={SafeValue(label)} status={GetStatusSummaryUnsafe()}");
-                return false;
-            }
-
-            var before = $"#{slot.SlotIndex}:{slot.Name}/{slot.Did}/{slot.Group}/{slot.UsageKind}/pid={(slot.ProcessId.HasValue ? slot.ProcessId.Value.ToString() : "-")}";
-            slot.Release();
-            _snapshotVersion++;
-            _log.Add("REC_TUNER_FORCE_RELEASE", group,
-                $"result=OK pid={processId} did={SafeValue(did)} bonDriver={SafeValue(bonDriverFileName)} released={before} owner={SafeValue(owner)} label={SafeValue(label)} version={_snapshotVersion} status={GetStatusSummaryUnsafe()} rule=release_contract");
-            return true;
-        }
+            return _slots.Count(s => string.Equals(s.Name, tunerName, StringComparison.OrdinalIgnoreCase)
+                && s.UsageKind == TunerUsageKind.Epg);
     }
 
+
     /// <summary>
-    /// 録画優先プリエンプトの最終段で、PIDが未反映/終了直後などのEPG leaseだけを解放する。
-    /// PID付きスロットは停止処理の対象にすべきなのでここでは触らない。
+    /// EpgCapture owner が存在しないことを確認した後だけ使う、PID未反映EPG leaseの世代一致回収。
+    /// TunerNameだけで解放せず、PoolLeaseId + OccupancyGeneration が現在のslot正本と一致する場合に限る。
+    /// これにより、確認後に同じ物理Tunerへ別世代EPG ownerが入っても新leaseを誤解放しない。
     /// </summary>
+    public bool ForceReleaseOwnerlessPidlessEpgLease(
+        string tunerName,
+        Guid poolLeaseId,
+        long occupancyGeneration,
+        string owner,
+        string label)
+    {
+        if (string.IsNullOrWhiteSpace(tunerName) || poolLeaseId == Guid.Empty || occupancyGeneration <= 0)
+            return false;
+
+        bool released = false;
+        string logMessage;
+        lock (_gate)
+        {
+            var slot = _slots.FirstOrDefault(candidate =>
+                string.Equals(candidate.Name, tunerName, StringComparison.OrdinalIgnoreCase)
+                && candidate.UsageKind == TunerUsageKind.Epg
+                && !candidate.ProcessId.HasValue
+                && candidate.PoolLeaseId == poolLeaseId
+                && candidate.OccupancyGeneration == occupancyGeneration
+                && candidate.LeaseState == TunerLeaseState.Active);
+
+            if (slot is null)
+            {
+                logMessage =
+                    $"result=MISS tuner={SafeValue(tunerName)} expectedLeaseId={poolLeaseId} expectedGeneration={occupancyGeneration} " +
+                    $"owner={SafeValue(owner)} label={SafeValue(label)} status={GetStatusSummaryUnsafe()} rule=epg_owner_identity_contract";
+            }
+            else
+            {
+                var before = $"#{slot.SlotIndex}:{slot.Name}/{slot.Did}/pid=-/L{poolLeaseId:N}/G{occupancyGeneration}";
+                slot.Release(revoked: true);
+                PublishStateChangeUnsafe();
+                released = true;
+                logMessage =
+                    $"result=OK_OWNERLESS_PIDLESS released={before} owner={SafeValue(owner)} label={SafeValue(label)} " +
+                    $"version={_snapshotVersion} status={GetStatusSummaryUnsafe()} rule=epg_owner_identity_contract";
+            }
+        }
+
+        _log.Add("EPG_TUNER_STALE_LEASE_RELEASE", tunerName, logMessage);
+        return released;
+    }
+
     public int ForceReleasePidlessEpgSlots(string group, string owner, string label)
     {
+        int releasedCount = 0;
+        string? logMessage = null;
+
         lock (_gate)
         {
             var targets = _slots
-                .Where(s => MatchGroup(s, group)
-                    && s.UsageKind == TunerUsageKind.Epg
-                    && !s.ProcessId.HasValue)
-                .OrderBy(s => s.SlotIndex)
+                .Where(slot => MatchGroup(slot, group)
+                    && slot.UsageKind == TunerUsageKind.Epg
+                    && !slot.ProcessId.HasValue)
+                .OrderBy(slot => slot.SlotIndex)
                 .ToList();
-            if (targets.Count <= 0) return 0;
-
-            var released = string.Join(",", targets.Select(s => $"#{s.SlotIndex}:{s.Name}/{s.Did}/pid=-"));
-            foreach (var slot in targets)
+            if (targets.Count > 0)
             {
-                slot.Release();
-                _snapshotVersion++;
+                var released = string.Join(",", targets.Select(slot => $"#{slot.SlotIndex}:{slot.Name}/{slot.Did}/pid=-"));
+                foreach (var slot in targets)
+                {
+                    slot.Release(revoked: true);
+                    PublishStateChangeUnsafe();
+                }
+
+                releasedCount = targets.Count;
+                logMessage =
+                    $"result=OK_PIDLESS count={targets.Count} released={released} owner={SafeValue(owner)} label={SafeValue(label)} " +
+                    $"version={_snapshotVersion} status={GetStatusSummaryUnsafe()} rule=release_contract";
             }
-
-            _log.Add("REC_TUNER_FORCE_RELEASE", group,
-                $"result=OK_PIDLESS count={targets.Count} released={released} owner={SafeValue(owner)} label={SafeValue(label)} version={_snapshotVersion} status={GetStatusSummaryUnsafe()} rule=release_contract");
-            return targets.Count;
         }
+
+        if (logMessage is not null) _log.Add("REC_TUNER_FORCE_RELEASE", group, logMessage);
+        return releasedCount;
     }
 
-    /// <summary>視聴中スロットを強制解放する（録画割り込み時）。</summary>
-    public bool ForceReleaseViewing(string group)
-    {
-        lock (_gate)
-        {
-            var slot = _slots.FirstOrDefault(
-                s => MatchGroup(s, group) && s.UsageKind == TunerUsageKind.Viewing && s.IsViewingReserved);
-            if (slot is null) return false;
-            slot.Release();
-            _snapshotVersion++;
-            _log.Add("TunerPool", group, $"Viewing 強制解放（録画割り込み） version={_snapshotVersion}");
-            return true;
-        }
-    }
-
-    /// <summary>指定グループに空きスロットがあるか。</summary>
     public bool HasFreeSlot(string group)
     {
         lock (_gate)
@@ -573,10 +662,10 @@ public sealed class TunerPool : IDisposable
             return _slots.Count(s => MatchGroup(s, group) && s.IsFree && !s.IsViewingReserved && !string.IsNullOrWhiteSpace(s.BonDriverFileName));
     }
 
-    public int CountEpgUsableFreeSlots(string group, IReadOnlySet<(string BonDriverFileName, string Did)>? excludeTunerKeys = null)
+    public int CountEpgUsableFreeSlots(string group)
     {
         lock (_gate)
-            return _slots.Count(s => MatchGroup(s, group) && s.IsFree && !s.IsViewingReserved && !string.IsNullOrWhiteSpace(s.BonDriverFileName) && !IsExcludedForEpg(s, excludeTunerKeys));
+            return _slots.Count(s => MatchGroup(s, group) && s.IsFree && !s.IsViewingReserved && !string.IsNullOrWhiteSpace(s.BonDriverFileName));
     }
 
 
@@ -628,10 +717,104 @@ public sealed class TunerPool : IDisposable
         }
     }
 
+    /// <summary>
+    /// 指定グループのEPG用スロットが空くまで、TunerPoolの状態変更シグナルで待つ。
+    /// TvAIr自身のTunerPool状態だけを正本にする。
+    /// </summary>
+    public async Task<bool> WaitForEpgSlotAsync(
+        string group,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+        => await WaitForAvailabilityAsync(() => FindFreeForEpg(group) is not null, timeout, cancellationToken).ConfigureAwait(false)
+            == TunerAvailabilityWaitResult.Available;
+
+    /// <summary>
+    /// 指定グループのEPG leaseがすべて解放されるまで、TunerPoolの状態変更シグナルで待つ。
+    /// 録画前プリエンプト後のlease収束確認用。timeoutは待機上限。
+    /// </summary>
+    public async Task<bool> WaitForEpgSlotsClearedAsync(string group, TimeSpan timeout, CancellationToken cancellationToken)
+        => await WaitForAvailabilityAsync(
+            () => !_slots.Any(s => MatchGroup(s, group) && s.UsageKind == TunerUsageKind.Epg),
+            timeout,
+            cancellationToken).ConfigureAwait(false) == TunerAvailabilityWaitResult.Available;
+
+    public async Task<bool> WaitForEpgSlotClearedByNameAsync(string tunerName, TimeSpan timeout, CancellationToken cancellationToken)
+        => await WaitForAvailabilityAsync(
+            () => !_slots.Any(s => string.Equals(s.Name, tunerName, StringComparison.OrdinalIgnoreCase)
+                && s.UsageKind == TunerUsageKind.Epg),
+            timeout,
+            cancellationToken).ConfigureAwait(false) == TunerAvailabilityWaitResult.Available;
+
+    /// <summary>
+    /// 指定グループの録画用スロットが空くまで、TunerPoolの状態変更シグナルで待つ。
+    /// timeoutは待機上限であり、固定ポーリング周期ではない。
+    /// </summary>
+    public async Task<bool> WaitForFreeSlotAsync(string group, TimeSpan timeout, CancellationToken cancellationToken)
+        => await WaitForFreeSlotDetailedAsync(group, timeout, cancellationToken).ConfigureAwait(false) == TunerAvailabilityWaitResult.Available;
+
+    public Task<TunerAvailabilityWaitResult> WaitForFreeSlotDetailedAsync(string group, TimeSpan timeout, CancellationToken cancellationToken)
+        => WaitForAvailabilityAsync(() => FindFree(group) is not null, timeout, cancellationToken);
+
+    /// <summary>
+    /// 指定名の録画用スロットが空くまで、TunerPoolの状態変更シグナルで待つ。
+    /// </summary>
+    public async Task<bool> WaitForFreeSlotByNameAsync(string tunerName, TimeSpan timeout, CancellationToken cancellationToken)
+        => await WaitForFreeSlotByNameDetailedAsync(tunerName, timeout, cancellationToken).ConfigureAwait(false) == TunerAvailabilityWaitResult.Available;
+
+    public Task<TunerAvailabilityWaitResult> WaitForFreeSlotByNameDetailedAsync(string tunerName, TimeSpan timeout, CancellationToken cancellationToken)
+        => WaitForAvailabilityAsync(
+            () => _slots.Any(s => string.Equals(s.Name, tunerName, StringComparison.OrdinalIgnoreCase) && s.IsFree && !s.IsViewingReserved),
+            timeout,
+            cancellationToken);
+
+    private async Task<TunerAvailabilityWaitResult> WaitForAvailabilityAsync(Func<bool> isAvailableUnsafe, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        if (timeout <= TimeSpan.Zero)
+        {
+            lock (_gate)
+            {
+                if (_lifecycleState == TunerPoolLifecycleState.Quiescing) return TunerAvailabilityWaitResult.PoolStopping;
+                if (_lifecycleState == TunerPoolLifecycleState.Disposed) return TunerAvailabilityWaitResult.PoolDisposed;
+                return isAvailableUnsafe() ? TunerAvailabilityWaitResult.Available : TunerAvailabilityWaitResult.TimedOut;
+            }
+        }
+
+        var deadline = DateTime.UtcNow + timeout;
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Task<long> stateChangedTask;
+            lock (_gate)
+            {
+                if (_lifecycleState == TunerPoolLifecycleState.Quiescing) return TunerAvailabilityWaitResult.PoolStopping;
+                if (_lifecycleState == TunerPoolLifecycleState.Disposed) return TunerAvailabilityWaitResult.PoolDisposed;
+                if (isAvailableUnsafe()) return TunerAvailabilityWaitResult.Available;
+                stateChangedTask = _stateChanged.Task;
+            }
+
+            var remaining = deadline - DateTime.UtcNow;
+            if (remaining <= TimeSpan.Zero) return TunerAvailabilityWaitResult.TimedOut;
+
+            try
+            {
+                await stateChangedTask.WaitAsync(remaining, cancellationToken).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                lock (_gate)
+                {
+                    if (_lifecycleState == TunerPoolLifecycleState.Quiescing) return TunerAvailabilityWaitResult.PoolStopping;
+                    if (_lifecycleState == TunerPoolLifecycleState.Disposed) return TunerAvailabilityWaitResult.PoolDisposed;
+                    return isAvailableUnsafe() ? TunerAvailabilityWaitResult.Available : TunerAvailabilityWaitResult.TimedOut;
+                }
+            }
+        }
+    }
+
     /// <summary>現在のスロット状態をログ出力しやすい1行文字列で返す。</summary>
     public string GetStatusSummary()
     {
-        lock (_gate) return $"version={_snapshotVersion} " + GetStatusSummaryUnsafe();
+        lock (_gate) return $"lifecycle={_lifecycleState} version={_snapshotVersion} " + GetStatusSummaryUnsafe();
     }
 
     /// <summary>視聴中スロットが存在するか（競合判定用）。</summary>
@@ -641,11 +824,48 @@ public sealed class TunerPool : IDisposable
             return _slots.Any(s => MatchGroup(s, group) && s.UsageKind == TunerUsageKind.Viewing);
     }
 
+    /// <summary>設定上の視聴専用チューナー本数を返す。</summary>
+    public int GetViewingCapacity()
+    {
+        lock (_gate)
+            return _slots.Count(s => s.IsViewingReserved && !string.IsNullOrWhiteSpace(s.BonDriverFileName));
+    }
+
+    /// <summary>現在Viewingで占有中の視聴専用チューナー本数を返す。</summary>
+    public int GetActiveViewingCount()
+    {
+        lock (_gate)
+            return _slots.Count(s => s.IsViewingReserved && s.UsageKind == TunerUsageKind.Viewing);
+    }
+
     /// <summary>現在のスロット状態スナップショットを返す。</summary>
     public IReadOnlyList<TunerSlotStatus> GetStatus()
     {
         lock (_gate)
             return _slots.Select(ToStatusUnsafe).ToList();
+    }
+
+    public long SnapshotVersion
+    {
+        get
+        {
+            lock (_gate) return _snapshotVersion;
+        }
+    }
+
+    public bool TryExecuteAtSnapshotVersion<T>(long expectedSnapshotVersion, Func<T> action, out T result)
+    {
+        lock (_gate)
+        {
+            if (_lifecycleState != TunerPoolLifecycleState.Running || _snapshotVersion != expectedSnapshotVersion)
+            {
+                result = default!;
+                return false;
+            }
+
+            result = action();
+            return true;
+        }
     }
 
     /// <summary>指定放送波でEPG使用中の管理下スロットがあるかを返す。PreRecordEpgAdmissionの実状態正本。</summary>
@@ -692,89 +912,118 @@ public sealed class TunerPool : IDisposable
 
     // ─── TunerLease から呼ばれる ─────────────────────────────────
 
-    internal void Release(Slot slot)
+    internal void Release(Slot slot, TunerLeaseIdentity identity)
     {
+        string? staleLog = null;
+        string? enterLog = null;
+        string? releasedLog = null;
+        string? exitLog = null;
+        string group = slot.Group;
+
         lock (_gate)
         {
-            var kind = slot.UsageKind;
-            var rid = slot.ReservationId;
-            var pid = slot.ProcessId;
-            _log.Add("TUNER_TRACE", slot.Group, $"[TUNER] stage=release_enter slot={slot.SlotIndex} name={slot.Name} did={slot.Did} kind={kind} reservationId={(rid.HasValue ? rid.Value.ToString() : "-")} pid={(pid.HasValue ? pid.Value.ToString() : "-")} status={GetStatusSummaryUnsafe()}");
-            slot.Release();
-            _snapshotVersion++;
-            _log.Add("TunerPool", slot.Group,
-                $"{kind} 解放: slot={slot.SlotIndex} name={slot.Name} did={slot.Did} version={_snapshotVersion} status={GetStatusSummaryUnsafe()}");
-            _log.Add("TUNER_TRACE", slot.Group, $"[TUNER] stage=release_exit slot={slot.SlotIndex} name={slot.Name} did={slot.Did} previousKind={kind} previousReservationId={(rid.HasValue ? rid.Value.ToString() : "-")} previousPid={(pid.HasValue ? pid.Value.ToString() : "-")} version={_snapshotVersion} status={GetStatusSummaryUnsafe()}");
+            if (!slot.Matches(identity))
+            {
+                staleLog = BuildStaleLeaseLogUnsafe(slot, identity, "release");
+            }
+            else
+            {
+                var kind = slot.UsageKind;
+                var rid = slot.ReservationId;
+                var pid = slot.ProcessId;
+                var beforeStatus = GetStatusSummaryUnsafe();
+                enterLog = $"[TUNER] stage=release_enter slot={slot.SlotIndex} name={slot.Name} did={slot.Did} kind={kind} reservationId={(rid.HasValue ? rid.Value.ToString() : "-")} pid={(pid.HasValue ? pid.Value.ToString() : "-")} leaseId={identity.PoolLeaseId} generation={identity.OccupancyGeneration} status={beforeStatus}";
+                slot.Release();
+                PublishStateChangeUnsafe();
+                var version = _snapshotVersion;
+                var afterStatus = GetStatusSummaryUnsafe();
+                releasedLog = $"{kind} 解放: slot={slot.SlotIndex} name={slot.Name} did={slot.Did} leaseId={identity.PoolLeaseId} generation={identity.OccupancyGeneration} version={version} status={afterStatus}";
+                exitLog = $"[TUNER] stage=release_exit slot={slot.SlotIndex} name={slot.Name} did={slot.Did} previousKind={kind} previousReservationId={(rid.HasValue ? rid.Value.ToString() : "-")} previousPid={(pid.HasValue ? pid.Value.ToString() : "-")} leaseId={identity.PoolLeaseId} generation={identity.OccupancyGeneration} version={version} status={afterStatus}";
+            }
         }
+
+        if (staleLog is not null)
+        {
+            _log.Add("TUNER_STALE_LEASE_REJECTED", group, staleLog);
+            return;
+        }
+        _log.Add("TUNER_TRACE", group, enterLog!);
+        _log.Add("TunerPool", group, releasedLog!);
+        _log.Add("TUNER_TRACE", group, exitLog!);
     }
 
-    internal void UpdateProcessId(Slot slot, int pid)
+    internal void UpdateProcessId(Slot slot, TunerLeaseIdentity identity, int pid)
     {
+        string? staleLog = null;
+        string? beforeLog = null;
+        string? afterLog = null;
+        string group = slot.Group;
+
         lock (_gate)
         {
-            _log.Add("TUNER_TRACE", slot.Group, $"[TUNER] stage=set_process_id slot={slot.SlotIndex} name={slot.Name} did={slot.Did} reservationId={(slot.ReservationId.HasValue ? slot.ReservationId.Value.ToString() : "-")} pid={pid} previousPid={(slot.ProcessId.HasValue ? slot.ProcessId.Value.ToString() : "-")} status={GetStatusSummaryUnsafe()}");
-            slot.SetProcessId(pid);
-            _snapshotVersion++;
-            _log.Add("TUNER_TRACE", slot.Group, $"[TUNER] stage=set_process_id_done slot={slot.SlotIndex} name={slot.Name} did={slot.Did} reservationId={(slot.ReservationId.HasValue ? slot.ReservationId.Value.ToString() : "-")} pid={pid} version={_snapshotVersion} status={GetStatusSummaryUnsafe()}");
+            if (!slot.Matches(identity))
+            {
+                staleLog = BuildStaleLeaseLogUnsafe(slot, identity, "set_process_id");
+            }
+            else
+            {
+                var reservationId = slot.ReservationId;
+                var previousPid = slot.ProcessId;
+                var beforeStatus = GetStatusSummaryUnsafe();
+                beforeLog = $"[TUNER] stage=set_process_id slot={slot.SlotIndex} name={slot.Name} did={slot.Did} reservationId={(reservationId.HasValue ? reservationId.Value.ToString() : "-")} pid={pid} previousPid={(previousPid.HasValue ? previousPid.Value.ToString() : "-")} leaseId={identity.PoolLeaseId} generation={identity.OccupancyGeneration} status={beforeStatus}";
+                slot.SetProcessId(pid);
+                PublishStateChangeUnsafe();
+                afterLog = $"[TUNER] stage=set_process_id_done slot={slot.SlotIndex} name={slot.Name} did={slot.Did} reservationId={(reservationId.HasValue ? reservationId.Value.ToString() : "-")} pid={pid} leaseId={identity.PoolLeaseId} generation={identity.OccupancyGeneration} version={_snapshotVersion} status={GetStatusSummaryUnsafe()}";
+            }
         }
+
+        if (staleLog is not null)
+        {
+            _log.Add("TUNER_STALE_LEASE_REJECTED", group, staleLog);
+            return;
+        }
+        _log.Add("TUNER_TRACE", group, beforeLog!);
+        _log.Add("TUNER_TRACE", group, afterLog!);
     }
 
-    internal void UpdatePlannedEndTime(Slot slot, DateTime plannedEndTime, string reason)
+    internal void UpdatePlannedEndTime(Slot slot, TunerLeaseIdentity identity, DateTime plannedEndTime, string reason)
     {
+        string? staleLog = null;
+        string? beforeLog = null;
+        string? afterLog = null;
+        string group = slot.Group;
+
         lock (_gate)
         {
-            var before = slot.PlannedEndTime;
-            _log.Add("TUNER_TRACE", slot.Group, $"[TUNER] stage=update_planned_end slot={slot.SlotIndex} name={slot.Name} did={slot.Did} reservationId={(slot.ReservationId.HasValue ? slot.ReservationId.Value.ToString() : "-")} before={(before.HasValue ? before.Value.ToString("MM/dd HH:mm:ss") : "-")} after={plannedEndTime:MM/dd HH:mm:ss} reason={reason} status={GetStatusSummaryUnsafe()}");
-            slot.UpdatePlannedEndTime(plannedEndTime);
-            _snapshotVersion++;
-            _log.Add("TUNER_TRACE", slot.Group, $"[TUNER] stage=update_planned_end_done slot={slot.SlotIndex} name={slot.Name} did={slot.Did} reservationId={(slot.ReservationId.HasValue ? slot.ReservationId.Value.ToString() : "-")} after={plannedEndTime:MM/dd HH:mm:ss} version={_snapshotVersion} status={GetStatusSummaryUnsafe()}");
+            if (!slot.Matches(identity))
+            {
+                staleLog = BuildStaleLeaseLogUnsafe(slot, identity, "update_planned_end");
+            }
+            else
+            {
+                var before = slot.PlannedEndTime;
+                var reservationId = slot.ReservationId;
+                var beforeStatus = GetStatusSummaryUnsafe();
+                beforeLog = $"[TUNER] stage=update_planned_end slot={slot.SlotIndex} name={slot.Name} did={slot.Did} reservationId={(reservationId.HasValue ? reservationId.Value.ToString() : "-")} before={(before.HasValue ? before.Value.ToString("MM/dd HH:mm:ss") : "-")} after={plannedEndTime:MM/dd HH:mm:ss} reason={reason} leaseId={identity.PoolLeaseId} generation={identity.OccupancyGeneration} status={beforeStatus}";
+                slot.UpdatePlannedEndTime(plannedEndTime);
+                PublishStateChangeUnsafe();
+                afterLog = $"[TUNER] stage=update_planned_end_done slot={slot.SlotIndex} name={slot.Name} did={slot.Did} reservationId={(reservationId.HasValue ? reservationId.Value.ToString() : "-")} after={plannedEndTime:MM/dd HH:mm:ss} leaseId={identity.PoolLeaseId} generation={identity.OccupancyGeneration} version={_snapshotVersion} status={GetStatusSummaryUnsafe()}";
+            }
         }
+
+        if (staleLog is not null)
+        {
+            _log.Add("TUNER_STALE_LEASE_REJECTED", group, staleLog);
+            return;
+        }
+        _log.Add("TUNER_TRACE", group, beforeLog!);
+        _log.Add("TUNER_TRACE", group, afterLog!);
     }
 
     // ─── 内部処理 ────────────────────────────────────────────────
 
-    private int PreemptEpgSlots(string group)
-    {
-        var targets = _slots
-            .Where(s => MatchGroup(s, group) && s.UsageKind == TunerUsageKind.Epg)
-            .ToList();
-        if (targets.Count > 0)
-        {
-            _log.Add("TUNER_TRACE", group, $"[TUNER] stage=preempt_epg_enter group={group} targets={string.Join(",", targets.Select(s => $"#{s.SlotIndex}:{s.Name}/{s.Did}"))} status={GetStatusSummaryUnsafe()}");
-        }
-        foreach (var s in targets)
-        {
-            s.Release();
-            _snapshotVersion++;
-        }
-        if (targets.Count > 0)
-        {
-            _log.Add("TUNER_TRACE", group, $"[TUNER] stage=preempt_epg_exit group={group} released={targets.Count} version={_snapshotVersion} status={GetStatusSummaryUnsafe()}");
-        }
-        return targets.Count;
-    }
 
-    private IEnumerable<Slot> OrderedRecordableFreeSlots(string group)
-        => _slots
-            .Where(s => MatchGroup(s, group) && s.IsFree && !s.IsViewingReserved)
-            .OrderBy(s => s.LastReleasedAt ?? DateTime.MinValue)
-            .ThenBy(s => s.SlotIndex);
 
-    private Slot? FindFreeWithUnknownExternalGuard(
-        string group,
-        bool reserveUnknownExternalBuffer,
-        string reason,
-        int reservationId,
-        string? requestedTunerName)
-    {
-        var selected = OrderedRecordableFreeSlots(group).FirstOrDefault();
-        if (reserveUnknownExternalBuffer)
-        {
-            _log.Add("TUNER_EXTERNAL_GUARD", group,
-                $"result=NO_REROUTE reservationId={reservationId} assigned={(selected is null ? "-" : selected.Name + "/" + selected.Did)} requested={SafeValue(requestedTunerName)} reason={reason} rule=explicit_detected_state_only_no_unknown_did_buffer");
-        }
-        return selected;
-    }
 
     /// <summary>
     /// 指定グループの空きスロットを返す。複数ある場合は LastReleasedAt が最も古いものを優先。
@@ -827,32 +1076,58 @@ public sealed class TunerPool : IDisposable
     {
         var parts = _slots
             .OrderBy(s => s.SlotIndex)
-            .Select(s => $"#{s.SlotIndex}:{s.Name}/{s.Did}/{s.Group}/{s.Role}/{s.UsageKind}/R{(s.ReservationId.HasValue ? s.ReservationId.Value.ToString() : "-")}");
+            .Select(s => $"#{s.SlotIndex}:{s.Name}/{s.Did}/{s.Group}/{s.Role}/{s.UsageKind}/R{(s.ReservationId.HasValue ? s.ReservationId.Value.ToString() : "-")}/L{(s.PoolLeaseId.HasValue ? s.PoolLeaseId.Value.ToString("N")[..8] : "-")}/G{s.OccupancyGeneration}/{s.LeaseState}");
         return string.Join(", ", parts);
     }
 
 
     private TunerSlotStatus ToStatusUnsafe(Slot s) => new(
         s.Name, s.BonDriverFileName, s.Did, s.Group, s.Role, s.SlotIndex,
-        s.UsageKind, s.ReservationId, s.ProcessId, s.PlannedEndTime, s.LastReleasedAt, _snapshotVersion);
+        s.UsageKind, s.ReservationId, s.ProcessId, s.PlannedEndTime, s.LastReleasedAt,
+        s.PoolLeaseId, s.OccupancyGeneration, s.LeaseState, _lifecycleState, _snapshotVersion);
 
+
+    public bool BeginQuiescing(string reason)
+    {
+        string? logMessage = null;
+        lock (_gate)
+        {
+            if (_lifecycleState != TunerPoolLifecycleState.Running) return false;
+            _lifecycleState = TunerPoolLifecycleState.Quiescing;
+            PublishStateChangeUnsafe();
+            logMessage = $"reason={SafeValue(reason)} version={_snapshotVersion} status={GetStatusSummaryUnsafe()}";
+        }
+        _log.Add("TUNER_POOL_LIFECYCLE", "Quiescing", logMessage!);
+        return true;
+    }
 
     public void Dispose()
     {
+        string? logMessage = null;
         lock (_gate)
         {
+            if (_lifecycleState == TunerPoolLifecycleState.Disposed) return;
+            _lifecycleState = TunerPoolLifecycleState.Disposed;
             foreach (var s in _slots.Where(s => !s.IsFree))
             {
-                s.Release();
-                _snapshotVersion++;
+                s.Release(revoked: true);
+                PublishStateChangeUnsafe();
             }
+            PublishStateChangeUnsafe();
+            logMessage = $"version={_snapshotVersion} status={GetStatusSummaryUnsafe()}";
         }
+        _log.Add("TUNER_POOL_LIFECYCLE", "Disposed", logMessage!);
     }
+
 }
 
 // ─── 補助型 ──────────────────────────────────────────────────────
 
 public enum TunerUsageKind { Free, Epg, Recording, Viewing }
+public enum TunerLeaseState { Free, Active, Revoked }
+public enum TunerPoolLifecycleState { Running, Quiescing, Disposed }
+public enum TunerAvailabilityWaitResult { Available, TimedOut, PoolStopping, PoolDisposed }
+public readonly record struct TunerLeaseIdentity(Guid PoolLeaseId, long OccupancyGeneration);
 
 /// <summary>スロット状態の読み取り専用スナップショット。</summary>
 public sealed record TunerSlotStatus(
@@ -867,6 +1142,10 @@ public sealed record TunerSlotStatus(
     int? ProcessId,
     DateTime? PlannedEndTime,
     DateTime? LastReleasedAt,
+    Guid? PoolLeaseId,
+    long OccupancyGeneration,
+    TunerLeaseState LeaseState,
+    TunerPoolLifecycleState PoolLifecycleState,
     long SnapshotVersion);
 
 /// <summary>録画接近通知用の軽量値型。</summary>
@@ -882,14 +1161,22 @@ public sealed record UpcomingRecording(
 /// </summary>
 public sealed class TunerLease : IDisposable
 {
+    private const int ReleaseStateActive = 0;
+    private const int ReleaseStateReleasing = 1;
+    private const int ReleaseStateReleased = 2;
+    private const int ConcurrentReleaseWaitTimeoutMs = 2_000;
+
     private readonly TunerPool.Slot _slot;
     private readonly TunerPool _pool;
-    private bool _released;
+    private readonly TunerLeaseIdentity _identity;
+    private readonly object _releaseGate = new();
+    private int _releaseState = ReleaseStateActive;
 
-    internal TunerLease(TunerPool.Slot slot, TunerPool pool, double? elapsedSinceReleaseMs)
+    internal TunerLease(TunerPool.Slot slot, TunerPool pool, double? elapsedSinceReleaseMs, TunerLeaseIdentity identity)
     {
         _slot = slot;
         _pool = pool;
+        _identity = identity;
         ElapsedSinceReleaseMs = elapsedSinceReleaseMs;
     }
 
@@ -897,7 +1184,16 @@ public sealed class TunerLease : IDisposable
     public string BonDriverFileName => _slot.BonDriverFileName;
     public string Did               => _slot.Did;
     public string Group             => _slot.Group;
+    public string LogicalViewerSlotId => _slot.LogicalViewerSlotId;
     public int    SlotIndex         => _slot.SlotIndex;
+    public Guid PoolLeaseId => _identity.PoolLeaseId;
+    public long OccupancyGeneration => _identity.OccupancyGeneration;
+    public bool IsCurrent =>
+        Volatile.Read(ref _releaseState) == ReleaseStateActive
+        && _pool.IsLeaseCurrent(_slot, _identity);
+
+    // Dispose状態に関係なく、Pool正本に同じidentityが残っているかを返す。
+    public bool IsIdentityCurrent => _pool.IsLeaseIdentityCurrent(_slot, _identity);
 
     /// <summary>
     /// この Lease を取得した時点で、同一スロットの前回Releaseから経過していたミリ秒。
@@ -907,15 +1203,124 @@ public sealed class TunerLease : IDisposable
     public double? ElapsedSinceReleaseMs { get; }
 
     /// <summary>TVTest起動後にプロセスIDを記録する。</summary>
-    public void SetProcessId(int pid) => _pool.UpdateProcessId(_slot, pid);
+    public void SetProcessId(int pid)
+    {
+        EnterReleaseGateOrThrow("set_process_id");
+        try
+        {
+            EnsureActiveForMutationUnsafe("set_process_id");
+            _pool.UpdateProcessId(_slot, _identity, pid);
+        }
+        finally
+        {
+            Monitor.Exit(_releaseGate);
+        }
+    }
 
     /// <summary>録画中時間追従で、同一チューナースロットの終了予定を更新する。</summary>
-    public void UpdatePlannedEndTime(DateTime plannedEndTime, string reason) => _pool.UpdatePlannedEndTime(_slot, plannedEndTime, reason);
+    public void UpdatePlannedEndTime(DateTime plannedEndTime, string reason)
+    {
+        EnterReleaseGateOrThrow("update_planned_end");
+        try
+        {
+            EnsureActiveForMutationUnsafe("update_planned_end");
+            _pool.UpdatePlannedEndTime(_slot, _identity, plannedEndTime, reason);
+        }
+        finally
+        {
+            Monitor.Exit(_releaseGate);
+        }
+    }
 
     public void Dispose()
     {
-        if (_released) return;
-        _released = true;
-        _pool.Release(_slot);
+        EnterReleaseGateOrThrow("dispose");
+        try
+        {
+            while (_releaseState == ReleaseStateReleasing)
+            {
+                if (Monitor.Wait(_releaseGate, ConcurrentReleaseWaitTimeoutMs))
+                    continue;
+
+                // LEASE_RELEASE_WAIT_RECHECK_INVARIANT:
+                // timeout境界で先行releaseが状態を確定してもPulseを観測できない場合がある。
+                // 待機失敗だけで解放失敗へせず、原子的な最終状態を再確認する。
+                var stateAfterWait = Volatile.Read(ref _releaseState);
+                if (stateAfterWait == ReleaseStateReleased)
+                    return;
+                if (stateAfterWait == ReleaseStateActive)
+                    break; // 先行release失敗後。自分が次のrelease ownerとして再試行する。
+
+                throw new TimeoutException($"Tuner lease release wait timed out: slot={SlotIndex} did={Did} leaseId={PoolLeaseId}");
+            }
+
+            if (_releaseState == ReleaseStateReleased)
+                return;
+
+            _releaseState = ReleaseStateReleasing;
+        }
+        finally
+        {
+            Monitor.Exit(_releaseGate);
+        }
+
+        Exception? releaseError = null;
+        try
+        {
+            _pool.Release(_slot, _identity);
+        }
+        catch (Exception ex)
+        {
+            releaseError = ex;
+        }
+
+        var identityStillCurrent = true;
+        try
+        {
+            identityStillCurrent = _pool.IsLeaseIdentityCurrent(_slot, _identity);
+        }
+        catch
+        {
+            // 観測不能時は安全側にActiveへ戻し、後続cleanupの再試行を許可する。
+            identityStillCurrent = true;
+        }
+
+        // LEASE_RELEASE_COMPLETION_PUBLISH_INVARIANT:
+        // Pool解放後の状態確定をreleaseGate再取得に依存させない。
+        // 再取得がタイムアウトするとReleasingのまま永久残留し、以後のmutation／Disposeが全て失敗する。
+        // 先に原子的にActiveまたはReleasedへ確定し、待機者へのPulseだけをベストエフォートで行う。
+        Interlocked.Exchange(
+            ref _releaseState,
+            identityStillCurrent ? ReleaseStateActive : ReleaseStateReleased);
+
+        if (Monitor.TryEnter(_releaseGate, ConcurrentReleaseWaitTimeoutMs))
+        {
+            try
+            {
+                Monitor.PulseAll(_releaseGate);
+            }
+            finally
+            {
+                Monitor.Exit(_releaseGate);
+            }
+        }
+
+        // LEASE_RELEASE_POOL_TRUTH_INVARIANT:
+        // Release呼出しが例外を返しても、Pool正本から同一identityが消えていれば解放は成立済みである。
+        // その場合に例外を再送出すると外側wrapperがentryをActiveへ復帰させ、消滅済みleaseを管理上だけ残す。
+        if (releaseError is not null && identityStillCurrent)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(releaseError).Throw();
+    }
+
+    private void EnterReleaseGateOrThrow(string operation)
+    {
+        if (!Monitor.TryEnter(_releaseGate, ConcurrentReleaseWaitTimeoutMs))
+            throw new TimeoutException($"Tuner lease gate wait timed out: operation={operation} slot={SlotIndex} did={Did} leaseId={PoolLeaseId}");
+    }
+
+    private void EnsureActiveForMutationUnsafe(string operation)
+    {
+        if (_releaseState != ReleaseStateActive || !_pool.IsLeaseCurrent(_slot, _identity))
+            throw new InvalidOperationException($"Tuner lease is not active: operation={operation} slot={SlotIndex} did={Did} leaseId={PoolLeaseId}");
     }
 }

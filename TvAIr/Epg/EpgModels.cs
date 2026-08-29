@@ -12,6 +12,15 @@ internal sealed record EpgAnalyzeResult(
     int RawSectionShortResolverCandidates,
     int RawSectionShortResolverMerged,
     int RawSectionShortResolverUnresolved,
+    int RejectedEventHeaderCount,
+    int RejectedBasicScheduleEventHeaderCount,
+    int IgnoredOtherTransportStreamEitSectionCount,
+    int InvalidEitSectionCount,
+    int IgnoredNonCurrentEitSectionCount,
+    int IgnoredDuplicateEitSectionCount,
+    int IgnoredVersionSwitchEitSectionCount,
+    int IgnoredBasicScheduleVersionSwitchEitSectionCount,
+    IReadOnlyList<EpgRejectedEventHeader> RejectedEventHeaders,
     IReadOnlyList<EpgTitleDecode> TitleDecodes,
     IReadOnlyList<EpgSectionStatus> SectionStatuses,
     IReadOnlyList<EpgEventObservation> EventObservations,
@@ -19,8 +28,21 @@ internal sealed record EpgAnalyzeResult(
     IReadOnlyList<ParsedEpgEvent> Events)
 {
     public string StatsLine =>
-        $"packets={PacketCount} syncErrors={SyncErrors} sections={SectionCount} eitSections={EitSectionCount} shortEventDescriptors={ShortEventDescriptorCount} decodeAttempts={DecodeAttemptCount} extendedWithoutShort={ExtendedWithoutShortCount} descriptorRecovery={DescriptorRecoveryCount} rawSectionShortResolverCandidates={RawSectionShortResolverCandidates} rawSectionShortResolverMerged={RawSectionShortResolverMerged} rawSectionShortResolverUnresolved={RawSectionShortResolverUnresolved} titleDecodes={TitleDecodes.Count} sectionStatus={SectionStatuses.Count} observations={EventObservations.Count} accumulators={EventAccumulatorAudits.Count} events={Events.Count}";
+        $"packets={PacketCount} syncErrors={SyncErrors} sections={SectionCount} eitSections={EitSectionCount} shortEventDescriptors={ShortEventDescriptorCount} decodeAttempts={DecodeAttemptCount} extendedWithoutShort={ExtendedWithoutShortCount} descriptorRecovery={DescriptorRecoveryCount} rawSectionShortResolverCandidates={RawSectionShortResolverCandidates} rawSectionShortResolverMerged={RawSectionShortResolverMerged} rawSectionShortResolverUnresolved={RawSectionShortResolverUnresolved} rejectedEventHeaders={RejectedEventHeaderCount} rejectedBasicScheduleEventHeaders={RejectedBasicScheduleEventHeaderCount} rejectedEventHeaderSamples={RejectedEventHeaders.Count} ignoredOtherTsEitSections={IgnoredOtherTransportStreamEitSectionCount} invalidEitSections={InvalidEitSectionCount} ignoredNonCurrentEitSections={IgnoredNonCurrentEitSectionCount} ignoredDuplicateEitSections={IgnoredDuplicateEitSectionCount} ignoredVersionSwitchEitSections={IgnoredVersionSwitchEitSectionCount} ignoredBasicScheduleVersionSwitchEitSections={IgnoredBasicScheduleVersionSwitchEitSectionCount} titleDecodes={TitleDecodes.Count} sectionStatus={SectionStatuses.Count} observations={EventObservations.Count} accumulators={EventAccumulatorAudits.Count} events={Events.Count}";
 }
+
+internal sealed record EpgRejectedEventHeader(
+    ushort NetworkId,
+    ushort TransportStreamId,
+    ushort ServiceId,
+    ushort EventId,
+    byte TableId,
+    byte SectionNumber,
+    DateTime Start,
+    int DurationSeconds,
+    int DescriptorLoopLength,
+    string EventHeaderHex,
+    string Reason);
 
 internal sealed record EpgTitleDecode(
     ushort NetworkId,
@@ -38,6 +60,7 @@ internal sealed record EpgTitleDecode(
     int EventNameLength,
     int EventNameBytesLength,
     string EventNameBytesHex,
+    string EventNameTrace,
     string DecodeRoute,
     string DecodeStatus,
     string DecodedTitle,
@@ -51,12 +74,21 @@ internal sealed record EpgTitleDecode(
 internal sealed record EpgSectionStatus(
     ushort ServiceId,
     byte TableId,
+    byte VersionNumber,
+    byte LastTableId,
     byte LastSectionNumber,
     int SeenSectionCount,
     int ExpectedSectionCount,
     int SegmentSeenTotal,
     int SegmentExpectedTotal,
-    IReadOnlyList<byte> MissingSegments);
+    IReadOnlyList<byte> MissingSegments)
+{
+    public bool IsComplete =>
+        TableId == 0x4E
+            ? SeenSectionCount == ExpectedSectionCount
+            : SegmentSeenTotal == SegmentExpectedTotal
+              && MissingSegments.Count == 0;
+}
 
 
 
@@ -112,6 +144,7 @@ internal sealed record EpgEventAccumulatorAudit(
     string ExtendedSourceTables,
     bool HasRawShort,
     bool HasRawExtended,
+    bool HasBasicScheduleObservation,
     bool HasScheduleTitleCarrier,
     bool HasScheduleBodyCarrier,
     bool HasExpectedScheduleTitleBodyPair,

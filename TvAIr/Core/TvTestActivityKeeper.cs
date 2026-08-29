@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 namespace TvAIr.Core;
@@ -182,7 +182,7 @@ public sealed class TvTestActivityKeeper
             {
                 while (!cts.IsCancellationRequested)
                 {
-                    var applied = TrySetProcessTitle(pid, desiredTitle);
+                    var applied = await TrySetProcessTitleAsync(pid, desiredTitle, cts.Token).ConfigureAwait(false);
                     if (applied && !appliedOnce)
                     {
                         appliedOnce = true;
@@ -293,45 +293,6 @@ public sealed class TvTestActivityKeeper
         return string.Empty;
     }
 
-    private int? FindReusableTvTestLikeProcessIdForActivity()
-    {
-        try
-        {
-            foreach (var p in Process.GetProcesses()
-                         .Where(p => IsTvTestLikeProcessName(p.ProcessName))
-                         .OrderBy(p => IsPreferredActivityWitnessName(p.ProcessName) ? 0 : 1)
-                         .ThenBy(p => p.Id))
-            {
-                using (p)
-                {
-                    try
-                    {
-                        if (p.HasExited) continue;
-                        if (TvAirManagedProcessRegistry.TryGet(p.Id, out var managed) && !managed.IsActivityOnly)
-                            continue;
-                        return p.Id;
-                    }
-                    catch { }
-                }
-            }
-        }
-        catch { }
-        return null;
-    }
-
-    private static bool IsTvTestLikeProcessName(string name)
-    {
-        return string.Equals(name, "TVTest", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(name, "LIVETest", StringComparison.OrdinalIgnoreCase)
-            || name.Contains("TVTest", StringComparison.OrdinalIgnoreCase)
-            || name.Contains("LIVETest", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool IsPreferredActivityWitnessName(string name)
-    {
-        return string.Equals(name, "LIVETest", StringComparison.OrdinalIgnoreCase)
-            || name.Contains("LIVETest", StringComparison.OrdinalIgnoreCase);
-    }
 
     private string TryFindPassiveBonDriver()
     {
@@ -389,13 +350,14 @@ public sealed class TvTestActivityKeeper
         return $"{reason}: {token.ServiceName} - {title}";
     }
 
-    private static bool TrySetProcessTitle(int pid, string title)
+    private static async Task<bool> TrySetProcessTitleAsync(int pid, string title, CancellationToken cancellationToken)
     {
         try
         {
             using var p = Process.GetProcessById(pid);
             for (var i = 0; i < 20; i++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 p.Refresh();
                 if (p.HasExited) return false;
                 var hwnd = p.MainWindowHandle;
@@ -403,8 +365,17 @@ public sealed class TvTestActivityKeeper
                     hwnd = FindWindowByProcessId(pid);
                 if (hwnd != IntPtr.Zero)
                     return SetWindowText(hwnd, title);
-                Thread.Sleep(100);
+
+                // VIEWER_TITLE_WINDOW_WAIT_INVARIANT:
+                // TVTest所有PIDのウィンドウ生成完了だけを待つ。同期Sleepでworker threadを占有しない。
+                // ウィンドウを検出した時点で即時終了し、最大2秒という従来の探索上限は変更しない。
+                // この待機条件・上限・所有PID限定を変更する場合は、開発者の明示承認を先に得ること。
+                await Task.Delay(100, cancellationToken).ConfigureAwait(false);
             }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch { }
         return false;

@@ -1,10 +1,9 @@
-/* TvAIr Settings Help Surface release_contract
+﻿/* TvAIr Settings Help Surface release_contract
    Scope: help.html only.
    Contract: one shared help page for hamburger/context menu entry; theme colors come from role tokens. */
 
-*{box-sizing:border-box}
 :root{--tvair-help-sidebar-width:176px;--tvair-help-pane-width:1080px}
-body.tvair-help-page{margin:0;font-family:'Meiryo','メイリオ',sans-serif;background:var(--tvair-role-page-bg,var(--app-bg));color:var(--tvair-role-page-fg,var(--text-main));font-size:13px;line-height:1.62;overflow:hidden}
+body.tvair-help-page{line-height:1.62;overflow:hidden}
 .help-window-bar{height:36px;display:flex;align-items:center;gap:10px;padding:0 14px;background:var(--tvair-role-panel-bg,var(--panel-bg));color:var(--tvair-role-text-fg,var(--text-main));border-bottom:1px solid var(--tvair-role-border-soft,var(--panel-border));user-select:none}
 .help-window-title{font-weight:700;font-size:14px;line-height:1;letter-spacing:.01em}
 .help-window-note{margin-left:auto;font-size:11px;color:var(--tvair-role-text-muted-fg,var(--tvair-content-muted));white-space:nowrap}
@@ -27,14 +26,16 @@ body.tvair-help-page{margin:0;font-family:'Meiryo','メイリオ',sans-serif;bac
 
 .help-group{background:var(--tvair-role-panel-bg);border:1px solid var(--tvair-role-border-soft);border-radius:8px;margin:0 0 12px;padding:12px;box-shadow:var(--tvair-help-card-shadow,none)}
 .help-group h2{margin:0 0 10px;padding:0 0 7px;border-bottom:1px solid var(--tvair-role-border-soft);font-size:15px;color:var(--tvair-role-text-fg);line-height:1.35}
-.setting-card{display:grid;grid-template-columns:minmax(210px,260px) minmax(0,1fr);gap:12px;align-items:start;margin:0 0 8px;padding:10px 12px;border:1px solid var(--tvair-role-border-soft);border-radius:7px;background:var(--tvair-role-subpanel-bg,var(--panel-bg));color:var(--tvair-role-text-fg)}
+.setting-card{display:block;margin:0 0 8px;padding:12px 14px;border:1px solid var(--tvair-role-border-soft);border-radius:7px;background:var(--tvair-role-subpanel-bg,var(--panel-bg));color:var(--tvair-role-text-fg)}
 .setting-card:last-child{margin-bottom:0}
-.setting-card h3{margin:2px 0 0;font-size:13px;line-height:1.45;color:var(--tvair-role-text-fg);font-weight:700}
+.setting-card h3{margin:0 0 7px;font-size:13px;line-height:1.45;color:var(--tvair-role-text-fg);font-weight:700}
+.setting-card p{margin:0 0 7px;color:var(--tvair-role-text-soft-fg);line-height:1.7}
+.setting-card p:last-child{margin-bottom:0}
 .setting-card dl{display:grid;grid-template-columns:96px minmax(0,1fr);gap:4px 10px;margin:0;min-width:0}
 .setting-card dt{font-weight:700;color:var(--tvair-role-text-muted-fg);font-size:12px;white-space:nowrap}
 .setting-card dd{margin:0;color:var(--tvair-role-text-soft-fg);min-width:0;overflow-wrap:anywhere}
 .setting-card dt:nth-of-type(4),.setting-card dt:nth-of-type(5){color:var(--tvair-role-text-muted-fg)}
-.setting-card.compact{grid-template-columns:minmax(190px,230px) minmax(0,1fr)}
+.setting-card.compact{display:block}
 
 
 /* Modal/standalone parity: the help root is shared.  The modal keeps the same
@@ -48,7 +49,7 @@ body.in-modal .help-sidebar-title{grid-column:auto}
 body.in-modal .help-content{height:100%;min-height:0;overflow:auto;padding:0 2px 26px 0;scrollbar-gutter:stable}
 body.in-modal .help-section{width:min(100%,var(--tvair-help-pane-width));max-width:var(--tvair-help-pane-width);margin:0 auto}
 body.in-modal .setting-card,
-body.in-modal .setting-card.compact{grid-template-columns:minmax(210px,260px) minmax(0,1fr);gap:12px}
+body.in-modal .setting-card.compact{display:block}
 body.in-modal .setting-card dl{grid-template-columns:96px minmax(0,1fr)}
 
 @media (max-width:900px){
@@ -57,7 +58,6 @@ body.in-modal .setting-card dl{grid-template-columns:96px minmax(0,1fr)}
   .help-sidebar{position:static;flex:none;margin-bottom:10px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}
   .help-sidebar-title{grid-column:1/-1}
   .help-content{overflow:visible;padding:0}
-  .setting-card,.setting-card.compact{grid-template-columns:1fr;gap:8px}
 }
 @media (max-width:560px){
   .help-sidebar{grid-template-columns:repeat(2,minmax(0,1fr))}
@@ -69,8 +69,6 @@ body.in-modal .setting-card dl{grid-template-columns:96px minmax(0,1fr)}
 /* release_contract: in-modal layout already has higher specificity than the generic max-width:900px help layout, so no duplicate modal media override is needed here. */
 @media (max-width:760px){
   body.in-modal .help-sidebar{flex-basis:150px}
-  body.in-modal .setting-card,
-  body.in-modal .setting-card.compact{grid-template-columns:1fr}
 }
 
 /* release_contract: right-pane cards use a single shared pane width across hamburger modal and context/direct help. */

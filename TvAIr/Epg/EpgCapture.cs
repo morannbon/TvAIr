@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Options;
+﻿using Microsoft.Extensions.Options;
 using TvAIr.Channel;
 using TvAIr.Core;
 using TvAIr.Tuner;
@@ -18,8 +18,11 @@ namespace TvAIr.Epg;
 ///   1. ch2 からチャンネル一覧を取得
 ///   2. TransportStreamId 単位にグループ化（同一TS内の複数サービスを1回の録画でまとめて取得）
 ///   3. TunerPool からチューナーを確保して TVTest を起動（EPG取得用の短時間TS取得）
-///   4. TvAIrEpgRec終了後に TS ファイルを EPG でパース
-///   5. 対象TS/SIDを今回TSから読めた結果だけでDBへUPSERT
+///   4. TvAIrEpgRec終了・チューナー解放後、次局workerを直ちに投入
+///   5. 前局TSの解析・DB保存は次局取得と並行して実行
+///   6. 通常EPGは対象TS/SIDを今回TSから読めた結果だけでDBへUPSERT
+///      非チェーンの録画前EPG確認は目的EventIdentityの観測snapshotを呼出元へ返し、通常EPG DBへは書き込まない
+///      明示チェーンrootの既存DB-backed追従経路は、開発者承認なしに変更しない
 ///
 /// 並列数は TunerPool の空きスロット数で自動決定する（GrConcurrentCaptures/BsCsConcurrentCaptures 廃止）。
 /// </summary>
@@ -41,53 +44,46 @@ public sealed class EpgCapture
     private readonly TunerPool tunerPool;
     private readonly ReservationStore reservationStore;
     private readonly IniSettingsService ini;
+    private readonly Database database;
     private readonly TvTestActivityKeeper tvTestActivity;
     private readonly ServiceLogoStore serviceLogoStore;
     private readonly EpgLogoExtractor logoExtractor;
-    private readonly BroadcastClockService broadcastClock;
+    private readonly ReservationProjectionPromotionService projectionPromotion;
+    private readonly KeywordMatcher keywordMatcher;
 
     // キャプチャ状態（UIへの進捗通知用）
     private EpgCaptureStatus status = new();
     private readonly object statusGate = new();
 
-    // ─── LIVE視聴中TVTestが使う(BonDriver,DID)集合 ───
-    // RunAsync 開始時に一度だけ検出して保持。同一EPG取得セッション中は不変として扱う。
-    // null = 未検出/機能無効。空集合 = 検出済みだがLIVE視聴なし。
-    private IReadOnlySet<(string BonDriverFileName, string Did)>? liveTvTestKeys;
+    // 管理外TVTestはEPG割当判断の対象外。EPGはTvAIrのTunerPoolだけを正本にする。
 
-    // EPG取得開始はGR/BSCS混在バーストを避けるためグローバルにシリアル化する。
+    // Process.Start 自体だけは短時間シリアル化する。BonDriver/OpenTuner/SetChannel の
+    // 物理デバイス開始境界は TunerDeviceAccessGate の GR/BSCS 単位契約で保護する。
+    // このSemaphoreをworkerの起動完了待ちに使うとGRとBSCSまで不要に直列化されるため、
+    // 子プロセス生成が終わった時点で必ず解放する。
     private readonly SemaphoreSlim epgLaunchStartGate = new(1, 1);
 
-    // EPG取得終了もシリアル化し、TVTest終了確認・チューナー解放・
-    // スケジューラ再評価が BonDriver へ一斉にヒットしないようにする。
-    private readonly SemaphoreSlim epgEndingGate = new(1, 1);
+    // TS解析は局ごとに並行できるが、SQLite書込み・stale retire・投影昇格は一つの確定単位として直列化する。
+    private readonly SemaphoreSlim epgImportCommitGate = new(1, 1);
 
-    // EPGラン全体用の代表ActivityKeeper TVTestは起動しない。
-    // 実際に取得中の局を示す個別TVTestだけを診断対象とし、
-    // TVTestプロセス監視利用者向けに「取得中局のTVTestアイコンが見えているか」をログ化する。
-    // key=pid, value=対象TS/局情報。制御には使わず診断ログ専用。
-    private readonly ConcurrentDictionary<int, ActiveEpgWorkerProcess> activeEpgWorkerProcesses = new();
-    // release_contract: 手動/定時EPGで録画優先ロックにより起動できなかったTSをrun単位で集計する。
-    // 0/N全抑止をPARTIALではなくBLOCKEDへ分類し、ユーザーへ「開始できなかった」と伝える。
+    // EPG workerのTask・lease・process・終端状態は activeEpgWorkerTasks を単一正本とする。
+    // 表示、停止、復帰照合、カバレッジ監視も同じ状態から投影する。
+    // PreRecの開始安全領域により起動できなかったTSだけをrun単位で保持する。
+    // normal EPGは開始Admission後に録画timelineを理由としてblocked/deferredへ移行しない。
     private readonly ConcurrentDictionary<string, string> currentRunBlockedGroups = new(StringComparer.OrdinalIgnoreCase);
     // EPG取得失敗はrun単位で保持する。
     private readonly ConcurrentDictionary<string, EpgCaptureFailureState> currentRunCaptureFailures = new(StringComparer.OrdinalIgnoreCase);
-    // 前TVTest終了後、次TVTest起動前のチューナークールダウン待機を
-    // TVTestアイコン空白の想定内要因として分類する。実プロセスは存在しないため
-    // アイコン表示対象にはできないが、WARN誤判定を避ける診断情報として扱う。
-    private readonly ConcurrentDictionary<string, EpgCooldownWait> epgCooldownWaits = new();
     private DateTime lastEpgWorkerCoverageLogUtc = DateTime.MinValue;
     private DateTime lastEpgWorkerGapLogUtc = DateTime.MinValue;
-    private volatile bool epgRunAcceptingNewWorkers = false;
+    private readonly ConcurrentDictionary<string, byte> epgRunsAcceptingNewWorkers = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, byte> activeNormalEpgRuns = new(StringComparer.Ordinal);
     private long epgRunSequence = 0;
+    // UI status projection has one visible owner. Scheduled Daily runs use manageStatus=false and do not overwrite it.
     private string currentEpgRunId = "none";
     // release_contract: EPG worker task state is tracked by actual task registration, not by increment/decrement counters.
     // Cancellation can finish the run before worker finally blocks drain; a global counter can underflow in that case.
     private readonly ConcurrentDictionary<string, ActiveEpgWorkerTask> activeEpgWorkerTasks = new(StringComparer.Ordinal);
-    // 通常EPG取得中だけ、TS間クールダウンでSleepGuard監視対象TVTestがゼロになる穴を塞ぐ。
-    // 録画前EPG確認では使わず、BonDriver実機取得には触らないTvAIr管理TVTestマーカーとして扱う。
-    // 起動/停止/診断を専用ヘルパーへ分離し、キャンセル/例外時も監視用TVTestと監視タスクを確実に片付ける。
-    private int epgSleepGuardBridgePid = 0;
+
 
     public EpgCapture(
         IOptionsMonitor<EpgSettings> settingsMonitor,
@@ -99,10 +95,12 @@ public sealed class EpgCapture
         TunerPool tunerPool,
         ReservationStore reservationStore,
         IniSettingsService ini,
+        Database database,
         TvTestActivityKeeper tvTestActivity,
         ServiceLogoStore serviceLogoStore,
         EpgLogoExtractor logoExtractor,
-        BroadcastClockService broadcastClock)
+        ReservationProjectionPromotionService projectionPromotion,
+        KeywordMatcher keywordMatcher)
     {
         this.settingsMonitor = settingsMonitor;
         this.tunerProfiles = tunerProfiles;
@@ -113,10 +111,225 @@ public sealed class EpgCapture
         this.tunerPool     = tunerPool;
         this.reservationStore = reservationStore;
         this.ini           = ini;
+        this.database      = database;
         this.tvTestActivity = tvTestActivity;
         this.serviceLogoStore = serviceLogoStore;
         this.logoExtractor = logoExtractor;
-        this.broadcastClock = broadcastClock;
+        this.projectionPromotion = projectionPromotion;
+        this.keywordMatcher = keywordMatcher;
+    }
+
+    private static EpgWorkerProcessIdentityState GetOwnedWorkerProcessIdentity(ActiveEpgWorkerSnapshot snapshot)
+    {
+        if (snapshot.ProcessId <= 0) return EpgWorkerProcessIdentityState.Missing;
+
+        try
+        {
+            using var process = Process.GetProcessById(snapshot.ProcessId);
+            if (process.HasExited) return EpgWorkerProcessIdentityState.Missing;
+
+            if (snapshot.ProcessStartedAtUtc.HasValue)
+            {
+                try
+                {
+                    var actualStartedAtUtc = process.StartTime.ToUniversalTime();
+                    return Math.Abs((actualStartedAtUtc - snapshot.ProcessStartedAtUtc.Value).TotalMilliseconds) <= 1000
+                        ? EpgWorkerProcessIdentityState.Match
+                        : EpgWorkerProcessIdentityState.ReusedPid;
+                }
+                catch
+                {
+                    return EpgWorkerProcessIdentityState.IdentityUnknown;
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(snapshot.ProcessExecutablePath))
+            {
+                try
+                {
+                    var actualPath = process.MainModule?.FileName ?? string.Empty;
+                    if (string.IsNullOrWhiteSpace(actualPath))
+                        return EpgWorkerProcessIdentityState.IdentityUnknown;
+                    return string.Equals(
+                        Path.GetFullPath(actualPath),
+                        Path.GetFullPath(snapshot.ProcessExecutablePath),
+                        StringComparison.OrdinalIgnoreCase)
+                        ? EpgWorkerProcessIdentityState.Match
+                        : EpgWorkerProcessIdentityState.ReusedPid;
+                }
+                catch
+                {
+                    return EpgWorkerProcessIdentityState.IdentityUnknown;
+                }
+            }
+
+            return EpgWorkerProcessIdentityState.IdentityUnknown;
+        }
+        catch (ArgumentException)
+        {
+            return EpgWorkerProcessIdentityState.Missing;
+        }
+        catch
+        {
+            return EpgWorkerProcessIdentityState.IdentityUnknown;
+        }
+    }
+
+    private static bool IsOwnedWorkerProcessAlive(ActiveEpgWorkerSnapshot snapshot)
+        => GetOwnedWorkerProcessIdentity(snapshot) is EpgWorkerProcessIdentityState.Match
+            or EpgWorkerProcessIdentityState.IdentityUnknown;
+
+    public int CapturePowerSuspendSnapshot(TunerOwnershipReconcileContext context)
+    {
+        var active = activeEpgWorkerTasks.Values
+            .Select(x => x.Snapshot())
+            .Count(x => !x.IsTerminal && x.ProcessId > 0 && x.PoolLeaseCurrent);
+
+        log.Add("EPG_POWER_SUSPEND_SNAPSHOT", context.CycleId,
+            $"result=OBSERVED source={context.Source} activeWorkers={activeEpgWorkerTasks.Count} ownedRunning={active} " +
+            "action=observe_only_run_continues_unless_worker_process_actually_disappears rule=power_notification_observation_only_contract");
+        return active;
+    }
+
+    public async Task<TunerOwnershipReconcileResult> ReconcileOwnedWorkersAfterResumeAsync(
+        TunerOwnershipReconcileContext context,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var workers = activeEpgWorkerTasks.Values.ToList();
+        var alive = 0;
+        var missing = 0;
+        var unavailable = 0;
+        var missingCandidates = new List<ActiveEpgWorkerTask>();
+
+        // POWER_NOTIFICATION_OBSERVATION_ONLY_INVARIANT:
+        // Suspend/Resume通知だけではEPG workerを中断しない。開始済みrunは明示Cancel以外で止めない。
+        // ReconcileはPID/leaseの実状態だけを観測し、実process消失時だけ既存ProcessMissing経路へ収束する。
+        foreach (var worker in workers)
+        {
+            var snapshot = worker.Snapshot();
+            if (!snapshot.PoolLeaseCurrent)
+            {
+                unavailable++;
+                log.Add("EPG_RECONCILE_STALE_POOL_LEASE", context.CycleId,
+                    $"result=OWNERSHIP_UNAVAILABLE source={context.Source} runId={snapshot.RunId} pid={snapshot.ProcessId} group={snapshot.Group} " +
+                    $"poolLeaseId={(snapshot.PoolLeaseId.HasValue ? snapshot.PoolLeaseId.Value.ToString("D") : "-")} occupancyGeneration={snapshot.OccupancyGeneration} " +
+                    "action=preserve_owner_task_reject_stale_cleanup rule=release_contract");
+                continue;
+            }
+
+            if (snapshot.ProcessId <= 0)
+            {
+                unavailable++;
+                continue;
+            }
+
+            if (snapshot.IsTerminal)
+                continue;
+
+            var identity = GetOwnedWorkerProcessIdentity(snapshot);
+            if (identity == EpgWorkerProcessIdentityState.Match)
+            {
+                alive++;
+                continue;
+            }
+            if (identity == EpgWorkerProcessIdentityState.IdentityUnknown)
+            {
+                unavailable++;
+                continue;
+            }
+
+            missingCandidates.Add(worker);
+        }
+
+        // Prefer the owner task's actual completion signal. The timeout is only an upper bound
+        // for workers whose owner has not converged yet; it is not a mandatory settle delay.
+        if (missingCandidates.Count > 0)
+        {
+            const int ownerCompletionUpperBoundMs = 600;
+            await Task.WhenAll(missingCandidates.Select(worker =>
+                worker.WaitForOwnerTaskCompletionAsync(
+                    TimeSpan.FromMilliseconds(ownerCompletionUpperBoundMs),
+                    cancellationToken))).ConfigureAwait(false);
+        }
+
+        foreach (var worker in missingCandidates)
+        {
+            var snapshot = worker.Snapshot();
+            if (snapshot.IsTerminal)
+                continue;
+
+            var identity = GetOwnedWorkerProcessIdentity(snapshot);
+            if (identity is EpgWorkerProcessIdentityState.Match or EpgWorkerProcessIdentityState.IdentityUnknown)
+                continue;
+
+            if (snapshot.OwnerTaskCompleted)
+            {
+                if (TryConvergeExitedEpgWorker(worker, EpgWorkerTerminalReason.Completed, "resume_owner_completed", expectedAttemptGeneration: snapshot.AttemptGeneration))
+                {
+                    missing++;
+                    log.Add("EPG_RESUME_RECONCILE", context.CycleId,
+                        $"result=OWNER_COMPLETED_PROCESS_EXITED source={context.Source} pid={snapshot.ProcessId} group={snapshot.Group} tsid={snapshot.TsId} " +
+                        $"service={snapshot.ServiceName} action=lease_released_task_removed rule=release_contract");
+                }
+                else
+                {
+                    unavailable++;
+                    StartResidualEpgWorkerExitMonitor(worker);
+                    log.Add("EPG_RESUME_RECONCILE", context.CycleId,
+                        $"result=OWNER_COMPLETED_CONVERGENCE_DEFERRED source={context.Source} pid={snapshot.ProcessId} group={snapshot.Group} tsid={snapshot.TsId} " +
+                        $"service={snapshot.ServiceName} action=keep_task_and_lease_monitor rule=release_contract");
+                }
+                continue;
+            }
+
+            var newlyReportedMissing = worker.ReportProcessMissing(context.CycleId, snapshot.AttemptGeneration);
+            if (newlyReportedMissing)
+            {
+                missing++;
+                log.Add("EPG_RESUME_RECONCILE", context.CycleId,
+                    $"result=PROCESS_MISSING source={context.Source} pid={snapshot.ProcessId} group={snapshot.Group} tsid={snapshot.TsId} " +
+                    $"service={snapshot.ServiceName} action=signal_owner_task_start_bounded_convergence rule=release_contract");
+            }
+
+            // ReportProcessMissing is intentionally single-shot because the owner signal uses a
+            // TaskCompletionSource. Convergence monitoring is not single-shot: if process identity
+            // was temporarily unavailable, the next reconciliation must be able to retry.
+            StartMissingEpgWorkerConvergenceMonitor(worker);
+        }
+
+        return new TunerOwnershipReconcileResult(
+            "EPG",
+            workers.Count,
+            alive,
+            0,
+            unavailable,
+            missing,
+            $"cycle={context.CycleId} source={context.Source} missing={missing} unavailable={unavailable}");
+    }
+
+
+    internal IReadOnlyList<ActiveEpgWorkerSnapshot> GetActiveEpgWorkerSnapshots()
+        => activeEpgWorkerTasks.Values.Select(worker => worker.Snapshot()).ToArray();
+
+    internal IReadOnlyDictionary<string, IReadOnlyList<string>> GetRunOwnedPhysicalTuners(string runId)
+    {
+        var result = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase);
+        var grouped = SnapshotActiveEpgWorkerTasks(runId)
+            .Select(x => x.Snapshot())
+            .Where(x => x.PoolLeaseId.HasValue && x.PoolLeaseCurrent && !string.IsNullOrWhiteSpace(x.TunerName))
+            .GroupBy(x => string.Equals(x.Group, "BSCS", StringComparison.OrdinalIgnoreCase) ? "BSCS" : "GR", StringComparer.OrdinalIgnoreCase);
+
+        foreach (var group in grouped)
+        {
+            result[group.Key] = group
+                .Select(x => x.TunerName.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        return result;
     }
 
     public EpgCaptureStatus GetStatus()
@@ -128,16 +341,10 @@ public sealed class EpgCapture
             return snapshot;
 
         var now = DateTime.Now;
-        var alive = new List<ActiveEpgWorkerProcess>();
-        foreach (var worker in activeEpgWorkerProcesses.Values)
-        {
-            if (IsProcessAlive(worker.Pid))
-                alive.Add(worker);
-            else
-                activeEpgWorkerProcesses.TryRemove(worker.Pid, out _);
-        }
-
-        alive = alive
+        var alive = SnapshotActiveEpgWorkerTasks(currentEpgRunId)
+            .Select(x => x.Snapshot())
+            .Where(x => !x.IsTerminal && x.ProcessId > 0
+                && (GetOwnedWorkerProcessIdentity(x) is EpgWorkerProcessIdentityState.Match or EpgWorkerProcessIdentityState.IdentityUnknown))
             .OrderBy(x => x.Group, StringComparer.OrdinalIgnoreCase)
             .ThenBy(x => x.TsId)
             .ThenBy(x => x.ServiceName, StringComparer.OrdinalIgnoreCase)
@@ -150,7 +357,6 @@ public sealed class EpgCapture
         {
             var elapsedSeconds = Math.Max(0, (int)(now - worker.StartedAt).TotalSeconds);
             maxElapsedSeconds = Math.Max(maxElapsedSeconds, elapsedSeconds);
-            // 取得完了イベントより先に100%扱いすると、完了グループ数との見た目が逆転するため上限は95%。
             runningProgress += Math.Min(0.95, elapsedSeconds / (double)plannedSeconds);
         }
 
@@ -212,7 +418,7 @@ public sealed class EpgCapture
             RunPurpose = runPurpose,
             RunSource = string.IsNullOrWhiteSpace(runSource) ? "ManualUi" : runSource,
             UiMode = mode,
-            CancelRoute = uiVisible ? "WidgetOrTray" : "TrayOnly",
+            CancelRoute = uiVisible ? "VisibleWidget" : "SilentTray",
             TargetScope = string.IsNullOrWhiteSpace(targetScope) ? "All" : targetScope,
             LastRunMessage = uiVisible ? "取得開始準備中" : "サイレントEPG取得中"
         });
@@ -220,60 +426,65 @@ public sealed class EpgCapture
 
     /// <summary>
     /// EPGキャンセル完了を、停止要求ではなく「worker停止・activity解放・EPG lease解放」後として扱う。
-    /// EpgScheduler はこの完了待ちの後で EPG_RUN_END と ALLOC_ROUTE:EpgCancelled を出す。
+    /// EpgScheduler はこの完了待ちの後で論理wave占有を解放し、EPG_RUN_END と
+    /// 共通 ALLOC_ROUTE:NormalEpgWaveTerminal を実行する。
     /// </summary>
-    public async Task WaitForCancellationQuiescenceAsync(string source, bool silent, string targetScope, TimeSpan? timeout = null)
+    public async Task WaitForCancellationQuiescenceAsync(string source, bool silent, string targetScope, string runId, TimeSpan? timeout = null)
     {
         var waitLimit = timeout ?? TimeSpan.FromSeconds(10);
         var deadline = DateTime.UtcNow + waitLimit;
         var loggedWait = false;
 
+        // Cancellation quiescence belongs to the normal EPG run that accepted this cancel.
+        // Independent PreRec probes also use TunerUsageKind.Epg, but have their own runId/lease owner
+        // and must never keep an unrelated normal EPG cancellation waiting.
         while (true)
         {
-            var runId = currentEpgRunId;
             var activeTasks = SnapshotActiveEpgWorkerTasks(runId);
-            var tracked = activeEpgWorkerProcesses.Values.OrderBy(x => x.Group).ThenBy(x => x.TsId).ThenBy(x => x.Pid).ToList();
-            var alive = new List<ActiveEpgWorkerProcess>();
-            foreach (var worker in tracked)
-            {
-                if (IsProcessAlive(worker.Pid)) alive.Add(worker);
-                else activeEpgWorkerProcesses.TryRemove(worker.Pid, out _);
-            }
+            var activeSnapshots = activeTasks
+                .Select(x => x.Snapshot())
+                .ToList();
+            var alive = activeSnapshots
+                .Where(x => !x.IsTerminal && x.ProcessId > 0
+                && (GetOwnedWorkerProcessIdentity(x) is EpgWorkerProcessIdentityState.Match or EpgWorkerProcessIdentityState.IdentityUnknown))
+                .OrderBy(x => x.Group)
+                .ThenBy(x => x.TsId)
+                .ThenBy(x => x.ProcessId)
+                .ToList();
 
+            var ownedLeaseIdentities = activeSnapshots
+                .Where(x => x.PoolLeaseId.HasValue)
+                .Select(x => new TunerLeaseIdentity(x.PoolLeaseId.GetValueOrDefault(), x.OccupancyGeneration))
+                .ToHashSet();
             var epgSlots = tunerPool.GetStatus()
-                .Where(s => s.UsageKind == TunerUsageKind.Epg)
+                .Where(s => s.UsageKind == TunerUsageKind.Epg
+                    && s.PoolLeaseId is Guid poolLeaseId
+                    && ownedLeaseIdentities.Contains(new TunerLeaseIdentity(poolLeaseId, s.OccupancyGeneration)))
                 .OrderBy(s => s.SlotIndex)
                 .ToList();
 
-            var cooldowns = epgCooldownWaits.Values
-                .Where(x => x.Until >= DateTime.Now)
-                .OrderBy(x => x.Group).ThenBy(x => x.TsId).ThenBy(x => x.SlotName)
-                .ToList();
-            foreach (var expired in epgCooldownWaits.Values.Where(x => x.Until < DateTime.Now).ToList())
-                epgCooldownWaits.TryRemove(expired.Key, out _);
-
             if (alive.Count == 0 && activeTasks.Count == 0 && epgSlots.Count == 0)
             {
-                LogEpgWorkerCoverage("cancel_quiescence_complete", force: true);
+                LogEpgWorkerCoverage(runId, "cancel_quiescence_complete", force: true);
                 Log("EPG_CANCEL_RELEASE_COMPLETE", "EPG",
-                    $"result=OK source={SafeLog(source)} silent={silent} uiMode={(silent ? "Silent" : "Visible")} targetScope={SafeLog(targetScope)} runId={SafeLog(runId)} aliveWorkers=0 activeWorkerTasks=0 epgSlots=0 cooldownWaits={cooldowns.Count} action=allow_epg_run_end_and_allocation_reevaluate rule=release_contract");
+                    $"result=OK source={SafeLog(source)} silent={silent} uiMode={(silent ? "Silent" : "Visible")} targetScope={SafeLog(targetScope)} runId={SafeLog(runId)} aliveWorkers=0 activeWorkerTasks=0 epgSlots=0 action=allow_epg_run_end_and_allocation_reevaluate rule=release_contract");
                 return;
             }
 
             if (!loggedWait)
             {
                 loggedWait = true;
-                LogEpgWorkerCoverage("cancel_quiescence_wait", force: true);
+                LogEpgWorkerCoverage(runId, "cancel_quiescence_wait", force: true);
                 Log("EPG_CANCEL_RELEASE_WAIT", "EPG",
-                    $"source={SafeLog(source)} silent={silent} uiMode={(silent ? "Silent" : "Visible")} targetScope={SafeLog(targetScope)} runId={SafeLog(runId)} aliveWorkers={alive.Count} activeWorkerTasks={activeTasks.Count} epgSlots={epgSlots.Count} cooldownWaits={cooldowns.Count} action=wait_before_epg_run_end_and_allocation_reevaluate rule=release_contract");
+                    $"source={SafeLog(source)} silent={silent} uiMode={(silent ? "Silent" : "Visible")} targetScope={SafeLog(targetScope)} runId={SafeLog(runId)} aliveWorkers={alive.Count} activeWorkerTasks={activeTasks.Count} epgSlots={epgSlots.Count} action=wait_before_epg_run_end_and_allocation_reevaluate rule=release_contract");
             }
 
             if (DateTime.UtcNow >= deadline)
             {
-                LogEpgWorkerCoverage("cancel_quiescence_timeout", force: true);
+                LogEpgWorkerCoverage(runId, "cancel_quiescence_timeout", force: true);
                 var activeTaskSummary = FormatActiveEpgWorkerTaskSummary(activeTasks);
                 Log("EPG_CANCEL_RELEASE_COMPLETE", "WARN",
-                    $"result=TIMEOUT source={SafeLog(source)} silent={silent} uiMode={(silent ? "Silent" : "Visible")} targetScope={SafeLog(targetScope)} runId={SafeLog(runId)} aliveWorkers={alive.Count} activeWorkerTasks={activeTasks.Count} activeTaskSummary={SafeLog(activeTaskSummary)} epgSlots={epgSlots.Count} cooldownWaits={cooldowns.Count} action=continue_with_warn_before_allocation_reevaluate rule=release_contract");
+                    $"result=TIMEOUT source={SafeLog(source)} silent={silent} uiMode={(silent ? "Silent" : "Visible")} targetScope={SafeLog(targetScope)} runId={SafeLog(runId)} aliveWorkers={alive.Count} activeWorkerTasks={activeTasks.Count} activeTaskSummary={SafeLog(activeTaskSummary)} epgSlots={epgSlots.Count} action=continue_with_warn_before_allocation_reevaluate rule=release_contract");
                 return;
             }
 
@@ -287,241 +498,269 @@ public sealed class EpgCapture
         CancellationToken ct = default,
         string targetScope = "All",
         string? runDepth = null,
-        ushort? expectedNetworkId = null,
-        ushort? expectedTransportStreamId = null,
-        ushort? expectedServiceId = null,
-        string? expectedServiceName = null,
-        ushort? expectedEventId = null,
-        DateTime? expectedStartTime = null,
-        DateTime? expectedEndTime = null,
-        bool isPreRecordCheck = false,
-        int? maxCaptureSeconds = null,
         bool showProgress = true,
-        string? preferredRecordingTunerName = null,
-        string? preTuneChainPosition = null,
-        string? preTuneAction = null,
-        bool preTuneKeepWorkerUntilSafetyCeiling = false)
+        string? runId = null,
+        bool manageStatus = true)
     {
         var started = DateTime.Now;
         var normalizedScope = NormalizeTargetScope(targetScope);
         var normalizedDepth = NormalizeDepth(runDepth ?? effectiveEpgDepth);
-        var singleServiceMode = expectedServiceId.HasValue || expectedTransportStreamId.HasValue || expectedNetworkId.HasValue || !string.IsNullOrWhiteSpace(expectedServiceName);
-        var runPurpose = isPreRecordCheck ? "pre_record_time_follow" : "normal_epg_capture";
-        var runId = $"epg-{DateTime.UtcNow:yyyyMMddHHmmssfff}-{Interlocked.Increment(ref epgRunSequence)}";
-        currentEpgRunId = runId;
+        const string runPurpose = "normal_epg_capture";
+        runId = string.IsNullOrWhiteSpace(runId)
+            ? $"epg-{DateTime.UtcNow:yyyyMMddHHmmssfff}-{Interlocked.Increment(ref epgRunSequence)}"
+            : runId.Trim();
+        if (manageStatus) currentEpgRunId = runId;
+        activeNormalEpgRuns[runId] = 0;
         PruneCompletedEpgWorkerTasksForOldRuns(runId);
         runtimeEpgDepthOverride = normalizedDepth;
-        if (!isPreRecordCheck)
-        {
-            currentRunBlockedGroups.Clear();
-            currentRunCaptureFailures.Clear();
-        }
-        if (isPreRecordCheck)
-        {
-            Log("PRE_REC_EPG_PROBE_RUN_START", "EPG確認",
-                $"目的番組の開始時刻確認を開始します。targetScope={normalizedScope} uiVisible={showProgress} singleServiceMode={singleServiceMode} safetyCeilingSeconds={(maxCaptureSeconds?.ToString() ?? "-")} expectedNid={(expectedNetworkId?.ToString() ?? "-")} expectedTsid={(expectedTransportStreamId?.ToString() ?? "-")} expectedSid={(expectedServiceId?.ToString() ?? "-")} expectedEventId={(expectedEventId?.ToString() ?? "-")} expectedStart={(expectedStartTime?.ToString("MM/dd HH:mm:ss") ?? "-")} expectedEnd={(expectedEndTime?.ToString("MM/dd HH:mm:ss") ?? "-")} expectedService={SafeLogValue(expectedServiceName)} preferredTuner={SafeLogValue(preferredRecordingTunerName)} chainPosition={SafeLogValue(preTuneChainPosition)} preTuneAction={SafeLogValue(preTuneAction)} keepWorkerUntilSafetyCeiling={preTuneKeepWorkerUntilSafetyCeiling} policy=silent_time_follow_probe_and_record_pretune_same_tuner rule=release_contract" );
-        }
-        else
-        {
-            Log("EPG_RUN_START", "EPG", $"EPG取得を開始します。targetScope={normalizedScope} runDepth={normalizedDepth} purpose={runPurpose} uiVisible={showProgress} uiMode={(showProgress ? "Visible" : "Silent")} singleServiceMode={singleServiceMode} maxCaptureSeconds={(maxCaptureSeconds?.ToString() ?? "-")} expectedNid={(expectedNetworkId?.ToString() ?? "-")} expectedTsid={(expectedTransportStreamId?.ToString() ?? "-")} expectedSid={(expectedServiceId?.ToString() ?? "-")} expectedService={SafeLogValue(expectedServiceName)} preferredTuner={SafeLogValue(preferredRecordingTunerName)} rule=release_contract");
-        }
-        epgRunAcceptingNewWorkers = true;
-        TvTestActivityHandle? epgSleepGuardBridge = null;
+        Log("EPG_RUN_START", "EPG", $"EPG取得を開始します。targetScope={normalizedScope} runDepth={normalizedDepth} purpose={runPurpose} uiVisible={showProgress} uiMode={(showProgress ? "Visible" : "Silent")} rule=release_contract");
+        epgRunsAcceptingNewWorkers[runId] = 0;
         CancellationTokenSource? coverageCts = null;
         Task? coverageMonitor = null;
-        var bridgeStopReason = "finally_cleanup";
-        epgSleepGuardBridge = StartEpgSleepGuardBridgeIfNeeded(isPreRecordCheck, normalizedScope, normalizedDepth);
 
         try
         {
+            // 管理外TVTestは監視・保護・EPG除外の対象外。
+            // EPG割当はTvAIr自身のTunerPool状態だけを使用する。
+            // 物理PT3チューナーの選択・包含的利用・競合処理・再配置はBonDriver_PTx/PT3側へ委ねる。
+            // 管理外TVTestの存在を推測してHost側で別Tunerへ逃がす、待つ、譲る、失敗扱いにする処理を追加しない。
+            Log("EPG_TUNER_SCOPE", "EPG",
+                "result=OK source=tvair_tuner_pool_only unmanagedExternalTvTest=out_of_scope externalProcessScan=False rule=release_contract");
 
-        // 録画前EPG確認では、外部プロセス一覧で見えるTVTestをTvAIr管理対象へ混ぜない。
-        // 管理対象はTunerPool/TvAirManagedProcessRegistry上のTvAIr/AIrCon管理下だけに限定する。
-        if (isPreRecordCheck)
-        {
-            liveTvTestKeys = new HashSet<(string, string)>();
-            Log("EPG_LIVE_DETECT", "EPG",
-                "result=SKIPPED reason=pre_record_check_uses_managed_tuner_pool_only externalTvTestProcessScan=False rule=release_contract");
-        }
-        else if (ini.EpgExcludeLiveTvTest)
-        {
-            try
+            var load = channelLoader.Load();
+            Log("EPG_CH2_LOADED", "EPG", load.Message);
+            foreach (var warning in load.Warnings)
+                Log("EPG_CHANNEL_CONFIG", "Settings", warning);
+
+            if (load.Targets.Count == 0)
             {
-                liveTvTestKeys = LiveTvTestDetector.Detect();
-                if (liveTvTestKeys.Count > 0)
-                {
-                    Log("EPG_LIVE_DETECT", "EPG",
-                        $"LIVE視聴中TVTest検出: {liveTvTestKeys.Count}本 [" +
-                        string.Join(", ", liveTvTestKeys.Select(k => $"{k.BonDriverFileName}/{k.Did}")) + "]");
-                }
+                Log("EPG_RUN_FAIL", "EPG", "有効なチャンネルがありません。ch2/ChSetを設定画面で明示してください。source=explicit_settings rule=release_contract");
+                return EpgCaptureResult.Failed("有効なチャンネルがありません。ch2/ChSetを設定画面で明示してください。");
             }
-            catch (Exception ex)
+
+            var allGroups = BuildGroups(load.Targets);
+            var groups = FilterGroupsByScope(allGroups, normalizedScope);
+            if (groups.Count == 0)
             {
-                liveTvTestKeys = new HashSet<(string, string)>();
-                Log("EPG_LIVE_DETECT", "EPG", $"LIVE視聴中チューナー検出失敗（無視して継続）: {ex.Message}");
+                var noTarget = $"EPG取得対象がありません。targetScope={normalizedScope}";
+                Log("EPG_RUN_FAIL", "EPG", noTarget);
+                if (manageStatus)
+                    SetStatus(st => st with { Phase = "idle", TotalGroups = 0, CompletedGroups = 0, RunningGroups = 0, RunningGroupNames = "", ActiveWorkerElapsedSeconds = 0, ActiveWorkerPlannedSeconds = 0, EstimatedProgressPercent = 0, RunStartedAt = null, LastRunAt = DateTime.Now, LastRunMessage = noTarget, RunDepth = normalizedDepth, TargetScope = normalizedScope, UiVisible = showProgress, RunPurpose = runPurpose, UiMode = showProgress ? "Visible" : "Silent", CancelRoute = showProgress ? "VisibleWidget" : "SilentTray" });
+                epgRunsAcceptingNewWorkers.TryRemove(runId, out _);
+                return EpgCaptureResult.Failed(noTarget);
             }
-        }
-        else
-        {
-            liveTvTestKeys = new HashSet<(string, string)>();
-        }
 
-        // チャンネル読み込み
-        var load = channelLoader.Load();
-        Log("EPG_CH2_LOADED", "EPG", load.Message);
-        foreach (var warning in load.Warnings)
-            Log("EPG_CHANNEL_CONFIG", "Settings", warning);
-
-        if (load.Targets.Count == 0)
-        {
-            Log("EPG_RUN_FAIL", "EPG", "有効なチャンネルがありません。ch2/ChSetを設定画面で明示してください。source=explicit_settings rule=release_contract");
-            return EpgCaptureResult.Failed("有効なチャンネルがありません。ch2/ChSetを設定画面で明示してください。");
-        }
-
-        // TSグループ化（TransportStreamId単位）
-        var allGroups = BuildGroups(load.Targets);
-        var groups = FilterGroupsByScope(allGroups, normalizedScope);
-        if (singleServiceMode)
-        {
-            groups = FilterGroupsForExpectedService(groups, expectedNetworkId, expectedTransportStreamId, expectedServiceId, expectedServiceName);
-            Log("EPG_PRE_REC_TARGET_FILTER", "EPG",
-                $"targetScope={normalizedScope} matchedGroups={groups.Count} expectedNid={(expectedNetworkId?.ToString() ?? "-")} expectedTsid={(expectedTransportStreamId?.ToString() ?? "-")} expectedSid={(expectedServiceId?.ToString() ?? "-")} expectedService={SafeLogValue(expectedServiceName)} rule=release_contract");
-        }
-        if (groups.Count == 0)
-        {
-            var noTarget = $"EPG取得対象がありません。targetScope={normalizedScope}";
-            Log("EPG_RUN_FAIL", "EPG", noTarget);
-            SetStatus(s => s with { Phase = "idle", TotalGroups = 0, CompletedGroups = 0, RunningGroups = 0, RunningGroupNames = "", ActiveWorkerElapsedSeconds = 0, ActiveWorkerPlannedSeconds = 0, EstimatedProgressPercent = 0, RunStartedAt = null, LastRunAt = DateTime.Now, LastRunMessage = noTarget, RunDepth = normalizedDepth, TargetScope = normalizedScope, UiVisible = showProgress, RunPurpose = runPurpose, UiMode = showProgress ? "Visible" : "Silent", CancelRoute = showProgress ? "WidgetOrTray" : "TrayOnly" });
-            epgRunAcceptingNewWorkers = false;
-            return EpgCaptureResult.Failed(noTarget);
-        }
-        SetStatus(s => s with
-        {
-            Phase = "running",
-            TotalGroups = groups.Count,
-            CompletedGroups = 0,
-            RunningGroups = 0,
-            RunningGroupNames = "",
-            ActiveWorkerElapsedSeconds = 0,
-            ActiveWorkerPlannedSeconds = WaitSecondsForDepth(normalizedDepth),
-            EstimatedProgressPercent = 0,
-            RunStartedAt = started,
-            LastRunMessage = isPreRecordCheck ? "録画前EPG確認中" : "取得中",
-            RunDepth = normalizedDepth,
-            TargetScope = normalizedScope,
-            UiVisible = showProgress,
-            RunPurpose = runPurpose,
-            UiMode = showProgress ? "Visible" : "Silent",
-            CancelRoute = showProgress ? "WidgetOrTray" : "TrayOnly"
-        });
-        if (isPreRecordCheck)
-        {
-            Log("PRE_REC_EPG_PROBE_PLAN", "EPG確認",
-                $"targetScope={normalizedScope} targetServices={groups.SelectMany(g => g.Targets).Count()} targetGroups={groups.Count} allGroups={allGroups.Count} policy=probe_only_no_epg_capture_panel rule=epg_probe_runtime_contract");
-        }
-        else
-        {
+            if (manageStatus)
+                SetStatus(st => st with
+            {
+                Phase = "running",
+                TotalGroups = groups.Count,
+                CompletedGroups = 0,
+                RunningGroups = 0,
+                RunningGroupNames = "",
+                ActiveWorkerElapsedSeconds = 0,
+                ActiveWorkerPlannedSeconds = WaitSecondsForDepth(normalizedDepth),
+                EstimatedProgressPercent = 0,
+                RunStartedAt = started,
+                LastRunMessage = "EPG取得中",
+                RunDepth = normalizedDepth,
+                TargetScope = normalizedScope,
+                UiVisible = showProgress,
+                RunPurpose = runPurpose,
+                UiMode = showProgress ? "Visible" : "Silent",
+                CancelRoute = showProgress ? "VisibleWidget" : "SilentTray"
+            });
             Log("EPG_PLAN", "EPG",
                 $"TS単位巡回取得を開始します。targetScope={normalizedScope} 対象 {groups.SelectMany(g => g.Targets).Count()} 局 / {groups.Count} グループ。allGroups={allGroups.Count} rule=epg_plan_contract");
-        }
 
+            using var limitCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            limitCts.CancelAfter(TimeSpan.FromMinutes(settings.TotalTimeLimitMinutes));
+            var execToken = limitCts.Token;
 
-        using var limitCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        limitCts.CancelAfter(TimeSpan.FromMinutes(settings.TotalTimeLimitMinutes));
-        var execToken = limitCts.Token;
+            coverageCts = CancellationTokenSource.CreateLinkedTokenSource(execToken);
+            coverageMonitor = StartEpgWorkerCoverageMonitorAsync(started, runId, coverageCts.Token);
 
-        coverageCts = CancellationTokenSource.CreateLinkedTokenSource(execToken);
-        coverageMonitor = StartEpgWorkerCoverageMonitorAsync(started, coverageCts.Token);
+            var totalImported = 0;
+            var completedGroups = new HashSet<string>();
+            totalImported += await RunPassAsync(groups, completedGroups, pass: 1, execToken, runId, manageStatus);
+            execToken.ThrowIfCancellationRequested();
+            epgRunsAcceptingNewWorkers.TryRemove(runId, out _);
 
-        var totalImported = 0;
-        var completedGroups = new HashSet<string>();
-
-        totalImported += await RunPassAsync(groups, completedGroups, pass: 1, execToken, isPreRecordCheck, maxCaptureSeconds, expectedNetworkId, expectedTransportStreamId, expectedServiceId, expectedEventId, expectedStartTime, expectedEndTime, preferredRecordingTunerName, preTuneChainPosition, preTuneAction, preTuneKeepWorkerUntilSafetyCeiling);
-        execToken.ThrowIfCancellationRequested();
-
-        execToken.ThrowIfCancellationRequested();
-        epgRunAcceptingNewWorkers = false;
-
-        if (isPreRecordCheck)
-        {
-            Log("PRE_REC_EPG_PROBE_ENDING", "EPG確認",
-                $"enter completed={completedGroups.Count}/{groups.Count} importedEvents={totalImported} rule=epg_probe_runtime_contract");
-        }
-        else
-        {
             Log("EPG_ENDING_PHASE", "EPG",
                 $"enter completed={completedGroups.Count}/{groups.Count} imported={totalImported} note=serialize_exit_release_cleanup");
-        }
 
-        // 前TVTest終了後、次TVTest起動前にクールダウン待機を挟む。
-        // cleanup/UI reload work begins. This keeps the end of EPG acquisition from
-        // bunching together with ALLOC_ROUTE and browser refresh.
-        try { await Task.Delay(1500, execToken); } catch (OperationCanceledException) { }
-
-        var elapsed = (int)(DateTime.Now - started).TotalSeconds;
-        var totalGroups = groups.Count;
-        var completedCount = completedGroups.Count;
-        var missingGroups = Math.Max(0, totalGroups - completedCount);
-        var missingGroupDetails = FormatMissingGroupDetails(groups, completedGroups);
-        var failureSummary = FormatCaptureFailureSummary(groups, completedGroups);
-        var blockedReason = ResolveEpgRunBlockedReason(groups, normalizedScope, completedCount, totalGroups);
-        var recordingConcurrent = HasRecordingConcurrentWithEpgRun(groups);
-        var runResult = !string.IsNullOrWhiteSpace(blockedReason)
-            ? "BLOCKED"
-            : completedCount == totalGroups && totalGroups > 0
-                ? "OK"
-                : "FAILED";
-        var detailCore = $"result={runResult} targetScope={normalizedScope} runDepth={normalizedDepth} completed={completedCount}/{totalGroups} imported={totalImported} missingGroups={missingGroups} missingGroupDetails=[{missingGroupDetails}] failureSummary=[{failureSummary}]";
-        var detailExtra = $"blockedReason={SafeLogValue(blockedReason)} recordingConcurrent={recordingConcurrent}";
-        var detail = detailCore + " " + detailExtra;
-        var captureResultDetail = $"blockedReason={SafeLogValue(blockedReason)}; recordingConcurrent={recordingConcurrent}; missingGroupDetails={missingGroupDetails}; failureSummary={failureSummary}";
-        var msg = isPreRecordCheck
-            ? "録画前時刻確認を終了しました"
-            : runResult == "OK"
+            var elapsed = (int)(DateTime.Now - started).TotalSeconds;
+            var totalGroups = groups.Count;
+            var completedCount = completedGroups.Count;
+            var missingGroups = Math.Max(0, totalGroups - completedCount);
+            var missingGroupDetails = FormatMissingGroupDetails(groups, completedGroups);
+            var missingScopes = string.Join(",", groups
+                .Where(g => !completedGroups.Contains(g.Key))
+                .Select(g => g.Group)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
+            var completedScopes = string.Join(",", groups
+                .GroupBy(g => g.Group, StringComparer.OrdinalIgnoreCase)
+                .Where(scopeGroups => scopeGroups.Any()
+                    && scopeGroups.All(g => completedGroups.Contains(g.Key)))
+                .Select(scopeGroups => scopeGroups.Key)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
+            var failureSummary = FormatCaptureFailureSummary(groups, completedGroups, runId);
+            var blockedReason = ResolveEpgRunBlockedReason(groups, completedCount, totalGroups, runId);
+            var runResult = !string.IsNullOrWhiteSpace(blockedReason)
+                ? "BLOCKED"
+                : completedCount == totalGroups && totalGroups > 0
+                    ? "OK"
+                    : "FAILED";
+            var detailCore = $"result={runResult} targetScope={normalizedScope} runDepth={normalizedDepth} completed={completedCount}/{totalGroups} imported={totalImported} completedScopes={completedScopes} missingGroups={missingGroups} missingScopes={missingScopes} missingGroupDetails=[{missingGroupDetails}] failureSummary=[{failureSummary}]";
+            var detailExtra = $"blockedReason={SafeLogValue(blockedReason)}";
+            var detail = detailCore + " " + detailExtra;
+            var captureResultDetail = $"blockedReason={SafeLogValue(blockedReason)}; completedScopes={completedScopes}; missingScopes={missingScopes}; missingGroupDetails={missingGroupDetails}; failureSummary={failureSummary}";
+            var msg = runResult == "OK"
                 ? $"EPG取得を完了しました\n{completedCount}/{totalGroups} グループ完了\n{totalImported} 件取得しました"
                 : runResult == "BLOCKED"
                     ? "EPG取得を開始できません"
                     : $"EPG取得に失敗しました\n{completedCount}/{totalGroups} グループ完了\n{totalImported} 件取得しました";
-        if (isPreRecordCheck)
-        {
-            Log("PRE_REC_EPG_PROBE_RUN_END", "OK", $"result=OK targetScope={normalizedScope} targetGroups={groups.Count} completedGroups={completedGroups.Count} importedEvents={totalImported} elapsedSec={elapsed} rule=epg_probe_runtime_contract");
-        }
-        else
-        {
+
             var runEvent = runResult == "OK" ? "EPG_RUN_OK" : runResult == "BLOCKED" ? "EPG_RUN_BLOCKED" : "EPG_RUN_FAILED";
             var runTitle = runResult == "OK" ? "EPG" : runResult == "BLOCKED" ? "BLOCKED" : "FAILED";
             Log(runEvent, runTitle, msg.Replace("\n", " / ") + " " + detail + " rule=release_contract");
             Log("EPG_RUN_END", runResult, detail + " rule=release_contract");
-            // GR全滅チェック
             var grGroupKeys = groups.Where(g => g.Group == "GR").Select(g => g.Key).ToList();
             if (grGroupKeys.Count > 0 && !grGroupKeys.Any(k => completedGroups.Contains(k)))
                 Log("EPG_GR_ALL_EMPTY", "WARN", $"result=WARN grGroups={grGroupKeys.Count} grCompleted=0 rule=release_contract");
-        }
-        var finalPhase = runResult == "BLOCKED" ? "blocked" : "completed";
-        var finalCompletedGroups = runResult == "BLOCKED" ? completedCount : groups.Count;
-        var finalProgress = runResult == "BLOCKED" ? 0 : 100;
-        SetStatus(s => s with { Phase = finalPhase, CompletedGroups = finalCompletedGroups, RunningGroups = 0, RunningGroupNames = "", ActiveWorkerElapsedSeconds = 0, ActiveWorkerPlannedSeconds = WaitSecondsForDepth(normalizedDepth), EstimatedProgressPercent = finalProgress, LastRunAt = DateTime.Now, LastRunMessage = msg, RunDepth = normalizedDepth, TargetScope = normalizedScope, UiVisible = showProgress, RunPurpose = runPurpose, UiMode = showProgress ? "Visible" : "Silent", CancelRoute = showProgress ? "WidgetOrTray" : "TrayOnly" });
 
-        // 期限切れデータを削除（昨日より前）
-        var deleted = store.DeleteExpired(DateTime.Now.Date.AddDays(-1));
-        if (deleted > 0)
-            Log("EPG_CLEANUP", "EPG", $"期限切れ {deleted} 件を削除しました。");
+            var finalPhase = runResult == "OK" ? "completed" : runResult == "BLOCKED" ? "blocked" : "failed";
+            var finalProgress = totalGroups <= 0
+                ? 0
+                : Math.Clamp((int)Math.Round((double)completedCount * 100 / totalGroups), 0, 100);
+            if (manageStatus)
+                SetStatus(st => st with { Phase = finalPhase, CompletedGroups = completedCount, RunningGroups = 0, RunningGroupNames = "", ActiveWorkerElapsedSeconds = 0, ActiveWorkerPlannedSeconds = WaitSecondsForDepth(normalizedDepth), EstimatedProgressPercent = finalProgress, LastRunAt = DateTime.Now, LastRunMessage = msg, RunDepth = normalizedDepth, TargetScope = normalizedScope, UiVisible = showProgress, RunPurpose = runPurpose, UiMode = showProgress ? "Visible" : "Silent", CancelRoute = showProgress ? "VisibleWidget" : "SilentTray" });
 
-        await StopEpgWorkerCoverageMonitorIfStartedAsync(coverageCts, coverageMonitor);
-        coverageCts = null;
-        coverageMonitor = null;
-        LogEpgWorkerCoverage("run_end", force: true);
-        bridgeStopReason = "epg_run_finished";
+            var deleted = store.DeleteExpired(DateTime.Now.Date.AddDays(-1));
+            if (deleted > 0)
+                Log("EPG_CLEANUP", "EPG", $"期限切れ {deleted} 件を削除しました。");
 
-        return new EpgCaptureResult(true, completedCount, totalGroups, totalImported, runResult, missingGroups, msg, captureResultDetail);
+            await StopEpgWorkerCoverageMonitorIfStartedAsync(coverageCts, coverageMonitor);
+            coverageCts = null;
+            coverageMonitor = null;
+            LogEpgWorkerCoverage(runId, "run_end", force: true);
+
+            return new EpgCaptureResult(string.Equals(runResult, "OK", StringComparison.OrdinalIgnoreCase), completedCount, totalGroups, totalImported, runResult, missingGroups, msg, captureResultDetail)
+            {
+                MissingScopes = missingScopes,
+                CompletedScopes = completedScopes,
+                PreRecordEvents = Array.Empty<EpgEvent>()
+            };
         }
         finally
         {
-            epgRunAcceptingNewWorkers = false;
+            epgRunsAcceptingNewWorkers.TryRemove(runId, out _);
+            activeNormalEpgRuns.TryRemove(runId, out _);
+            foreach (var key in currentRunBlockedGroups.Keys.Where(k => k.StartsWith(runId + "|", StringComparison.Ordinal)))
+                currentRunBlockedGroups.TryRemove(key, out _);
+            foreach (var key in currentRunCaptureFailures.Keys.Where(k => k.StartsWith(runId + "|", StringComparison.Ordinal)))
+                currentRunCaptureFailures.TryRemove(key, out _);
             await StopEpgWorkerCoverageMonitorIfStartedAsync(coverageCts, coverageMonitor);
-            StopEpgSleepGuardBridgeIfStarted(epgSleepGuardBridge, isPreRecordCheck, normalizedScope, normalizedDepth, bridgeStopReason);
         }
     }
+
+    // PRE_RECORD_EPG_INDEPENDENT_PROBE_CONTRACT:
+    // Every PreRec probe is an independent physical-tuner job and must not share the normal EPG
+    // run/status owner. Non-chain probes return an observed snapshot without DB mutation. The protected
+    // user-chain root keeps its established DB-backed series-follow input, but still owns only this
+    // probe worker/lease and never mutates the normal EPG run/status owner.
+    public async Task<EpgCaptureResult> RunIndependentPreRecordProbeAsync(
+        CancellationToken ct,
+        string targetScope,
+        ushort? expectedNetworkId,
+        ushort? expectedTransportStreamId,
+        ushort? expectedServiceId,
+        string? expectedServiceName,
+        ushort? expectedEventId,
+        DateTime? expectedStartTime,
+        DateTime? expectedEndTime,
+        int maxCaptureSeconds,
+        string preferredRecordingTunerName,
+        bool preserveUserChainDbSeriesFollow = false)
+    {
+        var started = DateTime.Now;
+        var normalizedScope = NormalizeTargetScope(targetScope);
+        var runId = $"prerec-{DateTime.UtcNow:yyyyMMddHHmmssfff}-{Interlocked.Increment(ref epgRunSequence)}";
+        var load = channelLoader.Load();
+        if (load.Targets.Count == 0)
+            return EpgCaptureResult.Failed("録画前EPG確認対象チャンネルがありません。");
+
+        var groups = FilterGroupsForExpectedService(
+            FilterGroupsByScope(BuildGroups(load.Targets), normalizedScope),
+            expectedNetworkId,
+            expectedTransportStreamId,
+            expectedServiceId,
+            expectedServiceName);
+        if (groups.Count != 1)
+        {
+            Log("PRE_REC_EPG_INDEPENDENT_PROBE", "EPG確認",
+                $"result=NO_UNIQUE_TARGET runId={runId} targetScope={normalizedScope} matchedGroups={groups.Count} expectedNid={(expectedNetworkId?.ToString() ?? "-")} expectedTsid={(expectedTransportStreamId?.ToString() ?? "-")} expectedSid={(expectedServiceId?.ToString() ?? "-")} expectedEventId={(expectedEventId?.ToString() ?? "-")} action=keep_original_recording_time rule=pre_record_epg_independent_probe_contract");
+            return EpgCaptureResult.Failed("録画前EPG確認対象TSを一意に解決できませんでした。");
+        }
+
+        var group = groups[0];
+        var snapshotOnly = !preserveUserChainDbSeriesFollow;
+        var events = new ConcurrentBag<EpgEvent>();
+        var workerState = RegisterActiveEpgWorkerTask(group, 1, runId);
+        var imported = 0;
+        try
+        {
+            Log("PRE_REC_EPG_INDEPENDENT_PROBE", $"TS{group.TsId}",
+                $"result=START runId={runId} group={group.Group} tuner={SafeLogValue(preferredRecordingTunerName)} safetyCeilingSec={maxCaptureSeconds} expectedEventId={(expectedEventId?.ToString() ?? "-")} chainDbSeriesFollow={preserveUserChainDbSeriesFollow} policy=parallel_by_physical_recording_tuner_no_normal_epg_status_owner rule=pre_record_epg_independent_probe_contract");
+
+            imported = await CaptureGroupAsync(
+                group: group,
+                pass: 1,
+                ct: ct,
+                isPreRecordCheck: true,
+                workerTaskState: workerState,
+                maxCaptureSeconds: maxCaptureSeconds,
+                expectedNetworkId: expectedNetworkId,
+                expectedTransportStreamId: expectedTransportStreamId,
+                expectedServiceId: expectedServiceId,
+                expectedEventId: expectedEventId,
+                expectedStartTime: expectedStartTime,
+                expectedEndTime: expectedEndTime,
+                preferredRecordingTunerName: preferredRecordingTunerName,
+                preTuneChainPosition: null,
+                preTuneAction: null,
+                preTuneKeepWorkerUntilSafetyCeiling: false,
+                preRecordProbeSnapshotOnly: snapshotOnly,
+                preRecordEvents: events,
+                releaseWorkerAdmission: null,
+                reacquireWorkerAdmissionAsync: null).ConfigureAwait(false);
+        }
+        finally
+        {
+            workerState.MarkOwnerTaskCompleted();
+            var ownerSnapshot = workerState.Snapshot();
+            if (!TryConvergeExitedEpgWorker(workerState, EpgWorkerTerminalReason.Completed, "independent_prerec_owner_finally", ownerSnapshot.AttemptGeneration))
+                StartResidualEpgWorkerExitMonitor(workerState);
+        }
+
+        var snapshot = events.OrderBy(e => e.Start).ThenBy(e => e.EventId).ToArray();
+        var success = preserveUserChainDbSeriesFollow ? imported > 0 : imported > 0 && snapshot.Length > 0;
+        var runResult = success ? "OK" : "FAILED";
+        Log("PRE_REC_EPG_INDEPENDENT_PROBE", $"TS{group.TsId}",
+            $"result={runResult} runId={runId} group={group.Group} tuner={SafeLogValue(preferredRecordingTunerName)} observedEvents={snapshot.Length} importedEvents={(preserveUserChainDbSeriesFollow ? imported : 0)} elapsedSec={(int)(DateTime.Now - started).TotalSeconds} dbWrite={(preserveUserChainDbSeriesFollow ? "epg_store_user_chain_protected" : "none")} normalEpgStatusOwner=untouched rule=pre_record_epg_independent_probe_contract");
+        return new EpgCaptureResult(success, success ? 1 : 0, 1, preserveUserChainDbSeriesFollow ? imported : 0, runResult, success ? 0 : 1,
+            "録画前時刻確認を終了しました",
+            $"result={runResult}; independentPreRec=true; tuner={SafeLogValue(preferredRecordingTunerName)}")
+        {
+            CompletedScopes = success ? normalizedScope : string.Empty,
+            MissingScopes = success ? string.Empty : normalizedScope,
+            PreRecordEvents = snapshot
+        };
+    }
+
+    private static string RunDiagnosticKey(string runId, string groupKey) => $"{runId}|{groupKey}";
 
     private string FormatMissingGroupDetails(IReadOnlyList<TsGroup> groups, HashSet<string> completedGroups)
     {
@@ -532,21 +771,23 @@ public sealed class EpgCapture
         return missing.Count == 0 ? "-" : string.Join(",", missing);
     }
 
-    private string FormatCaptureFailureSummary(IReadOnlyList<TsGroup> groups, HashSet<string> completedGroups)
+    private string FormatCaptureFailureSummary(IReadOnlyList<TsGroup> groups, HashSet<string> completedGroups, string runId)
     {
         var failures = groups
             .Where(g => !completedGroups.Contains(g.Key))
-            .Select(g => currentRunCaptureFailures.TryGetValue(g.Key, out var f)
+            .Select(g => currentRunCaptureFailures.TryGetValue(RunDiagnosticKey(runId, g.Key), out var f)
                 ? $"{g.Group}:TS{g.TsId}:{SafeLogValue(g.Targets.FirstOrDefault()?.Name)}:{SafeLogValue(f.Reason)}:{SafeLogValue(f.Detail)}"
-                : $"{g.Group}:TS{g.TsId}:{SafeLogValue(g.Targets.FirstOrDefault()?.Name)}:unknown")
+                : currentRunBlockedGroups.TryGetValue(RunDiagnosticKey(runId, g.Key), out var blocked) && !string.IsNullOrWhiteSpace(blocked)
+                    ? $"{g.Group}:TS{g.TsId}:{SafeLogValue(g.Targets.FirstOrDefault()?.Name)}:Blocked:{SafeLogValue(blocked)}"
+                    : $"{g.Group}:TS{g.TsId}:{SafeLogValue(g.Targets.FirstOrDefault()?.Name)}:unknown")
             .ToList();
         return failures.Count == 0 ? "-" : string.Join("|", failures);
     }
 
-    private void RecordCaptureFailure(TsGroup group, string reason, string detail, int attempt, int maxAttempts)
+    private void RecordCaptureFailure(TsGroup group, string reason, string detail, int attempt, int maxAttempts, string runId)
     {
         var state = new EpgCaptureFailureState(group.Group, group.TsId, reason, detail, attempt, maxAttempts, DateTime.Now);
-        currentRunCaptureFailures[group.Key] = state;
+        currentRunCaptureFailures[RunDiagnosticKey(runId, group.Key)] = state;
         Log("EPG_CAPTURE_FAILURE_CLASSIFIED", $"TS{group.TsId}",
             $"epgGroup={group.Group} ts={group.TsId} service={SafeLogValue(group.Targets.FirstOrDefault()?.Name)} reason={SafeLogValue(reason)} detail={SafeLogValue(detail)} attempt={attempt}/{maxAttempts} rule=release_contract");
     }
@@ -566,37 +807,28 @@ public sealed class EpgCapture
         }
     }
 
-    private string ResolveEpgRunBlockedReason(IReadOnlyList<TsGroup> groups, string normalizedScope, int completedCount, int totalGroups)
+    private string ResolveEpgRunBlockedReason(IReadOnlyList<TsGroup> groups, int completedCount, int totalGroups, string runId)
     {
         if (totalGroups <= 0 || completedCount > 0) return string.Empty;
 
-        var blockedReason = currentRunBlockedGroups.Values.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
-        if (!string.IsNullOrWhiteSpace(blockedReason)) return NormalizeBlockedReason(blockedReason);
-
-        var targetGroups = groups
-            .Select(g => NormalizeEpgTargetGroup(g.Group))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        foreach (var group in targetGroups)
+        // BLOCKED is used only by PreRec when every requested TS group was rejected by its
+        // recording-timeline safety boundary. Normal/定時EPGは開始後に録画timelineでBLOCKEDへ移行しない。
+        var blockedReasons = new List<string>(groups.Count);
+        foreach (var group in groups)
         {
-            if (RecordingLifecycleGate.IsNormalEpgSuppressed(group, out _, out var reason, out _, out _))
-                return NormalizeBlockedReason(reason);
+            if (!currentRunBlockedGroups.TryGetValue(RunDiagnosticKey(runId, group.Key), out var reason)
+                || string.IsNullOrWhiteSpace(reason))
+            {
+                return string.Empty;
+            }
+            blockedReasons.Add(NormalizeBlockedReason(reason));
         }
 
-        return string.Empty;
+        return blockedReasons
+            .FirstOrDefault(reason => !string.IsNullOrWhiteSpace(reason))
+            ?? "pre_record_boundary";
     }
 
-    private bool HasRecordingConcurrentWithEpgRun(IReadOnlyList<TsGroup> groups)
-    {
-        var targetGroups = groups
-            .Select(g => NormalizeEpgTargetGroup(g.Group))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        return tunerPool.GetStatus().Any(s =>
-            s.UsageKind == TunerUsageKind.Recording
-            && s.ReservationId.HasValue
-            && targetGroups.Contains(NormalizeEpgTargetGroup(s.Group)));
-    }
 
 
     private static IReadOnlyList<TsGroup> BuildEpgTargetGroupFairQueue(IReadOnlyList<TsGroup> groups, IReadOnlyList<string> targetGroups)
@@ -659,35 +891,24 @@ public sealed class EpgCapture
 
     private static string NormalizeBlockedReason(string? reason)
     {
-        if (string.IsNullOrWhiteSpace(reason)) return "recording_preempt_lock";
+        if (string.IsNullOrWhiteSpace(reason)) return "pre_record_boundary";
         var normalized = reason.Trim();
         if (normalized.Contains("window_insufficient", StringComparison.OrdinalIgnoreCase)) return "recording_window_insufficient";
-        if (normalized.Contains("warmup", StringComparison.OrdinalIgnoreCase)) return "recording_warmup";
-        if (normalized.Contains("stable", StringComparison.OrdinalIgnoreCase)) return "recording_stable_free_tuner_allowed";
-        return normalized.Contains("recording", StringComparison.OrdinalIgnoreCase)
-            ? "recording_preempt_lock"
-            : normalized;
+        return normalized;
     }
 
     // ─── 1パス処理 ───────────────────────────────────────────────
 
+    // NORMAL_EPG_RUN_PASS_CONTRACT:
+    // This queue/admission layer belongs only to normal EPG runs. PreRec owns a separate run entry
+    // and invokes CaptureGroupAsync directly so it cannot re-enter normal EPG run/status/queue state.
     private async Task<int> RunPassAsync(
         IReadOnlyList<TsGroup> groups,
         HashSet<string> completedGroups,
         int pass,
         CancellationToken ct,
-        bool isPreRecordCheck,
-        int? maxCaptureSeconds,
-        ushort? expectedNetworkId = null,
-        ushort? expectedTransportStreamId = null,
-        ushort? expectedServiceId = null,
-        ushort? expectedEventId = null,
-        DateTime? expectedStartTime = null,
-        DateTime? expectedEndTime = null,
-        string? preferredRecordingTunerName = null,
-        string? preTuneChainPosition = null,
-        string? preTuneAction = null,
-        bool preTuneKeepWorkerUntilSafetyCeiling = false)
+        string runId,
+        bool manageStatus)
     {
         if (groups.Count == 0) return 0;
 
@@ -705,13 +926,11 @@ public sealed class EpgCapture
             StringComparer.OrdinalIgnoreCase);
         var groupLogicalUsableSlots = targetGroups.ToDictionary(
             g => g,
-            g => Math.Max(0, tunerPool.CountEpgUsableFreeSlots(g, liveTvTestKeys)),
+            g => Math.Max(0, tunerPool.CountEpgUsableFreeSlots(g)),
             StringComparer.OrdinalIgnoreCase);
         var groupEpgCapacity = targetGroups.ToDictionary(
             g => g,
-            g => isPreRecordCheck
-                ? (groupLogicalUsableSlots.TryGetValue(g, out var preSlots) && preSlots > 0 ? 1 : 0)
-                : (groupLogicalUsableSlots.TryGetValue(g, out var normalSlots) ? normalSlots : 0),
+            g => groupLogicalUsableSlots.TryGetValue(g, out var slots) ? slots : 0,
             StringComparer.OrdinalIgnoreCase);
         var totalRecordableSlots = groupRecordableSlots.Values.Sum();
         var totalLogicalEpgUsableSlots = groupLogicalUsableSlots.Values.Sum();
@@ -719,39 +938,26 @@ public sealed class EpgCapture
         var groupRecordableSummary = string.Join(",", targetGroups.Select(g => $"{g}:{(groupRecordableSlots.TryGetValue(g, out var recordableValue) ? recordableValue : 0)}"));
         var groupLogicalSummary = string.Join(",", targetGroups.Select(g => $"{g}:{(groupLogicalUsableSlots.TryGetValue(g, out var logicalValue) ? logicalValue : 0)}"));
         var groupCapacitySummary = string.Join(",", targetGroups.Select(g => $"{g}:{(groupEpgCapacity.TryGetValue(g, out var capacityValue) ? capacityValue : 0)}"));
-        var liveExclusionSummary = liveTvTestKeys is null || liveTvTestKeys.Count == 0
-            ? "-"
-            : string.Join(",", liveTvTestKeys.Select(k => $"{SafeLogValue(k.BonDriverFileName)}/{SafeLogValue(k.Did)}"));
 
-        if (isPreRecordCheck)
-        {
-            Log("PRE_REC_EPG_PROBE_GROUP_START", string.Join("+", targetGroups),
-                $"pass={pass} groups={groups.Count} policy=GroupEpgCapacityAdmission groupLogical=[{groupLogicalSummary}] groupCapacity=[{groupCapacitySummary}] admissionCapacity={totalGroupEpgAdmissionCapacity} rule=release_contract");
-        }
-        else
-        {
-            Log("EPG_GLOBAL_JOB_QUEUE_PLAN", "EPG",
-                $"pass={pass} groups={groups.Count} targetGroups=[{string.Join(",", targetGroups)}] recordableSlots={totalRecordableSlots} logicalEpgUsableSlots={totalLogicalEpgUsableSlots} groupRecordable=[{groupRecordableSummary}] groupLogical=[{groupLogicalSummary}] groupCapacity=[{groupCapacitySummary}] admissionCapacity={totalGroupEpgAdmissionCapacity} liveExcluded=[{liveExclusionSummary}] policy=group_capacity_epg_job_queue rule=release_contract");
-        }
+        Log("EPG_GLOBAL_JOB_QUEUE_PLAN", "EPG",
+            $"pass={pass} groups={groups.Count} targetGroups=[{string.Join(",", targetGroups)}] recordableSlots={totalRecordableSlots} logicalEpgUsableSlots={totalLogicalEpgUsableSlots} groupRecordable=[{groupRecordableSummary}] groupLogical=[{groupLogicalSummary}] groupCapacity=[{groupCapacitySummary}] admissionCapacity={totalGroupEpgAdmissionCapacity} unmanagedExternalTvTest=out_of_scope policy=group_capacity_epg_job_queue rule=release_contract");
 
         var orderedGroups = BuildEpgTargetGroupFairQueue(groups, targetGroups);
         var admissibleHeadCount = Math.Max(1, Math.Min(totalGroupEpgAdmissionCapacity <= 0 ? targetGroups.Count : totalGroupEpgAdmissionCapacity, orderedGroups.Count));
         var queueHeadSummary = string.Join(",", orderedGroups
             .Take(admissibleHeadCount)
             .Select(g => $"{NormalizeEpgTargetGroup(g.Group)}:{g.TsId}"));
-        if (!isPreRecordCheck)
-        {
-            Log("EPG_TARGET_GROUP_QUEUE_PLAN", "EPG",
-                $"pass={pass} queuePolicy=EpgTargetGroupFairQueue admissionPolicy=GroupEpgCapacity targetGroups=[{string.Join(",", targetGroups)}] queueHead=[{queueHeadSummary}] groupCapacity=[{groupCapacitySummary}] admissionCapacity={totalGroupEpgAdmissionCapacity} rule=release_contract");
-        }
+        Log("EPG_TARGET_GROUP_QUEUE_PLAN", "EPG",
+            $"pass={pass} queuePolicy=EpgTargetGroupFairQueue admissionPolicy=GroupEpgCapacity targetGroups=[{string.Join(",", targetGroups)}] queueHead=[{queueHeadSummary}] groupCapacity=[{groupCapacitySummary}] admissionCapacity={totalGroupEpgAdmissionCapacity} rule=release_contract");
 
         var groupSemaphores = groupEpgCapacity
             .Where(kv => kv.Value > 0)
             .ToDictionary(kv => kv.Key, kv => new SemaphoreSlim(kv.Value), StringComparer.OrdinalIgnoreCase);
+        using var workerAdmissionReleased = new SemaphoreSlim(0);
         if (groupSemaphores.Count == 0)
         {
             Log("EPG_GROUP_CAPACITY_ADMISSION", "EPG",
-                $"result=NO_CAPACITY pass={pass} targetGroups=[{string.Join(",", targetGroups)}] groupCapacity=[{groupCapacitySummary}] liveExcluded=[{liveExclusionSummary}] action=skip_new_workers rule=release_contract");
+                $"result=NO_CAPACITY pass={pass} targetGroups=[{string.Join(",", targetGroups)}] groupCapacity=[{groupCapacitySummary}] unmanagedExternalTvTest=out_of_scope action=skip_new_workers rule=release_contract");
             return 0;
         }
 
@@ -759,32 +965,63 @@ public sealed class EpgCapture
         var tasks = new List<Task>();
         var pendingGroups = orderedGroups.ToList();
         var gate = new object();
-        var firstLaunch = true;
-        var staggerMs = Math.Max(0, ini.EpgLaunchStaggerMs);
 
-        async Task LaunchAsync(TsGroup group, SemaphoreSlim groupSemaphore)
+        Task LaunchAsync(TsGroup group, SemaphoreSlim groupSemaphore)
         {
-            if (!firstLaunch && staggerMs > 0)
-                await Task.Delay(staggerMs, ct);
-            firstLaunch = false;
-
             var g = group;
             var releaseSemaphore = groupSemaphore;
-            var workerTaskState = RegisterActiveEpgWorkerTask(g, pass);
+            var admissionReleased = 0;
+            void ReleaseWorkerAdmission()
+            {
+                if (Interlocked.Exchange(ref admissionReleased, 1) == 0)
+                {
+                    releaseSemaphore.Release();
+                    workerAdmissionReleased.Release();
+                }
+            }
+            var workerTaskState = RegisterActiveEpgWorkerTask(g, pass, runId);
             tasks.Add(Task.Run(async () =>
             {
                 try
                 {
-                    var count = await CaptureGroupAsync(g, pass, ct, isPreRecordCheck, maxCaptureSeconds, expectedNetworkId, expectedTransportStreamId, expectedServiceId, expectedEventId, expectedStartTime, expectedEndTime, preferredRecordingTunerName, preTuneChainPosition, preTuneAction, preTuneKeepWorkerUntilSafetyCeiling);
-
-                    if (IsNormalEpgCaptureSufficient(g, count, isPreRecordCheck))
+                    async Task ReacquireWorkerAdmissionAsync(CancellationToken token)
                     {
+                        await releaseSemaphore.WaitAsync(token).ConfigureAwait(false);
+                        Interlocked.Exchange(ref admissionReleased, 0);
+                    }
+
+                    var count = await CaptureGroupAsync(
+                        g,
+                        pass,
+                        ct,
+                        isPreRecordCheck: false,
+                        workerTaskState,
+                        maxCaptureSeconds: null,
+                        expectedNetworkId: null,
+                        expectedTransportStreamId: null,
+                        expectedServiceId: null,
+                        expectedEventId: null,
+                        expectedStartTime: null,
+                        expectedEndTime: null,
+                        preferredRecordingTunerName: null,
+                        preTuneChainPosition: null,
+                        preTuneAction: null,
+                        preTuneKeepWorkerUntilSafetyCeiling: false,
+                        preRecordProbeSnapshotOnly: false,
+                        preRecordEvents: null,
+                        releaseWorkerAdmission: ReleaseWorkerAdmission,
+                        reacquireWorkerAdmissionAsync: ReacquireWorkerAdmissionAsync);
+
+                    if (HasUsableCapturedEpgEvents(g, count))
+                    {
+                        int completedGroupCount;
                         lock (gate)
                         {
                             completedGroups.Add(g.Key);
                             imported += count;
+                            completedGroupCount = completedGroups.Count;
                         }
-                        SetStatus(s => s with { CompletedGroups = completedGroups.Count });
+                        if (manageStatus) SetStatus(s => s with { CompletedGroups = completedGroupCount });
                     }
                     else if (count > 0)
                     {
@@ -794,206 +1031,139 @@ public sealed class EpgCapture
                         }
                     }
                 }
-                catch (OperationCanceledException) { }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    workerTaskState.TryFinalize(EpgWorkerTerminalReason.Cancelled);
+                    // RunPassAsync側で新規投入を止め、全worker収束後に上位token確認へ戻す。
+                }
+                catch (EpgWorkerProcessMissingException ex)
+                {
+                    workerTaskState.TryFinalize(EpgWorkerTerminalReason.ProcessMissing);
+                    RecordCaptureFailure(
+                        g,
+                        "worker_process_missing",
+                        $"cycle={SafeLogValue(ex.CycleId)}",
+                        attempt: 1,
+                        maxAttempts: 2,
+                        runId: workerTaskState.RunId);
+                    Log("EPG_WORKER_TASK_FAIL", $"TS{g.TsId}",
+                        $"result=ERROR pass={pass} group={g.Group} worker={SafeLogValue($"{g.Group}-{g.TsId}")} reason=process_missing cycle={SafeLogValue(ex.CycleId)} action=classify_group_failed_continue_other_workers rule=release_contract");
+                }
+                catch (Exception ex)
+                {
+                    workerTaskState.TryFinalize(EpgWorkerTerminalReason.Failed);
+                    RecordCaptureFailure(
+                        g,
+                        "worker_task_exception",
+                        $"type={ex.GetType().Name} message={SafeLogValue(ex.Message)}",
+                        attempt: 1,
+                        maxAttempts: 2,
+                        runId: workerTaskState.RunId);
+                    Log("EPG_WORKER_TASK_FAIL", $"TS{g.TsId}",
+                        $"result=ERROR pass={pass} group={g.Group} worker={SafeLogValue($"{g.Group}-{g.TsId}")} error={ex.GetType().Name}:{SafeLogValue(ex.Message)} action=classify_group_failed_continue_other_workers rule=release_contract");
+                }
                 finally
                 {
-                    releaseSemaphore.Release();
-                    CompleteActiveEpgWorkerTask(workerTaskState);
+                    workerTaskState.MarkOwnerTaskCompleted();
+                    var ownerSnapshot = workerTaskState.Snapshot();
+                    var converged = TryConvergeExitedEpgWorker(workerTaskState, EpgWorkerTerminalReason.Completed, "owner_task_finally", ownerSnapshot.AttemptGeneration);
+                    if (!converged)
+                    {
+                        workerTaskState.DeferAdmissionRelease(ReleaseWorkerAdmission);
+                        StartResidualEpgWorkerExitMonitor(workerTaskState);
+                    }
+                    else
+                    {
+                        ReleaseWorkerAdmission();
+                    }
                 }
             }, CancellationToken.None));
+            return Task.CompletedTask;
         }
 
-        while (pendingGroups.Count > 0 && !ct.IsCancellationRequested)
+        try
         {
-            var launchedInThisScan = false;
-
-            for (var i = 0; i < pendingGroups.Count; i++)
+            try
             {
-                if (ct.IsCancellationRequested) break;
-                var group = pendingGroups[i];
-                lock (gate)
+                while (pendingGroups.Count > 0 && !ct.IsCancellationRequested)
                 {
-                    if (completedGroups.Contains(group.Key))
+                    var launchedInThisScan = false;
+
+                    for (var i = 0; i < pendingGroups.Count; i++)
                     {
+                        if (ct.IsCancellationRequested) break;
+                        var group = pendingGroups[i];
+                        lock (gate)
+                        {
+                            if (completedGroups.Contains(group.Key))
+                            {
+                                pendingGroups.RemoveAt(i--);
+                                continue;
+                            }
+                        }
+
+                        var groupKey = NormalizeEpgTargetGroup(group.Group);
+                        if (!groupSemaphores.TryGetValue(groupKey, out var groupSemaphore))
+                        {
+                            Log("EPG_GROUP_CAPACITY_ADMISSION", $"TS{group.TsId}",
+                                $"result=SKIP_NO_GROUP_CAPACITY pass={pass} group={groupKey} groupCapacity=[{groupCapacitySummary}] rule=release_contract");
+                            pendingGroups.RemoveAt(i--);
+                            continue;
+                        }
+
+                        if (!groupSemaphore.Wait(0))
+                            continue;
+
                         pendingGroups.RemoveAt(i--);
+                        launchedInThisScan = true;
+                        await LaunchAsync(group, groupSemaphore);
+                    }
+
+                    if (launchedInThisScan)
                         continue;
-                    }
+
+                    if (tasks.Count == 0)
+                        break;
+
+                    // CaptureGroupAsync全体（TS解析・DB保存）ではなく、worker終了とチューナー解放を待つ。
+                    // これにより前局TS解析中でも、空いた取得枠へ次局workerを直ちに投入できる。
+                    await workerAdmissionReleased.WaitAsync(ct);
                 }
-
-                var groupKey = NormalizeEpgTargetGroup(group.Group);
-                if (!groupSemaphores.TryGetValue(groupKey, out var groupSemaphore))
-                {
-                    if (!isPreRecordCheck)
-                    {
-                        Log("EPG_GROUP_CAPACITY_ADMISSION", $"TS{group.TsId}",
-                            $"result=SKIP_NO_GROUP_CAPACITY pass={pass} group={groupKey} groupCapacity=[{groupCapacitySummary}] rule=release_contract");
-                    }
-                    pendingGroups.RemoveAt(i--);
-                    continue;
-                }
-
-                if (!groupSemaphore.Wait(0))
-                    continue;
-
-                pendingGroups.RemoveAt(i--);
-                launchedInThisScan = true;
-                await LaunchAsync(group, groupSemaphore);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // 通知Semaphoreを先に破棄しない。新規投入だけを止め、起動済みworkerの
+                // finallyが取得枠と通知を返し終えるまで下のWhenAllで収束させる。
             }
 
-            if (launchedInThisScan)
-                continue;
+            if (ct.IsCancellationRequested)
+            {
+                epgRunsAcceptingNewWorkers.TryRemove(runId, out _);
+                Log("EPG_CANCEL_NEW_WORKERS_STOPPED", "EPG", $"pass={pass} reason=ct_cancelled action=await_started_workers_before_dispose rule=release_contract");
+            }
 
-            if (tasks.Count == 0)
-                break;
-
-            var completedTask = await Task.WhenAny(tasks);
-            tasks.Remove(completedTask);
-            await completedTask;
+            await Task.WhenAll(tasks);
+            return imported;
         }
-
-        if (ct.IsCancellationRequested)
+        finally
         {
-            epgRunAcceptingNewWorkers = false;
-            Log("EPG_CANCEL_NEW_WORKERS_STOPPED", "EPG", $"pass={pass} reason=ct_cancelled rule=release_contract");
+            foreach (var semaphore in groupSemaphores.Values)
+                semaphore.Dispose();
         }
-
-        await Task.WhenAll(tasks);
-        foreach (var semaphore in groupSemaphores.Values) semaphore.Dispose();
-        return imported;
     }
 
 
-    private bool IsNormalEpgCaptureSufficient(TsGroup group, int imported, bool isPreRecordCheck)
+    private bool HasUsableCapturedEpgEvents(TsGroup group, int imported)
     {
         if (imported <= 0) return false;
 
+        // EIT schedule section completeness is diagnostic. A short/shallow normal EPG capture can
+        // legitimately end with missing schedule segments while still yielding usable events.
+        // PreRec completion is evaluated by RunIndependentPreRecordProbeAsync and does not enter here.
         Log("EPG_COMPLETION", $"TS{group.TsId}",
-            $"result={(imported > 0 ? "COMPLETE" : "EMPTY")} imported={imported} purpose={(isPreRecordCheck ? "pre_record_check" : "normal_epg_capture")} group={group.Group} services={group.Targets.Count} rule=release_contract");
+            $"result=USABLE_IMPORT imported={imported} purpose=normal_epg_capture group={group.Group} services={group.Targets.Count} completionBasis=imported_events_present sectionCompleteness=diagnostic_only rule=release_contract");
 
         return true;
-    }
-
-    /// <summary>
-    /// 同一グループ（GR または BSCS）の TsGroup リストを並列処理する。
-    /// 並列数は TunerPool の当該 BonDriver の空きスロット数で自動決定する。
-    /// 並列上限内であっても、ジョブ投入間に EpgLaunchStaggerMs の間隔を入れて
-    /// 同時CmdSetCh/CmdOpenTuner集中を緩和する。
-    /// </summary>
-    private async Task<int> RunGroupsAsync(
-        IReadOnlyList<TsGroup> groups,
-        HashSet<string> completedGroups,
-        int pass,
-        CancellationToken ct,
-        bool isPreRecordCheck,
-        int? maxCaptureSeconds,
-        ushort? expectedNetworkId = null,
-        ushort? expectedTransportStreamId = null,
-        ushort? expectedServiceId = null,
-        ushort? expectedEventId = null,
-        DateTime? expectedStartTime = null,
-        DateTime? expectedEndTime = null,
-        string? preferredRecordingTunerName = null,
-        string? preTuneChainPosition = null,
-        string? preTuneAction = null,
-        bool preTuneKeepWorkerUntilSafetyCeiling = false)
-    {
-        if (groups.Count == 0) return 0;
-
-        // このグループの録画用スロット数を並列上限にする。
-        // Viewing専用スロットを並列上限に含めると、実際にはEPG確保できない余剰ワーカーが
-        // EPG_TUNER_BUSYを連発して空欄TSを増やすため、録画用として使える枠だけで回す。
-        var groupName  = groups[0].Group;
-        var recordableSlotCount = tunerPool.GetStatus()
-            .Count(s => string.Equals(s.Group, groupName, StringComparison.OrdinalIgnoreCase)
-                        && !string.Equals(s.Role, "Viewing", StringComparison.OrdinalIgnoreCase));
-        var initialFreeSlots = tunerPool.CountRecordableFreeSlots(groupName);
-        var initialEpgUsableFreeSlots = tunerPool.CountEpgUsableFreeSlots(groupName, liveTvTestKeys);
-        // release_contract: 録画用本数などの設定値ではなく、保護/占有/外部TVTest除外後の
-        // EPG用途で実際に使える論理スロット数だけを並列数にする。
-        var logicalEpgSlotCount = initialEpgUsableFreeSlots;
-        var concurrent = Math.Max(1, logicalEpgSlotCount);
-        if (!isPreRecordCheck)
-        {
-            var status = tunerPool.GetStatus();
-            var fixedExactSlots = status.Count(s => string.Equals(s.Group, groupName, StringComparison.OrdinalIgnoreCase));
-            var nonViewingExactSlots = status.Count(s => string.Equals(s.Group, groupName, StringComparison.OrdinalIgnoreCase)
-                && !string.Equals(s.Role, "Viewing", StringComparison.OrdinalIgnoreCase));
-            var freeExactNonViewing = status.Count(s => string.Equals(s.Group, groupName, StringComparison.OrdinalIgnoreCase)
-                && s.UsageKind == TunerUsageKind.Free
-                && !string.Equals(s.Role, "Viewing", StringComparison.OrdinalIgnoreCase));
-            var liveExclusionSummary = liveTvTestKeys is null || liveTvTestKeys.Count == 0
-                ? "-"
-                : string.Join(",", liveTvTestKeys.Select(k => $"{SafeLogValue(k.BonDriverFileName)}/{SafeLogValue(k.Did)}"));
-            Log("EPG_WORKER_CONCURRENCY_PLAN", groupName,
-                $"group={groupName} groups={groups.Count} recordableSlots={recordableSlotCount} initialFreeSlots={initialFreeSlots} logicalEpgUsableSlots={logicalEpgSlotCount} concurrent={concurrent} liveExcluded=[{liveExclusionSummary}] policy=settings_to_logical_resource rule=release_contract");
-        }
-
-        // ジョブ投入インターバル
-        var staggerMs = Math.Max(0, ini.EpgLaunchStaggerMs);
-
-        using var sem = new SemaphoreSlim(concurrent);
-        var imported  = 0;
-        var tasks     = new List<Task>();
-        var gate      = new object();
-        var firstLaunch = true;
-
-        foreach (var group in groups)
-        {
-            if (ct.IsCancellationRequested)
-            {
-                epgRunAcceptingNewWorkers = false;
-                Log("EPG_CANCEL_NEW_WORKERS_STOPPED", "EPG", $"pass={pass} reason=ct_cancelled rule=epg_plan_contract");
-                break;
-            }
-            if (completedGroups.Contains(group.Key)) continue;
-
-            await sem.WaitAsync(ct);
-
-            // 2件目以降は staggerMs だけ待ってから投入し、
-            // CmdSetCh/CmdOpenTuner の集中を分散する。最初の1件は即時。
-            if (!firstLaunch && staggerMs > 0)
-            {
-                try { await Task.Delay(staggerMs, ct); }
-                catch (OperationCanceledException) { sem.Release(); break; }
-            }
-            firstLaunch = false;
-
-            var g = group;
-            var workerTaskState = RegisterActiveEpgWorkerTask(g, pass);
-            tasks.Add(Task.Run(async () =>
-            {
-                try
-                {
-                    var count = await CaptureGroupAsync(g, pass, ct, isPreRecordCheck, maxCaptureSeconds, expectedNetworkId, expectedTransportStreamId, expectedServiceId, expectedEventId, expectedStartTime, expectedEndTime, preferredRecordingTunerName, preTuneChainPosition, preTuneAction, preTuneKeepWorkerUntilSafetyCeiling);
-
-                    if (IsNormalEpgCaptureSufficient(g, count, isPreRecordCheck))
-                    {
-                        lock (gate)
-                        {
-                            completedGroups.Add(g.Key);
-                            imported += count;
-                        }
-                        SetStatus(s => s with { CompletedGroups = completedGroups.Count });
-                    }
-                    else if (count > 0)
-                    {
-                        lock (gate)
-                        {
-                            imported += count;
-                        }
-                    }
-                }
-                catch (OperationCanceledException) { /* 時間切れは正常 */ }
-                finally
-                {
-                    sem.Release();
-                    CompleteActiveEpgWorkerTask(workerTaskState);
-                }
-            }, CancellationToken.None));
-        }
-
-        await Task.WhenAll(tasks);
-        return imported;
     }
 
     private async Task<EpgWorkerLaunchResult> StartEpgRecordingWithLaunchGateAsync(
@@ -1010,15 +1180,33 @@ public sealed class EpgCapture
         string? preferredRecordingTunerName = null,
         string? preTuneChainPosition = null,
         string? preTuneAction = null,
-        bool preTuneKeepWorkerUntilSafetyCeiling = false)
+        bool preTuneKeepWorkerUntilSafetyCeiling = false,
+        ushort? expectedEventId = null,
+        DateTime? expectedStartTime = null,
+        DateTime? expectedEndTime = null,
+        Func<EpgWorkerLaunchResult, bool>? bindStartedProcessOwnership = null,
+        Func<EpgWorkerLaunchResult, string, Task<bool>>? retireUnreadyStartupAsync = null)
     {
-        await epgLaunchStartGate.WaitAsync(ct);
+        // EPGも録画/視聴と同じ物理デバイス開始契約へ統合する。
+        // lease管理やDID選択はTunerPoolの責務のまま変更せず、ここでは
+        // BonDriver Open -> SetChannel -> TS-read開始までの短いstartup境界だけを保護する。
+        // GRとBSCSは別gateなので両波の同時起動能力は維持される。
+        using var tunerDeviceAccess = await TunerDeviceAccessGate.EnterAsync(
+            $"EPG_START {workerName} TS{group.TsId}",
+            group.Group,
+            msg => Log("TUNER_DEVICE_LOCK", $"TS{group.TsId}", msg),
+            ct).ConfigureAwait(false);
+
+        EpgWorkerLaunchResult launch;
+        await epgLaunchStartGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var gapMs = Math.Max(0, ini.EpgLaunchStaggerMs);
             Log("EPG_LAUNCH_GATE", $"TS{group.TsId}",
-                $"enter worker={workerName} group={group.Group} bonDriver={bonDriverFileName} did={did} gapAfterLaunch={gapMs}ms route=TvAIrEpgRec mode=epg-ts rule=epg_worker_route_contract");
+                $"enter worker={workerName} group={group.Group} bonDriver={bonDriverFileName} did={did} processStartOnly=true route=TvAIrEpgRec mode=epg-ts rule=epg_worker_route_contract");
 
+            // EXTERNAL_TVTEST_PT3_RESPONSIBILITY_BOUNDARY:
+            // ここでのViewing-role保護はTvAIr自身の設定契約だけを対象とする。管理外TVTestは観測しない。
+            // 物理PT3側の競合・再配置はBonDriver_PTx/PT3に任せ、Host独自の外部利用回避を入れてはならない。
             var viewingAudit = TvTestProcessAuditor.EmitViewingProtectionAudit(
                 log,
                 "EPG_START_BEFORE_LAUNCH",
@@ -1030,11 +1218,11 @@ public sealed class EpgCapture
             if (viewingAudit.ShouldBlock || tunerPool.IsViewingReservedDid(did))
             {
                 Log("EPG_VIEWING_PROTECTION_BLOCK", $"TS{group.TsId}",
-                    $"worker={workerName} targetDid={did} bonDriver={bonDriverFileName} externalSameDid={viewingAudit.ExternalSameDid} targetIsViewingRole={viewingAudit.TargetIsViewingRole}");
-                return new EpgWorkerLaunchResult(false, 0, "EPG blocked by viewing protection", null, null, null);
+                    $"worker={workerName} targetDid={did} bonDriver={bonDriverFileName} targetIsViewingRole={viewingAudit.TargetIsViewingRole} unmanagedExternalTvTest=out_of_scope");
+                return new EpgWorkerLaunchResult(false, 0, "EPG blocked by configured viewing-role protection", null, null, null);
             }
 
-            var launch = StartTvAIrEpgRecForEpg(
+            launch = StartTvAIrEpgRecForEpg(
                 workerName,
                 group,
                 bonDriverFileName,
@@ -1047,40 +1235,204 @@ public sealed class EpgCapture
                 preferredRecordingTunerName,
                 preTuneChainPosition,
                 preTuneAction,
-                preTuneKeepWorkerUntilSafetyCeiling);
-
-            if (launch.Success && launch.ProcessId > 0)
-            {
-                var primaryServiceName = displayServiceName ?? group.Targets.FirstOrDefault()?.Name ?? $"TS{group.TsId}";
-                RegisterActiveEpgWorkerProcess(launch.ProcessId, workerName, group, primaryServiceName, "launch_pending", launch.StopSignalPath);
-            }
-
-            if (gapMs > 0)
-            {
-                try { await Task.Delay(gapMs, ct); }
-                catch (OperationCanceledException)
-                {
-                    if (launch.Success && launch.ProcessId > 0)
-                    {
-                        await StopAndRetireActiveEpgWorkerAsync(
-                            launch,
-                            workerName,
-                            group,
-                            "launch_gate_delay",
-                            "launch_gate_cancelled").ConfigureAwait(false);
-                    }
-                    throw;
-                }
-            }
+                preTuneKeepWorkerUntilSafetyCeiling,
+                expectedEventId,
+                expectedStartTime,
+                expectedEndTime);
 
             Log("EPG_LAUNCH_GATE", $"TS{group.TsId}",
-                $"exit worker={workerName} success={launch.Success} pid={launch.ProcessId} route=TvAIrEpgRec mode=epg-ts rule=epg_worker_route_contract");
-            return launch;
+                $"exit worker={workerName} success={launch.Success} pid={launch.ProcessId} processStartOnly=true route=TvAIrEpgRec mode=epg-ts rule=epg_worker_route_contract");
         }
         finally
         {
             epgLaunchStartGate.Release();
         }
+
+        if (!launch.Success || launch.ProcessId <= 0)
+            return launch;
+
+        // Process identity becomes part of the exact worker-attempt ownership immediately after
+        // CreateProcess succeeds. Startup-boundary observation can take up to 15 seconds, so deferring
+        // this binding until after OpenTuner/SetChannel/TS-read evidence would expose a live process
+        // with stale/empty owner identity to reconciliation.
+        if (bindStartedProcessOwnership is not null && !bindStartedProcessOwnership(launch))
+        {
+            RequestTvAIrEpgRecStopSignalOnly(launch, workerName, group, "process_ownership_bind_rejected");
+            return launch with
+            {
+                Success = false,
+                Message = "EPG worker process ownership binding was rejected before startup observation"
+            };
+        }
+
+        var startup = await WaitForEpgWorkerStartupBoundaryAsync(launch, workerName, group, ct).ConfigureAwait(false);
+        if (!string.Equals(startup.Result, "READY", StringComparison.OrdinalIgnoreCase))
+        {
+            // PHYSICAL_EPG_DEVICE_START_INVARIANT:
+            // startupがREADYへ収束していないworkerを残したままgroup device gateを解放すると、
+            // 同一BonDriver系で次workerがCreate/Openへ入り、未収束startupと競合して失敗連鎖を起こす。
+            // FAILED/PROCESS_EXIT/TIMEOUTでは、このstartup ownerが同波device gateを保持したまま
+            // exact attemptの停止・exit確認を行う。killが必要でも既保持gateを再取得せず、
+            // owner taskを有限収束させてからこのusing scopeを抜ける。安全にkill対象を証明できない場合だけ
+            // Process drain barrierへ引き渡し、次Enterを実process exitまで待たせる。固定settle delayは使わない。
+            var retired = retireUnreadyStartupAsync is not null
+                && await retireUnreadyStartupAsync(launch, startup.Result).ConfigureAwait(false);
+            if (!retired && launch.ProcessId > 0)
+            {
+                // owner identityが確定できずその場でkillできない場合でも、Process handleをdrain barrierへ登録する。
+                // gate自体を解放した後の次Enterは、この実processのexitまで進まない。
+                TunerDeviceAccessGate.RegisterProcessDrain(
+                    group.Group,
+                    launch.ProcessId,
+                    msg => Log("TUNER_DEVICE_LOCK", $"TS{group.TsId}", msg));
+            }
+            Log("EPG_DEVICE_START_BOUNDARY", $"TS{group.TsId}",
+                $"worker={workerName} pid={launch.ProcessId} group={group.Group} result={startup.Result} stage={SafeLogValue(startup.Stage)} elapsedMs={startup.ElapsedMs} " +
+                $"retiredBeforeGateRelease={retired} drainBarrierRegistered={!retired && launch.ProcessId > 0} action={(retired ? "release_gate_after_failed_worker_exit" : "release_gate_with_process_drain_barrier")} rule=physical_epg_device_start_lifecycle_contract");
+            return launch with
+            {
+                Success = false,
+                Message = $"EPG worker startup did not reach READY: result={startup.Result} stage={startup.Stage}"
+            };
+        }
+
+        Log("EPG_DEVICE_START_BOUNDARY", $"TS{group.TsId}",
+            $"worker={workerName} pid={launch.ProcessId} group={group.Group} result=READY stage={SafeLogValue(startup.Stage)} elapsedMs={startup.ElapsedMs} " +
+            "action=release_group_device_gate_after_ready rule=physical_epg_device_start_lifecycle_contract");
+        return launch;
+    }
+
+    private async Task<(string Result, string Stage, int ElapsedMs)> WaitForEpgWorkerStartupBoundaryAsync(
+        EpgWorkerLaunchResult launch,
+        string workerName,
+        TsGroup group,
+        CancellationToken ct)
+    {
+        const int startupTimeoutMs = 15000;
+        const int pollMs = 25;
+        var started = Stopwatch.StartNew();
+        string lastStage = string.Empty;
+
+        while (started.ElapsedMilliseconds < startupTimeoutMs)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            if (TryReadWorkerProgressSnapshot(launch.ProgressPath, out var stages))
+            {
+                foreach (var (stage, message) in stages)
+                {
+                    if (!string.IsNullOrWhiteSpace(stage))
+                        lastStage = stage;
+
+                    // TvAIrEpgRec routes BonDriver/TS runtime progress through the common route and
+                    // prefixes those stages with "common_route_". Normalize only for boundary
+                    // classification so the host observes the actual TS-read start/failure contract
+                    // without depending on whether the progress came directly from the TS runtime
+                    // or through the common-route facade.
+                    var boundaryStage = NormalizeEpgWorkerProgressStage(stage);
+
+                    if (string.Equals(boundaryStage, "tsvariant_begin", StringComparison.OrdinalIgnoreCase))
+                        return ("READY", stage, (int)started.ElapsedMilliseconds);
+
+                    if (IsTerminalEpgStartupFailureStage(boundaryStage, message))
+                        return ("FAILED", stage, (int)started.ElapsedMilliseconds);
+                }
+            }
+
+            try
+            {
+                using var process = Process.GetProcessById(launch.ProcessId);
+                if (process.HasExited)
+                    return ("PROCESS_EXIT", lastStage, (int)started.ElapsedMilliseconds);
+            }
+            catch (ArgumentException)
+            {
+                return ("PROCESS_EXIT", lastStage, (int)started.ElapsedMilliseconds);
+            }
+
+            await Task.Delay(pollMs, ct).ConfigureAwait(false);
+        }
+
+        Log("EPG_DEVICE_START_BOUNDARY", $"TS{group.TsId}",
+            $"worker={workerName} pid={launch.ProcessId} group={group.Group} result=TIMEOUT lastStage={SafeLogValue(lastStage)} timeoutMs={startupTimeoutMs} " +
+            "action=release_gate_without_fixed_settle_delay rule=epg_worker_device_start_contract");
+        return ("TIMEOUT", lastStage, startupTimeoutMs);
+    }
+
+    private static bool TryReadWorkerProgressSnapshot(
+        string? progressPath,
+        out List<(string Stage, string Message)> stages)
+    {
+        stages = new List<(string Stage, string Message)>();
+        if (string.IsNullOrWhiteSpace(progressPath) || !File.Exists(progressPath)) return false;
+
+        try
+        {
+            using var stream = new FileStream(
+                progressPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+
+            while (reader.ReadLine() is { } line)
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                try
+                {
+                    using var doc = JsonDocument.Parse(line);
+                    var root = doc.RootElement;
+                    var stage = root.TryGetProperty("Stage", out var stageElement)
+                        ? stageElement.GetString() ?? string.Empty
+                        : root.TryGetProperty("stage", out stageElement)
+                            ? stageElement.GetString() ?? string.Empty
+                            : string.Empty;
+                    var message = root.TryGetProperty("Message", out var messageElement)
+                        ? messageElement.GetString() ?? string.Empty
+                        : root.TryGetProperty("message", out messageElement)
+                            ? messageElement.GetString() ?? string.Empty
+                            : string.Empty;
+
+                    if (!string.IsNullOrWhiteSpace(stage))
+                        stages.Add((stage, message));
+                }
+                catch (JsonException)
+                {
+                    // The worker may be appending the final line while this snapshot is read.
+                    // Ignore only that incomplete observation and retry on the next poll.
+                }
+            }
+
+            return stages.Count > 0;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
+
+    private static string NormalizeEpgWorkerProgressStage(string stage)
+    {
+        const string commonRoutePrefix = "common_route_";
+        if (stage.StartsWith(commonRoutePrefix, StringComparison.OrdinalIgnoreCase))
+            return stage[commonRoutePrefix.Length..];
+        return stage;
+    }
+
+    private static bool IsTerminalEpgStartupFailureStage(string stage, string message)
+    {
+        if (string.Equals(stage, "integrated_tsread_failed", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(stage, "integrated_tsread_exception_finalized", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(stage, "common_ts_route_ready_gate_blocked", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (string.Equals(stage, "tsvariant_open_tuner", StringComparison.OrdinalIgnoreCase)
+            && message.Contains("result=NG", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return string.Equals(stage, "tsvariant_summary", StringComparison.OrdinalIgnoreCase)
+            && message.Contains("result=NG", StringComparison.OrdinalIgnoreCase);
     }
 
     private EpgWorkerLaunchResult StartTvAIrEpgRecForEpg(
@@ -1096,7 +1448,10 @@ public sealed class EpgCapture
         string? preferredRecordingTunerName = null,
         string? preTuneChainPosition = null,
         string? preTuneAction = null,
-        bool preTuneKeepWorkerUntilSafetyCeiling = false)
+        bool preTuneKeepWorkerUntilSafetyCeiling = false,
+        ushort? expectedEventId = null,
+        DateTime? expectedStartTime = null,
+        DateTime? expectedEndTime = null)
     {
         var exe = ResolveTvAIrEpgRecPath();
         if (string.IsNullOrWhiteSpace(exe) || !File.Exists(exe))
@@ -1184,14 +1539,18 @@ public sealed class EpgCapture
                 ["allocationRouteContract"] = isPreRecordCheck ? "pre_record_epg_check_plan" : "epg_entry_transport_stream_plan",
                 ["targetSidCount"] = group.Targets.Count.ToString(),
                 ["targetSids"] = string.Join(",", group.Targets.Select(t => t.ServiceId).OrderBy(x => x)),
+                ["expectedEventId"] = expectedEventId?.ToString() ?? string.Empty,
+                ["expectedEventStart"] = expectedStartTime?.ToString("O") ?? string.Empty,
+                ["expectedEventEnd"] = expectedEndTime?.ToString("O") ?? string.Empty,
                 ["rule"] = "release_contract",
                 // TvAIrEpgRec process icon visibility follows the user setting for active EPG workers.
                 ["taskbarIconVisible"] = ini.ShowTvAIrEpgRecTaskbarIcon ? "true" : "false",
-                ["preTuneEnabled"] = isPreRecordCheck && !string.IsNullOrWhiteSpace(preferredRecordingTunerName) ? "true" : "false",
+                ["didSelectionTransport"] = "process_command_line_/DID",
+                ["preTuneEnabled"] = isPreRecordCheck && preTuneKeepWorkerUntilSafetyCeiling && !string.IsNullOrWhiteSpace(preferredRecordingTunerName) ? "true" : "false",
                 ["preTuneChainPosition"] = preTuneChainPosition ?? string.Empty,
                 ["preTuneAction"] = preTuneAction ?? string.Empty,
                 ["preTuneDisplayLabel"] = string.Empty,
-                ["preTuneTargetDisplayLabel"] = isPreRecordCheck && !string.IsNullOrWhiteSpace(preferredRecordingTunerName) ? "録画準備" : string.Empty,
+                ["preTuneTargetDisplayLabel"] = isPreRecordCheck && preTuneKeepWorkerUntilSafetyCeiling && !string.IsNullOrWhiteSpace(preferredRecordingTunerName) ? "録画準備" : string.Empty,
                 ["keepWorkerUntilSafetyCeiling"] = preTuneKeepWorkerUntilSafetyCeiling ? "true" : "false"
             }
         };
@@ -1202,7 +1561,15 @@ public sealed class EpgCapture
         var showWorkerTaskbarIcon = WorkerProcessStartInfoFactory.IsTaskbarIconVisible(launchKind, ini.ShowTvAIrEpgRecTaskbarIcon);
         var windowPolicy = WorkerProcessStartInfoFactory.GetWindowPolicy(launchKind, ini.ShowTvAIrEpgRecTaskbarIcon);
         var psi = WorkerProcessStartInfoFactory.CreateTvAIrEpgRec(exe, launchKind, ini.ShowTvAIrEpgRecTaskbarIcon);
-        psi.Arguments = $"--job \"{jobPath}\" --mode {(isPreRecordCheck ? "epg-check" : "epg")} --result \"{resultPath}\" --progress \"{progressPath}\"";
+        WorkerProcessStartInfoFactory.AppendPhysicalTunerDidArgument(psi, did);
+        psi.ArgumentList.Add("--job");
+        psi.ArgumentList.Add(jobPath);
+        psi.ArgumentList.Add("--mode");
+        psi.ArgumentList.Add(isPreRecordCheck ? "epg-check" : "epg");
+        psi.ArgumentList.Add("--result");
+        psi.ArgumentList.Add(resultPath);
+        psi.ArgumentList.Add("--progress");
+        psi.ArgumentList.Add(progressPath);
 
         try
         {
@@ -1258,6 +1625,22 @@ public sealed class EpgCapture
         return candidates.FirstOrDefault(File.Exists);
     }
 
+    private void RequestTvAIrEpgRecStopSignalOnly(EpgWorkerLaunchResult launch, string workerName, TsGroup group, string reason)
+    {
+        if (string.IsNullOrWhiteSpace(launch.StopSignalPath)) return;
+        try
+        {
+            File.WriteAllText(launch.StopSignalPath, DateTimeOffset.Now.ToString("O"));
+            Log("TVAIREPGREC_EPG_STOP_SIGNAL", $"TS{group.TsId}",
+                $"result=SENT pid={launch.ProcessId} worker={workerName} reason={SafeLog(reason)} stopSignal={SafeLogValue(launch.StopSignalPath)} rule=epg_worker_identity_contract");
+        }
+        catch (Exception ex)
+        {
+            Log("TVAIREPGREC_EPG_STOP_SIGNAL", $"TS{group.TsId}",
+                $"result=NG pid={launch.ProcessId} worker={workerName} reason={SafeLog(reason)} error={SafeLog(ex.Message)} rule=epg_worker_identity_contract");
+        }
+    }
+
     private void RequestTvAIrEpgRecStopOrKill(EpgWorkerLaunchResult launch, string workerName, TsGroup group, string reason)
     {
         if (!string.IsNullOrWhiteSpace(launch.StopSignalPath))
@@ -1272,10 +1655,13 @@ public sealed class EpgCapture
             catch (Exception ex)
             {
                 Log("TVAIREPGREC_EPG_STOP_SIGNAL", $"TS{group.TsId}",
-                    $"result=NG pid={launch.ProcessId} worker={workerName} reason={SafeLog(reason)} error={SafeLog(ex.Message)} rule=epg_worker_route_contract");
+                    $"result=NG pid={launch.ProcessId} worker={workerName} reason={SafeLog(reason)} error={SafeLog(ex.Message)} action=defer_kill_until_identity_recheck rule=epg_worker_identity_contract");
             }
         }
-        KillProcess(launch.ProcessId);
+
+        // Do not kill here. The caller waits, re-checks PID/start-time/path ownership,
+        // and only then may kill a still-matching worker. This prevents a stop-signal
+        // write failure from turning a stale PID into an unrelated-process kill.
     }
 
     private async Task<bool> StopAndRetireActiveEpgWorkerAsync(
@@ -1284,38 +1670,79 @@ public sealed class EpgCapture
         TsGroup group,
         string phase,
         string reason,
-        TimeSpan? gracefulTimeout = null)
+        ActiveEpgWorkerTask ownerState,
+        long expectedAttemptGeneration,
+        TimeSpan? gracefulTimeout = null,
+        bool deviceGateAlreadyHeld = false)
     {
         if (!launch.Success || launch.ProcessId <= 0) return false;
 
         var pid = launch.ProcessId;
         var timeout = gracefulTimeout ?? TimeSpan.FromSeconds(4);
+        var initialSnapshot = ownerState.Snapshot();
+        if (initialSnapshot.AttemptGeneration != expectedAttemptGeneration)
+        {
+            Log("EPG_CANCEL_PROCESS_IDENTITY", $"TS{group.TsId}",
+                $"result=STALE_ATTEMPT pid={pid} worker={workerName} phase={SafeLog(phase)} expectedAttemptGeneration={expectedAttemptGeneration} currentAttemptGeneration={initialSnapshot.AttemptGeneration} action=do_not_touch_current_attempt rule=epg_worker_attempt_ownership_contract");
+            return false;
+        }
+        var identity = GetOwnedWorkerProcessIdentity(initialSnapshot);
 
-        if (IsProcessAlive(pid))
+        if (identity == EpgWorkerProcessIdentityState.ReusedPid)
+        {
+            ownerState.MarkProcessExitObserved(expectedAttemptGeneration);
+            Log("EPG_CANCEL_PROCESS_IDENTITY", $"TS{group.TsId}",
+                $"result=REUSED_PID pid={pid} worker={workerName} phase={SafeLog(phase)} action=do_not_stop_other_process rule=epg_worker_identity_contract");
+            return true;
+        }
+
+        if (identity == EpgWorkerProcessIdentityState.IdentityUnknown)
+        {
+            RequestTvAIrEpgRecStopSignalOnly(launch, workerName, group, reason);
+            Log("EPG_CANCEL_PROCESS_IDENTITY", $"TS{group.TsId}",
+                $"result=IDENTITY_UNKNOWN pid={pid} worker={workerName} phase={SafeLog(phase)} action=signal_only_keep_tracked rule=epg_worker_identity_contract");
+            return false;
+        }
+
+        if (identity == EpgWorkerProcessIdentityState.Match)
         {
             Log("EPG_CANCEL_PROCESS_STOP_REQUEST", $"TS{group.TsId}",
                 $"pid={pid} worker={workerName} phase={SafeLog(phase)} route=TvAIrEpgRec reason={SafeLog(reason)} rule=epg_worker_route_contract");
             RequestTvAIrEpgRecStopOrKill(launch, workerName, group, reason);
 
-            var waitResult = await WaitForExitAsync(pid, timeout, CancellationToken.None).ConfigureAwait(false);
-            if (waitResult == EpgProcessExitWaitResult.Timeout && IsProcessAlive(pid))
+            var waitResult = await WaitForOwnedWorkerExitAsync(pid, timeout, ownerState, expectedAttemptGeneration, CancellationToken.None).ConfigureAwait(false);
+            if (waitResult == EpgProcessExitWaitResult.Timeout)
             {
-                Log("EPG_CANCEL_PROCESS_STOP_WAIT", $"TS{group.TsId}",
-                    $"result=TIMEOUT pid={pid} worker={workerName} phase={SafeLog(phase)} waitMs={(int)timeout.TotalMilliseconds} action=kill rule=epg_worker_route_contract");
-                KillProcess(pid);
-                waitResult = await WaitForExitAsync(pid, TimeSpan.FromSeconds(2), CancellationToken.None).ConfigureAwait(false);
+                var currentSnapshot = ownerState.Snapshot();
+                if (currentSnapshot.AttemptGeneration != expectedAttemptGeneration) return false;
+                identity = GetOwnedWorkerProcessIdentity(currentSnapshot);
+                if (identity == EpgWorkerProcessIdentityState.Match)
+                {
+                    var killResult = TryKillOwnedWorkerProcess(currentSnapshot, deviceGateAlreadyHeld);
+                    Log("EPG_CANCEL_PROCESS_STOP_WAIT", $"TS{group.TsId}",
+                        $"result=TIMEOUT pid={pid} worker={workerName} phase={SafeLog(phase)} waitMs={(int)timeout.TotalMilliseconds} " +
+                        $"killResult={killResult} action={GetOwnedWorkerKillAction(killResult)} deviceGateAlreadyHeld={deviceGateAlreadyHeld} rule=epg_worker_identity_contract");
+                }
+                else
+                {
+                    Log("EPG_CANCEL_PROCESS_STOP_WAIT", $"TS{group.TsId}",
+                        $"result={identity} pid={pid} worker={workerName} phase={SafeLog(phase)} action=do_not_kill rule=epg_worker_identity_contract");
+                }
+                waitResult = await WaitForOwnedWorkerExitAsync(pid, TimeSpan.FromSeconds(2), ownerState, expectedAttemptGeneration, CancellationToken.None).ConfigureAwait(false);
             }
 
             Log("EPG_CANCEL_PROCESS_WAIT_RESULT", $"TS{group.TsId}",
                 $"result={waitResult} pid={pid} worker={workerName} phase={SafeLog(phase)} reason={SafeLog(reason)} rule=epg_worker_route_contract");
         }
 
-        if (!IsProcessAlive(pid))
+        var finalSnapshot = ownerState.Snapshot();
+        if (finalSnapshot.AttemptGeneration != expectedAttemptGeneration) return false;
+        identity = GetOwnedWorkerProcessIdentity(finalSnapshot);
+        if (identity is EpgWorkerProcessIdentityState.Missing or EpgWorkerProcessIdentityState.ReusedPid)
         {
-            UnregisterActiveEpgWorkerProcess(pid, workerName, group, reason);
-            var released = tunerPool.ForceReleaseEpgByProcessId(group.Group, pid, null, null, reason, workerName);
+            ownerState.MarkProcessExitObserved(expectedAttemptGeneration);
             Log("EPG_CANCEL_PROCESS_EXIT_OK", $"TS{group.TsId}",
-                $"pid={pid} worker={workerName} phase={SafeLog(phase)} tunerReleased={released} action=stopped_unregistered_and_tuner_released rule=epg_worker_route_contract");
+                $"pid={pid} worker={workerName} phase={SafeLog(phase)} action=stopped_owner_task_will_release_tuner rule=epg_worker_route_contract");
             return true;
         }
 
@@ -1326,7 +1753,7 @@ public sealed class EpgCapture
 
     // ─── 1グループのキャプチャ ────────────────────────────────────
 
-    private async Task<int> CaptureGroupAsync(TsGroup group, int pass, CancellationToken ct, bool isPreRecordCheck, int? maxCaptureSeconds, ushort? expectedNetworkId, ushort? expectedTransportStreamId, ushort? expectedServiceId, ushort? expectedEventId, DateTime? expectedStartTime, DateTime? expectedEndTime, string? preferredRecordingTunerName = null, string? preTuneChainPosition = null, string? preTuneAction = null, bool preTuneKeepWorkerUntilSafetyCeiling = false)
+    private async Task<int> CaptureGroupAsync(TsGroup group, int pass, CancellationToken ct, bool isPreRecordCheck, ActiveEpgWorkerTask workerTaskState, int? maxCaptureSeconds, ushort? expectedNetworkId, ushort? expectedTransportStreamId, ushort? expectedServiceId, ushort? expectedEventId, DateTime? expectedStartTime, DateTime? expectedEndTime, string? preferredRecordingTunerName = null, string? preTuneChainPosition = null, string? preTuneAction = null, bool preTuneKeepWorkerUntilSafetyCeiling = false, bool preRecordProbeSnapshotOnly = false, ConcurrentBag<EpgEvent>? preRecordEvents = null, Action? releaseWorkerAdmission = null, Func<CancellationToken, Task>? reacquireWorkerAdmissionAsync = null)
     {
         var workerName  = $"{group.Group}-{group.TsId}";
         var tsFile      = BuildTsFilePath(group);
@@ -1341,7 +1768,7 @@ public sealed class EpgCapture
             settings.MultiServiceExtraSeconds);
 
         // release_contract: EPG深度/取得秒数は EpgDurationPolicy に集約。
-        // 設定表示・定時EPG枠・通常EPG実取得・録画前EPG確認で同じ変換結果を使う。
+        // 待機秒→分の数値変換だけを共有する。定時EPG取得と録画前EPG確認の生成・実行契約は共有しない。
         var baseWaitSec = durationPlan.ConfiguredBaseSeconds;
         var effectiveBaseWaitSec = durationPlan.EffectiveBaseSeconds;
         var configuredExtraPerService = durationPlan.ConfiguredExtraPerServiceSeconds;
@@ -1364,7 +1791,7 @@ public sealed class EpgCapture
                 $"{workerName} 開始: TS={group.TsId} pass={pass} services={serviceCount}" +
                 $" [{string.Join(",", group.Targets.Select(t => t.ServiceId))}]" +
                 $" safetyCeilingSeconds={waitSec} normalEpgSeconds={normalWaitSec}" +
-                $" expectedNid={(expectedNetworkId?.ToString() ?? "-")} expectedTsid={(expectedTransportStreamId?.ToString() ?? "-")} expectedSid={(expectedServiceId?.ToString() ?? "-")} expectedEventId={(expectedEventId?.ToString() ?? "-")} expectedStart={(expectedStartTime?.ToString("MM/dd HH:mm:ss") ?? "-")} preferredTuner={SafeLogValue(preferredRecordingTunerName)} policy=stop_as_soon_as_target_event_seen_and_pretune_same_recording_tuner rule=release_contract");
+                $" expectedNid={(expectedNetworkId?.ToString() ?? "-")} expectedTsid={(expectedTransportStreamId?.ToString() ?? "-")} expectedSid={(expectedServiceId?.ToString() ?? "-")} expectedEventId={(expectedEventId?.ToString() ?? "-")} expectedStart={(expectedStartTime?.ToString("MM/dd HH:mm:ss") ?? "-")} runtimeTuner={SafeLogValue(preferredRecordingTunerName)} policy=stop_as_soon_as_target_event_seen_runtime_tuner rule=pre_record_epg_runtime_tuner_contract");
         }
         else
         {
@@ -1380,56 +1807,42 @@ public sealed class EpgCapture
         {
             ct.ThrowIfCancellationRequested();
 
+            if (attempt > 1 && reacquireWorkerAdmissionAsync is not null)
+            {
+                await reacquireWorkerAdmissionAsync(ct).ConfigureAwait(false);
+                Log("EPG_WORKER_ADMISSION", $"TS{group.TsId}",
+                    $"result=REACQUIRED worker={workerName} attempt={attempt}/{maxAttempts} group={group.Group} action=retry_within_group_capacity rule=epg_worker_transition_contract");
+            }
+
             var effectiveWait = waitSec;
 
             // TunerPool からチューナーを確保
-            // LIVE視聴中のチューナーを除外
-            var plannedEnd = DateTime.Now.AddSeconds(effectiveWait + 30);
-            var lease = await AcquireEpgLeaseWithShortWaitAsync(group, plannedEnd, workerName, ct, isPreRecordCheck, isPreRecordCheck ? preferredRecordingTunerName : null);
+            // TvAIr管理TunerPoolのみから確保
+            var plannedEnd = DateTime.Now.AddSeconds(effectiveWait + (isPreRecordCheck ? 0 : 30));
+            var lease = await AcquireEpgLeaseWithShortWaitAsync(group, plannedEnd, workerName, ct, isPreRecordCheck, workerTaskState.RunId, isPreRecordCheck ? preferredRecordingTunerName : null);
             if (lease is null)
             {
                 if (!isPreRecordCheck)
                 {
-                    var liveExclusionSummary = liveTvTestKeys is null || liveTvTestKeys.Count == 0
-                        ? "-"
-                        : string.Join(",", liveTvTestKeys.Select(k => $"{SafeLogValue(k.BonDriverFileName)}/{SafeLogValue(k.Did)}"));
-                    RecordCaptureFailure(group, "epg_tuner_unavailable", $"waitMs={ResolveEpgLogicalAcquireWaitMs(plannedEnd, isPreRecordCheck)} liveExcluded=[{liveExclusionSummary}] policy=logical_resource_queue", attempt, maxAttempts);
+                    // normal EPG開始後のTuner確保失敗は録画都合のDeferredへ変換しない。
+                    // 実際に必要な論理資源を取得できなかったworker failureとして記録する。
+                    RecordCaptureFailure(group, "epg_tuner_unavailable", $"waitMs={ResolveEpgLogicalAcquireWaitMs(plannedEnd, isPreRecordCheck)} unmanagedExternalTvTest=out_of_scope policy=logical_resource_queue", attempt, maxAttempts, workerTaskState.RunId);
                 }
                 return 0;
             }
 
-            // ─── TvAIrEpgRec 終了直後の同一物理チューナー再利用保護 ───
-            // 旧TVTest録画時代の15秒直列待機はEPG経路では使用しない。
-            // ここで残すのは、worker終了直後のClose/Open競合を避ける最小保護だけ。
-            const int EpgWorkerExitSettleMs = 2000;
-            var cooldownMs = EpgWorkerExitSettleMs;
-            Log("EPG_TUNER_COOLDOWN_POLICY", $"TS{group.TsId}",
-                $"{workerName}: effective={cooldownMs}ms policy=TvAIrEpgRec_epg_process_exit_settle_only preRecordCheck={isPreRecordCheck} rule=epg_tuner_cooldown_contract");
-            if (cooldownMs > 0 && lease.ElapsedSinceReleaseMs is double epgElapsed && epgElapsed < cooldownMs)
+            if (!workerTaskState.TryAttachLease(lease, out var attemptGeneration, out var attemptRejectReason))
             {
-                var waitMs = (int)Math.Ceiling(cooldownMs - epgElapsed);
-                if (waitMs > 0)
-                {
-                    var cooldownKey = workerName + ":" + lease.Name + ":" + DateTime.UtcNow.Ticks;
-                    var primaryServiceName = group.Targets.FirstOrDefault()?.Name ?? $"TS{group.TsId}";
-                    epgCooldownWaits[cooldownKey] = new EpgCooldownWait(
-                        cooldownKey,
-                        workerName,
-                        group.Group,
-                        group.TsId,
-                        primaryServiceName,
-                        lease.Name,
-                        DateTime.Now,
-                        DateTime.Now.AddMilliseconds(waitMs));
-                    Log("EPG_TUNER_COOLDOWN", $"TS{group.TsId}",
-                        $"{workerName}: チューナー直列化ゲート待機 slot={lease.Name} " +
-                        $"前回解放から {epgElapsed:F0}ms / 有効 {cooldownMs}ms → {waitMs}ms 待機 policy=TvAIrEpgRec_epg_process_exit_settle_only rule=epg_tuner_cooldown_contract");
-                    LogEpgWorkerCoverage("cooldown_wait", force: true);
-                    try { await Task.Delay(waitMs, ct); }
-                    catch (OperationCanceledException) { epgCooldownWaits.TryRemove(cooldownKey, out _); lease.Dispose(); throw; }
-                    finally { epgCooldownWaits.TryRemove(cooldownKey, out _); }
-                }
+                try { lease.Dispose(); } catch { }
+                Log("EPG_WORKER_ATTEMPT_ATTACH", $"TS{group.TsId}",
+                    $"result=REJECTED worker={workerName} attempt={attempt}/{maxAttempts} group={group.Group} reason={attemptRejectReason} action=release_new_lease_stop_retry rule=epg_worker_attempt_ownership_contract");
+                return 0;
             }
+
+            // PHYSICAL_EPG_DEVICE_SESSION_INVARIANT:
+            // 次局へ進める正本は「論理leaseがFreeになった」だけではない。
+            // startupはREADY、失敗startupは当該workerのexit確認までTUNER_DEVICE_LOCK内で収束させる。
+            // 正常captureもowned process exit確認後にleaseを解放する。固定時間待機は設けない。
 
             int imported;
             EpgWorkerLaunchResult? activeLaunch = null;
@@ -1445,6 +1858,37 @@ public sealed class EpgCapture
                 // 録画前EPG確認は同一TS代表サービスで起動する場合があるため、
                 // ActivityKeeper/タスクバー識別は目的番組の expectedService を優先する。
                 var displayServiceName = ResolveActivityDisplayServiceName(group, isPreRecordCheck, expectedServiceId);
+                bool BindStartedProcessOwnership(EpgWorkerLaunchResult startedLaunch)
+                {
+                    // The just-created process belongs to this exact attempt before any OpenTuner/SetChannel/TS-read
+                    // observation begins. This removes the startup window where reconciliation could pair a new
+                    // lease with stale/empty process identity.
+                    activeLaunch = startedLaunch;
+                    // The logical attempt owner is canonical. Bind the process there first, then project the
+                    // same PID to the already-owned TunerPool lease. If the projection fails, the process is
+                    // still owned and can be stopped/converged without releasing an untracked live worker.
+                    if (!workerTaskState.AttachProcess(attemptGeneration, startedLaunch.ProcessId, workerName, startedLaunch.StopSignalPath))
+                    {
+                        Log("EPG_WORKER_ATTEMPT_ATTACH", $"TS{group.TsId}",
+                            $"result=STALE_PROCESS_ATTACH worker={workerName} pid={startedLaunch.ProcessId} attempt={attempt}/{maxAttempts} attemptGeneration={attemptGeneration} action=stop_old_launch_without_touching_current_attempt rule=epg_worker_attempt_ownership_contract");
+                        return false;
+                    }
+
+                    try
+                    {
+                        lease.SetProcessId(startedLaunch.ProcessId);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log("EPG_WORKER_ATTEMPT_ATTACH", $"TS{group.TsId}",
+                            $"result=LEASE_PROCESS_BIND_FAILED worker={workerName} pid={startedLaunch.ProcessId} attempt={attempt}/{maxAttempts} attemptGeneration={attemptGeneration} error={SafeLog(ex.Message)} action=stop_owned_launch_and_converge_attempt rule=epg_worker_attempt_ownership_contract");
+                        return false;
+                    }
+
+                    LogEpgWorkerCoverage(workerTaskState.RunId, "attach", force: true);
+                    return true;
+                }
+
                 var launch = await StartEpgRecordingWithLaunchGateAsync(
                     workerName,
                     group,
@@ -1459,51 +1903,83 @@ public sealed class EpgCapture
                     preferredRecordingTunerName,
                     preTuneChainPosition,
                     preTuneAction,
-                    preTuneKeepWorkerUntilSafetyCeiling);
-                activeLaunch = launch;
+                    preTuneKeepWorkerUntilSafetyCeiling,
+                    preRecordProbeSnapshotOnly ? expectedEventId : null,
+                    preRecordProbeSnapshotOnly ? expectedStartTime : null,
+                    preRecordProbeSnapshotOnly ? expectedEndTime : null,
+                    BindStartedProcessOwnership,
+                    async (unreadyLaunch, startupResult) => await StopAndRetireActiveEpgWorkerAsync(
+                        unreadyLaunch,
+                        workerName,
+                        group,
+                        "device_start_boundary",
+                        $"startup_{startupResult}",
+                        workerTaskState,
+                        attemptGeneration,
+                        TimeSpan.FromSeconds(2),
+                        deviceGateAlreadyHeld: true).ConfigureAwait(false));
+                activeLaunch ??= launch;
 
                 if (!launch.Success)
                 {
                     Log("EPG_CAPTURE_FAIL", $"TS{group.TsId}", launch.Message);
+
+                    // Normal EPGのstartup失敗は、未収束workerを残したまま同一capacityで即再起動しない。
+                    // failed workerがexit済みであることをowner正本から確認した場合だけlease/admissionを返し、
+                    // queueの後続と同じcapacity gateを取り直して次attemptへ進む。PreRecは従来どおり単発。
+                    var startupProcessConverged = workerTaskState.TrySnapshotAttempt(attemptGeneration, out var startupFailureSnapshot)
+                        && !IsOwnedWorkerProcessAlive(startupFailureSnapshot);
+                    if (!isPreRecordCheck && attempt < maxAttempts && startupProcessConverged)
+                    {
+                        if (!workerTaskState.ReleaseLeaseForAttempt(attemptGeneration))
+                        {
+                            workerTaskState.DeferAdmissionRelease(releaseWorkerAdmission);
+                            Log("EPG_CAPTURE_STARTUP_RETRY", $"TS{group.TsId}",
+                                $"result=SUPPRESSED worker={workerName} attempt={attempt}/{maxAttempts} group={group.Group} processConverged=True leaseConverged=False action=keep_owner_for_residual_convergence rule=physical_epg_device_session_contract");
+                            return 0;
+                        }
+                        releaseWorkerAdmission?.Invoke();
+                        RecordCaptureFailure(
+                            group,
+                            "worker_startup_not_ready",
+                            $"attempt={attempt}/{maxAttempts} message={SafeLogValue(launch.Message)}",
+                            attempt,
+                            maxAttempts,
+                            workerTaskState.RunId);
+                        Log("EPG_CAPTURE_STARTUP_RETRY", $"TS{group.TsId}",
+                            $"result=REQUEUE worker={workerName} attempt={attempt}/{maxAttempts} group={group.Group} processConverged=True " +
+                            "action=reacquire_group_capacity_before_retry rule=physical_epg_device_session_contract");
+                        continue;
+                    }
+
+                    if (!startupProcessConverged)
+                    {
+                        Log("EPG_CAPTURE_STARTUP_RETRY", $"TS{group.TsId}",
+                            $"result=SUPPRESSED worker={workerName} attempt={attempt}/{maxAttempts} group={group.Group} processConverged=False " +
+                            "action=keep_owned_until_residual_monitor rule=physical_epg_device_session_contract");
+                    }
                     return 0;
                 }
 
-                lease.SetProcessId(launch.ProcessId);
                 var primaryServiceName = displayServiceName;
-                RegisterActiveEpgWorkerProcess(launch.ProcessId, workerName, group, primaryServiceName, "attach", launch.StopSignalPath);
                 using var activityHandle = tvTestActivity.AttachExisting(isPreRecordCheck ? "EPG確認中" : "EPG取得中", launch.ProcessId, primaryServiceName, workerName);
                 if (isPreRecordCheck)
                     Log("PRE_REC_EPG_PROBE_TVAIREPGREC_START", $"TS{group.TsId}", launch.Message);
                 else
                     Log("EPG_CAPTURE_TVAIREPGREC_START", $"TS{group.TsId}", launch.Message);
 
-                var outputLifecycle = await ObserveEpgOutputLifecycleAsync(
-                    group,
-                    workerName,
-                    tsFile,
-                    launch.ProcessId,
-                    TimeSpan.FromSeconds(isPreRecordCheck ? 10 : 25),
-                    ct);
-
-                // ─── TVTest起動後の安定化待機 ───
-                // /recdelay 8 でTVTest側がチャンネルロックを待つが、それとは別に
-                // ホスト側でも EpgPostLaunchStabilizeMs ぶん追加待機して、
-                // 直後の他チューナー起動と CmdSetCh 発火が時間軸で重ならないようにする。
-                // この待機中は WaitForExit と同じ ct で中断可能。
-                var stabilizeMs = Math.Max(0, ini.EpgPostLaunchStabilizeMs);
-                if (stabilizeMs > 0)
+                EpgOutputLifecycleState? outputLifecycle = null;
+                if (!isPreRecordCheck || !preRecordProbeSnapshotOnly)
                 {
-                    try { await Task.Delay(stabilizeMs, ct); }
-                    catch (OperationCanceledException)
-                    {
-                        activeLaunchRetired = await StopAndRetireActiveEpgWorkerAsync(
-                            launch,
-                            workerName,
-                            group,
-                            "post_launch_stabilize",
-                            "post_launch_stabilize_cancelled").ConfigureAwait(false);
-                        throw;
-                    }
+                    outputLifecycle = await ObserveEpgOutputLifecycleAsync(
+                        group,
+                        workerName,
+                        tsFile,
+                        launch.ProcessId,
+                        workerTaskState,
+                        attemptGeneration,
+                        TimeSpan.FromSeconds(25),
+                        ct);
                 }
 
                 if (isPreRecordCheck)
@@ -1513,6 +1989,8 @@ public sealed class EpgCapture
                         tsFile,
                         launch.ProcessId,
                         workerName,
+                        workerTaskState,
+                        attemptGeneration,
                         TimeSpan.FromSeconds(effectiveWait),
                         expectedNetworkId,
                         expectedTransportStreamId,
@@ -1520,34 +1998,66 @@ public sealed class EpgCapture
                         expectedEventId,
                         expectedStartTime,
                         expectedEndTime,
+                        !preRecordProbeSnapshotOnly,
                         ct,
                         preferredRecordingTunerName,
                         preTuneKeepWorkerUntilSafetyCeiling);
 
-                    broadcastClock.ObserveFromTsFile(tsFile, "pre_record_epg", group.Group, displayServiceName ?? group.Targets.FirstOrDefault()?.Name, displayServiceName ?? group.Targets.FirstOrDefault()?.Name);
 
-                    if (IsProcessAlive(launch.ProcessId))
+                    if (!workerTaskState.TrySnapshotAttempt(attemptGeneration, out var probeSnapshot))
+                        return 0;
+                    var probeIdentity = GetOwnedWorkerProcessIdentity(probeSnapshot);
+                    if (probeIdentity == EpgWorkerProcessIdentityState.Match)
                     {
                         Log("PRE_REC_EPG_PROBE_STOP_REQUEST", $"TS{group.TsId}",
                             $"pid={launch.ProcessId} worker={workerName} reason={(probe.TargetFound ? "target_event_seen" : "safety_ceiling_reached")} rule=epg_probe_runtime_contract");
                         RequestTvAIrEpgRecStopOrKill(launch, workerName, group, "pre_record_target_probe_done");
                     }
-                    var probeWaitResult = await WaitForExitAsync(launch.ProcessId, TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false);
-                    if (probeWaitResult == EpgProcessExitWaitResult.Timeout && IsProcessAlive(launch.ProcessId))
+                    else if (probeIdentity == EpgWorkerProcessIdentityState.IdentityUnknown)
                     {
-                        Log("PRE_REC_EPG_PROBE_STOP_TIMEOUT", $"TS{group.TsId}",
-                            $"result=TIMEOUT pid={launch.ProcessId} worker={workerName} action=kill reason=pre_record_target_probe_done rule=epg_probe_runtime_contract");
-                        KillProcess(launch.ProcessId);
-                        probeWaitResult = await WaitForExitAsync(launch.ProcessId, TimeSpan.FromSeconds(2), CancellationToken.None).ConfigureAwait(false);
+                        RequestTvAIrEpgRecStopSignalOnly(launch, workerName, group, "pre_record_target_probe_done");
+                    }
+                    var probeWaitResult = await WaitForOwnedWorkerExitAsync(launch.ProcessId, TimeSpan.FromSeconds(5), workerTaskState, attemptGeneration, CancellationToken.None).ConfigureAwait(false);
+                    if (probeWaitResult == EpgProcessExitWaitResult.Timeout)
+                    {
+                        if (!workerTaskState.TrySnapshotAttempt(attemptGeneration, out probeSnapshot))
+                            return 0;
+                        probeIdentity = GetOwnedWorkerProcessIdentity(probeSnapshot);
+                        if (probeIdentity == EpgWorkerProcessIdentityState.Match)
+                        {
+                            var killResult = TryKillOwnedWorkerProcess(probeSnapshot);
+                            Log("PRE_REC_EPG_PROBE_STOP_TIMEOUT", $"TS{group.TsId}",
+                                $"result=TIMEOUT pid={launch.ProcessId} worker={workerName} " +
+                                $"killResult={killResult} action={GetOwnedWorkerKillAction(killResult)} " +
+                                "reason=pre_record_target_probe_done rule=epg_worker_identity_contract");
+                            probeWaitResult = await WaitForOwnedWorkerExitAsync(launch.ProcessId, TimeSpan.FromSeconds(2), workerTaskState, attemptGeneration, CancellationToken.None).ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            Log("PRE_REC_EPG_PROBE_STOP_TIMEOUT", $"TS{group.TsId}",
+                                $"result={probeIdentity} pid={launch.ProcessId} worker={workerName} action=do_not_kill rule=epg_worker_identity_contract");
+                        }
                     }
                     Log("PRE_REC_EPG_PROBE_STOP_RESULT", $"TS{group.TsId}",
                         $"result={probeWaitResult} pid={launch.ProcessId} worker={workerName} rule=epg_probe_runtime_contract");
-                    if (!IsProcessAlive(launch.ProcessId))
+                    // FINAL_OUTPUT_STAT_INVARIANT: probe-first flowでもworker停止後に最終ファイル状態を再観測し、
+                    // release/cleanupより前に出力証拠を確定する。
+                    _ = await ObserveEpgOutputLifecycleAsync(
+                        group, workerName, tsFile, launch.ProcessId, workerTaskState, attemptGeneration, TimeSpan.FromSeconds(1), CancellationToken.None).ConfigureAwait(false);
+                    if (!workerTaskState.TrySnapshotAttempt(attemptGeneration, out probeSnapshot))
+                        return 0;
+                    probeIdentity = GetOwnedWorkerProcessIdentity(probeSnapshot);
+                    if (probeIdentity is EpgWorkerProcessIdentityState.Missing or EpgWorkerProcessIdentityState.ReusedPid)
                     {
                         await HandleEpgProcessEndAsync(group, workerName, launch.ProcessId, ct).ConfigureAwait(false);
-                        UnregisterActiveEpgWorkerProcess(launch.ProcessId, workerName, group, "process_end");
+                        MarkActiveEpgWorkerProcessExitObserved(workerTaskState, attemptGeneration, launch.ProcessId, "process_end");
                         activeLaunchRetired = true;
-                        lease.Dispose();
+                        if (!workerTaskState.ReleaseLeaseForAttempt(attemptGeneration))
+                        {
+                            Log("PRE_REC_EPG_PROBE_STOP_WARN", $"TS{group.TsId}",
+                                $"result=LEASE_RELEASE_DEFERRED pid={launch.ProcessId} worker={workerName} action=keep_tracked rule=epg_worker_attempt_ownership_contract");
+                            return 0;
+                        }
                     }
                     else
                     {
@@ -1556,24 +2066,65 @@ public sealed class EpgCapture
                         return 0;
                     }
 
-                    imported = probe.ImportedEvents > 0
-                        ? probe.ImportedEvents
-                        : await ParseAndStoreAsync(group, tsFile, attempt, maxAttempts, ct, isPreRecordCheck);
-                    if (probe.ImportedEvents > 0)
+                    if (preRecordProbeSnapshotOnly)
                     {
+                        if (probe.TargetFound)
+                        {
+                            foreach (var observedEvent in probe.Events)
+                                preRecordEvents?.Add(observedEvent);
+                            imported = probe.Events.Count; // completion evidence only; no normal EPG DB mutation.
+                            Log("PRE_REC_EPG_SNAPSHOT", $"TS{group.TsId}",
+                                $"result=TARGET_FOUND observedEvents={probe.Events.Count} dbWrite=none event={SafeLogValue(probe.EventSummary)} action=return_probe_snapshot_to_scheduler rule=pre_record_epg_probe_snapshot_contract");
+                        }
+                        else
+                        {
+                            imported = 0;
+                            Log("PRE_REC_EPG_SNAPSHOT", $"TS{group.TsId}",
+                                $"result=TARGET_NOT_FOUND observedEvents={probe.Events.Count} dbWrite=none expectedEventId={(expectedEventId?.ToString() ?? "-")} action=fail_probe_keep_original_reservation_time rule=pre_record_epg_probe_snapshot_contract");
+                        }
                         try { File.Delete(tsFile); } catch { }
-                        CleanupTvAIrEpgRecRuntimeFiles(launch, workerName, group, reason: "pre_record_probe_target_found");
+                        CleanupTvAIrEpgRecRuntimeFiles(launch, workerName, group, reason: probe.TargetFound ? "pre_record_probe_target_found" : "pre_record_probe_target_not_found");
                     }
-                    else if (imported > 0)
+                    else
                     {
-                        CleanupTvAIrEpgRecRuntimeFiles(launch, workerName, group, reason: "pre_record_probe_parse_ok");
+                        // USER_CHAIN_PRE_REC_OBSERVED_SNAPSHOT_INVARIANT:
+                        // chain-rootも今回のworkerが実観測したsnapshotをschedulerへ返す。
+                        // 既存DB保存は互換投影用に維持するが、時間追従の正本はこの観測snapshotとする。
+                        imported = probe.Events.Count > 0
+                            ? probe.Events.Count
+                            : await ParseAndStoreAsync(group, tsFile, attempt, maxAttempts, ct, isPreRecordCheck);
+                        if (probe.Events.Count > 0)
+                        {
+                            foreach (var observedEvent in probe.Events)
+                                preRecordEvents?.Add(observedEvent);
+                            try { File.Delete(tsFile); } catch { }
+                            CleanupTvAIrEpgRecRuntimeFiles(launch, workerName, group, reason: "pre_record_probe_user_chain_target_seen");
+                        }
+                        else if (imported > 0)
+                        {
+                            CleanupTvAIrEpgRecRuntimeFiles(launch, workerName, group, reason: "pre_record_probe_user_chain_parse_ok");
+                        }
                     }
                 }
                 else
                 {
                     // TvAIrEpgRec の終了を待つ
                     var processTimeout = TimeSpan.FromSeconds(effectiveWait + 8 + 30);
-                    var waitResult = await WaitForExitAsync(launch.ProcessId, processTimeout, ct).ConfigureAwait(false);
+                    var waitResult = await WaitForExitOrExternalFailureAsync(
+                        launch.ProcessId,
+                        processTimeout,
+                        workerTaskState,
+                        attemptGeneration,
+                        ct).ConfigureAwait(false);
+
+                    if (waitResult is EpgProcessExitWaitResult.Exited or EpgProcessExitWaitResult.NotFound)
+                        workerTaskState.MarkProcessExitObserved(attemptGeneration);
+
+                    if (waitResult == EpgProcessExitWaitResult.ProcessMissing)
+                    {
+                        throw new EpgWorkerProcessMissingException(
+                            workerTaskState.Snapshot().ExternalFailureCycleId);
+                    }
 
                     // キャンセル時はTvAIrEpgRecへ停止要求を送る
                     if (waitResult == EpgProcessExitWaitResult.Cancelled)
@@ -1583,14 +2134,20 @@ public sealed class EpgCapture
                             workerName,
                             group,
                             "wait_for_exit",
-                            "wait_for_exit_cancelled").ConfigureAwait(false);
+                            "wait_for_exit_cancelled",
+                            workerTaskState,
+                            attemptGeneration).ConfigureAwait(false);
                         Log("EPG_CAPTURE_CANCELLED", $"TS{group.TsId}",
                             $"EPG取得がキャンセルされました。TvAIrEpgRec(PID={launch.ProcessId})を終了しました。");
                         ct.ThrowIfCancellationRequested();
                         return 0;
                     }
 
-                    if (waitResult == EpgProcessExitWaitResult.Timeout && IsProcessAlive(launch.ProcessId))
+                    if (!workerTaskState.TrySnapshotAttempt(attemptGeneration, out var postWaitSnapshot))
+                        return 0;
+                    var postWaitIdentity = GetOwnedWorkerProcessIdentity(postWaitSnapshot);
+                    if (waitResult == EpgProcessExitWaitResult.Timeout
+                        && (postWaitIdentity is EpgWorkerProcessIdentityState.Match or EpgWorkerProcessIdentityState.IdentityUnknown))
                     {
                         Log("EPG_CAPTURE_WAIT_TIMEOUT", $"TS{group.TsId}",
                             $"result=TIMEOUT pid={launch.ProcessId} worker={workerName} waitSec={(int)processTimeout.TotalSeconds} action=stop_then_kill_if_needed rule=epg_worker_route_contract");
@@ -1599,30 +2156,63 @@ public sealed class EpgCapture
                             workerName,
                             group,
                             "wait_for_exit_timeout",
-                            "wait_for_exit_timeout").ConfigureAwait(false);
+                            "wait_for_exit_timeout",
+                            workerTaskState,
+                            attemptGeneration).ConfigureAwait(false);
                     }
 
-                    if (IsProcessAlive(launch.ProcessId))
+                    if (!workerTaskState.TrySnapshotAttempt(attemptGeneration, out var finalOwnedSnapshot))
+                        return 0;
+                    var finalOwnedIdentity = GetOwnedWorkerProcessIdentity(finalOwnedSnapshot);
+                    if (finalOwnedIdentity is EpgWorkerProcessIdentityState.Match or EpgWorkerProcessIdentityState.IdentityUnknown)
                     {
                         Log("EPG_CAPTURE_PROCESS_STILL_ALIVE", $"TS{group.TsId}",
-                            $"result=STILL_ALIVE pid={launch.ProcessId} worker={workerName} waitResult={waitResult} action=skip_parse_keep_tracked rule=epg_worker_route_contract");
+                            $"result={finalOwnedIdentity} pid={launch.ProcessId} worker={workerName} waitResult={waitResult} action=skip_parse_keep_tracked rule=epg_worker_identity_contract");
                         return 0;
                     }
 
                     await HandleEpgProcessEndAsync(group, workerName, launch.ProcessId, ct).ConfigureAwait(false);
                     if (!activeLaunchRetired)
                     {
-                        UnregisterActiveEpgWorkerProcess(launch.ProcessId, workerName, group, "process_end");
+                        MarkActiveEpgWorkerProcessExitObserved(workerTaskState, attemptGeneration, launch.ProcessId, "process_end");
                         activeLaunchRetired = true;
                     }
-                    lease.Dispose();
+                    if (!workerTaskState.ReleaseLeaseForAttempt(attemptGeneration))
+                    {
+                        workerTaskState.DeferAdmissionRelease(releaseWorkerAdmission);
+                        Log("EPG_WORKER_TRANSITION", $"TS{group.TsId}",
+                            $"result=LEASE_RELEASE_DEFERRED worker={workerName} pid={launch.ProcessId} group={group.Group} action=keep_owner_no_next_worker rule=epg_worker_attempt_ownership_contract");
+                        return 0;
+                    }
+                    releaseWorkerAdmission?.Invoke();
+                    Log("EPG_WORKER_TRANSITION", $"TS{group.TsId}",
+                        $"result=RELEASED worker={workerName} pid={launch.ProcessId} group={group.Group} action=launch_next_before_parse fixedDelayMs=0 rule=epg_worker_transition_contract");
 
-                    broadcastClock.ObserveFromTsFile(tsFile, "normal_epg", group.Group, group.Targets.FirstOrDefault()?.Name, group.Targets.FirstOrDefault()?.Name);
 
-                    // TSパース
+                    // TSパース。取得完了判定はRunPassAsync側で一度だけ行う。
                     imported = await ParseAndStoreAsync(group, tsFile, attempt, maxAttempts, ct, isPreRecordCheck);
-                    var captureSufficient = IsNormalEpgCaptureSufficient(group, imported, isPreRecordCheck);
-                    CleanupTvAIrEpgRecRuntimeFiles(launch, workerName, group, reason: captureSufficient ? "epg_parse_done" : "epg_parse_done");
+                    // EPG_WORKER_TERMINAL_EVIDENCE_INVARIANT:
+                    // Parsing a partially written TS and the worker process completing successfully are
+                    // independent facts. Always capture the worker-owned terminal result before cleanup;
+                    // otherwise a failed worker can be hidden by a usable partial TS and its evidence lost.
+                    var terminalEvidence = LogTvAIrEpgRecTerminalEvidence(
+                        launch, workerName, group, tsFile, attempt, maxAttempts, imported);
+
+                    if (terminalEvidence.PreserveRuntimeArtifacts)
+                    {
+                        Log("TVAIREPGREC_RUNTIME_CLEANUP", $"TS{group.TsId}",
+                            $"result=PRESERVED worker={workerName} pid={launch.ProcessId} reason=worker_terminal_not_proven_success " +
+                            $"workerSuccess={terminalEvidence.WorkerSuccess} exitCode={terminalEvidence.ExitCode} tsReadOk={terminalEvidence.TsReadOk} " +
+                            "action=keep_job_result_progress_for_root_cause rule=epg_worker_terminal_evidence_contract");
+                    }
+                    else
+                    {
+                        CleanupTvAIrEpgRecRuntimeFiles(
+                            launch,
+                            workerName,
+                            group,
+                            reason: imported > 0 ? "epg_parse_done_worker_terminal_ok" : "epg_parse_empty_worker_terminal_ok");
+                    }
                 }
             }
             catch (OperationCanceledException)
@@ -1634,14 +2224,27 @@ public sealed class EpgCapture
                         workerName,
                         group,
                         "capture_scope",
-                        "capture_scope_cancelled").ConfigureAwait(false);
+                        "capture_scope_cancelled",
+                        workerTaskState,
+                        attemptGeneration).ConfigureAwait(false);
                 }
                 throw;
             }
             finally
             {
-                // チューナーを確実に解放
-                lease.Dispose();
+                var processStillOwnedAndAlive = false;
+                {
+                    if (workerTaskState.TrySnapshotAttempt(attemptGeneration, out var snapshot))
+                    {
+                        // ProcessExitObserved is historical evidence only. The exact attempt's
+                        // owned-process identity decides whether that attempt's lease must remain held.
+                        processStillOwnedAndAlive = snapshot.ProcessId > 0
+                            && IsOwnedWorkerProcessAlive(snapshot);
+                    }
+                }
+
+                if (!processStillOwnedAndAlive)
+                    workerTaskState.ReleaseLeaseForAttempt(attemptGeneration);
             }
 
             if (imported > 0)
@@ -1653,13 +2256,11 @@ public sealed class EpgCapture
             if (!isPreRecordCheck)
             {
                 var failureReason = ClassifyImportFailure(group, tsFile);
-                RecordCaptureFailure(group, failureReason, $"file={SafeLogValue(tsFile)}", attempt, maxAttempts);
+                RecordCaptureFailure(group, failureReason, $"file={SafeLogValue(tsFile)}", attempt, maxAttempts, workerTaskState.RunId);
                 if (attempt < maxAttempts)
                 {
                     Log("EPG_CAPTURE_RETRY", $"TS{group.TsId}",
                         $"reason={SafeLogValue(failureReason)} nextAttempt={attempt + 1}/{maxAttempts} group={group.Group} service={SafeLogValue(group.Targets.FirstOrDefault()?.Name)} policy=output_lifecycle_retry rule=release_contract");
-                    try { await Task.Delay(Math.Max(1000, ini.EpgLaunchStaggerMs), ct); }
-                    catch (OperationCanceledException) { throw; }
                 }
             }
         }
@@ -1673,6 +2274,8 @@ public sealed class EpgCapture
         string workerName,
         string tsFile,
         int processId,
+        ActiveEpgWorkerTask workerTaskState,
+        long expectedAttemptGeneration,
         TimeSpan waitLimit,
         CancellationToken ct)
     {
@@ -1680,6 +2283,7 @@ public sealed class EpgCapture
         var observed = false;
         var nonZero = false;
         var growing = false;
+        var workerExitObserved = false;
         long firstSize = 0;
         long lastSize = 0;
         var firstObservedAt = DateTime.MinValue;
@@ -1691,6 +2295,58 @@ public sealed class EpgCapture
         while ((DateTime.Now - started) < waitLimit)
         {
             ct.ThrowIfCancellationRequested();
+            var attemptSnapshot = workerTaskState.Snapshot();
+            if (attemptSnapshot.AttemptGeneration != expectedAttemptGeneration)
+                break;
+            var identity = GetOwnedWorkerProcessIdentity(attemptSnapshot);
+            if (identity is EpgWorkerProcessIdentityState.Missing or EpgWorkerProcessIdentityState.ReusedPid)
+            {
+                workerExitObserved = true;
+                // Worker終了と最終ファイルflushは同じ観測周期内で競合し得る。
+                // 直前pollの0 byteをそのまま確定すると、その後のparserが実ファイルを正常に読めても
+                // EPG_OUTPUT_LIFECYCLEだけがts_file_zeroと誤報するため、終了検出時に必ず最終statを取り直す。
+                try
+                {
+                    if (File.Exists(tsFile))
+                    {
+                        var finalInfo = new FileInfo(tsFile);
+                        finalInfo.Refresh();
+                        var finalSize = finalInfo.Length;
+                        var finalObservedAt = DateTime.Now;
+                        var observedBeforeFinalStat = observed;
+                        if (!observed)
+                        {
+                            observed = true;
+                            firstSize = finalSize;
+                            firstObservedAt = finalObservedAt;
+                        }
+                        if (finalSize > 0)
+                            nonZero = true;
+                        if (observedBeforeFinalStat && finalSize > lastSize)
+                            growing = true;
+                        lastSize = finalSize;
+                        lastObservedAt = finalObservedAt;
+
+                        Log("EPG_OUTPUT_LIFECYCLE", $"TS{group.TsId}",
+                            $"phase=worker_exit_final_stat worker={workerName} pid={processId} group={group.Group} size={finalSize} observed={observed} nonZero={nonZero} growing={growing} elapsedMs={(int)(DateTime.Now - started).TotalMilliseconds} output={SafeLogValue(tsFile)} rule=epg_output_final_stat_contract");
+                    }
+                }
+                catch (IOException ex)
+                {
+                    Log("EPG_OUTPUT_LIFECYCLE", $"TS{group.TsId}",
+                        $"phase=worker_exit_final_stat_io worker={workerName} pid={processId} group={group.Group} error={SafeLog(ex.Message)} rule=epg_output_final_stat_contract");
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    Log("EPG_OUTPUT_LIFECYCLE", $"TS{group.TsId}",
+                        $"phase=worker_exit_final_stat_access worker={workerName} pid={processId} group={group.Group} error={SafeLog(ex.Message)} rule=epg_output_final_stat_contract");
+                }
+
+                Log("EPG_OUTPUT_LIFECYCLE", $"TS{group.TsId}",
+                    $"phase=worker_exited worker={workerName} pid={processId} group={group.Group} elapsedMs={(int)(DateTime.Now - started).TotalMilliseconds} action=stop_output_wait_and_release_tuner rule=epg_worker_transition_contract");
+                break;
+            }
+
             try
             {
                 if (File.Exists(tsFile))
@@ -1736,12 +2392,150 @@ public sealed class EpgCapture
             await Task.Delay(1000, ct);
         }
 
-        var phase = !observed ? "ts_file_not_created" : !nonZero ? "ts_file_zero" : "ts_file_not_growing";
+        var phase = !observed
+            ? "ts_file_not_created"
+            : !nonZero
+                ? "ts_file_zero"
+                : growing
+                    ? "ts_file_growing"
+                    : workerExitObserved
+                        ? "ts_file_nonzero_at_worker_exit"
+                        : "ts_file_not_growing";
         Log("EPG_OUTPUT_LIFECYCLE", $"TS{group.TsId}",
             $"phase={phase} worker={workerName} pid={processId} group={group.Group} observed={observed} nonZero={nonZero} growing={growing} firstSize={firstSize} lastSize={lastSize} elapsedSec={(int)(DateTime.Now - started).TotalSeconds} output={SafeLogValue(tsFile)} action=continue_to_worker_exit_then_parse_or_retry rule=release_contract");
         return new EpgOutputLifecycleState(observed, nonZero, growing, firstSize, lastSize, firstObservedAt, lastObservedAt, phase);
     }
 
+
+
+    private EpgWorkerTerminalEvidence LogTvAIrEpgRecTerminalEvidence(
+        EpgWorkerLaunchResult launch,
+        string workerName,
+        TsGroup group,
+        string tsFile,
+        int attempt,
+        int maxAttempts,
+        int imported)
+    {
+        static string ReadCompactFile(string? path, bool lastNonEmptyLine)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return "path_missing";
+            try
+            {
+                if (!File.Exists(path)) return "file_missing";
+                string text;
+                if (lastNonEmptyLine)
+                {
+                    text = File.ReadLines(path)
+                        .Reverse()
+                        .FirstOrDefault(line => !string.IsNullOrWhiteSpace(line)) ?? string.Empty;
+                }
+                else
+                {
+                    text = File.ReadAllText(path);
+                }
+                text = text.Replace("\r", " ").Replace("\n", " ").Trim();
+                return text.Length <= 1800 ? text : text[^1800..];
+            }
+            catch (Exception ex)
+            {
+                return $"read_error:{ex.GetType().Name}:{ex.Message}";
+            }
+        }
+
+        static long FileLengthOrMinusOne(string? path)
+        {
+            try
+            {
+                return !string.IsNullOrWhiteSpace(path) && File.Exists(path)
+                    ? new FileInfo(path).Length
+                    : -1;
+            }
+            catch
+            {
+                return -2;
+            }
+        }
+
+        static string JsonScalar(JsonElement parent, string name)
+        {
+            if (!parent.TryGetProperty(name, out var value)) return "-";
+            return value.ValueKind switch
+            {
+                JsonValueKind.True => "true",
+                JsonValueKind.False => "false",
+                JsonValueKind.Number => value.GetRawText(),
+                JsonValueKind.String => value.GetString() ?? "-",
+                JsonValueKind.Null => "-",
+                _ => value.GetRawText()
+            };
+        }
+
+        bool resultExists = false;
+        bool? workerSuccess = null;
+        int? exitCode = null;
+        bool? tsReadOk = null;
+        string workerSummary;
+        try
+        {
+            if (string.IsNullOrWhiteSpace(launch.ResultPath) || !File.Exists(launch.ResultPath))
+            {
+                workerSummary = "file_missing";
+            }
+            else
+            {
+                resultExists = true;
+                using var doc = JsonDocument.Parse(File.ReadAllText(launch.ResultPath));
+                var root = doc.RootElement;
+                if (root.TryGetProperty("success", out var successValue)
+                    && successValue.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                    workerSuccess = successValue.GetBoolean();
+                if (root.TryGetProperty("exitCode", out var exitValue)
+                    && exitValue.ValueKind == JsonValueKind.Number
+                    && exitValue.TryGetInt32(out var parsedExitCode))
+                    exitCode = parsedExitCode;
+
+                var ts = root.TryGetProperty("tsReadProbe", out var tsReadProbe) && tsReadProbe.ValueKind == JsonValueKind.Object
+                    ? tsReadProbe
+                    : default;
+                var tsAvailable = ts.ValueKind == JsonValueKind.Object;
+                string TsValue(string name) => tsAvailable ? JsonScalar(ts, name) : "-";
+                if (tsAvailable && ts.TryGetProperty("tsReadOk", out var tsReadOkValue)
+                    && tsReadOkValue.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                    tsReadOk = tsReadOkValue.GetBoolean();
+
+                workerSummary =
+                    $"success={JsonScalar(root, "success")} cancelled={JsonScalar(root, "cancelled")} exitCode={JsonScalar(root, "exitCode")} " +
+                    $"message={SafeLogValue(JsonScalar(root, "message"))} errorType={SafeLogValue(JsonScalar(root, "errorType"))} error={SafeLogValue(JsonScalar(root, "error"))} " +
+                    $"loadLibrary={TsValue("loadLibraryOk")} create={TsValue("createBonDriverOk")} open={TsValue("openTunerOk")} " +
+                    $"setChannel2Called={TsValue("setChannel2Called")} setChannel2={TsValue("setChannel2Ok")} setChannel1Called={TsValue("setChannel1Called")} setChannel1={TsValue("setChannel1Ok")} setChannel={TsValue("setChannelOk")} " +
+                    $"tsReadStarted={TsValue("tsReadStarted")} tsReadOk={TsValue("tsReadOk")} getTsCalls={TsValue("getTsCalls")} emptyReads={TsValue("emptyReads")} bytesRead={TsValue("bytesRead")} chunksRead={TsValue("chunksRead")} packetsRead={TsValue("packetsRead")} " +
+                    $"readySamples={TsValue("readyCountSamples")} nonZeroReadySamples={TsValue("nonZeroReadyCountSamples")} lastReady={TsValue("lastReadyCount")} lastRemain={TsValue("lastRemain")} win32={TsValue("lastWin32Error")} tsError={SafeLogValue(TsValue("error"))}";
+            }
+        }
+        catch (Exception ex)
+        {
+            workerSummary = $"parse_error:{ex.GetType().Name}:{SafeLogValue(ex.Message)}";
+        }
+
+        var resultTailEvidence = ReadCompactFile(launch.ResultPath, lastNonEmptyLine: false);
+        var progressEvidence = ReadCompactFile(launch.ProgressPath, lastNonEmptyLine: true);
+        var provenSuccess = resultExists && workerSuccess == true && exitCode == 0 && tsReadOk == true;
+        var preserveRuntimeArtifacts = !provenSuccess;
+
+        Log("TVAIREPGREC_EPG_TERMINAL_EVIDENCE", $"TS{group.TsId}",
+            $"result={(provenSuccess ? "WORKER_OK" : "WORKER_NOT_PROVEN_OK")} worker={SafeLogValue(workerName)} pid={launch.ProcessId} group={SafeLogValue(group.Group)} attempt={attempt}/{maxAttempts} imported={imported} " +
+            $"tsExists={File.Exists(tsFile)} tsBytes={FileLengthOrMinusOne(tsFile)} resultBytes={FileLengthOrMinusOne(launch.ResultPath)} progressBytes={FileLengthOrMinusOne(launch.ProgressPath)} " +
+            $"workerSummary={workerSummary} workerResultTail={SafeLogValue(resultTailEvidence)} progressLast={SafeLogValue(progressEvidence)} " +
+            $"runtimeArtifacts={(preserveRuntimeArtifacts ? "preserve" : "cleanup_allowed")} rule=epg_worker_terminal_evidence_contract");
+
+        return new EpgWorkerTerminalEvidence(
+            resultExists,
+            workerSuccess,
+            exitCode,
+            tsReadOk,
+            preserveRuntimeArtifacts);
+    }
 
     private void CleanupTvAIrEpgRecRuntimeFiles(EpgWorkerLaunchResult launch, string workerName, TsGroup group, string reason)
     {
@@ -1771,35 +2565,16 @@ public sealed class EpgCapture
             $"result=OK worker={workerName} pid={launch.ProcessId} reason={SafeLog(reason)} deleted={deleted} failed={failed} rule=release_contract");
     }
 
-    private TvTestActivityHandle? StartEpgSleepGuardBridgeIfNeeded(bool isPreRecordCheck, string normalizedScope, string normalizedDepth)
+    private Task StartEpgWorkerCoverageMonitorAsync(DateTime runStarted, string runId, CancellationToken ct)
     {
-        Log("EPG_RUN_ACTIVITYKEEPER", "DISABLED",
-            $"result=SKIPPED targetScope={normalizedScope} runDepth={normalizedDepth} reason={(isPreRecordCheck ? "pre_record_probe_uses_individual_station_tvtest_only" : "normal_epg_uses_individual_station_tvtest_only_no_run_bridge")} policy=no_representative_activitykeeper_tvtest rule=release_contract");
-        return null;
-
-    }
-
-    private void StopEpgSleepGuardBridgeIfStarted(TvTestActivityHandle? handle, bool isPreRecordCheck, string normalizedScope, string normalizedDepth, string reason)
-    {
-        var bridgePid = Interlocked.Exchange(ref epgSleepGuardBridgePid, 0);
-        try { handle?.Dispose(); } catch { }
-        if (!isPreRecordCheck && bridgePid > 0)
-        {
-            Log("EPG_SLEEPGUARD_BRIDGE", "STOP",
-                $"pid={bridgePid} targetScope={normalizedScope} runDepth={normalizedDepth} reason={SafeLog(reason)} rule=release_contract");
-        }
-    }
-
-    private Task StartEpgWorkerCoverageMonitorAsync(DateTime runStarted, CancellationToken ct)
-    {
-        LogEpgWorkerCoverage("run_start", force: true);
+        LogEpgWorkerCoverage(runId, "run_start", force: true);
         return Task.Run(async () =>
         {
             try
             {
                 while (!ct.IsCancellationRequested)
                 {
-                    LogEpgWorkerCoverage("periodic", force: false);
+                    LogEpgWorkerCoverage(runId, "periodic", force: false);
                     await Task.Delay(TimeSpan.FromSeconds(20), ct).ConfigureAwait(false);
                 }
             }
@@ -1807,7 +2582,7 @@ public sealed class EpgCapture
             catch (Exception ex)
             {
                 Log("EPG_WORKER_COVERAGE", "WARN",
-                    $"monitor_error={SafeLog(ex.Message)} rule=epg_tuner_cooldown_contract");
+                    $"monitor_error={SafeLog(ex.Message)} rule=epg_worker_coverage_contract");
             }
         }, CancellationToken.None);
     }
@@ -1832,167 +2607,88 @@ public sealed class EpgCapture
         return group.Targets.FirstOrDefault()?.Name ?? $"TS{group.TsId}";
     }
 
-    public async Task<int> PreemptNormalEpgWorkersForPreRecordAsync(string targetGroup, string reason, CancellationToken ct)
+    private void MarkActiveEpgWorkerProcessExitObserved(
+        ActiveEpgWorkerTask state,
+        long expectedAttemptGeneration,
+        int pid,
+        string reason)
     {
-        var group = string.IsNullOrWhiteSpace(targetGroup) ? string.Empty : targetGroup.Trim();
-        var targets = activeEpgWorkerProcesses.Values
-            .Where(w => string.IsNullOrWhiteSpace(group) || string.Equals(w.Group, group, StringComparison.OrdinalIgnoreCase))
-            .OrderBy(w => w.Group, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(w => w.TsId)
-            .ThenBy(w => w.Pid)
-            .ToList();
-
-        if (targets.Count == 0)
-        {
-            var pidlessReleased = tunerPool.ForceReleasePidlessEpgSlots(group, reason, "pre_record_preempt_no_tracked_worker");
-            Log("PRE_REC_PRETUNE_PREEMPT_NORMAL_EPG", "EPG",
-                $"result=NO_TARGET targetGroup={SafeLog(group)} reason={SafeLog(reason)} pidlessReleased={pidlessReleased} action=continue_pre_record_probe rule=release_contract");
-            return 0;
-        }
-
-        var stopped = 0;
-        foreach (var w in targets)
-        {
-            ct.ThrowIfCancellationRequested();
-            try
-            {
-                var launch = new EpgWorkerLaunchResult(true, w.Pid, string.Empty, w.StopSignalPath, null, null, null);
-                var pseudoGroup = new TsGroup($"{w.Group}:{w.TsId}", w.Group, w.TsId, string.Empty, new List<ChannelTarget>());
-                var retired = await StopAndRetireActiveEpgWorkerAsync(
-                    launch,
-                    w.WorkerName,
-                    pseudoGroup,
-                    "pre_record_preempt_normal_epg",
-                    reason,
-                    TimeSpan.FromSeconds(6)).ConfigureAwait(false);
-                if (retired) stopped++;
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                Log("PRE_REC_PRETUNE_PREEMPT_NORMAL_EPG", $"TS{w.TsId}",
-                    $"result=ERROR pid={w.Pid} worker={SafeLog(w.WorkerName)} group={SafeLog(w.Group)} service={SafeLog(w.ServiceName)} reason={SafeLog(reason)} error={SafeLog(ex.Message)} action=continue_pre_record_probe rule=release_contract");
-            }
-        }
-
-        var pidlessAfter = tunerPool.ForceReleasePidlessEpgSlots(group, reason, "pre_record_preempt_after_stop");
-        Log("PRE_REC_PRETUNE_PREEMPT_NORMAL_EPG", "EPG",
-            $"result=SUMMARY targetGroup={SafeLog(group)} reason={SafeLog(reason)} targets={targets.Count} stopped={stopped} pidlessReleased={pidlessAfter} action=continue_pre_record_probe rule=release_contract");
-        LogEpgWorkerCoverage("pre_record_preempt_normal_epg", force: true);
-        return stopped;
+        var snapshot = state.Snapshot();
+        if (snapshot.AttemptGeneration != expectedAttemptGeneration || snapshot.ProcessId != pid)
+            return;
+        var identity = GetOwnedWorkerProcessIdentity(snapshot);
+        if (identity is not (EpgWorkerProcessIdentityState.Missing or EpgWorkerProcessIdentityState.ReusedPid))
+            return;
+        if (state.MarkProcessExitObserved(expectedAttemptGeneration))
+            LogEpgWorkerCoverage(state.RunId, $"release:{reason}", force: true);
     }
 
-    private void RegisterActiveEpgWorkerProcess(int pid, string workerName, TsGroup group, string serviceName, string phase = "attach", string? stopSignalPath = null)
-    {
-        activeEpgWorkerProcesses[pid] = new ActiveEpgWorkerProcess(pid, workerName, group.Group, group.TsId, serviceName, DateTime.Now, stopSignalPath);
-        LogEpgWorkerCoverage(phase, force: true);
-    }
-
-    private void UnregisterActiveEpgWorkerProcess(int pid, string workerName, TsGroup group, string reason)
-    {
-        activeEpgWorkerProcesses.TryRemove(pid, out _);
-        LogEpgWorkerCoverage($"release:{reason}", force: true);
-    }
-
-    private void LogEpgWorkerCoverage(string phase, bool force)
+    private void LogEpgWorkerCoverage(string runId, string phase, bool force)
     {
         var nowUtc = DateTime.UtcNow;
         if (!force && nowUtc - lastEpgWorkerCoverageLogUtc < TimeSpan.FromSeconds(30))
             return;
         lastEpgWorkerCoverageLogUtc = nowUtc;
 
-        var entries = activeEpgWorkerProcesses.Values.OrderBy(x => x.Group).ThenBy(x => x.TsId).ThenBy(x => x.Pid).ToList();
-        var alive = new List<ActiveEpgWorkerProcess>();
-        foreach (var e in entries)
-        {
-            if (IsProcessAlive(e.Pid))
-            {
-                alive.Add(e);
-            }
-            else
-            {
-                activeEpgWorkerProcesses.TryRemove(e.Pid, out _);
-            }
-        }
-
-        var cooldowns = epgCooldownWaits.Values
-            .Where(x => x.Until >= DateTime.Now)
-            .OrderBy(x => x.Group).ThenBy(x => x.TsId).ThenBy(x => x.SlotName)
+        var activeTasks = SnapshotActiveEpgWorkerTasks(runId);
+        var snapshots = activeTasks.Select(x => x.Snapshot()).ToList();
+        var alive = snapshots
+            .Where(x => !x.IsTerminal && x.ProcessId > 0
+                && (GetOwnedWorkerProcessIdentity(x) is EpgWorkerProcessIdentityState.Match or EpgWorkerProcessIdentityState.IdentityUnknown))
+            .OrderBy(x => x.Group)
+            .ThenBy(x => x.TsId)
+            .ThenBy(x => x.ProcessId)
             .ToList();
-        foreach (var expired in epgCooldownWaits.Values.Where(x => x.Until < DateTime.Now).ToList())
-            epgCooldownWaits.TryRemove(expired.Key, out _);
 
         var summary = alive.Count == 0
             ? "-"
-            : string.Join(",", alive.Take(8).Select(e => $"{e.Group}:{e.TsId}/{e.ServiceName}/pid={e.Pid}"));
+            : string.Join(",", alive.Take(8).Select(e => $"{e.Group}:{e.TsId}/{e.ServiceName}/pid={e.ProcessId}"));
         if (alive.Count > 8) summary += $",...+{alive.Count - 8}";
 
-        var cooldownSummary = cooldowns.Count == 0
-            ? "-"
-            : string.Join(",", cooldowns.Take(6).Select(e => $"{e.Group}:{e.TsId}/{e.ServiceName}/slot={e.SlotName}"));
-        if (cooldowns.Count > 6) cooldownSummary += $",...+{cooldowns.Count - 6}";
-
-        var activeTasks = SnapshotActiveEpgWorkerTasks(currentEpgRunId);
         var activeWorkers = activeTasks.Count;
+        // release_contract EpgProcessGapClassificationContract:
+        // activeEpgWorkerTasks also contains owner tasks that have already observed their worker
+        // exit and are parsing/cleaning the completed TS. Those tasks do not imply that a
+        // TvAIrEpgRec process should still be visible. A WARN is valid only when at least one
+        // non-terminal owner still expects its attached worker to be alive but none is visible.
+        var expectedLiveWorkers = snapshots.Count(x =>
+            !x.IsTerminal
+            && x.ProcessId > 0
+            && !x.ProcessExitObserved
+            && !x.OwnerTaskCompleted);
         var activeTaskSummary = FormatActiveEpgWorkerTaskSummary(activeTasks);
-        var bridgePid = Volatile.Read(ref epgSleepGuardBridgePid);
-        var bridgeAlive = bridgePid > 0 && IsProcessAlive(bridgePid);
-        if (bridgePid > 0 && !bridgeAlive)
-            Interlocked.CompareExchange(ref epgSleepGuardBridgePid, 0, bridgePid);
-
-        var tvTestIconActive = alive.Count > 0 || bridgeAlive;
+        var tvTestIconActive = alive.Count > 0;
 
         Log("EPG_PROCESS_COVERAGE", "EPG",
-            $"phase={phase} activeTrackedIndividual={entries.Count} aliveIndividualTvAIrEpgRec={alive.Count} cooldownWaits={cooldowns.Count} activeWorkers={activeWorkers} " +
-            $"runActivityKeeper={bridgeAlive} representativePid={(bridgePid > 0 ? bridgePid.ToString() : "-")} representativeAlive={bridgeAlive} processVisible={tvTestIconActive} individualPids={FormatPidList(alive.Select(e => e.Pid))} " +
-            $"individualSummary={SafeLog(summary)} cooldownSummary={SafeLog(cooldownSummary)} activeTaskSummary={SafeLog(activeTaskSummary)} " +
-            "mode=tvairepgrec_worker_processes rule=epg_tuner_cooldown_contract");
+            $"phase={phase} activeTrackedIndividual={snapshots.Count(x => x.ProcessId > 0)} aliveIndividualTvAIrEpgRec={alive.Count} activeWorkers={activeWorkers} expectedLiveWorkers={expectedLiveWorkers} " +
+            $"processVisible={tvTestIconActive} individualPids={FormatPidList(alive.Select(e => e.ProcessId))} " +
+            $"individualSummary={SafeLog(summary)} activeTaskSummary={SafeLog(activeTaskSummary)} " +
+            "mode=epg_worker_task_owner rule=epg_worker_transition_contract");
 
         if (!tvTestIconActive && phase != "run_start" && phase != "run_end")
         {
-            if (cooldowns.Count > 0)
-            {
-                if (force || nowUtc - lastEpgWorkerGapLogUtc >= TimeSpan.FromSeconds(30))
-                {
-                    lastEpgWorkerGapLogUtc = nowUtc;
-                    Log("EPG_PROCESS_COOLDOWN_GAP", "INFO",
-                        $"phase={phase} activeTrackedIndividual={entries.Count} aliveIndividualTvAIrEpgRec=0 cooldownWaits={cooldowns.Count} " +
-                        $"note=no_tvairepgrec_worker_while_waiting_tuner_cooldown processVisible=False cooldownSummary={SafeLog(cooldownSummary)} " +
-                        "action=cooldown_rechecked_no_representative_process_started rule=epg_tuner_cooldown_contract");
-                }
-            }
-            else if (!epgRunAcceptingNewWorkers || activeWorkers <= 1)
+            if (!epgRunsAcceptingNewWorkers.ContainsKey(runId) || expectedLiveWorkers == 0)
             {
                 if (force || nowUtc - lastEpgWorkerGapLogUtc >= TimeSpan.FromSeconds(30))
                 {
                     lastEpgWorkerGapLogUtc = nowUtc;
                     Log("EPG_PROCESS_ENDING_GAP", "INFO",
-                        $"phase={phase} activeTrackedIndividual={entries.Count} aliveIndividualTvAIrEpgRec=0 cooldownWaits=0 activeWorkers={activeWorkers} " +
-                        "note=no_tvairepgrec_worker_during_epg_tail_or_last_worker_cleanup processVisible=False action=tail_cleanup_no_representative_process rule=epg_tuner_cooldown_contract");
+                        $"phase={phase} activeTrackedIndividual={snapshots.Count(x => x.ProcessId > 0)} aliveIndividualTvAIrEpgRec=0 activeWorkers={activeWorkers} expectedLiveWorkers={expectedLiveWorkers} " +
+                        "note=no_live_worker_expected_during_epg_transition_or_tail processVisible=False action=continue_transition rule=epg_worker_transition_contract");
                 }
             }
             else if (force || nowUtc - lastEpgWorkerGapLogUtc >= TimeSpan.FromSeconds(30))
             {
                 lastEpgWorkerGapLogUtc = nowUtc;
                 Log("EPG_PROCESS_GAP", "WARN",
-                    $"phase={phase} activeTrackedIndividual={entries.Count} aliveIndividualTvAIrEpgRec=0 cooldownWaits=0 activeWorkers={activeWorkers} note=epg_run_has_no_tvairepgrec_worker_at_this_moment processVisible=False " +
-                    "action=inspect_worker_transition rule=epg_tuner_cooldown_contract");
+                    $"phase={phase} activeTrackedIndividual={snapshots.Count(x => x.ProcessId > 0)} aliveIndividualTvAIrEpgRec=0 activeWorkers={activeWorkers} expectedLiveWorkers={expectedLiveWorkers} note=epg_owner_expects_live_worker_but_none_is_visible processVisible=False " +
+                    "action=inspect_worker_transition rule=epg_worker_transition_contract");
             }
         }
     }
 
-    private static bool IsProcessAlive(int pid)
+    private ActiveEpgWorkerTask RegisterActiveEpgWorkerTask(TsGroup group, int pass, string runId)
     {
-        try
-        {
-            using var p = Process.GetProcessById(pid);
-            return !p.HasExited;
-        }
-        catch { return false; }
-    }
-
-    private ActiveEpgWorkerTask RegisterActiveEpgWorkerTask(TsGroup group, int pass)
-    {
-        var runId = currentEpgRunId;
         var normalizedGroup = NormalizeEpgTargetGroup(group.Group);
         var key = $"{runId}:{pass}:{normalizedGroup}:{group.TsId}:{Guid.NewGuid():N}";
         var state = new ActiveEpgWorkerTask(
@@ -2009,7 +2705,188 @@ public sealed class EpgCapture
 
     private void CompleteActiveEpgWorkerTask(ActiveEpgWorkerTask state)
     {
-        activeEpgWorkerTasks.TryRemove(state.Key, out _);
+        if (activeEpgWorkerTasks.TryGetValue(state.Key, out var current) && ReferenceEquals(current, state))
+            activeEpgWorkerTasks.TryRemove(state.Key, out _);
+    }
+
+    private bool TryConvergeExitedEpgWorker(
+        ActiveEpgWorkerTask state,
+        EpgWorkerTerminalReason fallbackReason,
+        string source,
+        long expectedAttemptGeneration)
+    {
+        var snapshot = state.Snapshot();
+        if (snapshot.AttemptGeneration != expectedAttemptGeneration)
+            return false;
+        // LOGICAL_WORKER_OWNER_INVARIANT:
+        // logical worker taskの終端・active辞書からの除去はowner task完了後だけ。
+        // missing monitorは個々のattempt資源を収束できるが、retryを含むlogical taskを終端しない。
+        if (!snapshot.OwnerTaskCompleted)
+            return false;
+
+        var identity = snapshot.ProcessId <= 0
+            ? EpgWorkerProcessIdentityState.Missing
+            : GetOwnedWorkerProcessIdentity(snapshot);
+        // A previous exit observation is only a hint. Always re-check the current
+        // owned-process identity before releasing the lease. IdentityUnknown must
+        // never be treated as process exit, and Match must never converge.
+        if (identity is EpgWorkerProcessIdentityState.Match or EpgWorkerProcessIdentityState.IdentityUnknown)
+            return false;
+
+        const string finalizerOwner = "owner_task";
+        if (!state.TryBeginFinalization(finalizerOwner, expectedAttemptGeneration))
+            return false;
+
+        try
+        {
+            if (!state.IsCurrentAttempt(expectedAttemptGeneration))
+            {
+                state.ResetFinalization();
+                return false;
+            }
+            state.MarkProcessExitObserved(expectedAttemptGeneration);
+            if (!state.ReleaseLeaseForAttempt(expectedAttemptGeneration))
+            {
+                state.ResetFinalization();
+                return false;
+            }
+            if (!state.IsCurrentAttempt(expectedAttemptGeneration))
+            {
+                state.ResetFinalization();
+                return false;
+            }
+            state.FinalizeRequestedOr(fallbackReason);
+            CompleteActiveEpgWorkerTask(state);
+            state.MarkFinalized();
+        }
+        catch
+        {
+            state.ResetFinalization();
+            throw;
+        }
+
+        var completed = !activeEpgWorkerTasks.TryGetValue(state.Key, out var current) || !ReferenceEquals(current, state);
+        if (completed)
+        {
+            Log("EPG_WORKER_TASK_CONVERGED", $"TS{snapshot.TsId}",
+                $"result=COMPLETED source={SafeLog(source)} pid={snapshot.ProcessId} worker={SafeLog(snapshot.WorkerName)} group={SafeLog(snapshot.Group)} identity={identity} " +
+                $"finalizerOwner={finalizerOwner} attemptGeneration={snapshot.AttemptGeneration} action=lease_released_task_removed rule=epg_worker_task_owner");
+        }
+        return completed;
+    }
+
+    private bool TryConvergeMissingAttemptResources(
+        ActiveEpgWorkerTask state,
+        long expectedAttemptGeneration,
+        string source)
+    {
+        var snapshot = state.Snapshot();
+        if (snapshot.AttemptGeneration != expectedAttemptGeneration || snapshot.OwnerTaskCompleted)
+            return false;
+        var identity = snapshot.ProcessId <= 0
+            ? EpgWorkerProcessIdentityState.Missing
+            : GetOwnedWorkerProcessIdentity(snapshot);
+        if (identity is EpgWorkerProcessIdentityState.Match or EpgWorkerProcessIdentityState.IdentityUnknown)
+            return false;
+
+        state.MarkProcessExitObserved(expectedAttemptGeneration);
+        var released = state.ReleaseLeaseForAttempt(expectedAttemptGeneration);
+        Log("EPG_WORKER_ATTEMPT_CONVERGED", $"TS{snapshot.TsId}",
+            $"result={(released ? "RESOURCES_CONVERGED" : "LEASE_RELEASE_DEFERRED")} source={SafeLog(source)} pid={snapshot.ProcessId} worker={SafeLog(snapshot.WorkerName)} group={SafeLog(snapshot.Group)} identity={identity} attemptGeneration={expectedAttemptGeneration} leaseReleased={released} ownerTaskCompleted=False action={(released ? "keep_logical_worker_owner_for_retry_or_owner_completion" : "keep_attempt_resources_for_next_reconcile")} rule=epg_worker_attempt_ownership_contract");
+        return released;
+    }
+
+    private void StartMissingEpgWorkerConvergenceMonitor(ActiveEpgWorkerTask state)
+    {
+        if (!state.TryStartMissingConvergenceMonitor()) return;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var snapshot = state.Snapshot();
+                var monitoredAttemptGeneration = snapshot.AttemptGeneration;
+                var deadlineUtc = snapshot.MissingConvergenceDeadlineUtc ?? DateTime.UtcNow;
+                await state.WaitForOwnerTaskOrDeadlineAsync(deadlineUtc, CancellationToken.None).ConfigureAwait(false);
+
+                if (!activeEpgWorkerTasks.TryGetValue(state.Key, out var tracked) || !ReferenceEquals(tracked, state))
+                    return;
+
+                snapshot = state.Snapshot();
+                if (snapshot.AttemptGeneration != monitoredAttemptGeneration)
+                    return;
+                var ownerCompleted = snapshot.OwnerTaskCompleted;
+                var deadlineReached = snapshot.MissingConvergenceDeadlineUtc.HasValue
+                    && DateTime.UtcNow >= snapshot.MissingConvergenceDeadlineUtc.Value;
+                if (!ownerCompleted && !deadlineReached)
+                    return;
+
+                var converged = ownerCompleted
+                    ? TryConvergeExitedEpgWorker(
+                        state,
+                        EpgWorkerTerminalReason.ProcessMissing,
+                        "missing_monitor_owner_completed",
+                        expectedAttemptGeneration: monitoredAttemptGeneration)
+                    : deadlineReached && TryConvergeMissingAttemptResources(
+                        state,
+                        monitoredAttemptGeneration,
+                        "missing_monitor_deadline");
+                if (!converged)
+                {
+                    var currentSnapshot = state.Snapshot();
+                    var identity = currentSnapshot.AttemptGeneration == monitoredAttemptGeneration
+                        ? GetOwnedWorkerProcessIdentity(currentSnapshot)
+                        : EpgWorkerProcessIdentityState.ReusedPid;
+                    Log("EPG_MISSING_WORKER_CONVERGENCE", $"TS{snapshot.TsId}",
+                        $"result=DEFERRED pid={snapshot.ProcessId} worker={SafeLog(snapshot.WorkerName)} identity={identity} " +
+                        $"ownerCompleted={ownerCompleted} deadlineReached={deadlineReached} attemptGeneration={monitoredAttemptGeneration} action=keep_logical_owner_retry_on_next_reconcile rule=epg_worker_attempt_ownership_contract");
+                    state.ResetMissingConvergenceMonitor(monitoredAttemptGeneration);
+                }
+            }
+            catch (Exception ex)
+            {
+                var snapshot = state.Snapshot();
+                Log("EPG_MISSING_WORKER_CONVERGENCE", $"TS{snapshot.TsId}",
+                    $"result=ERROR pid={snapshot.ProcessId} worker={SafeLog(snapshot.WorkerName)} error={SafeLog(ex.Message)} " +
+                    "action=keep_attempt_resources_for_next_reconcile rule=epg_worker_attempt_ownership_contract");
+            }
+        }, CancellationToken.None);
+    }
+
+    private void StartResidualEpgWorkerExitMonitor(ActiveEpgWorkerTask state)
+    {
+        if (!state.TryStartExitMonitor()) return;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                while (true)
+                {
+                    if (!activeEpgWorkerTasks.TryGetValue(state.Key, out var tracked) || !ReferenceEquals(tracked, state))
+                        return;
+
+                    var snapshot = state.Snapshot();
+                    var identity = snapshot.ProcessId <= 0
+                        ? EpgWorkerProcessIdentityState.Missing
+                        : GetOwnedWorkerProcessIdentity(snapshot);
+                    if (identity is EpgWorkerProcessIdentityState.Missing or EpgWorkerProcessIdentityState.ReusedPid)
+                    {
+                        if (TryConvergeExitedEpgWorker(state, EpgWorkerTerminalReason.Completed, "residual_exit_monitor", snapshot.AttemptGeneration))
+                            return;
+                    }
+
+                    await Task.Delay(TimeSpan.FromMilliseconds(500)).ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                state.ResetExitMonitor();
+                var snapshot = state.Snapshot();
+                Log("EPG_RESIDUAL_WORKER_MONITOR", $"TS{snapshot.TsId}",
+                    $"result=ERROR pid={snapshot.ProcessId} worker={SafeLog(snapshot.WorkerName)} error={SafeLog(ex.Message)} action=keep_task_and_lease rule=epg_worker_task_owner");
+            }
+        }, CancellationToken.None);
     }
 
     private List<ActiveEpgWorkerTask> SnapshotActiveEpgWorkerTasks(string runId)
@@ -2027,8 +2904,22 @@ public sealed class EpgCapture
     {
         foreach (var item in activeEpgWorkerTasks.ToArray())
         {
-            if (!string.Equals(item.Value.RunId, currentRunId, StringComparison.Ordinal))
-                activeEpgWorkerTasks.TryRemove(item.Key, out _);
+            if (string.Equals(item.Value.RunId, currentRunId, StringComparison.Ordinal)
+                || activeNormalEpgRuns.ContainsKey(item.Value.RunId))
+                continue;
+
+            var snapshot = item.Value.Snapshot();
+            var identity = snapshot.ProcessId <= 0
+                ? EpgWorkerProcessIdentityState.Missing
+                : GetOwnedWorkerProcessIdentity(snapshot);
+            if (identity is EpgWorkerProcessIdentityState.Match or EpgWorkerProcessIdentityState.IdentityUnknown)
+            {
+                StartResidualEpgWorkerExitMonitor(item.Value);
+                continue;
+            }
+
+            if (!TryConvergeExitedEpgWorker(item.Value, EpgWorkerTerminalReason.Completed, "old_run_prune", snapshot.AttemptGeneration))
+                StartResidualEpgWorkerExitMonitor(item.Value);
         }
     }
 
@@ -2046,40 +2937,44 @@ public sealed class EpgCapture
         return list.Count == 0 ? "-" : string.Join(",", list);
     }
 
-    private static string GenreLabelFromCodes(string? genreCodes)
-    {
-        var first = string.IsNullOrWhiteSpace(genreCodes)
-            ? string.Empty
-            : genreCodes.Split(',', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim().ToUpperInvariant() ?? string.Empty;
-        if (first.StartsWith("0X", StringComparison.OrdinalIgnoreCase)) first = first[2..];
-        if (first.Length == 0) return string.Empty;
-        return first[0] switch
-        {
-            '0' => "ニュース/報道",
-            '1' => "スポーツ",
-            '2' => "情報/ワイドショー",
-            '3' => "ドラマ",
-            '4' => "音楽",
-            '5' => "バラエティ",
-            '6' => "映画",
-            '7' => "アニメ/特撮",
-            '8' => "ドキュメンタリー/教養",
-            '9' => "劇場/公演",
-            'A' => "趣味/教育",
-            'B' => "福祉",
-            _ => "その他"
-        };
-    }
-
     private static string SafeLog(string? value)
         => string.IsNullOrWhiteSpace(value) ? "-" : value.Replace('\r', ' ').Replace('\n', ' ').Trim();
 
+
+    private static async Task WaitForWorkerExitOrDeadlineAsync(int processId, DateTime deadline, CancellationToken cancellationToken)
+    {
+        var remaining = deadline - DateTime.Now;
+        if (remaining <= TimeSpan.Zero) return;
+
+        try
+        {
+            using var process = System.Diagnostics.Process.GetProcessById(processId);
+            if (process.HasExited) return;
+
+            using var deadlineCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            deadlineCts.CancelAfter(remaining);
+            try
+            {
+                await process.WaitForExitAsync(deadlineCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                // The safety deadline is the normal completion condition for a healthy pre-tune hold.
+            }
+        }
+        catch (ArgumentException)
+        {
+            // The owned worker already exited before the process handle was acquired.
+        }
+    }
 
     private async Task<PreRecordProbeResult> WaitForPreRecordTargetEventAsync(
         TsGroup group,
         string tsFile,
         int processId,
         string workerName,
+        ActiveEpgWorkerTask workerTaskState,
+        long expectedAttemptGeneration,
         TimeSpan safetyCeiling,
         ushort? expectedNetworkId,
         ushort? expectedTransportStreamId,
@@ -2087,6 +2982,7 @@ public sealed class EpgCapture
         ushort? expectedEventId,
         DateTime? expectedStartTime,
         DateTime? expectedEndTime,
+        bool persistProbeEventsToDb,
         CancellationToken ct,
         string? preferredRecordingTunerName = null,
         bool preTuneKeepWorkerUntilSafetyCeiling = false)
@@ -2095,15 +2991,18 @@ public sealed class EpgCapture
         var deadline = started.Add(safetyCeiling);
         var pollNo = 0;
         var lastLength = 0L;
-        var lastImported = 0;
+        IReadOnlyList<EpgEvent> lastEvents = Array.Empty<EpgEvent>();
 
         Log("PRE_REC_EPG_PROBE_WAIT", $"TS{group.TsId}",
-            $"start worker={workerName} pid={processId} safetyCeilingSec={(int)safetyCeiling.TotalSeconds} expectedNid={(expectedNetworkId?.ToString() ?? "-")} expectedTsid={(expectedTransportStreamId?.ToString() ?? "-")} expectedSid={(expectedServiceId?.ToString() ?? "-")} expectedEventId={(expectedEventId?.ToString() ?? "-")} expectedStart={(expectedStartTime?.ToString("MM/dd HH:mm:ss") ?? "-")} preferredTuner={SafeLogValue(preferredRecordingTunerName)} policy=stop_as_soon_as_target_event_seen_and_pretune_same_recording_tuner rule=release_contract");
+            $"start worker={workerName} pid={processId} safetyCeilingSec={(int)safetyCeiling.TotalSeconds} expectedNid={(expectedNetworkId?.ToString() ?? "-")} expectedTsid={(expectedTransportStreamId?.ToString() ?? "-")} expectedSid={(expectedServiceId?.ToString() ?? "-")} expectedEventId={(expectedEventId?.ToString() ?? "-")} expectedStart={(expectedStartTime?.ToString("MM/dd HH:mm:ss") ?? "-")} runtimeTuner={SafeLogValue(preferredRecordingTunerName)} policy=stop_as_soon_as_target_event_seen_runtime_tuner rule=pre_record_epg_runtime_tuner_contract");
 
         while (DateTime.Now < deadline)
         {
             ct.ThrowIfCancellationRequested();
-            if (!IsProcessAlive(processId)) break;
+            var attemptSnapshot = workerTaskState.Snapshot();
+            if (attemptSnapshot.AttemptGeneration != expectedAttemptGeneration) break;
+            var identity = GetOwnedWorkerProcessIdentity(attemptSnapshot);
+            if (identity is EpgWorkerProcessIdentityState.Missing or EpgWorkerProcessIdentityState.ReusedPid) break;
 
             try { await Task.Delay(TimeSpan.FromSeconds(2), ct); }
             catch (OperationCanceledException) { throw; }
@@ -2123,37 +3022,71 @@ public sealed class EpgCapture
                 expectedEventId,
                 expectedStartTime,
                 expectedEndTime,
+                persistProbeEventsToDb,
                 ct);
-            lastImported = Math.Max(lastImported, probe.ImportedEvents);
+            if (probe.Events.Count > 0) lastEvents = probe.Events;
 
             if (probe.TargetFound)
             {
                 if (preTuneKeepWorkerUntilSafetyCeiling && !string.IsNullOrWhiteSpace(preferredRecordingTunerName))
                 {
                     Log("PRE_REC_EPG_PROBE_EVENT_FOUND", $"TS{group.TsId}",
-                        $"result=FOUND worker={workerName} pid={processId} poll={pollNo} fileBytes={fi.Length} imported={probe.ImportedEvents} event={probe.EventSummary} elapsedSec={(int)(DateTime.Now - started).TotalSeconds} action=transition_to_record_pretune_hold preferredTuner={SafeLogValue(preferredRecordingTunerName)} rule=release_contract");
+                        $"result=FOUND worker={workerName} pid={processId} poll={pollNo} fileBytes={fi.Length} observedEvents={probe.Events.Count} dbWrite={(persistProbeEventsToDb ? "epg_store_user_chain_protected" : "none")} event={probe.EventSummary} elapsedSec={(int)(DateTime.Now - started).TotalSeconds} action=transition_to_record_pretune_hold preferredTuner={SafeLogValue(preferredRecordingTunerName)} rule=release_contract");
                     Log("PRE_REC_PRETUNE_STATE", $"TS{group.TsId}",
                         $"state=record_prepare display=録画準備中 worker={workerName} pid={processId} preferredTuner={SafeLogValue(preferredRecordingTunerName)} holdUntil={deadline:MM/dd HH:mm:ss} reason=target_event_seen_same_worker_no_relaunch rule=release_contract");
                     var foundProbe = probe with { TargetFound = true };
-                    while (DateTime.Now < deadline)
-                    {
-                        ct.ThrowIfCancellationRequested();
-                        if (!IsProcessAlive(processId)) break;
-                        try { await Task.Delay(TimeSpan.FromSeconds(2), ct); }
-                        catch (OperationCanceledException) { throw; }
-                    }
+                    // PRE_RECORD_PRETUNE_HOLD_INVARIANT:
+                    // Once the target event is found, this worker already owns the planned recording tuner.
+                    // Hold it until the safety deadline, cancellation, or actual process exit. Do not poll every
+                    // two seconds or add an environment-dependent settle; process exit/deadline are the evidence.
+                    await WaitForWorkerExitOrDeadlineAsync(processId, deadline, ct).ConfigureAwait(false);
                     return foundProbe;
                 }
 
                 Log("PRE_REC_EPG_PROBE_EVENT_FOUND", $"TS{group.TsId}",
-                    $"result=FOUND worker={workerName} pid={processId} poll={pollNo} fileBytes={fi.Length} imported={probe.ImportedEvents} event={probe.EventSummary} elapsedSec={(int)(DateTime.Now - started).TotalSeconds} action=stop_tvtest_now rule=epg_probe_runtime_contract");
+                    $"result=FOUND worker={workerName} pid={processId} poll={pollNo} fileBytes={fi.Length} observedEvents={probe.Events.Count} dbWrite={(persistProbeEventsToDb ? "epg_store_user_chain_protected" : "none")} event={probe.EventSummary} elapsedSec={(int)(DateTime.Now - started).TotalSeconds} action=stop_epg_worker_now rule=epg_probe_runtime_contract");
                 return probe with { TargetFound = true };
             }
         }
 
+        // Non-chain snapshot mode only: worker may flush and exit between polls, so parse the final file
+        // once before declaring the target missing. The protected user-chain path intentionally keeps
+        // the established DB-backed behavior unchanged.
+        if (!persistProbeEventsToDb)
+        try
+        {
+            if (File.Exists(tsFile))
+            {
+                var finalInfo = new FileInfo(tsFile);
+                finalInfo.Refresh();
+                Log("EPG_OUTPUT_LIFECYCLE", $"TS{group.TsId}",
+                    $"phase=worker_exit_final_stat worker={workerName} pid={processId} group={group.Group} size={finalInfo.Length} observed={finalInfo.Exists} nonZero={finalInfo.Length > 0} growing={finalInfo.Length > lastLength} elapsedMs={(int)(DateTime.Now - started).TotalMilliseconds} output={SafeLogValue(tsFile)} rule=epg_output_final_stat_contract");
+                if (finalInfo.Length >= 188 * 256)
+                {
+                    var finalProbe = await TryParsePreRecordProbeAsync(
+                        group, tsFile, expectedNetworkId, expectedTransportStreamId, expectedServiceId, expectedEventId, expectedStartTime, expectedEndTime, persistProbeEventsToDb, ct).ConfigureAwait(false);
+                    if (finalProbe.Events.Count > 0) lastEvents = finalProbe.Events;
+                    if (finalProbe.TargetFound)
+                    {
+                        Log("PRE_REC_EPG_PROBE_EVENT_FOUND", $"TS{group.TsId}",
+                            $"result=FOUND_FINAL_STAT worker={workerName} pid={processId} fileBytes={finalInfo.Length} observedEvents={finalProbe.Events.Count} dbWrite={(persistProbeEventsToDb ? "epg_store_user_chain_protected" : "none")} event={finalProbe.EventSummary} elapsedSec={(int)(DateTime.Now - started).TotalSeconds} action=accept_final_probe_snapshot rule=pre_record_epg_probe_snapshot_contract");
+                        return finalProbe;
+                    }
+                }
+            }
+        }
+        catch (IOException ex)
+        {
+            Log("EPG_OUTPUT_LIFECYCLE", $"TS{group.TsId}", $"phase=worker_exit_final_stat_io worker={workerName} pid={processId} group={group.Group} error={SafeLog(ex.Message)} rule=epg_output_final_stat_contract");
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            Log("EPG_OUTPUT_LIFECYCLE", $"TS{group.TsId}", $"phase=worker_exit_final_stat_access worker={workerName} pid={processId} group={group.Group} error={SafeLog(ex.Message)} rule=epg_output_final_stat_contract");
+        }
+
         Log("PRE_REC_EPG_PROBE_EVENT_NOT_FOUND", $"TS{group.TsId}",
-            $"result=NOT_FOUND worker={workerName} pid={processId} imported={lastImported} elapsedSec={(int)(DateTime.Now - started).TotalSeconds} action=fall_back_to_original_reservation_time rule=epg_probe_runtime_contract");
-        return new PreRecordProbeResult(false, lastImported, "-");
+            $"result=NOT_FOUND worker={workerName} pid={processId} observedEvents={lastEvents.Count} dbWrite={(persistProbeEventsToDb ? "epg_store_user_chain_protected" : "none")} elapsedSec={(int)(DateTime.Now - started).TotalSeconds} action=fall_back_to_original_reservation_time rule=pre_record_epg_probe_snapshot_contract");
+        return new PreRecordProbeResult(false, lastEvents, "-");
     }
 
     private async Task<PreRecordProbeResult> TryParsePreRecordProbeAsync(
@@ -2165,6 +3098,7 @@ public sealed class EpgCapture
         ushort? expectedEventId,
         DateTime? expectedStartTime,
         DateTime? expectedEndTime,
+        bool persistProbeEventsToDb,
         CancellationToken ct)
     {
         var tempFile = Path.Combine(Path.GetDirectoryName(tsFile) ?? Path.GetTempPath(), Path.GetFileNameWithoutExtension(tsFile) + ".probe_" + Guid.NewGuid().ToString("N") + ".ts");
@@ -2190,7 +3124,7 @@ public sealed class EpgCapture
                     ServiceName = group.Targets.FirstOrDefault(t => t.ServiceId == e.ServiceId)?.Name ?? string.Empty,
                     Title = string.Empty,
                     Description = string.Empty,
-                    Genre = GenreLabelFromCodes(e.GenreCodes),
+                    Genre = EpgProjection.GenreLabel(null, e.GenreCodes),
                     GenreCodes = e.GenreCodes ?? string.Empty,
                     TableId = e.BestTableId,
                     SectionNumber = e.SectionNumber,
@@ -2206,13 +3140,21 @@ public sealed class EpgCapture
                 })
                 .ToList();
 
-            if (events.Count > 0)
+            if (persistProbeEventsToDb && events.Count > 0)
             {
-                try { store.Upsert(events); } catch { }
+                try
+                {
+                    _ = store.Upsert(events);
+                }
+                catch (Exception ex)
+                {
+                    Log("PRE_REC_EPG_STORE", $"TS{group.TsId}",
+                        $"result=FAILED events={events.Count} error={ex.GetType().Name}:{TrimLog(ex.Message)} action=preserve_probe_result rule=release_contract");
+                }
             }
 
             Log("PRE_REC_EPG_PARSE", $"TS{group.TsId}",
-                $"result=OK events={events.Count} {epg.StatsLine} rule=release_contract");
+                $"result=OK events={events.Count} dbWrite={(persistProbeEventsToDb ? "epg_store_user_chain_protected" : "none")} {epg.StatsLine} rule={(persistProbeEventsToDb ? "release_contract" : "pre_record_epg_probe_snapshot_contract")}");
 
             var target = events.FirstOrDefault(ev => IsExpectedPreRecordEvent(
                 ev,
@@ -2224,14 +3166,14 @@ public sealed class EpgCapture
                 expectedEndTime));
             if (target is not null)
             {
-                return new PreRecordProbeResult(true, events.Count,
+                return new PreRecordProbeResult(true, events,
                     $"{target.NetworkId}/{target.TransportStreamId}/{target.ServiceId}/{target.EventId} {target.Start:MM/dd HH:mm:ss}〜{target.End:MM/dd HH:mm:ss} {SafeLog(target.Title)}");
             }
-            return new PreRecordProbeResult(false, events.Count, "-");
+            return new PreRecordProbeResult(false, events, "-");
         }
         catch
         {
-            return new PreRecordProbeResult(false, 0, "-");
+            return new PreRecordProbeResult(false, Array.Empty<EpgEvent>(), "-");
         }
         finally
         {
@@ -2264,80 +3206,20 @@ public sealed class EpgCapture
         return false;
     }
 
-    private async Task HandleEpgProcessEndAsync(TsGroup group, string workerName, int processId, CancellationToken ct)
+    private Task HandleEpgProcessEndAsync(TsGroup group, string workerName, int processId, CancellationToken ct)
     {
-        await epgEndingGate.WaitAsync(ct);
-        try
-        {
-            Log("EPG_ENDING_GATE", $"TS{group.TsId}",
-                $"enter worker={workerName} pid={processId} group={group.Group} note=serialize_tvtest_exit_release");
-            Log("EPG_CAPTURE_END", $"TS{group.TsId}", $"TvAIrEpgRec終了確認。PID={processId}");
-
-            // A very small settle interval after TVTest has exited. This is intentionally
-            // shorter than tuner cooldown and only separates Close/route side effects.
-            try { await Task.Delay(500, ct); }
-            catch (OperationCanceledException) { throw; }
-
-            Log("EPG_ENDING_GATE", $"TS{group.TsId}",
-                $"exit worker={workerName} pid={processId}");
-        }
-        finally
-        {
-            epgEndingGate.Release();
-        }
+        ct.ThrowIfCancellationRequested();
+        Log("EPG_CAPTURE_END", $"TS{group.TsId}",
+            $"TvAIrEpgRec終了確認。PID={processId} worker={workerName} action=release_after_owned_process_exit fixedDelayMs=0 rule=physical_epg_device_session_contract");
+        return Task.CompletedTask;
     }
-
-    private const int NormalEpgTimelineSafetySeconds = 600;
-    private const int NormalEpgNearReservationHardStopSeconds = 600;
-
-    private void RefreshRecordingTimelineGateForNormalEpgWorker(string group)
-    {
-        var normalizedGroup = NormalizeEpgTargetGroup(group);
-        var now = DateTime.Now;
-        var horizon = now.AddSeconds(NormalEpgTimelineSafetySeconds);
-        try
-        {
-            var next = reservationStore.GetByStatus(ReservationStatus.Scheduled)
-                .Where(r => r.IsEnabled && r.Source != ReservationSource.Epg)
-                .Select(r => new { Reservation = r, Group = ResolveReservationGroupForTimeline(r), DueAt = r.StartTime.AddSeconds(-ini.PreStartMarginSeconds) })
-                .Where(x => string.Equals(x.Group, normalizedGroup, StringComparison.OrdinalIgnoreCase) && x.DueAt <= horizon)
-                .OrderBy(x => x.DueAt)
-                .ThenBy(x => x.Reservation.Id)
-                .FirstOrDefault();
-
-            if (next is null) return;
-
-            var blockAfter = next.DueAt.AddSeconds(-NormalEpgTimelineSafetySeconds);
-            var protectUntil = next.Reservation.StartTime.AddSeconds(30);
-            RecordingLifecycleGate.RegisterRecordingTimelineBoundary(
-                normalizedGroup,
-                next.DueAt,
-                protectUntil,
-                "recording_timeline_due",
-                $"R{next.Reservation.Id}",
-                $"service={SafeLogValue(next.Reservation.ServiceName)} title={SafeLogValue(next.Reservation.Title)}",
-                blockAfter);
-        }
-        catch (Exception ex)
-        {
-            Log("EPG_RECORDING_TIMELINE_GATE", "WARN",
-                $"result=REFRESH_SKIPPED group={normalizedGroup} reason={ex.GetType().Name} rule=release_contract");
-        }
-    }
-
-    private static string ResolveReservationGroupForTimeline(Reservation r)
-        => (!string.IsNullOrWhiteSpace(r.ChannelArgument) && r.ChannelArgument.Contains("/chspace", StringComparison.OrdinalIgnoreCase))
-            ? "BSCS"
-            : "GR";
-
-
 
     private static int ResolveEpgLogicalAcquireWaitMs(DateTime plannedEnd, bool isPreRecordCheck)
     {
         if (isPreRecordCheck) return 3000;
 
         // 通常EPGは「空きがなければすぐ諦める」ではなく、取得runの残り予算内で論理スロットを待つ。
-        // 物理DID構成・BonDriver終了速度・外部TVTest残存時間への依存を減らすため、
+        // 物理DID構成・BonDriver終了速度への依存を減らすため、
         // ただし録画本線を妨げない上限として最大120秒に丸める。
         var remainingMs = (int)Math.Floor((plannedEnd - DateTime.Now).TotalMilliseconds - 30000);
         if (remainingMs <= 0) return 15000;
@@ -2354,56 +3236,59 @@ public sealed class EpgCapture
         string workerName,
         CancellationToken ct,
         bool isPreRecordCheck,
+        string workerRunId,
         string? preferredRecordingTunerName = null)
     {
         var maxWaitMs = ResolveEpgLogicalAcquireWaitMs(plannedEnd, isPreRecordCheck);
-        const int pollMs = 500;
+        var waitStartedAt = DateTime.UtcNow;
         var waitedMs = 0;
 
         while (true)
         {
             ct.ThrowIfCancellationRequested();
 
-            if (!isPreRecordCheck)
-                RefreshRecordingTimelineGateForNormalEpgWorker(group.Group);
+            // 録画境界の正本はReservationSchedulerの500ms高優先監視。
+            // EpgCapture側では共有境界を書き換えず、最新スナップショットを読むだけにする。
 
-            DateTime suppressUntil;
-            string suppressReason;
-            string suppressOwner;
-            string suppressLabel;
-            var suppressesNormalEpg = isPreRecordCheck
-                ? RecordingLifecycleGate.IsEpgSuppressed(group.Group, out suppressUntil, out suppressReason, out suppressOwner, out suppressLabel)
-                : RecordingLifecycleGate.IsNormalEpgSuppressed(group.Group, plannedEnd, out suppressUntil, out suppressReason, out suppressOwner, out suppressLabel);
-            if (suppressesNormalEpg)
+            // PRE_RECORD_EPG_RUNTIME_BOUNDARY_INVARIANT:
+            // PreRecだけは親録画の開始安全領域へ食い込まないことをここで確認する。
+            // normal EPGは開始Admissionを通過した後、録画timelineを理由にworker投入を止めない。
+            if (isPreRecordCheck
+                && RecordingLifecycleGate.IsPreRecordEpgSuppressed(
+                    group.Group, plannedEnd, out var suppressUntil, out var suppressReason, out var suppressOwner, out var suppressLabel))
             {
-                currentRunBlockedGroups[group.Key] = string.IsNullOrWhiteSpace(suppressReason) ? "recording_preempt_lock" : suppressReason;
-                if (RecordingLifecycleGate.ShouldLogEpgSuppression(group.Group, suppressUntil, suppressReason, suppressOwner))
+                currentRunBlockedGroups[RunDiagnosticKey(workerRunId, group.Key)] = string.IsNullOrWhiteSpace(suppressReason) ? "pre_record_boundary" : suppressReason;
+                if (RecordingLifecycleGate.ShouldLogPreRecordEpgSuppression(group.Group, suppressUntil, suppressReason, suppressOwner))
                 {
                     Log("EPG_SUPPRESSED_BY_REC_DUE", $"TS{group.TsId}",
-                        $"{workerName}: EPG新規起動を抑止 group={group.Group} until={suppressUntil:MM/dd HH:mm:ss} " +
+                        $"{workerName}: 録画前EPG確認の新規起動を抑止 group={group.Group} until={suppressUntil:MM/dd HH:mm:ss} " +
                         $"owner={suppressOwner} reason={suppressReason} label={suppressLabel} pass={group.Group}-{group.TsId} " +
-                        "rule=release_contract");
+                        "rule=pre_record_epg_runtime_tuner_contract");
                 }
                 return null;
             }
 
             TunerLease? lease = null;
-            if (!string.IsNullOrWhiteSpace(preferredRecordingTunerName))
+            if (isPreRecordCheck && !string.IsNullOrWhiteSpace(preferredRecordingTunerName))
             {
-                lease = tunerPool.AcquireForEpgByName(preferredRecordingTunerName, group.Group, plannedEnd, liveTvTestKeys, "pre_record_pretune_same_recording_tuner");
-                if (lease is not null)
+                // PRE_RECORD_EPG_RUNTIME_TUNER_INVARIANT:
+                // ReservationSchedulerが現在の空き状態と各Tunerの次録画境界から選んだ物理Tunerだけを取得する。
+                // ここで別Tunerへfallbackすると安全判定を迂回するため、選択Tunerが競争で埋まった場合は単発失敗とする。
+                lease = tunerPool.AcquireForEpgByName(preferredRecordingTunerName, group.Group, plannedEnd, "pre_record_epg_runtime_selected_tuner");
+                if (lease is null)
                 {
-                    Log("PRE_REC_PRETUNE_TUNER_ACQUIRE", $"TS{group.TsId}",
-                        $"result=OK worker={workerName} preferredTuner={preferredRecordingTunerName} actualTuner={lease.Name} did={lease.Did} group={group.Group} targetSids=[{string.Join(',', group.Targets.Select(t => t.ServiceId).OrderBy(x => x))}] policy=same_actual_tuner_before_recording rule=release_contract");
+                    Log("PRE_REC_EPG_RUNTIME_TUNER_ACQUIRE", $"TS{group.TsId}",
+                        $"result=SELECTED_TUNER_BUSY worker={workerName} selectedTuner={preferredRecordingTunerName} group={group.Group} action=no_fallback_single_attempt rule=pre_record_epg_runtime_tuner_contract");
+                    return null;
                 }
-                else if (waitedMs == 0)
-                {
-                    Log("PRE_REC_PRETUNE_TUNER_ACQUIRE", $"TS{group.TsId}",
-                        $"result=PREFERRED_BUSY worker={workerName} preferredTuner={preferredRecordingTunerName} group={group.Group} action=wait_then_use_free_epg_tuner_if_still_busy rule=release_contract");
-                }
-            }
 
-            lease ??= tunerPool.AcquireForEpg(group.Group, plannedEnd, liveTvTestKeys);
+                Log("PRE_REC_EPG_RUNTIME_TUNER_ACQUIRE", $"TS{group.TsId}",
+                    $"result=OK worker={workerName} selectedTuner={preferredRecordingTunerName} actualTuner={lease.Name} did={lease.Did} group={group.Group} targetSids=[{string.Join(',', group.Targets.Select(t => t.ServiceId).OrderBy(x => x))}] rule=pre_record_epg_runtime_tuner_contract");
+            }
+            else
+            {
+                lease = tunerPool.AcquireForEpg(group.Group, plannedEnd);
+            }
             if (lease is not null)
             {
                 if (waitedMs > 0)
@@ -2411,18 +3296,13 @@ public sealed class EpgCapture
                     Log("EPG_TUNER_ACQUIRE_WAIT_OK", $"TS{group.TsId}",
                         $"{workerName}: チューナー空き待ち後に確保しました。waitMs={waitedMs} tuner={lease.Name} preferredTuner={SafeLogValue(preferredRecordingTunerName)}");
                 }
-                else if (!string.IsNullOrWhiteSpace(preferredRecordingTunerName) && !string.Equals(lease.Name, preferredRecordingTunerName, StringComparison.OrdinalIgnoreCase))
-                {
-                    Log("PRE_REC_PRETUNE_TUNER_ACQUIRE", $"TS{group.TsId}",
-                        $"result=USE_FREE_EPG_TUNER worker={workerName} preferredTuner={preferredRecordingTunerName} actualTuner={lease.Name} did={lease.Did} group={group.Group} reason=preferred_not_available policy=recording_priority_no_block rule=release_contract");
-                }
                 return lease;
             }
 
             if (waitedMs >= maxWaitMs)
             {
                 Log("EPG_TUNER_BUSY", $"TS{group.TsId}",
-                    $"{workerName}: EPG用途の論理チューナーが確保できませんでした（録画/視聴/外部TVTest保護を優先）。waitMs={waitedMs} policy=logical_resource_queue");
+                    $"{workerName}: EPG用途の論理チューナーが確保できませんでした（録画/視聴のTvAIr管理リソースを優先）。waitMs={waitedMs} policy=logical_resource_queue");
                 return null;
             }
 
@@ -2432,8 +3312,10 @@ public sealed class EpgCapture
                     $"{workerName}: EPG用途の論理チューナー待機を開始します。maxWaitMs={maxWaitMs} policy=logical_resource_queue");
             }
 
-            await Task.Delay(pollMs, ct);
-            waitedMs += pollMs;
+            var remainingMs = Math.Max(0, maxWaitMs - waitedMs);
+            if (remainingMs <= 0) continue;
+            await tunerPool.WaitForEpgSlotAsync(group.Group, TimeSpan.FromMilliseconds(remainingMs), ct).ConfigureAwait(false);
+            waitedMs = (int)Math.Min(maxWaitMs, Math.Max(0, (DateTime.UtcNow - waitStartedAt).TotalMilliseconds));
         }
     }
 
@@ -2469,6 +3351,61 @@ public sealed class EpgCapture
             Log("EPG_PARSE", $"TS{group.TsId}",
                 $"purpose={purpose} source=ts_file group={group.Group} {epg.StatsLine} rule=release_contract");
 
+            if (epg.IgnoredOtherTransportStreamEitSectionCount > 0)
+            {
+                Log("EPG_OTHER_TS_EIT_IGNORED", $"TS{group.TsId}",
+                    $"purpose={purpose} group={group.Group} ignoredSections={epg.IgnoredOtherTransportStreamEitSectionCount} " +
+                    $"acceptedTables=0x4E,0x50-0x5F ignoredTables=0x4F,0x60-0x6F action=drop_before_section_tracking_accumulator_projection_db_import " +
+                    $"rule=actual_transport_stream_eit_scope");
+            }
+
+            if (epg.InvalidEitSectionCount > 0)
+            {
+                Log("EPG_INVALID_EIT_SECTION_DROPPED", $"TS{group.TsId}",
+                    $"purpose={purpose} group={group.Group} invalidSections={epg.InvalidEitSectionCount} " +
+                    $"validation=section_syntax_length_crc32_header_consistency action=drop_before_section_tracking_event_header_accumulator_projection_db_import " +
+                    $"rule=eit_section_integrity_contract");
+            }
+
+            if (epg.IgnoredNonCurrentEitSectionCount > 0)
+            {
+                Log("EPG_NON_CURRENT_SECTION_IGNORED", $"TS{group.TsId}",
+                    $"purpose={purpose} group={group.Group} ignoredSections={epg.IgnoredNonCurrentEitSectionCount} " +
+                    $"currentNextIndicator=0 action=drop_before_section_tracking_accumulator_projection_db_import " +
+                    $"rule=eit_current_next_contract");
+            }
+
+            if (epg.IgnoredDuplicateEitSectionCount > 0)
+            {
+                Log("EPG_DUPLICATE_SECTION_IGNORED", $"TS{group.TsId}",
+                    $"purpose={purpose} group={group.Group} ignoredSections={epg.IgnoredDuplicateEitSectionCount} " +
+                    $"identity=service_table_version_section action=parse_first_occurrence_only rule=eit_section_repetition_contract");
+            }
+
+            if (epg.IgnoredVersionSwitchEitSectionCount > 0)
+            {
+                Log("EPG_VERSION_SWITCH_SECTION_IGNORED", $"TS{group.TsId}",
+                    $"purpose={purpose} group={group.Group} ignoredSections={epg.IgnoredVersionSwitchEitSectionCount} ignoredBasicSchedule={epg.IgnoredBasicScheduleVersionSwitchEitSectionCount} " +
+                    $"snapshot=first_current_version_per_service_table action=defer_new_version_to_next_capture " +
+                    $"rule=eit_capture_snapshot_version_contract");
+            }
+
+            if (epg.RejectedEventHeaderCount > 0)
+            {
+                foreach (var rejected in epg.RejectedEventHeaders)
+                {
+                    Log("EPG_EVENT_HEADER_REJECTED", $"TS{group.TsId}",
+                        $"purpose={purpose} group={group.Group} nid={rejected.NetworkId} tsid={rejected.TransportStreamId} sid={rejected.ServiceId} eid={rejected.EventId} " +
+                        $"tableId=0x{rejected.TableId:X2} section={rejected.SectionNumber} start={(rejected.Start == DateTime.MinValue ? "-" : rejected.Start.ToString("O"))} durationSec={rejected.DurationSeconds} " +
+                        $"descriptorLoopLength={rejected.DescriptorLoopLength} eventHeaderHex={SafeLogValue(rejected.EventHeaderHex)} reason={rejected.Reason} " +
+                        $"action=drop_before_accumulator_projection_db_import_and_stale_scope rule=eit_event_header_structure_contract");
+                }
+                Log("EPG_EVENT_HEADER_REJECTED_SUMMARY", $"TS{group.TsId}",
+                    $"purpose={purpose} group={group.Group} rejected={epg.RejectedEventHeaderCount} rejectedBasicSchedule={epg.RejectedBasicScheduleEventHeaderCount} emitted={epg.RejectedEventHeaders.Count} " +
+                    $"truncated={epg.RejectedEventHeaderCount > epg.RejectedEventHeaders.Count} " +
+                    $"action=drop_before_accumulator_projection_db_import_and_stale_scope rule=eit_event_header_structure_contract");
+            }
+
             var titleLogCount = 0;
             foreach (var a in epg.TitleDecodes
                 .Where(a => targetSidSet.Count == 0 || targetSidSet.Contains(a.ServiceId))
@@ -2479,17 +3416,30 @@ public sealed class EpgCapture
                 Log("EPG_ARIB_TITLE", $"TS{group.TsId}",
                     $"purpose={purpose} group={group.Group} nid={a.NetworkId} tsid={a.TransportStreamId} sid={a.ServiceId} eid={a.EventId} " +
                     $"tableId=0x{a.TableId:X2} section={a.SectionNumber}/{a.LastSectionNumber} descriptorLoopLength={a.DescriptorLoopLength} descriptorOffset={a.DescriptorOffset} descriptorLength={a.DescriptorLength} " +
-                    $"boundaryStatus={SafeLogValue(a.BoundaryStatus)} lang={SafeLogValue(a.Iso639LanguageCode)} eventNameLength={a.EventNameLength} eventNameBytesLen={a.EventNameBytesLength} eventNameBytesHex={SafeLogValue(a.EventNameBytesHex)} " +
+                    $"boundaryStatus={SafeLogValue(a.BoundaryStatus)} lang={SafeLogValue(a.Iso639LanguageCode)} eventNameLength={a.EventNameLength} eventNameBytesLen={a.EventNameBytesLength} eventNameBytesHex={SafeLogValue(a.EventNameBytesHex)} eventNameTrace={SafeLogValue(a.EventNameTrace)} " +
                     $"decodeRoute={SafeLogValue(a.DecodeRoute)} decodeStatus={SafeLogValue(a.DecodeStatus)} decodedTitle={SafeLogValue(TrimLog(a.DecodedTitle))} decodedTitleLength={a.DecodedTitleLength} " +
                     $"textLength={a.TextLength} textBytesLen={a.TextBytesLength} textBytesHexHead={SafeLogValue(a.TextBytesHexHead)} decodedTextHead={SafeLogValue(TrimLog(a.DecodedTextHead))} " +
                     $"emptyReason={SafeLogValue(a.EmptyReason)} rule=release_contract");
             }
 
-            var completenessLines = epg.SectionStatuses
+            var targetSectionStatuses = epg.SectionStatuses
                 .Where(st => targetSidSet.Count == 0 || targetSidSet.Contains(st.ServiceId))
-                .OrderBy(st => st.ServiceId).ThenBy(st => st.TableId)
+                .OrderBy(st => st.ServiceId).ThenBy(st => st.TableId).ThenBy(st => st.VersionNumber)
+                .ToArray();
+            // stale row retirement is authorized only by the basic schedule EIT
+            // (0x50-0x57), which owns event existence and timing. Present/following
+            // (0x4E) and extended schedule (0x58-0x5F) may enrich the same event but
+            // must not grant or revoke deletion authority.
+            var staleAuthoritySectionStatuses = targetSectionStatuses
+                .Where(st => st.TableId >= 0x50 && st.TableId <= 0x57)
+                .ToArray();
+            var incompleteSectionStatuses = staleAuthoritySectionStatuses
+                .Where(st => !st.IsComplete)
+                .ToArray();
+            var scheduleCoverageIssues = BuildBasicScheduleTableCoverageIssues(staleAuthoritySectionStatuses, targetSidSet);
+            var completenessLines = targetSectionStatuses
                 .Take(40)
-                .Select(st => $"SID={st.ServiceId} table=0x{st.TableId:X2} sec={st.SeenSectionCount}/{st.ExpectedSectionCount} seg={st.SegmentSeenTotal}/{st.SegmentExpectedTotal} missingSegs=[{string.Join(",", st.MissingSegments)}]")
+                .Select(st => $"SID={st.ServiceId} table=0x{st.TableId:X2} version={st.VersionNumber} lastTable=0x{st.LastTableId:X2} sec={st.SeenSectionCount}/{st.ExpectedSectionCount} seg={st.SegmentSeenTotal}/{st.SegmentExpectedTotal} complete={st.IsComplete} missingSegs=[{string.Join(",", st.MissingSegments)}]")
                 .ToArray();
             if (completenessLines.Length > 0)
             {
@@ -2510,25 +3460,124 @@ public sealed class EpgCapture
                 .ThenBy(e => e.TableId)
                 .ToList();
 
-            var upsertedCount = store.Upsert(rawEvents);
-            var mergeStats = store.LastUpsertMergeStats;
-            var mergeResult = mergeStats.IncomingRawShortBlankExistingRawShortPresent == 0 && mergeStats.IncomingRawExtendedBlankExistingRawExtendedPresent == 0
-                ? "OK"
-                : "CURRENT_CAPTURE_OVERWRITE";
-            Log("EPG_EVENT_DESCRIPTOR_MERGE_CONTRACT", $"TS{group.TsId}",
-                $"result={mergeResult} purpose={purpose} group={group.Group} incoming={mergeStats.Incoming} existingRows={mergeStats.ExistingRows} " +
-                $"incomingRawShortPresent={mergeStats.IncomingRawShortPresent} incomingRawExtendedPresent={mergeStats.IncomingRawExtendedPresent} " +
-                $"incomingRawShortBlankExistingRawShortPresent={mergeStats.IncomingRawShortBlankExistingRawShortPresent} incomingRawExtendedBlankExistingRawExtendedPresent={mergeStats.IncomingRawExtendedBlankExistingRawExtendedPresent} incomingRawContentBlankExistingRawContentPresent={mergeStats.IncomingRawContentBlankExistingRawContentPresent} " +
-                $"incomingExtendedOnlyExistingTitle={mergeStats.IncomingExtendedOnlyExistingRawShortPresent} sameEventExtendedMergedPreservingExistingTitle=0 " +
-                $"tableMetadataPreservedForExistingTitle=0 policy=current_capture_raw_descriptor_overwrites_existing_db_raw_descriptors titleSynthesis=none bodyToTitlePromotion=none dbSchemaMutation=none rule=release_contract");
+            var basicScheduleEventKeys = epg.EventAccumulatorAudits
+                .Where(a => a.HasBasicScheduleObservation)
+                .Select(a => (a.NetworkId, a.TransportStreamId, a.ServiceId, a.EventId, a.Start, a.DurationSeconds))
+                .ToHashSet();
+            var staleAuthorityEvents = rawEvents
+                .Where(e => basicScheduleEventKeys.Contains((e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId, e.Start, e.DurationSeconds)))
+                .ToList();
 
-            var staleStats = store.RetireStaleEventsForCapturedScope(rawEvents);
+            var staleRetireBlockReasons = new List<string>();
+            if (staleAuthorityEvents.Count == 0) staleRetireBlockReasons.Add("no_captured_basic_schedule_events");
+            if (incompleteSectionStatuses.Length > 0) staleRetireBlockReasons.Add("incomplete_section_snapshot");
+            if (scheduleCoverageIssues.Length > 0) staleRetireBlockReasons.Add("incomplete_schedule_table_coverage");
+            if (epg.RejectedBasicScheduleEventHeaderCount > 0) staleRetireBlockReasons.Add("rejected_basic_schedule_event_header");
+            if (epg.IgnoredBasicScheduleVersionSwitchEitSectionCount > 0) staleRetireBlockReasons.Add("basic_schedule_version_switch_during_capture");
+            var staleRetireEligible = staleAuthorityEvents.Count > 0 && staleRetireBlockReasons.Count == 0;
+
+            var importGateWaitStartedAt = DateTime.Now;
+            await epgImportCommitGate.WaitAsync(ct).ConfigureAwait(false);
+            int upsertedCount;
+            int promotedReservations;
+            EpgUpsertStorageStats storageStats;
+            EpgStaleRetireStats staleStats;
+            try
+            {
+                var importGateWaitMs = (int)Math.Max(0, (DateTime.Now - importGateWaitStartedAt).TotalMilliseconds);
+                Log("EPG_IMPORT_COMMIT_GATE", $"TS{group.TsId}",
+                    $"result=ENTER purpose={purpose} group={group.Group} waitMs={importGateWaitMs} action=serialize_sqlite_write_keep_ts_analysis_parallel rule=epg_import_commit_contract");
+
+                var commitResult = store.CommitCapture(
+                    rawEvents,
+                    staleRetireEligible ? staleAuthorityEvents : null);
+                upsertedCount = commitResult.Upsert.Count;
+                storageStats = commitResult.Upsert.Stats;
+                staleStats = commitResult.StaleRetire;
+                try
+                {
+                    // DB identity promotion belongs to the same SQLite commit lane, but the common
+                    // allocation route must not hold this gate. Normal EPG already runs one complete
+                    // post-import route at the EpgScheduler boundary.
+                    promotedReservations = projectionPromotion.PromotePending(
+                        $"EpgCapture:{purpose}:{group.Group}:TS{group.TsId}",
+                        runAllocationRoute: false);
+                }
+                catch (Exception ex)
+                {
+                    promotedReservations = 0;
+                    Log("RESERVATION_PROJECTION_PROMOTE", $"TS{group.TsId}",
+                        $"result=ERROR source=EpgCapture error={SafeLogValue(ex.Message)} rule=release_contract");
+                }
+            }
+            finally
+            {
+                epgImportCommitGate.Release();
+            }
+
+            // release_contract IncrementalKeywordMatchAfterCommittedEpgImport:
+            // A normal EPG run commits each transport stream independently, and the programme
+            // guide can expose those committed rows immediately. Waiting until the entire
+            // multi-TS run completes before running KeywordMatcher creates a dangerous interval
+            // where a visible matching programme is still unreserved. If the run is cancelled or
+            // fails later, that interval becomes permanent. Match immediately after each
+            // successful DB commit, outside the SQLite commit gate. The existing final
+            // EpgCompletePostImport pass remains as an idempotent convergence pass.
+            if (!isPreRecordCheck && upsertedCount > 0)
+            {
+                try
+                {
+                    var keywordAdded = keywordMatcher.RunMatching();
+                    if (keywordAdded > 0)
+                    {
+                        projectionPromotion.RunAllocationRoute(
+                            $"EpgCapture:{purpose}:{group.Group}:TS{group.TsId}:KeywordMatch",
+                            ReservationAllocationWakeRefreshMode.BoundedCoalesce);
+                    }
+                    Log("EPG_INCREMENTAL_KEYWORD_MATCH", $"TS{group.TsId}",
+                        $"result=OK purpose={purpose} group={group.Group} imported={upsertedCount} keywordAdded={keywordAdded} allocationRun={keywordAdded > 0} timing=after_committed_ts_import_before_full_epg_completion rule=incremental_keyword_match_contract");
+                }
+                catch (Exception ex)
+                {
+                    Log("EPG_INCREMENTAL_KEYWORD_MATCH", $"TS{group.TsId}",
+                        $"result=ERROR purpose={purpose} group={group.Group} imported={upsertedCount} error={SafeLogValue(ex.Message)} action=retry_by_final_epg_complete_pass rule=incremental_keyword_match_contract");
+                }
+            }
+
+            // Pre-record probes do not pass through EpgScheduler's post-import route. If this
+            // narrowly scoped import promoted a reservation, run its route only after releasing
+            // the SQLite import gate. Normal EPG defers all allocation work to the single
+            // EpgCompletePostImport route.
+            if (isPreRecordCheck && promotedReservations > 0)
+            {
+                try
+                {
+                    projectionPromotion.RunAllocationRoute(
+                        $"EpgCapture:{purpose}:{group.Group}:TS{group.TsId}");
+                }
+                catch (Exception ex)
+                {
+                    Log("RESERVATION_PROJECTION_PROMOTE", $"TS{group.TsId}",
+                        $"result=ERROR phase=post_commit_allocation source=EpgCapture promoted={promotedReservations} error={SafeLogValue(ex.Message)} rule=release_contract");
+                }
+            }
+
+            Log("EPG_EVENT_DESCRIPTOR_STORAGE_CONTRACT", $"TS{group.TsId}",
+                $"result=OK purpose={purpose} group={group.Group} incoming={storageStats.Incoming} " +
+                $"incomingRawShortPresent={storageStats.IncomingRawShortPresent} incomingRawExtendedPresent={storageStats.IncomingRawExtendedPresent} incomingRawContentPresent={storageStats.IncomingRawContentPresent} " +
+                $"existingRowRead=none policy=current_capture_raw_descriptor_is_storage_authority " +
+                $"titleSynthesis=none bodyToTitlePromotion=none dbSchemaMutation=none rule=release_contract");
+
             var staleScopeStart = staleStats.ScopeStart.HasValue ? staleStats.ScopeStart.Value.ToString("O") : "-";
             var staleScopeEnd = staleStats.ScopeEnd.HasValue ? staleStats.ScopeEnd.Value.ToString("O") : "-";
+            var incompleteSectionSample = incompleteSectionStatuses
+                .Take(8)
+                .Select(st => $"{st.ServiceId}:0x{st.TableId:X2}:v{st.VersionNumber}:{st.SeenSectionCount}/{st.ExpectedSectionCount}")
+                .ToArray();
             Log("EPG_STALE_EVENT_RETIRE_CONTRACT", $"TS{group.TsId}",
-                $"result=OK purpose={purpose} group={group.Group} services={staleStats.Services} incoming={staleStats.IncomingEvents} deleted={staleStats.DeletedRows} " +
-                $"scopeStart={staleScopeStart} scopeEnd={staleScopeEnd} " +
-                $"policy=captured_service_time_range_raw_event_identity titleSynthesis=none bodyToTitlePromotion=none reservationTitleBorrow=none startupDbClear=none dbSchemaMutation=none rule=release_contract");
+                $"result={(staleRetireEligible ? "OK" : "SKIPPED_INCOMPLETE_CAPTURE")} purpose={purpose} group={group.Group} services={staleStats.Services} capturedIncoming={rawEvents.Count} basicScheduleAuthorityIncoming={staleAuthorityEvents.Count} retireIncoming={staleStats.IncomingEvents} deleted={staleStats.DeletedRows} " +
+                $"scopeStart={staleScopeStart} scopeEnd={staleScopeEnd} blockReasons=[{string.Join(",", staleRetireBlockReasons)}] incompleteSectionSample=[{string.Join(",", incompleteSectionSample)}] " +
+                $"policy=delete_only_from_complete_basic_schedule_snapshot authorityTables=0x50-0x57 supplementaryTables=0x4E,0x58-0x5F upsertPartialCapture=allowed titleSynthesis=none bodyToTitlePromotion=none reservationTitleBorrow=none startupDbClear=none dbSchemaMutation=none rule=release_contract");
 
             var rawStoredTitleBlankCount = rawEvents.Count(e => string.IsNullOrEmpty(e.Title));
             var importedSids = rawEvents.Select(e => e.ServiceId).Distinct().OrderBy(x => x).ToArray();
@@ -2541,6 +3590,12 @@ public sealed class EpgCapture
             try { File.Delete(tsFile); } catch { }
             return upsertedCount;
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            Log("EPG_PARSE_CANCELLED", $"TS{group.TsId}",
+                $"result=CANCELLED purpose={(isPreRecordCheck ? "pre_record_check" : "normal_epg_capture")} action=propagate_without_retry rule=epg_import_commit_contract");
+            throw;
+        }
         catch (Exception ex)
         {
             Log("EPG_PARSE_FAIL", $"TS{group.TsId}",
@@ -2552,7 +3607,7 @@ public sealed class EpgCapture
 
     // ─── TS グループ構築 ──────────────────────────────────────────
 
-    private static string NormalizeTargetScope(string? value)
+    internal static string NormalizeTargetScope(string? value)
     {
         var v = (value ?? "All").Trim().ToUpperInvariant();
         return v switch
@@ -2565,7 +3620,7 @@ public sealed class EpgCapture
         };
     }
 
-    private static List<TsGroup> FilterGroupsByScope(IReadOnlyList<TsGroup> groups, string scope)
+    internal static List<TsGroup> FilterGroupsByScope(IReadOnlyList<TsGroup> groups, string scope)
     {
         return scope switch
         {
@@ -2593,6 +3648,51 @@ public sealed class EpgCapture
                 (!expectedServiceId.HasValue || t.ServiceId == expectedServiceId.Value) &&
                 (string.IsNullOrWhiteSpace(serviceName) || string.Equals(t.Name, serviceName, StringComparison.OrdinalIgnoreCase))))
             .ToList();
+    }
+
+    private static string[] BuildBasicScheduleTableCoverageIssues(
+        IReadOnlyList<EpgSectionStatus> sectionStatuses,
+        IReadOnlySet<ushort> targetSidSet)
+    {
+        var serviceIds = targetSidSet.Count > 0
+            ? targetSidSet.OrderBy(x => x).ToArray()
+            : sectionStatuses.Select(x => x.ServiceId).Distinct().OrderBy(x => x).ToArray();
+        var issues = new List<string>();
+        foreach (var sid in serviceIds)
+        {
+            var schedule = sectionStatuses
+                .Where(x => x.ServiceId == sid && x.TableId >= 0x50 && x.TableId <= 0x57)
+                .OrderBy(x => x.TableId)
+                .ToArray();
+            if (schedule.Length == 0)
+            {
+                issues.Add($"SID={sid}:schedule_tables=none");
+                continue;
+            }
+
+            var lastTableIds = schedule.Select(x => x.LastTableId).Distinct().OrderBy(x => x).ToArray();
+            if (lastTableIds.Length != 1)
+            {
+                issues.Add($"SID={sid}:basic:last_table_inconsistent=[{string.Join('.', lastTableIds.Select(x => $"0x{x:X2}"))}]");
+                continue;
+            }
+
+            var lastTableId = lastTableIds[0];
+            if (lastTableId < 0x50 || lastTableId > 0x57)
+            {
+                issues.Add($"SID={sid}:basic:last_table_out_of_family=0x{lastTableId:X2}");
+                continue;
+            }
+
+            var seen = schedule.Select(x => x.TableId).ToHashSet();
+            var missing = Enumerable.Range(0x50, lastTableId - 0x50 + 1)
+                .Select(x => (byte)x)
+                .Where(x => !seen.Contains(x))
+                .ToArray();
+            if (missing.Length > 0)
+                issues.Add($"SID={sid}:basic:expected=0x50-0x{lastTableId:X2}:missing=[{string.Join('.', missing.Select(x => $"0x{x:X2}"))}]");
+        }
+        return issues.ToArray();
     }
 
     private static string SafeLogValue(string? value)
@@ -2625,7 +3725,6 @@ public sealed class EpgCapture
     private static string ServiceTimeKeyForAudit(EpgEventObservation e)
         => ServiceTimeKeyForAudit(e.NetworkId, e.TransportStreamId, e.ServiceId, e.Start, e.DurationSeconds);
 
-    private static bool IsScheduleTitleTable(byte tableId) => tableId is 0x50 or 0x51;
     private static bool IsScheduleBodyTable(byte tableId) => tableId is >= 0x58 and <= 0x5F;
     private static bool HasRawShort(EpgEvent e) => !string.IsNullOrWhiteSpace(e.RawShortEventDescriptorHex);
     private static bool HasRawShort(ParsedEpgEvent e) => !string.IsNullOrWhiteSpace(e.RawShortEventDescriptorHex);
@@ -2638,19 +3737,14 @@ public sealed class EpgCapture
 
 
 
-    private static byte ExpectedTitleTableForBodyTable(byte bodyTableId)
-        => bodyTableId == 0x59 ? (byte)0x51 : (byte)0x50;
 
 
 
 
 
-    private static byte ExpectedTitleTableForBodyTableByDelta(byte bodyTableId)
-        => bodyTableId >= 0x58 && bodyTableId <= 0x5F ? (byte)(bodyTableId - 0x08) : ExpectedTitleTableForBodyTable(bodyTableId);
 
     private static bool IsScheduleShortCarrierCandidateTable(byte tableId) => tableId is >= 0x50 and <= 0x57;
 
-    private static int ScheduleSegmentOf(byte sectionNumber) => sectionNumber / 8;
 
 
 
@@ -2689,7 +3783,7 @@ public sealed class EpgCapture
                 // and the program guide derives cellText from the common raw descriptor decoder.
                 Title = string.Empty,
                 Description = string.Empty,
-                Genre = GenreLabelFromCodes(e.GenreCodes),
+                Genre = EpgProjection.GenreLabel(null, e.GenreCodes),
                 GenreCodes = e.GenreCodes ?? string.Empty,
                 TableId = e.BestTableId,
                 SectionNumber = e.SectionNumber,
@@ -3356,7 +4450,7 @@ public sealed class EpgCapture
         return string.Join(";", tokens);
     }
 
-    private List<TsGroup> BuildGroups(IReadOnlyList<ChannelTarget> targets)
+    internal List<TsGroup> BuildGroups(IReadOnlyList<ChannelTarget> targets, bool emitDiagnostics = true)
     {
         // release_contract: 通常EPGは「局単位」ではなく .ch2 由来の同一TS束で回す。
         // group+nid+tsid に加えて、実際に BonDriver/TVTest へ渡す chspace/chi も同一であることを
@@ -3384,10 +4478,13 @@ public sealed class EpgCapture
                     : "OK_ACTIVE_CH2_SERVICE_COVERED";
                 var targetSids = string.Join(",", targetList.Select(t => t.ServiceId).OrderBy(x => x));
                 var ch2Lines = string.Join(",", targetList.Select(t => t.Ch2LineNumber).OrderBy(x => x));
-                Log("EPG_CH2_TS_SCOPE", $"TS{g.Key.TransportStreamId}",
-                    $"result={bundleStatus} group={g.Key.Group} nid={g.Key.OriginalNetworkId} tsid={g.Key.TransportStreamId} chspace={g.Key.ResolvedSpace} chi={g.Key.ResolvedChannelIndex} " +
-                    $"ch2ActiveSameTsServices={ch2ActiveSameTsServices} epgTargetSidCount={targetList.Count} targetSids=[{targetSids}] ch2Lines=[{ch2Lines}] " +
-                    $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC note=epg_uses_ch2_bundle_before_tvairepgrec_job rule=release_contract");
+                if (emitDiagnostics)
+                {
+                    Log("EPG_CH2_TS_SCOPE", $"TS{g.Key.TransportStreamId}",
+                        $"result={bundleStatus} group={g.Key.Group} nid={g.Key.OriginalNetworkId} tsid={g.Key.TransportStreamId} chspace={g.Key.ResolvedSpace} chi={g.Key.ResolvedChannelIndex} " +
+                        $"ch2ActiveSameTsServices={ch2ActiveSameTsServices} epgTargetSidCount={targetList.Count} targetSids=[{targetSids}] ch2Lines=[{ch2Lines}] " +
+                        $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC note=epg_uses_ch2_bundle_before_tvairepgrec_job rule=release_contract");
+                }
                 return new TsGroup(
                     Key:               $"{g.Key.Group}:{g.Key.OriginalNetworkId}:{g.Key.TransportStreamId}:{g.Key.ResolvedSpace}:{g.Key.ResolvedChannelIndex}",
                     Group:             g.Key.Group,
@@ -3401,9 +4498,12 @@ public sealed class EpgCapture
             .ThenBy(g => g.Targets.FirstOrDefault()?.ResolvedChannelIndex ?? 0)
             .ToList();
 
-        Log("EPG_CH2_SCOPE_SUMMARY", "EPG",
-            $"groups={groups.Count} services={groups.Sum(g => g.Targets.Count)} warnings={groups.Count(g => (g.Targets.Count == 0 ? 0 : g.Targets.Max(t => t.SameTransportServiceCount)) > g.Targets.Count)} " +
-            $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
+        if (emitDiagnostics)
+        {
+            Log("EPG_CH2_SCOPE_SUMMARY", "EPG",
+                $"groups={groups.Count} services={groups.Sum(g => g.Targets.Count)} warnings={groups.Count(g => (g.Targets.Count == 0 ? 0 : g.Targets.Max(t => t.SameTransportServiceCount)) > g.Targets.Count)} " +
+                $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
+        }
         return groups;
     }
 
@@ -3422,16 +4522,10 @@ public sealed class EpgCapture
     private string BuildTsFilePath(TsGroup group)
     {
         var dir = string.IsNullOrWhiteSpace(settings.TsRecordDirectory)
-            ? Path.Combine(ResolveDataDir(), "ts-rec")
+            ? Path.Combine(database.DataDirectory, "ts-rec")
             : settings.TsRecordDirectory;
         var ts = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
         return Path.Combine(dir, $"epg_{group.Group}_{group.TsId}_{ts}.ts");
-    }
-
-    private string ResolveDataDir()
-    {
-        var raw = string.IsNullOrWhiteSpace(ini.DataDirectory) ? "data" : ini.DataDirectory.Trim();
-        return Path.GetFullPath(Path.IsPathRooted(raw) ? raw : Path.Combine(AppContext.BaseDirectory, raw));
     }
 
     private static string NormalizeGroup(string group)
@@ -3462,7 +4556,31 @@ public sealed class EpgCapture
     /// TvAIrEpgRec/対象プロセスの終了を待つ。
     /// 終了・タイムアウト・外部キャンセル・既に存在しない状態を分離して返す。
     /// </summary>
-    private static async Task<EpgProcessExitWaitResult> WaitForExitAsync(int pid, TimeSpan timeout, CancellationToken ct)
+    private static async Task<EpgProcessExitWaitResult> WaitForExitOrExternalFailureAsync(
+        int pid,
+        TimeSpan timeout,
+        ActiveEpgWorkerTask workerState,
+        long expectedAttemptGeneration,
+        CancellationToken ct)
+    {
+        var waitTask = WaitForOwnedWorkerExitAsync(pid, timeout, workerState, expectedAttemptGeneration, ct);
+        var externalFailureTask = workerState.WaitForExternalFailureAsync(expectedAttemptGeneration, ct);
+        var completed = await Task.WhenAny(waitTask, externalFailureTask).ConfigureAwait(false);
+        if (completed == externalFailureTask)
+        {
+            await externalFailureTask.ConfigureAwait(false);
+            return EpgProcessExitWaitResult.ProcessMissing;
+        }
+
+        return await waitTask.ConfigureAwait(false);
+    }
+
+    private static async Task<EpgProcessExitWaitResult> WaitForOwnedWorkerExitAsync(
+        int pid,
+        TimeSpan timeout,
+        ActiveEpgWorkerTask workerState,
+        long expectedAttemptGeneration,
+        CancellationToken ct)
     {
         if (ct.IsCancellationRequested) return EpgProcessExitWaitResult.Cancelled;
 
@@ -3471,15 +4589,14 @@ public sealed class EpgCapture
         {
             if (ct.IsCancellationRequested) return EpgProcessExitWaitResult.Cancelled;
 
-            try
-            {
-                using var p = System.Diagnostics.Process.GetProcessById(pid);
-                if (p.HasExited) return EpgProcessExitWaitResult.Exited;
-            }
-            catch (ArgumentException)
-            {
+            var snapshot = workerState.Snapshot();
+            if (snapshot.AttemptGeneration != expectedAttemptGeneration)
+                return EpgProcessExitWaitResult.Exited;
+            var identity = GetOwnedWorkerProcessIdentity(snapshot);
+            if (identity == EpgWorkerProcessIdentityState.Missing)
                 return EpgProcessExitWaitResult.NotFound;
-            }
+            if (identity == EpgWorkerProcessIdentityState.ReusedPid)
+                return EpgProcessExitWaitResult.Exited;
 
             var remaining = deadline - DateTime.UtcNow;
             var delay = remaining < TimeSpan.FromMilliseconds(500) ? remaining : TimeSpan.FromMilliseconds(500);
@@ -3491,16 +4608,104 @@ public sealed class EpgCapture
         return EpgProcessExitWaitResult.Timeout;
     }
 
-    /// <summary>対象プロセスを強制終了する。</summary>
-    private static void KillProcess(int pid)
+    /// <summary>
+    /// EPG worker所有Task用。取得した同一Processハンドル上で所有権を再照合してからKillする。
+    /// PIDを再取得する別処理へ渡さないため、照合後のPID再利用競合を避ける。
+    /// </summary>
+    private static string GetOwnedWorkerKillAction(EpgOwnedWorkerKillResult result)
+        => result switch
+        {
+            EpgOwnedWorkerKillResult.Killed => "kill_owned_process",
+            EpgOwnedWorkerKillResult.AlreadyExited => "already_exited_no_kill",
+            EpgOwnedWorkerKillResult.IdentityMismatch => "kill_skipped_identity_changed",
+            EpgOwnedWorkerKillResult.IdentityUnavailable => "kill_skipped_identity_unavailable",
+            _ => "kill_failed_keep_tracked"
+        };
+
+    private static EpgOwnedWorkerKillResult TryKillOwnedWorkerProcess(
+        ActiveEpgWorkerSnapshot snapshot,
+        bool deviceGateAlreadyHeld = false)
+    {
+        if (snapshot.ProcessId <= 0) return EpgOwnedWorkerKillResult.AlreadyExited;
+
+        // deviceGateAlreadyHeld=true は、呼出元startup ownerが同じGR/BSCS device gateの
+        // using scope内にいることを明示する契約。awaitを跨ぐAsyncLocalのre-entry推測には依存せず、
+        // 同じgateを自己再取得しない。gate外の呼出元は従来どおり物理device gateを取得してからkillする。
+        if (deviceGateAlreadyHeld)
+            return TryKillOwnedWorkerProcessCore(snapshot);
+
+        try
+        {
+            using var tunerDeviceAccess = TunerDeviceAccessGate.Enter(
+                $"EPG_KILL_OWNED PID={snapshot.ProcessId}",
+                snapshot.Group);
+            return TryKillOwnedWorkerProcessCore(snapshot);
+        }
+        catch
+        {
+            return EpgOwnedWorkerKillResult.Failed;
+        }
+    }
+
+    private static EpgOwnedWorkerKillResult TryKillOwnedWorkerProcessCore(ActiveEpgWorkerSnapshot snapshot)
     {
         try
         {
-            using var tunerDeviceAccess = TunerDeviceAccessGate.Enter($"EPG_KILL PID={pid}");
-            using var p = System.Diagnostics.Process.GetProcessById(pid);
-            if (!p.HasExited) p.Kill();
+            using var process = Process.GetProcessById(snapshot.ProcessId);
+            if (process.HasExited) return EpgOwnedWorkerKillResult.AlreadyExited;
+
+            if (snapshot.ProcessStartedAtUtc.HasValue)
+            {
+                DateTime actualStartedAtUtc;
+                try
+                {
+                    actualStartedAtUtc = process.StartTime.ToUniversalTime();
+                }
+                catch
+                {
+                    return EpgOwnedWorkerKillResult.IdentityUnavailable;
+                }
+
+                if (Math.Abs((actualStartedAtUtc - snapshot.ProcessStartedAtUtc.Value).TotalMilliseconds) > 1000)
+                    return EpgOwnedWorkerKillResult.IdentityMismatch;
+            }
+            else if (!string.IsNullOrWhiteSpace(snapshot.ProcessExecutablePath))
+            {
+                string actualPath;
+                try
+                {
+                    actualPath = process.MainModule?.FileName ?? string.Empty;
+                }
+                catch
+                {
+                    return EpgOwnedWorkerKillResult.IdentityUnavailable;
+                }
+
+                if (string.IsNullOrWhiteSpace(actualPath))
+                    return EpgOwnedWorkerKillResult.IdentityUnavailable;
+
+                if (!string.Equals(
+                        Path.GetFullPath(actualPath),
+                        Path.GetFullPath(snapshot.ProcessExecutablePath),
+                        StringComparison.OrdinalIgnoreCase))
+                    return EpgOwnedWorkerKillResult.IdentityMismatch;
+            }
+            else
+            {
+                return EpgOwnedWorkerKillResult.IdentityUnavailable;
+            }
+
+            process.Kill();
+            return EpgOwnedWorkerKillResult.Killed;
         }
-        catch { /* 既に終了している場合は無視 */ }
+        catch (ArgumentException)
+        {
+            return EpgOwnedWorkerKillResult.AlreadyExited;
+        }
+        catch
+        {
+            return EpgOwnedWorkerKillResult.Failed;
+        }
     }
 
     private static string TrimLog(string? value, int max = 80)
@@ -3527,8 +4732,12 @@ internal enum EpgProcessExitWaitResult
     Exited,
     Timeout,
     Cancelled,
-    NotFound
+    NotFound,
+    ProcessMissing
 }
+
+
+internal sealed record EpgWorkerTerminalEvidence(bool ResultExists, bool? WorkerSuccess, int? ExitCode, bool? TsReadOk, bool PreserveRuntimeArtifacts);
 
 internal sealed record EpgWorkerLaunchResult(bool Success, int ProcessId, string Message, string? StopSignalPath, string? ResultPath, string? ProgressPath, string? JobPath = null);
 
@@ -3541,6 +4750,7 @@ internal sealed record EpgCaptureFailureState(
     int MaxAttempts,
     DateTime CreatedAt);
 
+
 internal sealed record EpgOutputLifecycleState(
     bool Observed,
     bool NonZero,
@@ -3551,34 +4761,424 @@ internal sealed record EpgOutputLifecycleState(
     DateTime LastObservedAt,
     string Phase);
 
-internal sealed record ActiveEpgWorkerProcess(
-    int Pid,
-    string WorkerName,
-    string Group,
-    ushort TsId,
-    string ServiceName,
-    DateTime StartedAt,
-    string? StopSignalPath = null);
+internal enum EpgWorkerTerminalReason
+{
+    None,
+    Completed,
+    Failed,
+    Cancelled,
+    ProcessMissing
+}
 
-internal sealed record ActiveEpgWorkerTask(
+internal enum EpgOwnedWorkerKillResult
+{
+    Killed,
+    AlreadyExited,
+    IdentityMismatch,
+    IdentityUnavailable,
+    Failed
+}
+
+internal enum EpgWorkerProcessIdentityState
+{
+    Match,
+    Missing,
+    ReusedPid,
+    IdentityUnknown
+}
+
+internal sealed record ActiveEpgWorkerSnapshot(
     string Key,
     string RunId,
     int Pass,
     string Group,
     ushort TsId,
     string ServiceName,
-    DateTime StartedAt);
-
-internal sealed record EpgCooldownWait(
-    string Key,
-    string WorkerName,
-    string Group,
-    ushort TsId,
-    string ServiceName,
-    string SlotName,
     DateTime StartedAt,
-    DateTime Until);
+    long AttemptGeneration,
+    int ProcessId,
+    DateTime? ProcessStartedAtUtc,
+    string ProcessExecutablePath,
+    string WorkerName,
+    string? StopSignalPath,
+    EpgWorkerTerminalReason TerminalReason,
+    EpgWorkerTerminalReason PendingTerminalReason,
+    string ExternalFailureCycleId,
+    DateTime? ProcessMissingReportedAtUtc,
+    DateTime? MissingConvergenceDeadlineUtc,
+    bool ProcessExitObserved,
+    bool OwnerTaskCompleted,
+    EpgWorkerFinalizationState FinalizationState,
+    string FinalizerOwner,
+    string TunerName,
+    string Did,
+    string BonDriverFileName,
+    Guid? PoolLeaseId,
+    long OccupancyGeneration,
+    bool PoolLeaseCurrent)
+{
+    public bool IsTerminal => TerminalReason != EpgWorkerTerminalReason.None;
+}
 
+internal enum EpgWorkerFinalizationState
+{
+    Active,
+    Finalizing,
+    Finalized
+}
+
+internal sealed class ActiveEpgWorkerTask
+{
+    private readonly object gate = new();
+    private TaskCompletionSource<EpgWorkerExternalSignal> externalFailure =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private long attemptGeneration;
+    private readonly TaskCompletionSource<bool> ownerTaskCompletion =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int processId;
+    private DateTime? processStartedAtUtc;
+    private string processExecutablePath = string.Empty;
+    private string workerName = string.Empty;
+    private string? stopSignalPath;
+    private EpgWorkerTerminalReason terminalReason;
+    private EpgWorkerTerminalReason pendingTerminalReason;
+    private string externalFailureCycleId = string.Empty;
+    private DateTime? processMissingReportedAtUtc;
+    private DateTime? missingConvergenceDeadlineUtc;
+    private bool processExitObserved;
+    private bool ownerTaskCompleted;
+    private EpgWorkerFinalizationState finalizationState;
+    private string finalizerOwner = string.Empty;
+    private int exitMonitorStarted;
+    private int missingConvergenceMonitorStarted;
+    private TunerLease? tunerLease;
+    private Action? deferredAdmissionRelease;
+
+    public ActiveEpgWorkerTask(string key, string runId, int pass, string group, ushort tsId, string serviceName, DateTime startedAt)
+    {
+        Key = key;
+        RunId = runId;
+        Pass = pass;
+        Group = group;
+        TsId = tsId;
+        ServiceName = serviceName;
+        StartedAt = startedAt;
+    }
+
+    public string Key { get; }
+    public string RunId { get; }
+    public int Pass { get; }
+    public string Group { get; }
+    public ushort TsId { get; }
+    public string ServiceName { get; }
+    public DateTime StartedAt { get; }
+
+    public bool TryAttachLease(TunerLease lease, out long generation, out string rejectionReason)
+    {
+        lock (gate)
+        {
+            generation = attemptGeneration;
+            rejectionReason = string.Empty;
+            if (terminalReason != EpgWorkerTerminalReason.None || finalizationState != EpgWorkerFinalizationState.Active)
+            {
+                rejectionReason = "logical_worker_finalizing_or_terminal";
+                return false;
+            }
+            // A new attempt may start only after the previous attempt no longer owns a lease and,
+            // if it ever owned a process, that process exit has been observed. Do not overwrite live
+            // attempt resources and rely on a later monitor to repair ownership.
+            if (tunerLease is not null)
+            {
+                rejectionReason = "previous_attempt_lease_not_converged";
+                return false;
+            }
+            if (processId > 0 && !processExitObserved)
+            {
+                rejectionReason = "previous_attempt_process_not_converged";
+                return false;
+            }
+            // EPG_WORKER_ATTEMPT_OWNERSHIP_INVARIANT:
+            // retryは同一logical worker task内でも別attemptである。lease/process/external signalを
+            // attempt境界で必ず切り替え、旧attempt monitorが新attempt資源へ触れないようにする。
+            attemptGeneration++;
+            generation = attemptGeneration;
+            tunerLease = lease;
+            processId = 0;
+            processStartedAtUtc = null;
+            processExecutablePath = string.Empty;
+            workerName = string.Empty;
+            stopSignalPath = null;
+            externalFailure = new TaskCompletionSource<EpgWorkerExternalSignal>(TaskCreationOptions.RunContinuationsAsynchronously);
+            externalFailureCycleId = string.Empty;
+            processMissingReportedAtUtc = null;
+            missingConvergenceDeadlineUtc = null;
+            processExitObserved = false;
+            Interlocked.Exchange(ref missingConvergenceMonitorStarted, 0);
+            return true;
+        }
+    }
+
+    public bool AttachProcess(long expectedAttemptGeneration, int pid, string name, string? signalPath)
+    {
+        DateTime? startedAtUtc = null;
+        var executablePath = string.Empty;
+        try
+        {
+            using var process = Process.GetProcessById(pid);
+            startedAtUtc = process.StartTime.ToUniversalTime();
+            try { executablePath = process.MainModule?.FileName ?? string.Empty; } catch { }
+        }
+        catch { }
+
+        lock (gate)
+        {
+            if (attemptGeneration != expectedAttemptGeneration
+                || terminalReason != EpgWorkerTerminalReason.None
+                || finalizationState != EpgWorkerFinalizationState.Active)
+                return false;
+            processId = pid;
+            processStartedAtUtc = startedAtUtc;
+            processExecutablePath = executablePath;
+            workerName = name;
+            stopSignalPath = signalPath;
+            return true;
+        }
+    }
+
+    public bool MarkProcessExitObserved(long expectedAttemptGeneration)
+    {
+        lock (gate)
+        {
+            if (attemptGeneration != expectedAttemptGeneration)
+                return false;
+            processExitObserved = true;
+            return true;
+        }
+    }
+
+    public bool ReportProcessMissing(string cycleId, long expectedAttemptGeneration)
+    {
+        lock (gate)
+        {
+            if (attemptGeneration != expectedAttemptGeneration || terminalReason != EpgWorkerTerminalReason.None) return false;
+            externalFailureCycleId = cycleId ?? string.Empty;
+            if (!processMissingReportedAtUtc.HasValue)
+            {
+                processMissingReportedAtUtc = DateTime.UtcNow;
+                // Owner task is signalled immediately. The deadline only bounds how long an orphaned
+                // attempt may keep its own lease after its process disappeared. The monitor never
+                // finalizes or removes the logical worker owner; retry/owner completion retains that authority.
+                missingConvergenceDeadlineUtc = processMissingReportedAtUtc.Value.AddSeconds(5);
+            }
+        }
+        return externalFailure.TrySetResult(new EpgWorkerExternalSignal(EpgWorkerExternalSignalKind.ProcessMissing, cycleId ?? string.Empty));
+    }
+
+    public Task<EpgWorkerExternalSignal> WaitForExternalFailureAsync(long expectedAttemptGeneration, CancellationToken cancellationToken)
+    {
+        Task<EpgWorkerExternalSignal> task;
+        lock (gate)
+        {
+            if (attemptGeneration != expectedAttemptGeneration)
+                return Task.FromResult(new EpgWorkerExternalSignal(EpgWorkerExternalSignalKind.ProcessMissing, "stale_attempt"));
+            task = externalFailure.Task;
+        }
+        return task.WaitAsync(cancellationToken);
+    }
+
+    public bool TryFinalize(EpgWorkerTerminalReason reason)
+    {
+        lock (gate)
+        {
+            if (terminalReason != EpgWorkerTerminalReason.None) return false;
+            if (pendingTerminalReason == EpgWorkerTerminalReason.None || reason != EpgWorkerTerminalReason.Completed)
+                pendingTerminalReason = reason;
+            return true;
+        }
+    }
+
+    public void MarkOwnerTaskCompleted()
+    {
+        lock (gate) ownerTaskCompleted = true;
+        ownerTaskCompletion.TrySetResult(true);
+    }
+
+    public async Task<bool> WaitForOwnerTaskCompletionAsync(TimeSpan upperBound, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (ownerTaskCompleted) return true;
+        }
+
+        try
+        {
+            await ownerTaskCompletion.Task.WaitAsync(upperBound, cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (TimeoutException)
+        {
+            return false;
+        }
+    }
+
+    public async Task WaitForOwnerTaskOrDeadlineAsync(DateTime deadlineUtc, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (ownerTaskCompleted) return;
+        }
+
+        var remaining = deadlineUtc - DateTime.UtcNow;
+        if (remaining <= TimeSpan.Zero) return;
+
+        var deadlineTask = Task.Delay(remaining, cancellationToken);
+        await Task.WhenAny(ownerTaskCompletion.Task, deadlineTask).ConfigureAwait(false);
+    }
+
+    public bool TryBeginFinalization(string owner, long expectedAttemptGeneration)
+    {
+        lock (gate)
+        {
+            if (attemptGeneration != expectedAttemptGeneration)
+                return false;
+            if (finalizationState != EpgWorkerFinalizationState.Active) return false;
+            finalizationState = EpgWorkerFinalizationState.Finalizing;
+            finalizerOwner = owner ?? string.Empty;
+            return true;
+        }
+    }
+
+    public void MarkFinalized()
+    {
+        lock (gate) finalizationState = EpgWorkerFinalizationState.Finalized;
+    }
+
+    public void ResetFinalization()
+    {
+        lock (gate)
+        {
+            if (finalizationState != EpgWorkerFinalizationState.Finalizing) return;
+            finalizationState = EpgWorkerFinalizationState.Active;
+            finalizerOwner = string.Empty;
+        }
+    }
+
+    public bool FinalizeRequestedOr(EpgWorkerTerminalReason fallback)
+    {
+        lock (gate)
+        {
+            if (terminalReason != EpgWorkerTerminalReason.None) return false;
+            terminalReason = pendingTerminalReason != EpgWorkerTerminalReason.None
+                ? pendingTerminalReason
+                : fallback;
+            return true;
+        }
+    }
+
+    public void DeferAdmissionRelease(Action? releaseAdmission)
+    {
+        if (releaseAdmission is null) return;
+        lock (gate)
+            deferredAdmissionRelease ??= releaseAdmission;
+    }
+
+    public bool ReleaseLeaseForAttempt(long expectedAttemptGeneration)
+    {
+        TunerLease? lease;
+        lock (gate)
+        {
+            if (attemptGeneration != expectedAttemptGeneration)
+                return false;
+            lease = tunerLease;
+            if (lease is null)
+                return true;
+        }
+
+        try
+        {
+            lease.Dispose();
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (lease.IsIdentityCurrent)
+            return false;
+
+        Action? releaseAdmission = null;
+        lock (gate)
+        {
+            if (attemptGeneration != expectedAttemptGeneration)
+                return false;
+            if (ReferenceEquals(tunerLease, lease))
+                tunerLease = null;
+            if (tunerLease is not null)
+                return false;
+            releaseAdmission = deferredAdmissionRelease;
+            deferredAdmissionRelease = null;
+        }
+
+        try { releaseAdmission?.Invoke(); } catch { }
+        return true;
+    }
+
+    public bool IsCurrentAttempt(long expectedAttemptGeneration)
+    {
+        lock (gate) return attemptGeneration == expectedAttemptGeneration;
+    }
+
+    public bool TrySnapshotAttempt(long expectedAttemptGeneration, out ActiveEpgWorkerSnapshot snapshot)
+    {
+        lock (gate)
+        {
+            snapshot = CreateSnapshotUnsafe();
+            return attemptGeneration == expectedAttemptGeneration;
+        }
+    }
+
+    public bool TryStartExitMonitor() => Interlocked.CompareExchange(ref exitMonitorStarted, 1, 0) == 0;
+    public void ResetExitMonitor() => Interlocked.Exchange(ref exitMonitorStarted, 0);
+    public bool TryStartMissingConvergenceMonitor() => Interlocked.CompareExchange(ref missingConvergenceMonitorStarted, 1, 0) == 0;
+    public void ResetMissingConvergenceMonitor(long expectedAttemptGeneration)
+    {
+        if (IsCurrentAttempt(expectedAttemptGeneration))
+            Interlocked.Exchange(ref missingConvergenceMonitorStarted, 0);
+    }
+
+    public ActiveEpgWorkerSnapshot Snapshot()
+    {
+        lock (gate) return CreateSnapshotUnsafe();
+    }
+
+    private ActiveEpgWorkerSnapshot CreateSnapshotUnsafe()
+        => new(
+            Key, RunId, Pass, Group, TsId, ServiceName, StartedAt,
+            attemptGeneration, processId, processStartedAtUtc, processExecutablePath, workerName, stopSignalPath, terminalReason, pendingTerminalReason,
+            externalFailureCycleId, processMissingReportedAtUtc, missingConvergenceDeadlineUtc,
+            processExitObserved, ownerTaskCompleted, finalizationState, finalizerOwner,
+            tunerLease?.Name ?? string.Empty, tunerLease?.Did ?? string.Empty, tunerLease?.BonDriverFileName ?? string.Empty,
+            tunerLease?.PoolLeaseId, tunerLease?.OccupancyGeneration ?? 0, tunerLease?.IsCurrent == true);
+}
+
+
+internal enum EpgWorkerExternalSignalKind
+{
+    ProcessMissing
+}
+
+internal sealed record EpgWorkerExternalSignal(EpgWorkerExternalSignalKind Kind, string Detail);
+
+internal sealed class EpgWorkerProcessMissingException : Exception
+{
+    public EpgWorkerProcessMissingException(string cycleId)
+        : base("EPG worker process disappeared during an active run.")
+    {
+        CycleId = cycleId;
+    }
+
+    public string CycleId { get; }
+}
 
 internal sealed record TsGroup(
     string Key,
@@ -3589,7 +5189,7 @@ internal sealed record TsGroup(
 
 // ─── 公開型 ──────────────────────────────────────────────────────
 
-internal sealed record PreRecordProbeResult(bool TargetFound, int ImportedEvents, string EventSummary);
+internal sealed record PreRecordProbeResult(bool TargetFound, IReadOnlyList<EpgEvent> Events, string EventSummary);
 
 public sealed record EpgCaptureResult(
     bool Success,
@@ -3601,6 +5201,10 @@ public sealed record EpgCaptureResult(
     string Message,
     string Detail)
 {
+    public string MissingScopes { get; init; } = string.Empty;
+    public string CompletedScopes { get; init; } = string.Empty;
+    public IReadOnlyList<EpgEvent> PreRecordEvents { get; init; } = Array.Empty<EpgEvent>();
+
     public static EpgCaptureResult Failed(string message)
         => new(false, 0, 0, 0, "FAILED", 0, message, "result=FAILED");
 }
@@ -3624,5 +5228,5 @@ public sealed record EpgCaptureStatus
     public string RunPurpose { get; init; } = "normal_epg_capture";
     public string RunSource { get; init; } = "";
     public string UiMode { get; init; } = "Visible";
-    public string CancelRoute { get; init; } = "WidgetOrTray";
+    public string CancelRoute { get; init; } = "VisibleWidget";
 }

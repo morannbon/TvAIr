@@ -1,6 +1,7 @@
-using TvAIr.Channel;
+﻿using TvAIr.Channel;
 using TvAIr.Core;
 using TvAIr.Epg;
+using TvAIr.Epg.Projection;
 using TvAIr.Tuner;
 
 namespace TvAIr.Schedule;
@@ -14,7 +15,9 @@ public sealed class ReservationPresentationService
     private readonly LogRepository _log;
     private readonly ChannelFileLoader _channelLoader;
     private readonly ReservationAllocationRouteService _allocationRoute;
-    private readonly EpgStore _epgStore;
+    private readonly IProgramEventSource _programEvents;
+    private readonly ReservationProjectionMetadataStore _projectionMetadata;
+    private readonly SystemEpgResponsibilityPlanService _systemEpgResponsibilityPlan;
 
     public ReservationPresentationService(
         ReservationStore store,
@@ -24,7 +27,9 @@ public sealed class ReservationPresentationService
         LogRepository log,
         ChannelFileLoader channelLoader,
         ReservationAllocationRouteService allocationRoute,
-        EpgStore epgStore)
+        IProgramEventSource programEvents,
+        ReservationProjectionMetadataStore projectionMetadata,
+        SystemEpgResponsibilityPlanService systemEpgResponsibilityPlan)
     {
         _store = store;
         _ini = ini;
@@ -33,16 +38,26 @@ public sealed class ReservationPresentationService
         _log = log;
         _channelLoader = channelLoader;
         _allocationRoute = allocationRoute;
-        _epgStore = epgStore;
+        _programEvents = programEvents;
+        _projectionMetadata = projectionMetadata;
+        _systemEpgResponsibilityPlan = systemEpgResponsibilityPlan;
     }
+
+    public ReservationPresentationItem? GetReservation(int id)
+        => GetReservations().FirstOrDefault(x => x.Id == id);
 
     public IReadOnlyList<ReservationPresentationItem> GetReservations()
     {
         try
         {
             var reservations = _store.GetAll();
-            reservations = ProjectSystemEpgVisibleRows(reservations);
-            return BuildPresentationItems(reservations);
+            var projection = BuildSystemEpgVisibleProjection(reservations);
+            var visible = reservations.Where(r => r.Source != ReservationSource.Epg).ToList();
+            visible.AddRange(projection.Rows
+                .OrderBy(r => r.StartTime)
+                .ThenBy(r => ResolveRecordingTunerOrder(projection.RecordingTuners, projection.PriorityNames.TryGetValue(r.Id, out var priority) ? priority : r.TunerName))
+                .ThenBy(r => r.Id));
+            return BuildPresentationItems(visible, projection.PriorityNames);
         }
         catch (Exception ex)
         {
@@ -56,8 +71,8 @@ public sealed class ReservationPresentationService
         try
         {
             var items = GetReservations()
-                .Where(x => x.Source == "keyword")
-                .Where(IsListVisibleReservation)
+                .Where(x => x.SourceKind == ReservationSource.Keyword)
+                .Where(x => x.StatusKind is ReservationStatus.Scheduled or ReservationStatus.Starting or ReservationStatus.Recording or ReservationStatus.Stopping)
                 .OrderBy(x => x.StartTime)
                 .ThenBy(x => x.ServiceName)
                 .ThenBy(x => x.Title)
@@ -94,70 +109,94 @@ public sealed class ReservationPresentationService
     }
 
 
-    private static bool IsListVisibleReservation(ReservationPresentationItem item)
-    {
-        var status = (item.Status ?? string.Empty).Trim().ToLowerInvariant();
-        return status == "scheduled" || status == "recording";
-    }
-
-    private IReadOnlyList<Reservation> ProjectSystemEpgVisibleRows(IReadOnlyList<Reservation> reservations)
-    {
-        var userRows = reservations
-            .Where(r => r.Source != ReservationSource.Epg)
-            .ToList();
-
-        var projection = BuildSystemEpgVisibleProjection(reservations);
-        if (projection.Rows.Count == 0)
-            return userRows;
-
-        userRows.AddRange(projection.Rows
-            .OrderBy(r => r.StartTime)
-            .ThenBy(r => ResolveRecordingTunerOrder(projection.RecordingTuners, r.TunerName))
-            .ThenBy(r => r.Id));
-        return userRows;
-    }
-
     private SystemEpgVisibleProjection BuildSystemEpgVisibleProjection(IReadOnlyList<Reservation> reservations)
     {
         var recordingTuners = GetRecordingTuners();
         if (recordingTuners.Count == 0)
-            return new SystemEpgVisibleProjection(recordingTuners, Array.Empty<Reservation>());
+            return new SystemEpgVisibleProjection(recordingTuners, Array.Empty<Reservation>(), new Dictionary<int, string>());
 
         var now = DateTime.Now;
-        var epgRowsByTuner = reservations
+        var preRecordEnabled = _ini.EpgPreRecordMinutes > 0;
+        var dailyEnabled = _ini.EpgEnabled;
+        if (!preRecordEnabled && !dailyEnabled)
+            return new SystemEpgVisibleProjection(recordingTuners, Array.Empty<Reservation>(), new Dictionary<int, string>());
+
+        var activeSystemRows = reservations
             .Where(r => IsActiveFutureSystemEpgRow(r, now))
-            .Where(r => !string.IsNullOrWhiteSpace(r.TunerName))
-            .GroupBy(r => r.TunerName, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
+            .ToList();
+        var plan = _systemEpgResponsibilityPlan.Build(reservations, now);
+        var selectedByParent = plan.PreRecordResponsibilities
+            .GroupBy(x => x.ParentReservationId)
+            .ToDictionary(g => g.Key, g => g.First());
 
-        var visibleRows = new List<Reservation>(recordingTuners.Count);
-        var dailyWindows = _ini.EpgEnabled
-            ? BuildDailyEpgWindows(recordingTuners, now)
-            : new Dictionary<string, DailyEpgWindow>(StringComparer.OrdinalIgnoreCase);
+        var visibleRows = new List<Reservation>();
+        var priorityNames = new Dictionary<int, string>();
 
-        var virtualIndex = 0;
-        foreach (var tuner in recordingTuners)
+        // EPG確認はSystemEpgResponsibilityPlanが選んだ直近責務だけを表示する。
+        // 直近は「現在から概ね3時間以内の予約イベント群」と、そこに候補が無い場合の
+        // 「予約リスト全体の先頭1件」の二軸。各Tunerごとの未来先頭を独立に先取りしない。
+        // Presentation層独自の再計算は禁止。
+        if (preRecordEnabled)
         {
-            epgRowsByTuner.TryGetValue(tuner.Name, out var tunerRows);
-            tunerRows ??= new List<Reservation>();
-
-            var preRecord = SelectVisiblePreRecordEpg(tunerRows);
-            if (preRecord is not null)
+            foreach (var row in activeSystemRows
+                         .Where(IsPreRecordEpgRow)
+                         .Where(r => r.SourceRuleId.HasValue && selectedByParent.ContainsKey(r.SourceRuleId.Value))
+                         .OrderBy(r => r.Status == ReservationStatus.Recording ? 0 : 1)
+                         .ThenBy(r => r.StartTime)
+                         .ThenBy(r => r.Id))
             {
-                visibleRows.Add(preRecord);
-                continue;
+                visibleRows.Add(row);
+                var responsibility = selectedByParent[row.SourceRuleId!.Value];
+                if (!string.IsNullOrWhiteSpace(responsibility.PriorityName))
+                    priorityNames[row.Id] = responsibility.PriorityName;
             }
-
-            if (!_ini.EpgEnabled)
-                continue;
-
-            var daily = SelectVisibleDailyEpg(tunerRows)
-                ?? BuildVirtualDailyEpgRow(tuner, dailyWindows, now, --virtualIndex);
-            visibleRows.Add(daily);
         }
 
-        return new SystemEpgVisibleProjection(recordingTuners, visibleRows);
+        if (dailyEnabled)
+        {
+            // SYSTEM_EPG_DAILY_ENTRY_SINGLE_SOURCE:
+            // 定時EPGの表示時刻はEpgSchedulerがPlanner結果から永続化したSystemDailyEpg行だけを正本とする。
+            // Presentation層で設定時刻・深度・局数から仮想枠を再計算すると、可動枠の後方移動や
+            // pending/skipで実行行が存在しない状態を後段から上書きしてしまうため、仮想Daily行は生成しない。
+            var dailyRows = activeSystemRows
+                .Where(IsDailyEpgRow)
+                .Where(r => !string.IsNullOrWhiteSpace(r.TunerName))
+                .GroupBy(r => r.TunerName, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
+
+            // 選択済み直近PreRecが責務を持つTunerだけ、同じTunerのDaily fallbackを隠す。
+            // それ以外はDailyへ収束する。ON/ONでも1物理録画Tunerあたり可視System責務は最大1件。
+            var usedPriorityNames = plan.PreRecordResponsibilities
+                .Where(x => !string.IsNullOrWhiteSpace(x.PriorityName))
+                .Select(x => x.PriorityName)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var tuner in recordingTuners)
+            {
+                if (usedPriorityNames.Contains(tuner.Name))
+                    continue;
+                if (!dailyRows.TryGetValue(tuner.Name, out var tunerRows))
+                    continue;
+
+                var daily = SelectVisibleDailyEpg(tunerRows);
+                if (daily is null)
+                    continue;
+
+                visibleRows.Add(daily);
+                priorityNames[daily.Id] = tuner.Name;
+            }
+        }
+
+        return new SystemEpgVisibleProjection(recordingTuners, visibleRows, priorityNames);
     }
+
+    private static Reservation? SelectVisibleDailyEpg(IEnumerable<Reservation> rows)
+        => rows
+            .Where(IsDailyEpgRow)
+            .OrderBy(r => r.Status == ReservationStatus.Recording ? 0 : 1)
+            .ThenBy(r => r.StartTime)
+            .ThenBy(r => r.Id)
+            .FirstOrDefault();
 
     private IReadOnlyList<TunerProfile> GetRecordingTuners()
         => _tunerProfiles
@@ -172,30 +211,11 @@ public sealed class ReservationPresentationService
         && (r.Status == ReservationStatus.Scheduled || r.Status == ReservationStatus.Recording)
         && r.EndTime > now;
 
-    private static Reservation? SelectVisiblePreRecordEpg(IEnumerable<Reservation> rows)
-        => rows
-            .Where(IsPreRecordEpgRow)
-            .OrderBy(r => r.Status == ReservationStatus.Recording ? 0 : 1)
-            .ThenBy(r => r.StartTime)
-            .ThenBy(r => r.Id)
-            .FirstOrDefault();
-
-    private static Reservation? SelectVisibleDailyEpg(IEnumerable<Reservation> rows)
-        => rows
-            .Where(IsDailyEpgRow)
-            .OrderBy(r => r.Status == ReservationStatus.Recording ? 0 : 1)
-            .ThenBy(r => r.StartTime)
-            .ThenBy(r => r.Id)
-            .FirstOrDefault();
-
     private static bool IsPreRecordEpgRow(Reservation r)
-        => string.Equals(r.SourceRuleName, "PreRecEpg", StringComparison.OrdinalIgnoreCase)
-        || r.Title.StartsWith("EPG確認", StringComparison.OrdinalIgnoreCase)
-        || r.Title.StartsWith("録画前EPG確認", StringComparison.OrdinalIgnoreCase);
+        => ReservationIntentContract.IsPreRecordEpg(r);
 
     private static bool IsDailyEpgRow(Reservation r)
-        => !IsPreRecordEpgRow(r)
-        && r.Title.StartsWith("EPG取得", StringComparison.OrdinalIgnoreCase);
+        => ReservationIntentContract.IsDailyEpg(r);
 
     private static int ResolveRecordingTunerOrder(IReadOnlyList<TunerProfile> tuners, string? tunerName)
     {
@@ -208,136 +228,14 @@ public sealed class ReservationPresentationService
         return int.MaxValue;
     }
 
-    private Dictionary<string, DailyEpgWindow> BuildDailyEpgWindows(IReadOnlyList<TunerProfile> recordingTuners, DateTime now)
-    {
-        var start = CalcNextDailyEpgStart(now).AddMinutes(-1);
-        var result = new Dictionary<string, DailyEpgWindow>(StringComparer.OrdinalIgnoreCase);
-        if (recordingTuners.Count == 0)
-            return result;
-
-        var tunersByGroup = BuildDailyEpgTunerGroups(recordingTuners);
-        var durationByGroup = EstimateDailyEpgDurationByGroup(tunersByGroup);
-
-        foreach (var (group, tuners) in tunersByGroup)
-        {
-            if (tuners.Count == 0) continue;
-            var duration = durationByGroup.TryGetValue(group, out var value) ? value : TimeSpan.FromSeconds(EpgDurationPolicy.CreateSchedulePlan(_ini.EpgDepth, 0).RecDurationSeconds);
-            var end = CeilTo30Min(start.Add(duration));
-            foreach (var tuner in tuners)
-                result[tuner.Name] = new DailyEpgWindow(start, end);
-        }
-
-        return result;
-    }
-
-    private static Dictionary<string, List<TunerProfile>> BuildDailyEpgTunerGroups(IReadOnlyList<TunerProfile> recordingTuners)
-    {
-        var result = new Dictionary<string, List<TunerProfile>>(StringComparer.OrdinalIgnoreCase);
-        foreach (var tuner in recordingTuners)
-        {
-            var group = string.Equals(tuner.Group, "HYBRID", StringComparison.OrdinalIgnoreCase)
-                ? "BSCS"
-                : (string.IsNullOrWhiteSpace(tuner.Group) ? "GR" : tuner.Group.ToUpperInvariant());
-            if (!result.TryGetValue(group, out var list))
-            {
-                list = new List<TunerProfile>();
-                result[group] = list;
-            }
-            list.Add(tuner);
-        }
-        return result;
-    }
-
-    private Dictionary<string, TimeSpan> EstimateDailyEpgDurationByGroup(Dictionary<string, List<TunerProfile>> tunersByGroup)
-    {
-        var durationByGroup = new Dictionary<string, TimeSpan>(StringComparer.OrdinalIgnoreCase);
-        var basePlan = EpgDurationPolicy.CreateSchedulePlan(_ini.EpgDepth, 0);
-        var fallbackSecondsByGroup = tunersByGroup.ToDictionary(kv => kv.Key, kv => basePlan.RecDurationSeconds * Math.Max(1, kv.Value.Count), StringComparer.OrdinalIgnoreCase);
-
-        try
-        {
-            var targets = _channelLoader.Load().Targets;
-            var totalSeconds = targets
-                .GroupBy(t => new
-                {
-                    Group = t.ChannelArgument.Contains("/chspace", StringComparison.OrdinalIgnoreCase) ? "BSCS" : "GR",
-                    t.OriginalNetworkId,
-                    t.TransportStreamId
-                })
-                .GroupBy(g => g.Key.Group)
-                .ToDictionary(
-                    g => g.Key,
-                    g => g.Sum(ts => EpgDurationPolicy.CreateSchedulePlan(_ini.EpgDepth, 0, ts.Count()).RecDurationSeconds),
-                    StringComparer.OrdinalIgnoreCase);
-
-            foreach (var (group, tuners) in tunersByGroup)
-            {
-                var total = totalSeconds.TryGetValue(group, out var seconds) ? seconds : fallbackSecondsByGroup[group];
-                var parallel = Math.Max(1, tuners.Count);
-                durationByGroup[group] = TimeSpan.FromSeconds((int)Math.Ceiling((double)total / parallel));
-            }
-        }
-        catch
-        {
-            foreach (var (group, tuners) in tunersByGroup)
-            {
-                var parallel = Math.Max(1, tuners.Count);
-                durationByGroup[group] = TimeSpan.FromSeconds((int)Math.Ceiling((double)fallbackSecondsByGroup[group] / parallel));
-            }
-        }
-
-        return durationByGroup;
-    }
-
-    private Reservation BuildVirtualDailyEpgRow(TunerProfile tuner, IReadOnlyDictionary<string, DailyEpgWindow> dailyWindows, DateTime now, int virtualId)
-    {
-        var window = dailyWindows.TryGetValue(tuner.Name, out var value)
-            ? value
-            : new DailyEpgWindow(CalcNextDailyEpgStart(now).AddMinutes(-1), CalcNextDailyEpgStart(now).AddMinutes(29));
-
-        return new Reservation
-        {
-            Id = -100000 + virtualId,
-            Title = $"EPG取得（{tuner.Name}）",
-            StartTime = window.Start,
-            EndTime = window.End,
-            Status = ReservationStatus.Scheduled,
-            Source = ReservationSource.Epg,
-            IsEnabled = true,
-            IsConflicted = false,
-            TunerName = tuner.Name,
-            ServiceName = string.Empty,
-            SourceRuleName = string.Empty,
-            CreatedAt = now,
-            UpdatedAt = now
-        };
-    }
-
-    private DateTime CalcNextDailyEpgStart(DateTime now)
-    {
-        var hour = Math.Clamp(_ini.EpgHour, 0, 23);
-        var minute = Math.Clamp(_ini.EpgMinute, 0, 59);
-        var baseTime = new DateTime(now.Year, now.Month, now.Day, hour, minute, 0, now.Kind);
-        if (baseTime <= now) baseTime = baseTime.AddDays(1);
-        return baseTime;
-    }
-
-    private static DateTime CeilTo30Min(DateTime value)
-    {
-        var tick = TimeSpan.FromMinutes(30).Ticks;
-        return new DateTime(((value.Ticks + tick - 1) / tick) * tick, value.Kind);
-    }
-
     private sealed record SystemEpgVisibleProjection(
         IReadOnlyList<TunerProfile> RecordingTuners,
-        IReadOnlyList<Reservation> Rows);
+        IReadOnlyList<Reservation> Rows,
+        IReadOnlyDictionary<int, string> PriorityNames);
 
-    private readonly record struct DailyEpgWindow(DateTime Start, DateTime End);
-
-    private IReadOnlyList<ReservationPresentationItem> BuildPresentationItems(IReadOnlyList<Reservation> reservations)
+    private IReadOnlyList<ReservationPresentationItem> BuildPresentationItems(IReadOnlyList<Reservation> reservations, IReadOnlyDictionary<int, string>? priorityOverrides = null)
     {
         var chainMap = BuildChainMap();
-        var conflictPartnerMap = BuildConflictPartnerMap(reservations);
         var items = new List<ReservationPresentationItem>(reservations.Count);
 
         foreach (var r in reservations)
@@ -345,13 +243,19 @@ public sealed class ReservationPresentationService
             try
             {
                 chainMap.TryGetValue(r.Id, out var chainInfo);
-                conflictPartnerMap.TryGetValue(r.Id, out var partners);
-                partners ??= Array.Empty<string>();
 
-                var sourceLabel = GetSourceLabel(r);
+                var sourceLabel = ReservationOriginClassifier.GetUserSourceLabel(r);
                 var displayStatusLabel = BuildDisplayStatusLabel(r, sourceLabel);
-                var conflictPrefix = BuildConflictPrefix(r, partners);
+                // RESERVATION_CONFLICT_PROJECTION_SINGLE_SOURCE:
+                // IsConflicted is FinalAllocationCommit が永続化した競合正本。Presentation層で
+                // 時刻重複やProgramGuideMissing重複から別の競合状態・競合相手を再計算しない。
+                var conflictPrefix = string.Empty;
+                var priorityName = priorityOverrides is not null && priorityOverrides.TryGetValue(r.Id, out var projectedPriority)
+                    ? projectedPriority
+                    : ResolvePresentationTunerName(r);
                 var title = ResolveReservationTitle(r);
+                if (IsPreRecordEpgRow(r) && !string.IsNullOrWhiteSpace(priorityName))
+                    title = $"EPG確認（{priorityName}）";
                 var resolvedServiceName = ResolveServiceName(r);
                 var genreCodes = ResolveGenreCodes(r);
                 var origin = ReservationOriginClassifier.Classify(r);
@@ -366,17 +270,21 @@ public sealed class ReservationPresentationService
                     Title = title,
                     TitleDisplay = string.IsNullOrEmpty(conflictPrefix) ? title : $"{conflictPrefix}{title}",
                     ConflictPrefix = conflictPrefix,
-                    ConflictTitles = partners,
+                    ConflictTitles = Array.Empty<string>(),
                     StartTime = r.StartTime,
                     EndTime = r.EndTime,
                     Status = r.Status.ToString().ToLowerInvariant(),
                     Source = r.Source.ToString().ToLowerInvariant(),
+                    StatusKind = r.Status,
+                    SourceKind = r.Source,
+                    SystemEpgKind = IsPreRecordEpgRow(r) ? "pre-record-epg" : IsDailyEpgRow(r) ? "daily-epg" : string.Empty,
                     SourceLabel = sourceLabel,
                     DisplayStatusLabel = displayStatusLabel,
                     ChannelArgument = r.ChannelArgument ?? string.Empty,
                     IsConflicted = r.IsConflicted,
                     IsEnabled = r.IsEnabled,
-                    TunerName = ResolvePresentationTunerName(r),
+                    TunerName = priorityName,
+                    PriorityName = priorityName,
                     ActualTunerName = r.ActualTunerName ?? string.Empty,
                     HasRecordingStarted = r.RecordingStartedAt.HasValue,
                     RecordingStartedAt = r.RecordingStartedAt,
@@ -390,6 +298,8 @@ public sealed class ReservationPresentationService
                     ReservationIdentity = origin.Identity.ToString(),
                     IsProgramGuideMissing = origin.IsProgramGuideMissingProgramRule,
                     IsResolvedEventReservation = origin.IsResolvedEventReservation,
+                    CanToggleEnabled = ReservationOperationPolicy.CanToggleEnabled(r),
+                    CanCancel = ReservationOperationPolicy.CanCancel(r),
                     ChainRole = chainInfo?.Role ?? string.Empty,
                     ChainLabel = chainInfo?.Label ?? string.Empty,
                     CreatedAt = r.CreatedAt,
@@ -413,7 +323,7 @@ public sealed class ReservationPresentationService
         if (!reservation.IsEnabled || reservation.IsConflicted)
             return string.Empty;
 
-        if (reservation.Status == ReservationStatus.Recording)
+        if (reservation.Status is ReservationStatus.Starting or ReservationStatus.Recording or ReservationStatus.Stopping)
             return !string.IsNullOrWhiteSpace(reservation.ActualTunerName)
                 ? reservation.ActualTunerName
                 : reservation.TunerName ?? string.Empty;
@@ -428,14 +338,8 @@ public sealed class ReservationPresentationService
     {
         try
         {
-            // release_contract ARIB raw-field: 予約行のジャンルも、同一EIDで取得済みの EPG 値だけを使う。
-            // 同一時刻帯の既存イベントを探して色を補う経路は、EPG取得結果の見え方を曖昧にするため撤去。
-            var ev = _epgStore.GetOne(reservation.NetworkId, reservation.TransportStreamId, reservation.ServiceId, reservation.EventId);
-            if (!string.IsNullOrWhiteSpace(ev?.GenreCodes))
-                return ev.GenreCodes;
-
-            var byRange = ResolveGenreCodesFromRangeFallback(reservation);
-            return byRange ?? string.Empty;
+            var ev = ResolveProjectedEvent(reservation);
+            return ev?.GenreCodes ?? string.Empty;
         }
         catch (Exception ex)
         {
@@ -444,81 +348,25 @@ public sealed class ReservationPresentationService
         }
     }
 
-    private string? ResolveGenreCodesFromRangeFallback(Reservation reservation)
+    private ProjectedProgramEvent? ResolveProjectedEvent(Reservation reservation)
     {
-        // release_contract:
-        // Some user-facing reservations, especially program/search-generated rows, can carry
-        // incomplete triplet/EID metadata while still showing the correct service/title/time.
-        // Do not let that leak into the UI as uncolored rows.  The fallback remains bounded
-        // to the reservation time window and prefers exact service identity before service name.
-        try
+        var metadata = _projectionMetadata.Get(reservation.Id);
+        if (metadata is not null && metadata.OverlayEventId != 0)
         {
-            var candidates = _epgStore.GetByRange(reservation.StartTime.AddHours(-3), reservation.EndTime.AddHours(3))
-                .Where(ev => ev is not null)
-                .Where(ev => !string.IsNullOrWhiteSpace(ev.GenreCodes))
-                .Where(ev => ev.End > reservation.StartTime && ev.Start < reservation.EndTime)
-                .Select(ev => new
-                {
-                    Event = ev,
-                    ServiceScore = ScoreReservationGenreServiceMatch(reservation, ev),
-                    TitleScore = ScoreReservationGenreTitleMatch(reservation.Title, ev.Title),
-                    OverlapSeconds = Math.Max(0, (Math.Min(ev.End.Ticks, reservation.EndTime.Ticks) - Math.Max(ev.Start.Ticks, reservation.StartTime.Ticks)) / TimeSpan.TicksPerSecond)
-                })
-                .Where(x => x.ServiceScore > 0 || x.TitleScore > 0)
-                .OrderByDescending(x => x.ServiceScore)
-                .ThenByDescending(x => x.TitleScore)
-                .ThenByDescending(x => x.OverlapSeconds)
-                .ThenBy(x => Math.Abs((x.Event.Start - reservation.StartTime).TotalSeconds))
-                .ThenByDescending(x => x.Event.UpdatedAt)
-                .Take(1)
-                .ToList();
-
-            return candidates.FirstOrDefault()?.Event.GenreCodes;
-        }
-        catch (Exception ex)
-        {
-            _log.Add("ReservationAPI", "ResolveGenreCodesRangeFallback", $"予約ID={reservation.Id} genre範囲参照失敗: {ex.Message}");
-            return null;
-        }
-    }
-
-    private static int ScoreReservationGenreServiceMatch(Reservation reservation, EpgEvent ev)
-    {
-        var score = 0;
-        if (reservation.ServiceId != 0 && ev.ServiceId == reservation.ServiceId) score += 100;
-        if (reservation.NetworkId != 0 && ev.NetworkId == reservation.NetworkId) score += 20;
-        if (reservation.TransportStreamId != 0 && ev.TransportStreamId == reservation.TransportStreamId) score += 20;
-
-        var rService = NormalizeGenreMatchText(reservation.ServiceName);
-        var eService = NormalizeGenreMatchText(ev.ServiceName);
-        if (!string.IsNullOrEmpty(rService) && !string.IsNullOrEmpty(eService))
-        {
-            if (string.Equals(rService, eService, StringComparison.Ordinal)) score += 70;
-            else if (rService.Contains(eService, StringComparison.Ordinal) || eService.Contains(rService, StringComparison.Ordinal)) score += 35;
+            var byProjectionIdentity = _programEvents.GetByEventKey(
+                metadata.OverlayNetworkId,
+                metadata.OverlayTransportStreamId,
+                metadata.OverlayServiceId,
+                metadata.OverlayEventId);
+            if (byProjectionIdentity is not null) return byProjectionIdentity;
         }
 
-        return score;
-    }
-
-    private static int ScoreReservationGenreTitleMatch(string? reservationTitle, string? eventTitle)
-    {
-        var rTitle = NormalizeGenreMatchText(NormalizeTitle(reservationTitle));
-        var eTitle = NormalizeGenreMatchText(eventTitle);
-        if (string.IsNullOrEmpty(rTitle) || string.IsNullOrEmpty(eTitle)) return 0;
-        if (string.Equals(rTitle, eTitle, StringComparison.Ordinal)) return 100;
-        if (rTitle.Contains(eTitle, StringComparison.Ordinal) || eTitle.Contains(rTitle, StringComparison.Ordinal)) return 60;
-
-        var prefixLen = Math.Min(Math.Min(rTitle.Length, eTitle.Length), 12);
-        return prefixLen >= 6 && string.Equals(rTitle[..prefixLen], eTitle[..prefixLen], StringComparison.Ordinal) ? 30 : 0;
-    }
-
-    private static string NormalizeGenreMatchText(string? value)
-    {
-        var s = (value ?? string.Empty).Trim();
-        if (s.Length == 0) return string.Empty;
-        s = s.Normalize(System.Text.NormalizationForm.FormKC);
-        var chars = s.Where(c => !char.IsWhiteSpace(c)).ToArray();
-        return new string(chars);
+        if (reservation.EventId == 0) return null;
+        return _programEvents.GetByEventKey(
+            reservation.NetworkId,
+            reservation.TransportStreamId,
+            reservation.ServiceId,
+            reservation.EventId);
     }
 
     private Dictionary<int, ReservationChainInfo> BuildChainMap()
@@ -551,99 +399,21 @@ public sealed class ReservationPresentationService
         return result;
     }
 
-    private Dictionary<int, IReadOnlyList<string>> BuildConflictPartnerMap(IReadOnlyList<Reservation> reservations)
-    {
-        var result = new Dictionary<int, IReadOnlyList<string>>();
-        var preMargin = TimeSpan.FromSeconds(_ini.PreStartMarginSeconds);
-        var postMargin = TimeSpan.FromSeconds(_ini.PostEndMarginSeconds);
-        var predecessors = _ini.PseudoContinuousRecording ? _store.GetChainPredecessors() : new Dictionary<int, int>();
-        var chainRootById = new Dictionary<int, int>();
-        if (_ini.PseudoContinuousRecording)
-        {
-            var byIdForChain = reservations.ToDictionary(r => r.Id);
-            foreach (var r in reservations)
-            {
-                var root = r.UserChainRootId ?? r.UserChainPreviousId ?? (predecessors.ContainsValue(r.Id) ? r.Id : 0);
-                if (root > 0)
-                    chainRootById[r.Id] = root;
-            }
-        }
-
-        bool IsSameChainGroup(Reservation a, Reservation b)
-        {
-            if (!_ini.PseudoContinuousRecording) return false;
-            if (!chainRootById.TryGetValue(a.Id, out var ar)) return false;
-            if (!chainRootById.TryGetValue(b.Id, out var br)) return false;
-            return ar == br;
-        }
-
-        static string ResolveGroup(Reservation r)
-        {
-            if (!string.IsNullOrWhiteSpace(r.ChannelArgument))
-                return r.ChannelArgument.Contains("/chspace", StringComparison.OrdinalIgnoreCase) ? "BSCS" : "GR";
-            return r.NetworkId == 4 ? "BSCS" : "GR";
-        }
-
-        static bool IsContinuousPair(Reservation a, Reservation b)
-            => a.NetworkId == b.NetworkId
-            && a.TransportStreamId == b.TransportStreamId
-            && a.ServiceId == b.ServiceId
-            && a.EndTime.ToString("yyyy-MM-ddTHH:mm:ss") == b.StartTime.ToString("yyyy-MM-ddTHH:mm:ss");
-
-        DateTime OccupyStart(Reservation r) => r.StartTime - preMargin;
-        DateTime OccupyEnd(Reservation r) => r.EndTime + postMargin;
-
-        var active = reservations
-            .Where(r => r.Source != ReservationSource.Epg)
-            .Where(r => r.IsEnabled)
-            .Where(r => r.Status == ReservationStatus.Scheduled || r.Status == ReservationStatus.Recording)
-            .ToList();
-
-        foreach (var r in active.Where(x => x.IsConflicted))
-        {
-            var oStart = OccupyStart(r);
-            var oEnd = OccupyEnd(r);
-            var sameGroup = active
-                .Where(x => x.Id != r.Id)
-                .Where(x => string.Equals(ResolveGroup(x), ResolveGroup(r), StringComparison.OrdinalIgnoreCase))
-                .Where(x => !IsSameChainGroup(x, r))
-                .Where(x => !(predecessors.ContainsKey(x.Id)))
-                .Where(x => !IsContinuousPair(x, r))
-                .Where(x => OccupyStart(x) < oEnd && OccupyEnd(x) > oStart)
-                .OrderBy(x => x.IsConflicted)
-                .ThenBy(x => x.StartTime)
-                .ThenBy(x => x.Id)
-                .Select(x => string.IsNullOrWhiteSpace(x.Title) ? "（無題）" : x.Title)
-                .Select(NormalizeTitle)
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Distinct(StringComparer.Ordinal)
-                .Take(3)
-                .ToList();
-
-            result[r.Id] = sameGroup;
-        }
-
-        return result;
-    }
-
-
 
     private string ResolveReservationTitle(Reservation r)
     {
         var title = NormalizeTitle(r.Title);
         if (!string.IsNullOrWhiteSpace(title)) return title;
 
-        // release_contract: Existing reservations may have been persisted while the legacy title
-        // field was empty.  The reservation list is a presentation surface, so recover the
-        // visible title from the same DB raw-descriptor projection used by the program guide.
+        // 保存予約のタイトルが空の場合は、同じ番組イベント投影から表示用タイトルを補う。
         if (r.EventId != 0)
         {
             try
             {
-                var ev = _epgStore.GetOne(r.NetworkId, r.TransportStreamId, r.ServiceId, r.EventId);
+                var ev = ResolveProjectedEvent(r);
                 if (ev is not null)
                 {
-                    var projected = NormalizeTitle(EpgProjection.Title(ev));
+                    var projected = NormalizeTitle(ev.Title);
                     if (!string.IsNullOrWhiteSpace(projected)) return projected;
                 }
             }
@@ -653,10 +423,8 @@ public sealed class ReservationPresentationService
             }
         }
 
-        // release_contract ReservationTitleDisplayContract:
-        // raw Reservation.Title may intentionally remain empty for blank-title EPG events.
-        // Reservation list / keyword reservation list are user-facing surfaces, so display
-        // the same unavailable label as ProgramGuide without writing it back to storage.
+        // 予約タイトル表示は次の優先順で解決する。
+        // 保存値は書き換えず、空タイトルは番組表と同じ表示規則で補う。
         return ReservationTitleDisplayContract.ForUser(r.Title);
     }
 
@@ -683,78 +451,27 @@ public sealed class ReservationPresentationService
 
     private string ResolveServiceName(Reservation reservation)
     {
-        var current = reservation.ServiceName?.Trim() ?? string.Empty;
+        var stored = reservation.ServiceName?.Trim() ?? string.Empty;
 
+        // SERVICE_IDENTITY_CONTRACT:
+        // NID/TSID/SID is the service identity. ServiceName is mutable display metadata.
+        // Reservation rows keep the name captured at creation time as a fallback snapshot, but
+        // current presentation must prefer the exact current ChannelTarget name when available.
+        // Never infer a current station by SID-only or by station-name matching.
         try
         {
-            var loaded = _channelLoader.Load();
-            var targets = loaded.Targets;
-
-            ChannelTarget? target = targets.FirstOrDefault(t =>
-                t.OriginalNetworkId == reservation.NetworkId
-                && t.TransportStreamId == reservation.TransportStreamId
-                && t.ServiceId == reservation.ServiceId);
-
-            target ??= targets.FirstOrDefault(t =>
-                t.OriginalNetworkId == reservation.NetworkId
-                && t.ServiceId == reservation.ServiceId);
-
-            target ??= targets.FirstOrDefault(t => t.ServiceId == reservation.ServiceId);
-
-            if (target is not null && !string.IsNullOrWhiteSpace(target.Name))
-            {
-                var canonical = target.Name.Trim();
-                if (ShouldPreferCanonicalServiceName(current, canonical))
-                    return canonical;
-            }
+            return ServiceIdentityContract.ResolveCurrentServiceName(
+                _channelLoader.Load().Targets,
+                reservation.NetworkId,
+                reservation.TransportStreamId,
+                reservation.ServiceId,
+                stored);
         }
         catch (Exception ex)
         {
             _log.Add("ReservationAPI", "ResolveServiceName", $"予約ID={reservation.Id} 局名解決失敗: {ex.Message}");
+            return stored;
         }
-
-        return current;
-    }
-
-    private static bool ShouldPreferCanonicalServiceName(string current, string canonical)
-    {
-        if (string.IsNullOrWhiteSpace(canonical))
-            return false;
-        if (string.IsNullOrWhiteSpace(current))
-            return true;
-        if (current.StartsWith("SID", StringComparison.OrdinalIgnoreCase))
-            return true;
-        if (string.Equals(current.Trim(), canonical.Trim(), StringComparison.Ordinal))
-            return false;
-
-        // release_contract: Reservation.ServiceName may be polluted by EPG text/title fragments
-        // such as 「詳しくはご案内」. A triplet match from ch2 is the authoritative
-        // channel label for reservation list display.
-        return true;
-    }
-
-    private static string GetSourceLabel(Reservation reservation)
-    {
-        // release_contract: 予約もと列は「予約が発生した起点」という同一メタ属性だけを表示する。
-        // source名をそのまま表示名へ丸めない。
-        //
-        //   番組表   : 番組表直接予約 / キーワード検索結果からのユーザー手動予約 / 今すぐ録画
-        //   自動検索 : KeywordRule により自動生成された予約
-        //   プログラム: ProgramRule / プラグイン等のプログラム由来予約
-        //   システム : EPG取得 / 録画前EPG確認など内部生成
-        //
-        // 注意: ReservationSource.Keyword は「キーワード検索画面」ではなく、
-        // KeywordMatcher が作る自動検索予約の内部sourceとして使われている。
-        return reservation.Source switch
-        {
-            ReservationSource.Manual => "番組表",
-            ReservationSource.KeywordSearch => "番組表",
-            ReservationSource.Immediate => "番組表",
-            ReservationSource.Keyword => "自動検索",
-            ReservationSource.Program => "プログラム",
-            ReservationSource.Epg => "システム",
-            _ => "不明"
-        };
     }
 
     private static string BuildDisplayStatusLabel(Reservation reservation, string sourceLabel)
@@ -762,10 +479,6 @@ public sealed class ReservationPresentationService
         return sourceLabel;
     }
 
-    private static string BuildConflictPrefix(Reservation reservation, IReadOnlyList<string> partners)
-    {
-        return string.Empty;
-    }
 }
 
 public sealed class ReservationPresentationItem
@@ -783,12 +496,17 @@ public sealed class ReservationPresentationItem
     public DateTime EndTime { get; set; }
     public string Status { get; set; } = "scheduled";
     public string Source { get; set; } = "manual";
+    internal ReservationStatus StatusKind { get; set; }
+    internal ReservationSource SourceKind { get; set; }
+    /// <summary>System EPG行の表示種別。内部ReservationIntentをUIへ直接公開せず、表示に必要な分類だけを投影する。</summary>
+    public string SystemEpgKind { get; set; } = "";
     public string SourceLabel { get; set; } = "";
     public string DisplayStatusLabel { get; set; } = "";
     public string ChannelArgument { get; set; } = "";
     public bool IsConflicted { get; set; }
     public bool IsEnabled { get; set; }
     public string TunerName { get; set; } = "";
+    public string PriorityName { get; set; } = "";
     public string ActualTunerName { get; set; } = "";
     public bool HasRecordingStarted { get; set; }
     public DateTime? RecordingStartedAt { get; set; }
@@ -802,6 +520,8 @@ public sealed class ReservationPresentationItem
     public string ReservationIdentity { get; set; } = "Unknown";
     public bool IsProgramGuideMissing { get; set; }
     public bool IsResolvedEventReservation { get; set; }
+    public bool CanToggleEnabled { get; set; }
+    public bool CanCancel { get; set; }
     public string ChainRole { get; set; } = "";
     public string ChainLabel { get; set; } = "";
     public DateTime CreatedAt { get; set; }

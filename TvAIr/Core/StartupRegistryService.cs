@@ -28,15 +28,24 @@ public sealed class StartupRegistryService
     /// enabled=true のとき Run キーに自身の実行ファイルパスを登録する。
     /// false のとき値を削除する。
     /// </summary>
-    public void Set(bool enabled)
+    public bool Set(bool enabled)
     {
         try
         {
-            using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true);
+            // STARTUP_RUN_KEY_EXISTENCE_CONTRACT
+            // 有効化時はRunキー自体が未作成でも登録できるようCreateSubKeyを使う。
+            // 無効化時はRunキーが存在しないこと自体が「既に無効」の正常状態であり、失敗扱いにしない。
+            using var key = enabled
+                ? Registry.CurrentUser.CreateSubKey(RunKeyPath, writable: true)
+                : Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true);
+
             if (key is null)
             {
-                _log.Add("Startup", "Registry", $"Run キーを開けませんでした: HKCU\\{RunKeyPath}");
-                return;
+                if (!enabled)
+                    return true;
+
+                _log.Add("Startup", "Registry", $"Run キーを作成できませんでした: HKCU\\{RunKeyPath}");
+                return false;
             }
 
             if (enabled)
@@ -47,25 +56,28 @@ public sealed class StartupRegistryService
                 if (string.Equals(existing, quoted, StringComparison.OrdinalIgnoreCase))
                 {
                     // 既に同一値で登録済み。ログを抑止して何もしない。
-                    return;
+                    return true;
                 }
+
                 key.SetValue(ValueName, quoted, RegistryValueKind.String);
                 _log.Add("Startup", "Registry", $"自動起動を有効化しました: {exe}");
+                return true;
             }
-            else
+
+            if (key.GetValue(ValueName) is null)
             {
-                if (key.GetValue(ValueName) is null)
-                {
-                    // 既に未登録。ログを抑止して何もしない。
-                    return;
-                }
-                key.DeleteValue(ValueName, throwOnMissingValue: false);
-                _log.Add("Startup", "Registry", "自動起動を無効化しました。");
+                // 既に未登録。ログを抑止して何もしない。
+                return true;
             }
+
+            key.DeleteValue(ValueName, throwOnMissingValue: false);
+            _log.Add("Startup", "Registry", "自動起動を無効化しました。");
+            return true;
         }
         catch (Exception ex)
         {
             _log.Add("Startup", "Registry", $"自動起動設定の更新に失敗しました: {ex.Message}");
+            return false;
         }
     }
 

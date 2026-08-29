@@ -1,4 +1,4 @@
-namespace TvAIr.Core;
+﻿namespace TvAIr.Core;
 
 // ─── EPGイベント ─────────────────────────────────────────────────
 
@@ -59,8 +59,38 @@ public sealed class ChannelTarget
 
 // ─── 予約 ────────────────────────────────────────────────────────
 
-public enum ReservationStatus { Scheduled, Recording, Completed, Cancelled, Failed }
+public enum ReservationStatus { Scheduled, Starting, Recording, Stopping, Completed, Cancelled, Failed }
 public enum ReservationSource { Manual, Immediate, KeywordSearch, Keyword, Program, Epg }
+public enum ReservationIntent
+{
+    Unspecified,
+    InteractiveProgramEvent,
+    ProgramTimeSlot,
+    AutomaticSearch,
+    KeywordRule,
+    System,
+    SystemDailyEpg,
+    SystemPreRecordEpg
+}
+
+/// <summary>
+/// Reservation.Intent の内部System用途契約。System EPGの用途判定をTitle/SourceRuleNameへ戻さない。
+/// Plugin SDKへ内部用途を公開せず、Host内部の保存・実行・投影だけで使用する。
+/// </summary>
+public static class ReservationIntentContract
+{
+    public const string SystemDailyEpgStorageValue = "systemdailyepg";
+    public const string SystemPreRecordEpgStorageValue = "systemprerecordepg";
+
+    public static bool IsSystem(ReservationIntent intent)
+        => intent is ReservationIntent.System or ReservationIntent.SystemDailyEpg or ReservationIntent.SystemPreRecordEpg;
+
+    public static bool IsDailyEpg(Reservation reservation)
+        => reservation.Source == ReservationSource.Epg && reservation.Intent == ReservationIntent.SystemDailyEpg;
+
+    public static bool IsPreRecordEpg(Reservation reservation)
+        => reservation.Source == ReservationSource.Epg && reservation.Intent == ReservationIntent.SystemPreRecordEpg;
+}
 
 public sealed class Reservation
 {
@@ -74,6 +104,12 @@ public sealed class Reservation
     public DateTime EndTime { get; set; }
     public ReservationStatus Status { get; set; } = ReservationStatus.Scheduled;
     public ReservationSource Source { get; set; } = ReservationSource.Manual;
+    /// <summary>予約の意味。作成経路や作成主体とは分離し、割当優先度はHost側の閉じた対応表で決定する。</summary>
+    public ReservationIntent Intent { get; set; } = ReservationIntent.Unspecified;
+    /// <summary>作成経路。現行公開値はHost / Plugin / System。</summary>
+    public string CreatedThrough { get; set; } = "";
+    /// <summary>Plugin経由の場合にHostが自動付与する正規Plugin ID。プラグイン自己申告は禁止。</summary>
+    public string CreatedByPluginId { get; set; } = "";
     /// <summary>チューナー起動時のチャンネル引数（/ch 14, /chspace 0 /chi 3 等）。予約登録時にChannelFileLoaderから解決して保存する。</summary>
     public string ChannelArgument { get; set; } = "";
     /// <summary>チューナー競合フラグ。同一グループ・同時間帯でチューナー数を超えた場合 true。予約リストで赤文字表示される。</summary>
@@ -105,8 +141,14 @@ public sealed class Reservation
     public int? UserChainPreviousId { get; set; } = null;
     /// <summary>ユーザー明示チェーンの先頭予約ID。通常予約ではnull。</summary>
     public int? UserChainRootId { get; set; } = null;
+    /// <summary>録画中断からの復旧録画系列を一意に追跡するID。番組チェーンとは別契約。</summary>
+    public string RecordingRecoveryChainId { get; set; } = "";
+    /// <summary>直前の復旧元予約ID。初回予約ではnull。</summary>
+    public int? RecoveryParentReservationId { get; set; } = null;
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
+    /// <summary>予約業務状態の楽観ロック用世代。実変更時だけ増加する。</summary>
+    public long DataVersion { get; set; }
 }
 
 // ─── キーワードルール ────────────────────────────────────────────
@@ -130,7 +172,7 @@ public sealed class KeywordRule
     /// <summary>正規表現を使うか。false の場合は ; = AND, | = OR, () = グループ。</summary>
     public bool UseRegex { get; set; } = false;
 
-    /// <summary>後方互換用の旧検索対象。現在は各フィールド個別フラグを使用。</summary>
+    /// <summary>既存設定読込の互換用検索対象。新規設定では各フィールド個別フラグを使用する。</summary>
     public string SearchFields { get; set; } = "title";
 
     public bool SearchTitle { get; set; } = true;
@@ -201,6 +243,17 @@ public sealed class LogEntry
     public DateTime CreatedAt { get; set; } = DateTime.Now;
 }
 
+public sealed class UserEventLogDisplayEntry
+{
+    public int Id { get; set; }
+    public string Severity { get; set; } = "INFO";
+    public string Category { get; set; } = "";
+    public string Result { get; set; } = "";
+    public string Target { get; set; } = "";
+    public string Message { get; set; } = "";
+    public DateTime CreatedAt { get; set; } = DateTime.Now;
+}
+
 public sealed class UserEventLogEntry
 {
     public int Id { get; set; }
@@ -217,8 +270,10 @@ public sealed class UserEventLogEntry
     public bool VersionChanged { get; set; }
     public string StoryContext { get; set; } = "";
 
-    // UserOperationEvent 正本の報告用メタ属性。
-    // ログタブでは原則表示せず、報告用コピーで展開する。
+    // UserOperationEvent の内部追跡属性。ユーザー向け表示文言の正本にはしない。
+    // USER_LOG_PRESENTATION_INVARIANT:
+    // 標準ログは必ずシンプルな1行、詳細ログはユーザーが選択した項目だけを多段表示する。
+    // 報告用コピーにも内部契約名を直接露出させず、ユーザーが理解できる事実だけを投影する。
     public string Origin { get; set; } = "";
     public string Trigger { get; set; } = "";
     public string StoryRole { get; set; } = "";
@@ -226,6 +281,23 @@ public sealed class UserEventLogEntry
     public string Actionability { get; set; } = "";
     public string ReservationSource { get; set; } = "";
     public string ProgramTitle { get; set; } = "";
+
+    // Standard and extended views read these fields from the same persisted operation row.
+    public string ReservationId { get; set; } = "";
+    public string RecordingId { get; set; } = "";
+    public string RecordingRecoveryChainId { get; set; } = "";
+    public string PowerResumeCycleId { get; set; } = "";
+    public string ServiceName { get; set; } = "";
+    public DateTime? ScheduledStart { get; set; }
+    public DateTime? ScheduledEnd { get; set; }
+    public DateTime? ActualStart { get; set; }
+    public DateTime? ActualEnd { get; set; }
+    public long? DropCount { get; set; }
+    public long? ErrorCount { get; set; }
+    public long? ScrambleCount { get; set; }
+    public string FilePath { get; set; } = "";
+    public string CompletionReason { get; set; } = "";
+    public string DetailsJson { get; set; } = "{}";
     public string Detail { get; set; } = "";
 
     public DateTime CreatedAt { get; set; } = DateTime.Now;

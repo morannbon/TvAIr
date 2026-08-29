@@ -1,5 +1,5 @@
-/* TvAIr List Pages Scoped Rebuild release_contract
-   One file owns list-page geometry, scroll roots, and column schemas.
+/* TvAIr list-page layout ownership contract
+   This file owns list-page geometry, scroll roots, and column schemas.
    Scope: reservations.html, keyword.html, program-rules.html, new-reservation.html.
    Not in scope: program guide, plugins, recording/EPG/tuner logic. */
 
@@ -9,13 +9,11 @@
   --tvair-list-head-z:60;
   --tvair-list-tabs-z:80;
   --tvair-list-nav-z:100;
-  --tvair-list-menu-z:300;
 
   --tvair-list-scrollbar-size:6px;
   --tvair-reservation-subtab-rail-w:80%;
 
   --tvair-list-action-col:96px;
-  --tvair-list-order-col:104px;
   --tvair-list-enabled-col:70px;
   --tvair-list-date-col:150px;
   --tvair-list-channel-col:150px;
@@ -74,9 +72,36 @@ body.tvair-reservation-page #filter-tabs{
   width:var(--tvair-reservation-subtab-rail-w);
   max-width:var(--tvair-reservation-subtab-rail-w);
   min-width:0;
-  margin-left:auto;
-  margin-right:auto;
+  margin:0 auto;
   box-sizing:border-box;
+  display:flex;
+  align-items:flex-end;
+  gap:2px;
+  border-bottom:2px solid var(--tvair-reservation-subtab-active-border,var(--tvair-role-focus));
+  background:var(--tvair-reservation-subtab-strip-bg,var(--tvair-role-toolbar-bg));
+}
+body.tvair-reservation-page #filter-tabs .tvair-reservation-subtab{
+  padding:3px 14px;
+  border:1px solid var(--tvair-reservation-subtab-border,var(--tvair-role-control-border));
+  border-bottom:0;
+  border-radius:2px 2px 0 0;
+  background:var(--tvair-reservation-subtab-bg,var(--tvair-role-control-bg));
+  color:var(--tvair-reservation-subtab-fg,var(--tvair-role-control-fg));
+  box-shadow:none;
+  cursor:pointer;
+  font-family:'Meiryo','メイリオ',sans-serif;
+  font-size:12px;
+}
+body.tvair-reservation-page #filter-tabs .tvair-reservation-subtab:hover{
+  background:var(--tvair-reservation-subtab-hover-bg,var(--tvair-role-control-hover-bg));
+  color:var(--tvair-reservation-subtab-hover-fg,var(--tvair-role-control-fg));
+}
+body.tvair-reservation-page #filter-tabs .tvair-reservation-subtab.active{
+  background:var(--tvair-reservation-subtab-active-bg,var(--tvair-role-control-active-bg));
+  color:var(--tvair-reservation-subtab-active-fg,var(--tvair-role-control-active-fg));
+  border-color:var(--tvair-reservation-subtab-active-border,var(--tvair-role-focus));
+  box-shadow:inset 0 -3px 0 var(--tvair-reservation-subtab-active-underline,var(--tvair-role-control-active-fg));
+  font-weight:bold;
 }
 body.tvair-reservation-page #content-region{
   flex:1 1 auto;
@@ -140,36 +165,48 @@ body.tvair-reservation-page #keyword-wrap{
    - list-index/date/time/service/title/source metadata roles are explicit data-cell-role targets.
    Scope: reservations.html, keyword.html, program-rules.html, new-reservation.html.
    Out of scope: program guide cells, recording, EPG, FinalConflictPlan, Wake and plugin internals. */
-body.tvair-reservation-page{
-  --tvair-list-state-col:var(--tvair-list-col-state,var(--rsv-toggle-w));
-  --tvair-list-operation-col:var(--tvair-list-col-action,var(--rsv-action-w));
-}
 body.tvair-reservation-page .col-toggle,
 body.tvair-reservation-page .tvair-reservation-state-cell{
   text-align:center;
   justify-content:center;
   white-space:nowrap;
 }
-body.tvair-reservation-page .col-toggle .toggle-btn,
+body.tvair-reservation-page .col-toggle .tvair-reservation-toggle,
 body.tvair-reservation-page .col-toggle [data-state-role^="reservation-"]{
   box-sizing:border-box;
   display:inline-flex;
   align-items:center;
   justify-content:center;
-  min-width:22px;
-  height:20px;
-  padding:0 6px;
-  border-radius:2px;
-  font-size:12px;
-  line-height:1;
-  white-space:nowrap;
+  width:30px;
+  min-width:30px;
+  height:18px;
+  padding:0;
+  border:1px solid var(--tvair-role-control-border);
+  border-radius:3px;
+  background:var(--tvair-role-control-bg);
+  color:var(--tvair-role-control-fg);
   font-family:'Meiryo','メイリオ',sans-serif;
+  font-size:12px;
+  font-weight:bold;
+  line-height:1;
+  vertical-align:middle;
+  white-space:nowrap;
 }
-body.tvair-reservation-page .col-toggle .toggle-btn{
+body.tvair-reservation-page .col-toggle .tvair-reservation-toggle{
   cursor:pointer;
 }
-body.tvair-reservation-page .col-toggle .toggle-btn:disabled{
+body.tvair-reservation-page .col-toggle .tvair-reservation-toggle:hover{
+  background:var(--tvair-role-control-hover-bg);
+  border-color:var(--tvair-role-control-border);
+  color:var(--tvair-role-control-fg);
+}
+body.tvair-reservation-page .col-toggle .tvair-reservation-toggle:focus-visible{
+  outline:2px solid var(--tvair-role-focus);
+  outline-offset:1px;
+}
+body.tvair-reservation-page .col-toggle .tvair-reservation-toggle:disabled{
   cursor:not-allowed;
+  opacity:.35;
 }
 body.tvair-reservation-page .col-action,
 body.tvair-reservation-page .tvair-reservation-action-cell,
@@ -180,27 +217,22 @@ body.tvair-program-reservation-page #program-rules-table .act-wrap{
   justify-content:center;
   white-space:nowrap;
 }
+body.tvair-reservation-page .tvair-reservation-action-cell{
+  padding:0;
+  vertical-align:middle;
+}
 body.tvair-reservation-page .reservation-action-slot{
-  display:inline-flex;
+  display:flex;
   align-items:center;
   justify-content:center;
+  width:100%;
   min-width:0;
   max-width:100%;
+  height:22px;
+  min-height:22px;
+  line-height:1;
   white-space:nowrap;
 }
-body.tvair-reservation-page .col-action .reservation-action-button,
-body.tvair-reservation-page .col-action .act-btn{
-  box-sizing:border-box;
-  display:inline-flex;
-  align-items:center;
-  justify-content:center;
-  min-width:80px;
-  height:20px;
-  padding:1px 10px;
-  white-space:nowrap;
-  line-height:1.15;
-}
-
 
 body.tvair-keyword-page [data-cell-role="date-time-metadata"],
 body.tvair-keyword-page [data-cell-role="service-metadata"],
@@ -249,6 +281,7 @@ body.tvair-reservation-page [data-state-role="source-label"]{
   overflow:hidden;
   text-overflow:ellipsis;
   white-space:nowrap;
+  color:var(--tvair-role-text-muted-fg);
 }
 
 body.tvair-reservation-page .col-toggle [data-state-role],
@@ -318,15 +351,20 @@ body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table t
   width:auto;
   min-width:0;
   max-width:100%;
-  overflow:hidden;
-  text-overflow:ellipsis;
-  white-space:nowrap;
   box-sizing:border-box;
   background:transparent;
   justify-self:stretch;
   font-family:'Meiryo','メイリオ',sans-serif;
   vertical-align:initial;
   line-height:normal;
+}
+body.tvair-reservation-page #rsv-table th:not(.tvair-text-multiline):not([data-text-mode="multiline"]),
+body.tvair-reservation-page #rsv-table td:not(.tvair-text-multiline):not([data-text-mode="multiline"]),
+body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table th,
+body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table td{
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
 }
 body.tvair-reservation-page #rsv-table th,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table th{
@@ -341,10 +379,13 @@ body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table t
 body.tvair-reservation-page #rsv-table td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table td{
   padding:0 6px;
-  height:26px;
-  min-height:26px;
   font-size:12px;
   font-weight:400;
+}
+body.tvair-reservation-page #rsv-table td:not(.tvair-text-multiline):not([data-text-mode="multiline"]),
+body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table td{
+  height:26px;
+  min-height:26px;
 }
 body.tvair-reservation-page #rsv-table tbody tr,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr{
@@ -399,6 +440,67 @@ body.tvair-reservation-page #keyword-wrap table[data-table-schema="candidate"] t
     var(--rsv-service-w)
     minmax(0,1fr)
     var(--rsv-action-w);
+}
+
+/* reservation-family column typography and semantic text tone */
+body.tvair-reservation-page .col-no,
+body.tvair-reservation-page .col-index{
+  font-size:12px;
+  color:var(--tvair-reservation-list-text-muted);
+  text-align:center;
+}
+body.tvair-reservation-page .col-toggle{
+  text-align:center;
+}
+body.tvair-reservation-page .col-tuner{
+  font-size:12px;
+  color:var(--tvair-reservation-list-text-soft);
+  text-align:center;
+}
+body.tvair-reservation-page .col-date,
+body.tvair-reservation-page .col-datetime{
+  font-size:12px;
+  color:var(--tvair-reservation-list-text-strong);
+  text-align:center;
+}
+body.tvair-reservation-page .col-time{
+  font-size:12px;
+  font-weight:bold;
+  color:var(--tvair-reservation-list-text-strong);
+  text-align:center;
+}
+body.tvair-reservation-page .col-dur{
+  margin-left:4px;
+  font-size:11px;
+  font-weight:normal;
+  color:var(--tvair-reservation-list-text-muted);
+}
+body.tvair-reservation-page .col-ch,
+body.tvair-reservation-page .col-target{
+  font-size:12px;
+  color:var(--tvair-reservation-list-text-strong);
+}
+body.tvair-reservation-page .col-title,
+body.tvair-reservation-page .col-main{
+  font-size:12px;
+  color:var(--tvair-reservation-list-text-strong);
+  text-align:left;
+}
+body.tvair-reservation-page .col-kind,
+body.tvair-reservation-page .col-result,
+body.tvair-reservation-page .col-status{
+  font-size:12px;
+  color:var(--tvair-reservation-list-text-strong);
+  text-align:center;
+}
+body.tvair-reservation-page .col-code{
+  font-size:12px;
+  color:var(--tvair-reservation-list-text-strong);
+  text-align:left;
+}
+body.tvair-reservation-page .col-action{
+  font-size:12px;
+  text-align:center;
 }
 
 /* reservation-family table text alignment */
@@ -513,76 +615,70 @@ body.tvair-reservation-page #rsv-table tbody tr,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr{
   border-bottom:none;
 }
+
+/* release_contract ReservationRowBackgroundOwner
+   One row token owns background state. Cells paint that token once, so zebra, genre,
+   hover, disabled, cancelled, and conflict states never compete by selector specificity. */
+body.tvair-reservation-page #rsv-table tbody tr,
+body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr{
+  --tvair-reservation-row-bg:var(--tvair-reservation-list-row-odd-bg);
+  --tvair-reservation-row-fg:var(--tvair-content-primary);
+  border-bottom:none;
+}
+body.tvair-reservation-page #rsv-table tbody tr:nth-child(even),
+body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr:nth-child(even){
+  --tvair-reservation-row-bg:var(--tvair-reservation-list-row-even-bg);
+}
+body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.tvair-reservation-genre-row,
+body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.tvair-reservation-genre-row{
+  --tvair-reservation-row-bg:var(--tvair-genre-row-bg);
+}
+body.tvair-reservation-page #rsv-table tbody tr:hover,
+body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr:hover{
+  --tvair-reservation-row-bg:var(--tvair-reservation-list-row-hover-bg);
+}
+body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.tvair-reservation-genre-row:hover,
+body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.tvair-reservation-genre-row:hover{
+  --tvair-reservation-row-bg:var(--tvair-reservation-genre-row-hover-bg);
+}
+body.tvair-reservation-page #rsv-table tbody tr.disabled-row,
+body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row{
+  --tvair-reservation-row-bg:var(--tvair-reservation-list-row-disabled-bg);
+  --tvair-reservation-row-fg:var(--tvair-role-reservation-row-disabled-fg);
+  font-weight:400;
+}
+body.tvair-reservation-page #rsv-table tbody tr.disabled-row:hover,
+body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row:hover{
+  --tvair-reservation-row-bg:var(--tvair-reservation-list-row-disabled-hover-bg);
+}
+body.tvair-reservation-page #rsv-table tbody tr.cancelled-row,
+body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.cancelled-row{
+  --tvair-reservation-row-bg:var(--tvair-reservation-list-row-cancelled-bg);
+  --tvair-reservation-row-fg:var(--tvair-reservation-cancelled-text);
+}
+body.tvair-reservation-page #rsv-table tbody tr.cancelled-row:hover,
+body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.cancelled-row:hover{
+  --tvair-reservation-row-bg:var(--tvair-reservation-list-row-cancelled-hover-bg);
+}
+body.tvair-reservation-page #rsv-table tbody tr.conflicted,
+body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.conflicted{
+  --tvair-reservation-row-bg:var(--tvair-reservation-row-conflict-bg);
+  --tvair-reservation-row-fg:var(--tvair-reservation-row-conflict-text);
+  font-weight:400;
+}
+body.tvair-reservation-page #rsv-table tbody tr.conflicted:hover,
+body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.conflicted:hover{
+  --tvair-reservation-row-bg:var(--tvair-reservation-row-conflict-hover-bg);
+}
 body.tvair-reservation-page #rsv-table tbody tr > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr > td{
-  background:var(--tvair-reservation-list-row-odd-bg);
+  background:var(--tvair-reservation-row-bg);
+  color:var(--tvair-reservation-row-fg);
   border-bottom:1px solid var(--tvair-reservation-list-border);
 }
 body.tvair-reservation-page #rsv-table tbody tr:last-child > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr:last-child > td{
   border-bottom:none;
-}
-body.tvair-reservation-page #rsv-table tbody tr:nth-child(even) > td,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr:nth-child(even) > td{
-  background:var(--tvair-reservation-list-row-even-bg);
-}
-body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.tvair-reservation-genre-row > td,
-body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr[data-genre-row="1"] > td,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.tvair-reservation-genre-row > td,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr[data-genre-row="1"] > td{
-  background:var(--tvair-genre-row-bg);
-}
-body.tvair-reservation-page #rsv-table tbody tr:hover > td,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr:hover > td{
-  background:var(--tvair-reservation-list-row-hover-bg);
-}
-body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.tvair-reservation-genre-row:hover > td,
-body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr[data-genre-row="1"]:hover > td,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.tvair-reservation-genre-row:hover > td,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr[data-genre-row="1"]:hover > td{
-  background:var(--tvair-reservation-genre-row-hover-bg);
-}
-body.tvair-reservation-page #rsv-table tbody tr.disabled-row > td,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row > td{
-  background:var(--tvair-reservation-list-row-disabled-bg);
-  color:var(--tvair-role-reservation-disabled-fg,var(--tvair-reservation-disabled-text));
-  font-weight:400;
-}
-body.tvair-reservation-page #rsv-table tbody tr.disabled-row:hover > td,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row:hover > td{
-  background:var(--tvair-reservation-list-row-disabled-hover-bg);
-}
-body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.disabled-row.tvair-reservation-genre-row > td,
-body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.disabled-row[data-genre-row="1"] > td,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row.tvair-reservation-genre-row > td,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row[data-genre-row="1"] > td{
-  background:var(--tvair-reservation-list-row-disabled-bg);
-  color:var(--tvair-role-reservation-disabled-fg,var(--tvair-reservation-disabled-text));
-}
-body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.disabled-row.tvair-reservation-genre-row:hover > td,
-body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.disabled-row[data-genre-row="1"]:hover > td,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row.tvair-reservation-genre-row:hover > td,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row[data-genre-row="1"]:hover > td{
-  background:var(--tvair-reservation-list-row-disabled-hover-bg);
-}
-body.tvair-reservation-page #rsv-table tbody tr.cancelled-row > td,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.cancelled-row > td{
-  background:var(--tvair-reservation-list-row-cancelled-bg);
-  color:var(--tvair-reservation-cancelled-text);
-}
-body.tvair-reservation-page #rsv-table tbody tr.cancelled-row:hover > td,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.cancelled-row:hover > td{
-  background:var(--tvair-reservation-list-row-cancelled-hover-bg);
-}
-body.tvair-reservation-page #rsv-table tbody tr.conflicted > td,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.conflicted > td{
-  background:var(--tvair-reservation-row-conflict-bg);
-  color:var(--tvair-reservation-row-conflict-text);
-  font-weight:400;
-}
-body.tvair-reservation-page #rsv-table tbody tr.conflicted:hover > td,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.conflicted:hover > td{
-  background:var(--tvair-reservation-row-conflict-hover-bg);
 }
 body.tvair-reservation-page #rsv-table tbody tr.conflicted.missing-duplicate-conflict > td,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.conflicted.missing-duplicate-conflict > td{
@@ -611,12 +707,7 @@ body.tvair-reservation-page #rsv-table tbody tr.chain-tail > td:first-child,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.chain-head > td:first-child,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.chain-mid > td:first-child,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.chain-tail > td:first-child{
-  border-left:3px solid var(--chain-accent);
-}
-body.tvair-reservation-page #rsv-table tbody tr.disabled-row > td *,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row > td *{
-  color:inherit;
-  font-weight:400;
+  border-left:3px solid var(--tvair-role-focus);
 }
 body.tvair-reservation-page #rsv-table tbody tr.conflicted.missing-duplicate-conflict .tuner-conflict,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.conflicted.missing-duplicate-conflict .tuner-conflict{
@@ -648,15 +739,12 @@ body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table t
 body.tvair-reservation-page #rsv-table tbody tr.tvair-reservation-system-daily-epg .col-title,
 body.tvair-reservation-page #rsv-table tbody tr.tvair-reservation-system-system-epg .col-title,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.tvair-reservation-system-daily-epg .col-title,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.tvair-reservation-system-system-epg .col-title{
-  color:var(--tvair-action-primary-bg);
-  font-style:normal;
-  font-weight:500;
-}
+body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.tvair-reservation-system-system-epg .col-title,
 body.tvair-reservation-page #rsv-table tbody tr.tvair-reservation-system-pre-record-epg .col-title,
 body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.tvair-reservation-system-pre-record-epg .col-title{
-  color:var(--tvair-state-conflict-text);
+  color:var(--tvair-status-processing-text);
   font-style:normal;
+  font-weight:500;
 }
 body.tvair-reservation-page .col-no,
 body.tvair-reservation-page .col-toggle,
@@ -699,42 +787,65 @@ body.tvair-program-reservation-page #page-scroll{
   width:100%;
   max-width:none;
   min-width:0;
+  min-height:0;
+  margin:0;
   padding:var(--tvair-list-pad);
   overflow:hidden;
   box-sizing:border-box;
+  background:var(--tvair-role-page-bg,var(--tvair-color-surface-page));
 }
 body.tvair-keyword-page #body{
   width:100%;
   max-width:none;
   min-width:0;
+  min-height:0;
+  height:calc(100vh - var(--tvair-layout-nav-height,var(--tvair-top-nav-height,32px)) - (var(--tvair-list-pad) * 2));
   margin:0;
+  padding:0;
   display:grid;
-  grid-template-columns:var(--tvair-keyword-form-pane,var(--tvair-split-form-pane,340px)) minmax(0,1fr);
-  gap:0;
-  height:calc(100vh - var(--tvair-top-nav-height,32px) - (var(--tvair-list-pad) * 2));
+  grid-template-columns:var(--tvair-keyword-form-pane) minmax(0,1fr);
+  gap:var(--tvair-list-gap);
   overflow:hidden;
+  box-sizing:border-box;
+  background:transparent;
+  border:0;
+  border-radius:0;
 }
 body.tvair-rule-list-page #main{
   width:100%;
   max-width:none;
   min-width:0;
+  min-height:0;
+  height:calc(100vh - var(--tvair-layout-nav-height,var(--tvair-top-nav-height,32px)) - (var(--tvair-list-pad) * 2));
   margin:0;
+  padding:var(--tvair-layout-page-pad,8px);
   display:flex;
+  flex:1 1 auto;
   flex-direction:column;
-  gap:var(--tvair-list-gap);
-  height:calc(100vh - var(--tvair-top-nav-height,32px) - (var(--tvair-list-pad) * 2));
+  gap:var(--tvair-layout-gap,var(--tvair-list-gap));
   overflow:hidden;
+  box-sizing:border-box;
+  background:transparent;
+  border:0;
+  border-radius:0;
 }
 body.tvair-program-reservation-page #main{
   width:100%;
   max-width:none;
   min-width:0;
+  min-height:0;
+  height:calc(100vh - var(--tvair-layout-nav-height,var(--tvair-top-nav-height,32px)) - (var(--tvair-list-pad) * 2));
   margin:0;
+  padding:0;
   display:grid;
-  grid-template-columns:var(--tvair-program-form-pane,var(--tvair-split-form-pane,340px)) minmax(0,1fr);
+  grid-template-columns:var(--tvair-program-form-pane) minmax(0,1fr);
   gap:var(--tvair-list-gap);
-  height:calc(100vh - var(--tvair-top-nav-height,32px) - (var(--tvair-list-pad) * 2));
+  align-items:stretch;
   overflow:hidden;
+  box-sizing:border-box;
+  background:transparent;
+  border:0;
+  border-radius:0;
 }
 body.tvair-keyword-page #result-wrap,
 body.tvair-rule-list-page #table-wrap,
@@ -757,9 +868,11 @@ body.tvair-rule-list-page #rules-table,
 body.tvair-program-reservation-page #program-rules-table{
   width:100%;
   max-width:none;
+  min-width:var(--tvair-list-page-table-min);
   table-layout:fixed;
+  border-collapse:collapse;
 }
-body.tvair-keyword-page #result-table{min-width:760px}
+/* release_contract KeywordResultTableSchemaOwner: the shared list module owns keyword-result columns and cell text geometry. Page CSS supplies only semantic colors. */
 body.tvair-keyword-page #result-table th:nth-child(1),
 body.tvair-keyword-page #result-table td:nth-child(1){width:var(--tvair-list-date-col)}
 body.tvair-keyword-page #result-table th:nth-child(2),
@@ -768,85 +881,14 @@ body.tvair-keyword-page #result-table th:nth-child(4),
 body.tvair-keyword-page #result-table td:nth-child(4){width:var(--tvair-list-duration-col);text-align:center}
 body.tvair-keyword-page #result-table th:nth-child(5),
 body.tvair-keyword-page #result-table td:nth-child(5){width:var(--tvair-list-action-col);text-align:center}
-
-body.tvair-rule-list-page #rules-table th.col-order,
-body.tvair-rule-list-page #rules-table td:nth-child(4),
-body.tvair-rule-list-page #rules-table th.col-actions,
-body.tvair-rule-list-page #rules-table td:nth-child(5){
-  text-align:center;
-}
-body.tvair-program-reservation-page #program-rules-table{min-width:900px}
-body.tvair-program-reservation-page #program-rules-table th:nth-child(1),
-body.tvair-program-reservation-page #program-rules-table td:nth-child(1){width:var(--tvair-list-program-no-col);text-align:center}
-body.tvair-program-reservation-page #program-rules-table th:nth-child(2),
-body.tvair-program-reservation-page #program-rules-table td:nth-child(2){width:var(--tvair-list-enabled-col);text-align:center}
-body.tvair-program-reservation-page #program-rules-table th:nth-child(3),
-body.tvair-program-reservation-page #program-rules-table td:nth-child(3){width:auto;min-width:var(--tvair-list-program-rule-min)}
-body.tvair-program-reservation-page #program-rules-table th:nth-child(4),
-body.tvair-program-reservation-page #program-rules-table td:nth-child(4){width:76px;text-align:center}
-body.tvair-program-reservation-page #program-rules-table th:nth-child(5),
-body.tvair-program-reservation-page #program-rules-table td:nth-child(5){width:var(--tvair-list-time-col);text-align:center}
-body.tvair-program-reservation-page #program-rules-table th:nth-child(6),
-body.tvair-program-reservation-page #program-rules-table td:nth-child(6){width:var(--tvair-list-expire-col);text-align:center}
-body.tvair-program-reservation-page #program-rules-table th:nth-child(7),
-body.tvair-program-reservation-page #program-rules-table td:nth-child(7){width:132px;text-align:center}
-body.tvair-program-reservation-page #program-rules-table .td-name,
-body.tvair-program-reservation-page #program-rules-table .td-ch{
-  overflow:hidden;
-  text-overflow:ellipsis;
-  white-space:nowrap;
-}
-
-
-
+body.tvair-keyword-page #result-table .td-date{white-space:nowrap;font-size:11px}
+body.tvair-keyword-page #result-table .td-time{font-size:12px;font-weight:bold;white-space:nowrap}
+body.tvair-keyword-page #result-table .td-ch{white-space:nowrap;max-width:120px;overflow:hidden;text-overflow:ellipsis}
+body.tvair-keyword-page #result-table .td-title{font-weight:bold}
+body.tvair-keyword-page #result-table .td-title .sub{font-weight:normal;font-size:11px;margin-top:2px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+body.tvair-keyword-page #result-table .td-dur{font-size:11px;white-space:nowrap}
 
 /* release_contract ListTableStateImportantReduction: non-reservation list table geometry, header, row rhythm and base row-state paint live here. Page CSS keeps page-specific text semantics, columns, modal tables and action meaning only. */
-body.tvair-keyword-page{
-  --tvair-list-page-table-min:560px;
-  --tvair-list-page-head-bg:var(--table-head-bg);
-  --tvair-list-page-head-fg:var(--tvair-content-inverse);
-  --tvair-list-page-head-border-bottom:none;
-  --tvair-list-page-head-border-right:1px solid var(--nav-border);
-  --tvair-list-page-row-border:1px solid var(--row-border);
-  --tvair-list-page-row-hover-bg:var(--row-hover);
-  --tvair-list-page-row-disabled-bg:var(--reserved-row-bg);
-  --tvair-list-page-row-disabled-hover-bg:var(--row-hover);
-  --tvair-list-page-cell-fg:var(--tvair-content-primary);
-  --tvair-list-page-disabled-fg:var(--tvair-content-muted);
-}
-body.tvair-program-reservation-page{
-  --tvair-list-page-table-min:500px;
-  --tvair-list-page-head-bg:var(--tvair-tab-bg);
-  --tvair-list-page-head-fg:var(--tvair-content-link);
-  --tvair-list-page-head-border-bottom:2px solid var(--tvair-line-strong);
-  --tvair-list-page-head-border-right:none;
-  --tvair-list-page-row-border:1px solid var(--tvair-line-soft);
-  --tvair-list-page-row-hover-bg:var(--tvair-row-hover-bg);
-  --tvair-list-page-row-disabled-bg:var(--tvair-list-row-even-bg);
-  --tvair-list-page-row-disabled-hover-bg:var(--tvair-list-row-even-bg);
-  --tvair-list-page-cell-fg:var(--tvair-content-primary);
-  --tvair-list-page-disabled-fg:var(--tvair-content-muted);
-}
-body.tvair-rule-list-page{
-  --tvair-list-page-table-min:860px;
-  --tvair-list-page-head-bg:var(--table-head-bg);
-  --tvair-list-page-head-fg:var(--tvair-content-inverse);
-  --tvair-list-page-head-border-bottom:none;
-  --tvair-list-page-head-border-right:1px solid var(--nav-border);
-  --tvair-list-page-row-border:1px solid var(--list-row-disabled);
-  --tvair-list-page-row-hover-bg:var(--list-row-hover);
-  --tvair-list-page-row-disabled-bg:var(--list-row-disabled);
-  --tvair-list-page-row-disabled-hover-bg:var(--list-row-disabled-hover);
-  --tvair-list-page-cell-fg:var(--list-text-normal);
-  --tvair-list-page-disabled-fg:var(--list-text-disabled);
-}
-body.tvair-keyword-page #result-table,
-body.tvair-program-reservation-page #program-rules-table,
-body.tvair-rule-list-page #rules-table{
-  width:100%;
-  border-collapse:collapse;
-  min-width:var(--tvair-list-page-table-min);
-}
 body.tvair-keyword-page #result-table thead tr,
 body.tvair-program-reservation-page #program-rules-table thead tr,
 body.tvair-rule-list-page #rules-table thead tr{
@@ -880,8 +922,8 @@ body.tvair-rule-list-page #rules-table tbody tr{
   border-bottom:var(--tvair-list-page-row-border);
   transition:background .1s;
 }
-body.tvair-rule-list-page #rules-table tbody tr.row-odd{background:var(--list-row-odd)}
-body.tvair-rule-list-page #rules-table tbody tr.row-even{background:var(--list-row-even)}
+body.tvair-rule-list-page #rules-table tbody tr.row-odd{background:var(--tvair-role-table-row-bg)}
+body.tvair-rule-list-page #rules-table tbody tr.row-even{background:var(--tvair-role-table-row-alt-bg)}
 body.tvair-keyword-page #result-table tbody tr:hover,
 body.tvair-program-reservation-page #program-rules-table tbody tr:hover,
 body.tvair-rule-list-page #rules-table tbody tr:hover{
@@ -894,7 +936,7 @@ body.tvair-rule-list-page #rules-table tbody tr.disabled-row{
   opacity:1;
 }
 body.tvair-keyword-page #result-table tbody tr.reserved{
-  background:var(--reserved-row-bg);
+  background:var(--tvair-role-action-danger-soft-bg);
 }
 body.tvair-rule-list-page #rules-table tbody tr.disabled-row:hover{
   background:var(--tvair-list-page-row-disabled-hover-bg);
@@ -987,9 +1029,9 @@ body.tvair-keyword-page #result-table td[data-cell-role="reservation-action"] .r
 }
 
 
-/* release_contract ProgramReservationFormActionOwnership:
+/* release_contract ProgramReservationFormActionOwnership / HoverStateSemanticPreservation:
    program reservation weekday chips and form/modal action buttons share geometry here.
-   Page CSS keeps semantic paint and state colors only. */
+   Shared choice-state paint below is also authoritative; page CSS must not repaint weekday normal/hover/checked/focus/disabled states. */
 body.tvair-program-reservation-page .dow-chip{
   box-sizing:border-box;
   display:inline-flex;
@@ -1074,33 +1116,70 @@ body.tvair-program-reservation-page #modal-close:disabled{
   }
 }
 
+/* RuleList schema contract. */
+body.tvair-rule-list-page{
+  --tvair-col-rule-enabled:56px;
+  --tvair-col-rule-state:190px;
+  --tvair-col-rule-order:86px;
+  --tvair-col-rule-actions:120px;
+}
+body.tvair-rule-list-page #page-scroll{width:100%;max-width:none;min-width:0;}
+body.tvair-rule-list-page #rules-table{
+  width:100%;
+  max-width:none;
+  table-layout:fixed;
+}
+body.tvair-rule-list-page #rules-table col.rule-col-enabled{width:var(--tvair-col-rule-enabled);}
+body.tvair-rule-list-page #rules-table col.rule-col-keyword{width:auto;}
+body.tvair-rule-list-page #rules-table col.rule-col-state{width:var(--tvair-col-rule-state);}
+body.tvair-rule-list-page #rules-table col.rule-col-order{width:var(--tvair-col-rule-order);}
+body.tvair-rule-list-page #rules-table col.rule-col-actions{width:var(--tvair-col-rule-actions);}
+body.tvair-rule-list-page #rules-table th.col-enabled,
+body.tvair-rule-list-page #rules-table td.col-enabled{
+  width:var(--tvair-col-rule-enabled);
+  min-width:var(--tvair-col-rule-enabled);
+  max-width:var(--tvair-col-rule-enabled);
+  text-align:center;
+  vertical-align:middle;
+  overflow:visible;
+  padding-left:4px;
+  padding-right:4px;
+}
+body.tvair-rule-list-page #rules-table th.col-state,
+body.tvair-rule-list-page #rules-table td.col-state{width:var(--tvair-col-rule-state);}
+body.tvair-rule-list-page #rules-table th.col-order,
+body.tvair-rule-list-page #rules-table td.col-order{width:var(--tvair-col-rule-order);text-align:center;}
+body.tvair-rule-list-page #rules-table th.col-actions,
+body.tvair-rule-list-page #rules-table td.col-actions{width:var(--tvair-col-rule-actions);text-align:center;}
+body.tvair-rule-list-page #rules-table td:nth-child(2){
+  min-width:0;
+  white-space:normal;
+  overflow:hidden;
+}
+body.tvair-rule-list-page #rules-table .keyword-main,
+body.tvair-rule-list-page #rules-table .keyword-sub{
+  max-width:none;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+
+
+/* List geometry owner: tvair-list-module.css owns reservation/keyword/rule/program list geometry. */
+/* HeaderCell/ProgramGuideColumnSchema layout contract. Placement only; no color tuning. */
+.tvair-header-cell,
+body.tvair-non-program-page:not(.tvair-reservation-page) th,body.tvair-non-program-page:not(.tvair-reservation-page) table th,#rules-table th,#result-table th{
+  text-align:center;
+  vertical-align:middle;
+}
+
 /* Program-rule preview semantic columns */
 body.tvair-rule-list-page #preview-table .preview-col-date{width:var(--tvair-list-date-col);}
 body.tvair-rule-list-page #preview-table .preview-col-channel{width:var(--tvair-list-channel-col);}
 body.tvair-rule-list-page #preview-table .preview-col-status{width:var(--tvair-list-expire-col);}
 body.tvair-program-reservation-page #program-rules-table .program-rule-col-enabled{width:var(--tvair-list-enabled-col);text-align:center;}
 
-/* release_contract Reservation row-state genre owner guard
-   Disabled rows are a higher-priority state than genre coloring. This block is a
-   stale-DOM insurance layer; the primary fix is that reservations.html no longer
-   attaches genre row owner classes to disabled/cancelled/conflict rows. */
-body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.disabled-row.tvair-reservation-genre-row > td,
-body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.disabled-row.genre-colored-row > td,
-body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.disabled-row[data-genre-row="1"] > td,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row.tvair-reservation-genre-row > td,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row.genre-colored-row > td,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row[data-genre-row="1"] > td{
-  background:var(--tvair-reservation-list-row-disabled-bg);
-  color:var(--tvair-role-reservation-disabled-fg,var(--tvair-reservation-disabled-text));
-}
-body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.disabled-row.tvair-reservation-genre-row:hover > td,
-body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.disabled-row.genre-colored-row:hover > td,
-body.tvair-reservation-page #rsv-table:not([data-list-role="log"]) tbody tr.disabled-row[data-genre-row="1"]:hover > td,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row.tvair-reservation-genre-row:hover > td,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row.genre-colored-row:hover > td,
-body.tvair-reservation-page #keyword-wrap table.tvair-reservation-family-table tbody tr.disabled-row[data-genre-row="1"]:hover > td{
-  background:var(--tvair-reservation-list-row-disabled-hover-bg);
-}
 
 /* release_contract ListFormControlOwnership: non-reservation list pages share basic form controls and toolbar/filter geometry here. Program-reservation time select geometry is also owned here so direct form controls and compound time controls do not fight across page CSS modules. Toast geometry/paint is owned by tvair-notification.css. Page CSS keeps page-specific labels, panels, modal layout and semantic colors. */
 body.tvair-keyword-page .form-row input[type=text],
@@ -1161,8 +1240,8 @@ body.tvair-program-reservation-page .f-row select:focus,
 body.tvair-rule-list-page .input:focus,
 body.tvair-rule-list-page select:focus{
   outline:none;
-  border-color:var(--tvair-role-control-focus-border,var(--nav-bg));
-  box-shadow:var(--tvair-role-control-focus-ring,var(--focus-ring,none));
+  border-color:var(--tvair-role-control-focus-border);
+  box-shadow:var(--tvair-role-control-focus-ring);
 }
 body.tvair-rule-list-page .multi{
   width:100%;
@@ -1175,6 +1254,16 @@ body.tvair-rule-list-page .multi{
   font-size:12px;
   font-family:'Meiryo','メイリオ',sans-serif;
   box-sizing:border-box;
+}
+body.tvair-rule-list-page .multi option{
+  background-color:var(--tvair-role-control-bg,var(--tvair-surface-raised));
+  color:var(--tvair-role-control-fg,var(--tvair-content-primary));
+}
+body.tvair-rule-list-page .multi option:checked,
+body.tvair-rule-list-page .multi option[data-selected="true"]{
+  background-color:var(--tvair-role-control-active-bg);
+  color:var(--tvair-role-control-active-fg);
+  font-weight:700;
 }
 body.tvair-rule-list-page #toolbar,
 body.tvair-reservation-page #filter-tabs{
@@ -1292,26 +1381,17 @@ body.tvair-keyword-page #result-empty{
 /* release_contract ProgramRuleListPanelOwnership:
    Auto-search rule list page panel/toolbar/table wrap/empty-state geometry lives here.
    tvair-program-rules.css keeps page-local semantic paint, modal surface and preview meaning. */
-body.tvair-rule-list-page #main{
-  width:100%;
-  max-width:none;
-  min-width:0;
-  margin:0;
-  border-radius:0;
-  padding:var(--tvair-layout-page-pad,8px);
-  display:flex;
-  flex-direction:column;
-  gap:var(--tvair-layout-gap,8px);
-  min-height:0;
-  flex:1 1 auto;
-  overflow:hidden;
-}
 body.tvair-rule-list-page #toolbar{
+  width:100%;
+  min-width:0;
+  max-width:none;
+  margin:0;
   display:flex;
+  flex:0 0 auto;
   align-items:center;
   justify-content:space-between;
   gap:8px;
-  flex-shrink:0;
+  box-sizing:border-box;
   border-radius:3px;
   padding:6px 10px;
 }
@@ -1320,8 +1400,14 @@ body.tvair-rule-list-page #summary{
   flex:0 0 auto;
 }
 body.tvair-rule-list-page #table-wrap{
-  flex:1;
+  width:100%;
+  min-width:0;
+  max-width:none;
+  min-height:0;
+  margin:0;
+  flex:1 1 auto;
   overflow:auto;
+  box-sizing:border-box;
   border-radius:3px;
 }
 body.tvair-rule-list-page #table-wrap::-webkit-scrollbar{
@@ -1472,104 +1558,119 @@ body.tvair-rule-list-page .toolbar-btn:disabled{
 }
 
 
-/* release_contract ListPageShellParityContract:
-   Top-tab non-program pages must share the same page shell width contract.
-   Page width belongs to #page-scroll / PageShell, not to page-local toolbars,
-   tables, or buttons.  This prevents auto-search toolbar/button edits from
-   changing the whole page width and aligns keyword / auto-search / program
-   reservation pages under the same horizontal spine. */
-body.tvair-keyword-page #page-scroll,
-body.tvair-rule-list-page #page-scroll,
-body.tvair-program-reservation-page #page-scroll{
-  flex:1 1 auto;
-  width:100%;
-  max-width:none;
-  min-width:0;
-  min-height:0;
-  margin:0;
-  padding:var(--tvair-list-pad);
-  overflow:hidden;
-  box-sizing:border-box;
-  background:var(--tvair-role-page-bg,var(--tvair-color-surface-page));
-}
-body.tvair-keyword-page #body,
-body.tvair-rule-list-page #main,
-body.tvair-program-reservation-page #main{
-  width:100%;
-  max-width:none;
-  min-width:0;
-  height:calc(100vh - var(--tvair-layout-nav-height,var(--tvair-top-nav-height,32px)) - (var(--tvair-list-pad) * 2));
-  min-height:0;
-  margin:0;
-  padding:0;
-  box-sizing:border-box;
-  overflow:hidden;
-  background:transparent;
-  border:0;
-  border-radius:0;
-}
-/* release_contract SplitPaneParity: keyword/program split pages share the same left-pane width token. */
-body.tvair-keyword-page #body{
-  display:grid;
-  grid-template-columns:var(--tvair-keyword-form-pane,var(--tvair-split-form-pane,340px)) minmax(0,1fr);
-  gap:var(--tvair-list-gap);
-}
-body.tvair-rule-list-page #main{
-  display:flex;
-  flex-direction:column;
-  gap:var(--tvair-list-gap);
-}
-body.tvair-program-reservation-page #main{
-  display:grid;
-  grid-template-columns:var(--tvair-program-form-pane,var(--tvair-split-form-pane,340px)) minmax(0,1fr);
-  gap:var(--tvair-list-gap);
-  align-items:stretch;
-}
-body.tvair-keyword-page #result-panel,
-body.tvair-rule-list-page #toolbar,
-body.tvair-rule-list-page #table-wrap,
-body.tvair-program-reservation-page #form-panel,
-body.tvair-program-reservation-page #list-panel{
-  min-width:0;
-  max-width:none;
-  box-sizing:border-box;
-}
-body.tvair-rule-list-page #toolbar{
-  width:100%;
-  flex:0 0 auto;
-  margin:0;
-}
-body.tvair-rule-list-page #table-wrap{
-  width:100%;
-  flex:1 1 auto;
-  min-height:0;
-  margin:0;
-  overflow:auto;
-}
-body.tvair-rule-list-page #toolbar-left,
-body.tvair-rule-list-page #toolbar-right{
-  min-width:0;
-}
-body.tvair-rule-list-page #toolbar-left{
-  flex:1 1 auto;
-}
-body.tvair-rule-list-page #toolbar-right{
-  flex:0 0 auto;
-  margin-left:auto;
-}
-body.tvair-rule-list-page .toolbar-btn{
-  min-height:24px;
-  padding:4px 12px;
-  line-height:1.2;
-  gap:4px;
-}
-body.tvair-rule-list-page #toolbar-right .toolbar-btn{
-  min-height:24px;
-  padding:4px 12px;
-}
 @media (max-width:900px){
   body.tvair-keyword-page #body,
   body.tvair-program-reservation-page #main{
     grid-template-columns:1fr;
   }
+}
+
+/* release_contract ListPageCompoundStateOwner
+   Shared list/form pages own their field and choice compound states here.
+   Disabled wins over hover/focus; checked wins over generic hover/focus.
+   This deliberately excludes plugin pages, generated surfaces, and ProgramGuide. */
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) input:not([type="checkbox"]):not([type="radio"]),
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) select,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) textarea,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .input,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .select,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .listbox{
+  background:var(--tvair-role-field-bg);
+  color:var(--tvair-role-field-fg);
+  border-color:var(--tvair-role-field-border);
+}
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) input:not([type="checkbox"]):not([type="radio"]):not(:disabled):hover,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) select:not(:disabled):hover,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) textarea:not(:disabled):hover,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .input:not(.disabled):not(.is-disabled):hover,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .select:not(.disabled):not(.is-disabled):hover,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .listbox:not(.disabled):not(.is-disabled):hover{
+  background:var(--tvair-role-field-hover-bg);
+  border-color:var(--tvair-role-field-hover-border);
+}
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) input:not([type="checkbox"]):not([type="radio"]):focus,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) select:focus,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) textarea:focus,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .input:focus,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .select:focus,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .listbox:focus{
+  background:var(--tvair-role-field-focus-bg);
+  color:var(--tvair-role-field-focus-fg);
+  border-color:var(--tvair-role-field-focus-border);
+  box-shadow:var(--tvair-role-field-focus-ring);
+}
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) input:not([type="checkbox"]):not([type="radio"]):disabled,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) select:disabled,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) textarea:disabled,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .input.disabled,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .input.is-disabled,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .select.disabled,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .select.is-disabled,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .listbox.disabled,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .listbox.is-disabled,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) input:not([type="checkbox"]):not([type="radio"]):disabled:hover,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) select:disabled:hover,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) textarea:disabled:hover{
+  background:var(--tvair-role-field-disabled-bg);
+  color:var(--tvair-role-field-disabled-fg);
+  border-color:var(--tvair-role-field-disabled-border);
+  box-shadow:none;
+}
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-choice-chip,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-check-chip,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-weekday-chip{
+  background:var(--tvair-role-choice-bg);
+  color:var(--tvair-role-choice-fg);
+  border-color:var(--tvair-role-choice-border);
+}
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-choice-chip:not(:disabled):not([aria-disabled="true"]):hover,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-check-chip:not(:has(input:disabled)):hover,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-weekday-chip:not(:disabled):not([aria-disabled="true"]):hover{
+  background:var(--tvair-role-choice-hover-bg);
+  color:var(--tvair-role-choice-hover-fg);
+  border-color:var(--tvair-role-choice-hover-border);
+}
+/* release_contract HoverStateSemanticPreservation:
+   semantic checked/pressed state outranks hover. Hover must never replace its surface/text/border. */
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-choice-chip[aria-pressed="true"],
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-choice-chip[aria-pressed="true"]:hover,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-choice-chip[aria-pressed="true"]:focus-visible,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-choice-chip.checked,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-choice-chip.checked:hover,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-check-chip.checked,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-check-chip.checked:hover,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-check-chip:has(input:checked),
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-check-chip:has(input:checked):hover,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-check-chip:has(input:checked):focus-within,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-weekday-chip[aria-pressed="true"],
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-weekday-chip[aria-pressed="true"]:hover,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-weekday-chip.checked,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-weekday-chip.checked:hover{
+  background:var(--tvair-role-choice-checked-bg);
+  color:var(--tvair-role-choice-checked-fg);
+  border-color:var(--tvair-role-choice-checked-border);
+}
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-choice-chip:focus-visible,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-check-chip:focus-within,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-weekday-chip:focus-visible{
+  outline:2px solid var(--tvair-role-choice-focus);
+  outline-offset:1px;
+}
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-choice-chip:disabled,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-choice-chip[aria-disabled="true"],
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-check-chip:has(input:disabled),
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-weekday-chip:disabled,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-weekday-chip[aria-disabled="true"],
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-choice-chip:disabled:hover,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-choice-chip[aria-disabled="true"]:hover,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-check-chip:has(input:disabled):hover,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-weekday-chip:disabled:hover,
+:is(body.tvair-keyword-page, body.tvair-program-reservation-page, body.tvair-rule-list-page) .tvair-weekday-chip[aria-disabled="true"]:hover{
+  background:var(--tvair-role-choice-disabled-bg);
+  color:var(--tvair-role-choice-disabled-fg);
+  border-color:var(--tvair-role-choice-disabled-border);
+  outline:none;
+  box-shadow:none;
+  opacity:.55;
+  cursor:default;
 }

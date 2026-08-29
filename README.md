@@ -1,87 +1,56 @@
-# TvAIr Alpha 1.1.0
+﻿# TvAIr 1.2.0
 
-TvAIr は、TVTest 環境を利用して、番組表表示、録画予約、自動検索予約、プラグイン連携を行うアプリケーションです。
+TvAIr 1.2.0 の Visual Studio 2022 用ソース一式です。
 
-Alpha 1.1.0 は暫定確認版です。使用する場合は、利用者自身の責任で動作環境、設定内容、録画結果を確認してください。
+## ビルド
 
-## 主な機能
+1. Visual Studio 2022 で `TvAIr.sln` を開きます。
+2. 構成を `Release` にします。
+3. 使用する環境に合わせて `x64` または `x86` を選択してソリューションをビルドします。
 
-- 番組表表示
-- 録画予約
-- 自動検索予約
-- プラグイン対応
-- ライト / ダークテーマ
+製品ソリューションは次の4プロジェクトで構成されています。
 
-## 必要動作環境
+- TvAIrEpgRec
+- AribDecodeBridge
+- TvAIrPlugin
+- TvAIr
 
-### 実行環境
+導入方法と必要環境は `README.txt` を確認してください。
 
-- Windows 10 / 11
-- .NET 8 Desktop Runtime
-- Microsoft Visual C++ 再頒布可能パッケージ
-- TVTest 0.10.0 以降で単体視聴・録画できる環境
-- B25 デコーダーまたは復号に必要な環境
-- 使用する BonDriver
-- `.ch2` ファイル
-- `ChSet.txt`
-- 録画保存先
+## TVTest
 
-### ビルド環境
+設定画面の「TVTest.exe のフルパス」は、TvAIr で使用する基準となる TVTest を指定します。録画用と視聴用で TVTest を分けない場合は、この TVTest を共通で使用します。視聴専用の TVTest を別に使用する場合は「視聴用TVTest.exe のフルパス」を指定します。
 
-- Visual Studio 2022 以降
-- .NET 8 SDK
-- .NET 8 SDK 対応の Visual Studio 構成
-- C++ によるデスクトップ開発
+録画処理、EPG取得、放送前EPG確認では TvAIrEpgRec が録画用チューナーの実行を管理します。視聴は視聴用チューナーを使用して TVTest を起動します。
 
-## ビルド方法
+## EPG取得と放送前EPG確認
 
-Visual Studio 2022 以降で `TvAIr.sln` を開きます。
+定時EPG取得は、指定した時刻を基準に、必要な取得時間を確保できる連続した空き時間へ自動調整します。取得開始後はその実行条件を固定し、完了まで継続します。
 
-対応するビルド構成は次の通りです。
+放送前EPG確認は、録画前に番組情報を確認して番組の開始・終了時刻の変更に追従します。確認に失敗した場合は再試行せず、予定時刻になれば録画を開始します。
 
-- `Release | x86`
-- `Release | x64`
+## チェーン予約
 
-ビルド後の出力先は次の通りです。
+チェーン予約は、同じ放送局で連続する複数の番組を同じ録画用チューナーで順番に録画します。番組の境界では前の録画を終了してチューナーを解放し、その後に次の録画へ引き継ぎます。前後の録画マージンが重なる場合は後番組を優先し、対象となる前番組名には「(C)」を表示します。
 
-```text
-TvAIr/bin/x86/Release/net8.0-windows/
-TvAIr/bin/x64/Release/net8.0-windows/
+## プラグイン
+
+Plugin SDK / Host Contract 1.1.5 に対応しています。Host 管理の独立ウィンドウは、表示状態、位置・サイズ、終了状態を Host のライフサイクル契約に従って管理します。
+
+## ネットワーク
+
+初期状態ではローカルPCからのみ利用できます。LAN内の別端末から接続する場合は、設定画面でLAN接続を有効にし、12文字以上の接続用パスワードを設定します。文字種に必須条件はなく、大文字と小文字は区別されます。インターネットへポートを直接公開しないでください。
+
+## バージョン更新
+
+製品バージョンは `Directory.Build.props` を基準に、次のスクリプトで関連ファイルを更新します。
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build\Set-TvAIr-Version.ps1 -ProductVersion 1.2.0
 ```
 
-## 初期設定
+通常の製品更新では、Plugin SDK / Host Contract の対応バージョンを個別に変更しません。
 
-1. ZIP を任意のフォルダに展開します。
-2. `B25Decoder.dll` を `TvAIr.exe` と同じフォルダに配置します。
-3. `TvAIr.exe` を起動します。
-4. 設定画面で BonDriver、`.ch2`、`ChSet.txt`、録画保存先を指定します。
-5. 番組表を取得します。
+## 開発者版 / 一般公開版
 
-## appsettings.example.json について
-
-`TvAIr/appsettings.example.json` は公開用の設定例です。
-
-実際の環境設定は、必要に応じて `TvAIr/appsettings.json` を作成して行います。ただし、`TvAIr/appsettings.json` には利用者環境の値が入る可能性があるため、Git 管理対象にしません。
-
-公開リポジトリでは、設定例の正本を `appsettings.example.json` とします。
-
-## 同梱ファイル
-
-- `README.txt` — 配布ZIP向け説明
-- `README.md` — GitHub表示向け説明
-- `Regex_Manual.txt` — 自動検索予約向け正規表現マニュアル
-- `RELEASE_NOTES.txt` — リリースノート
-- `LICENSE` — ライセンス
-
-## 既知の制限と注意
-
-- Alpha 版のため、仕様や画面構成は今後変更される場合があります。
-- TvAIr は TVTest、BonDriver、復号環境、チャンネル設定に依存します。
-- 録画前には、利用者自身の環境で視聴・録画できることを確認してください。
-- 録画結果、設定内容、既存環境への影響について、作者は責任を負いません。
-
-## ライセンス
-
-このリポジトリのライセンスは `LICENSE` を確認してください。
-
-TVTest、BonDriver、B25 デコーダー、各プラグインなど、TvAIr 以外のソフトウェアについては、それぞれの配布元・権利者のライセンスに従ってください。
+本配布物は一般公開版で、`TvAIrDeveloperDiagnostics=false` を既定値としています。Developer Diagnostics は単一のコンパイル時境界で管理され、開発者ログ本体だけでなく診断専用の計測・Queue・購読・snapshot・ファイル・APIも一般公開ビルドでは生成または保持しません。ユーザー運用ログは別責務として一般公開版にも残ります。製品機能は Developer Diagnostics の ON/OFF で分岐しません。

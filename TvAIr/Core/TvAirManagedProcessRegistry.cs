@@ -1,4 +1,5 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
+using System.Diagnostics;
 
 namespace TvAIr.Core;
 
@@ -23,7 +24,9 @@ public static class TvAirManagedProcessRegistry
             did,
             bonDriverFileName,
             recordingFilePath,
-            DateTime.Now);
+            DateTime.Now,
+            null,
+            CaptureIdentity(processId));
     }
 
     public static void RegisterActivity(int processId, string reason, string? serviceName)
@@ -38,12 +41,15 @@ public static class TvAirManagedProcessRegistry
             null,
             null,
             null,
-            DateTime.Now);
+            DateTime.Now,
+            null,
+            CaptureIdentity(processId));
     }
 
-    public static void RegisterViewer(int processId, string? did, string? bonDriverFileName)
+    public static ManagedProcessIdentity RegisterViewer(int processId, string ownershipId, string? did, string? bonDriverFileName)
     {
-        if (processId <= 0) return;
+        if (processId <= 0) return ManagedProcessIdentity.Unavailable(processId);
+        var identity = CaptureIdentity(processId);
         Processes[processId] = new ManagedTvTestProcess(
             processId,
             ManagedTvTestProcessPurpose.Viewer,
@@ -53,11 +59,68 @@ public static class TvAirManagedProcessRegistry
             string.IsNullOrWhiteSpace(did) ? null : did.Trim(),
             string.IsNullOrWhiteSpace(bonDriverFileName) ? null : Path.GetFileName(bonDriverFileName.Trim()),
             null,
-            DateTime.Now);
+            DateTime.Now,
+            string.IsNullOrWhiteSpace(ownershipId) ? null : ownershipId.Trim(),
+            identity);
+        return identity;
+    }
+
+    public static ManagedProcessIdentity CaptureIdentity(int processId)
+    {
+        if (processId <= 0) return ManagedProcessIdentity.Unavailable(processId);
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            if (process.HasExited) return ManagedProcessIdentity.Unavailable(processId);
+            DateTime? startedAtUtc = null;
+            string? executablePath = null;
+            try { startedAtUtc = process.StartTime.ToUniversalTime(); } catch { }
+            try { executablePath = NormalizeExecutablePath(process.MainModule?.FileName); } catch { }
+            return new ManagedProcessIdentity(processId, startedAtUtc, executablePath, startedAtUtc.HasValue || !string.IsNullOrWhiteSpace(executablePath));
+        }
+        catch
+        {
+            return ManagedProcessIdentity.Unavailable(processId);
+        }
+    }
+
+    public static bool IdentityMatches(ManagedProcessIdentity registered, ManagedProcessIdentity observed)
+    {
+        if (registered.ProcessId != observed.ProcessId) return false;
+        if (!registered.IsAvailable || !observed.IsAvailable) return true;
+        if (registered.ProcessStartTimeUtc.HasValue && observed.ProcessStartTimeUtc.HasValue &&
+            registered.ProcessStartTimeUtc.Value != observed.ProcessStartTimeUtc.Value) return false;
+        if (!string.IsNullOrWhiteSpace(registered.ExecutablePath) && !string.IsNullOrWhiteSpace(observed.ExecutablePath) &&
+            !string.Equals(registered.ExecutablePath, observed.ExecutablePath, StringComparison.OrdinalIgnoreCase)) return false;
+        return true;
+    }
+
+    private static string? NormalizeExecutablePath(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        try { return Path.GetFullPath(value.Trim()); }
+        catch { return value.Trim(); }
     }
 
     public static bool TryGet(int processId, out ManagedTvTestProcess process)
         => Processes.TryGetValue(processId, out process!);
+
+    public static IReadOnlyList<ManagedTvTestProcess> GetRecordings(int? reservationId = null)
+    {
+        return Processes.Values
+            .Where(p => p.Purpose == ManagedTvTestProcessPurpose.DirectRecorder
+                && (!reservationId.HasValue || p.ReservationId == reservationId.Value))
+            .OrderBy(p => p.RegisteredAt)
+            .ToList();
+    }
+
+    public static IReadOnlyList<ManagedTvTestProcess> GetAll()
+    {
+        return Processes.Values
+            .OrderBy(p => p.RegisteredAt)
+            .ThenBy(p => p.ProcessId)
+            .ToList();
+    }
 
     public static IReadOnlyList<ManagedTvTestProcess> GetViewers(string? did = null, string? bonDriverFileName = null)
     {
@@ -94,8 +157,16 @@ public sealed record ManagedTvTestProcess(
     string? Did,
     string? BonDriverFileName,
     string? RecordingFilePath,
-    DateTime RegisteredAt)
+    DateTime RegisteredAt,
+    string? OwnershipId,
+    ManagedProcessIdentity Identity)
 {
     public bool IsActivityOnly => Purpose == ManagedTvTestProcessPurpose.ActivityKeeper;
     public bool IsViewer => Purpose == ManagedTvTestProcessPurpose.Viewer;
+}
+
+
+public sealed record ManagedProcessIdentity(int ProcessId, DateTime? ProcessStartTimeUtc, string? ExecutablePath, bool IsAvailable)
+{
+    public static ManagedProcessIdentity Unavailable(int processId) => new(processId, null, null, false);
 }

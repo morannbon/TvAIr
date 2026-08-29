@@ -1,4 +1,4 @@
-using TvAIr.Core;
+﻿using TvAIr.Core;
 
 namespace TvAIr.Schedule;
 
@@ -30,8 +30,8 @@ public sealed record ReservationOriginClassification(
     string Reason);
 
 /// <summary>
-/// release_contract: 予約元と同定軸の分類を一箇所へ集約する。
-/// ここはチューナー割当を行わず、ALLOC_ROUTE/TUNER_ALLOCへ渡す前の意味付けだけを扱う。
+/// 予約元・同定軸・共通表示分類を一箇所へ集約する。
+/// チューナー割当は行わず、予約の構造化された意味付けだけを扱う。
 /// </summary>
 public static class ReservationOriginClassifier
 {
@@ -75,6 +75,33 @@ public static class ReservationOriginClassifier
 
         return new(origin, identity, isMissingProgramRule, isResolved, reason);
     }
+
+
+    public static string GetUserSourceLabel(Reservation? reservation)
+        => Classify(reservation).Origin switch
+        {
+            ReservationOriginKind.ManualProgramGuide
+                or ReservationOriginKind.ImmediateProgramGuide
+                or ReservationOriginKind.KeywordSearchProgramGuide => "番組表",
+            ReservationOriginKind.AutoSearch => "自動検索",
+            ReservationOriginKind.ExplicitProgramRule
+                or ReservationOriginKind.ProgramGuideMissingProgramRule => "プログラム",
+            ReservationOriginKind.SystemEpg => "システム",
+            _ => "不明"
+        };
+
+    public static string GetOperationalRoute(Reservation? reservation)
+        => Classify(reservation).Origin switch
+        {
+            ReservationOriginKind.ManualProgramGuide
+                or ReservationOriginKind.ImmediateProgramGuide
+                or ReservationOriginKind.KeywordSearchProgramGuide => "program_guide",
+            ReservationOriginKind.AutoSearch => "auto_search",
+            ReservationOriginKind.ExplicitProgramRule
+                or ReservationOriginKind.ProgramGuideMissingProgramRule => "program",
+            ReservationOriginKind.SystemEpg => "system_epg",
+            _ => "unknown"
+        };
 
     public static ReservationIdentityKind ClassifyIdentity(Reservation? r)
     {

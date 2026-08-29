@@ -1,9 +1,8 @@
 /* TvAIr Menu Spine release_contract
-   Windows-style menu projection: shared tree, surface attributes, JS-managed flyout.
-   MenuLegacyEntryCleanupContract: hamburger/page/context/tray keep a single command spine; page-local onclick menu fallbacks are removed, and only EPG silent remains a surface attribute.
-   release_contract: menu page-open actions use a shared entry contract; Help opens as a separate tab from every menu surface.
-   release_contract: Web context is an in-app surface: app.open/app.exit stay tray-only and are not projected into page context menus.
-   release_contract: Manual EPG run uses the shared scope-based request contract; Web context is visible, tray is silent. */
+   Windows-style Web menu projection: hamburger/page/context share one command tree and one lifecycle.
+   Tray is Host-owned by TrayIconService/NotifyIcon.ContextMenuStrip and is intentionally outside this Web spine.
+   Page-local onclick menu fallbacks are removed. Help opens as a separate tab from every Web menu surface.
+   Manual EPG run uses the shared scope-based Web request contract. */
 (function(){
   'use strict';
   if(window.TvAIrMenuSpine && window.TvAIrMenuSpine.version === '1.0.0') return;
@@ -14,13 +13,11 @@
   const qa = (s,r=document)=>Array.from(r.querySelectorAll(s));
 
   const MENU_LABELS = Object.freeze({
-    open:'TvAIrを開く',
     epg:'EPG取得',
     plugins:'プラグイン',
     settings:'設定',
     help:'ヘルプ',
     version:'バージョン情報',
-    exit:'TvAIr終了',
     cancelEpg:'取得キャンセル'
   });
   const EPG_ITEMS = [
@@ -66,13 +63,32 @@
   }
 
   function epgCanStart(s){ return !!(s && (s.canStart === true || s.CanStart === true)); }
-  function epgCanCancel(s){ return !!(s && (s.canCancel === true || s.CanCancel === true)); }
+  function epgCanCancel(s){
+    if(!s || !(s.canCancel === true || s.CanCancel === true)) return false;
+    return !((s.silent === true || s.Silent === true) || String((s.uiMode || s.UiMode || '')).toLowerCase() === 'silent');
+  }
   function epgScope(s){ return (s && (s.targetScope || s.TargetScope || s.scope || s.Scope)) || '-'; }
   function epgUiMode(s){ return (s && (s.uiMode || s.UiMode)) || '-'; }
 
+  function tvairCurrentLocalReturnUrl(){
+    try{
+      const path = String(window.location && window.location.pathname || '/');
+      if(!path || path.charAt(0) !== '/' || path.indexOf('//') === 0) return '/';
+      if(/^\/(api|plugin-menu|plugin-menu-info|plugin-window)/i.test(path)) return '/';
+      const search = String(window.location && window.location.search || '');
+      const hash = String(window.location && window.location.hash || '');
+      const local = path + search + hash;
+      if(/^(?:javascript|data|vbscript):/i.test(local)) return '/';
+      return local || '/';
+    }catch(_){ return '/'; }
+  }
+
   function pluginHref(action,surface){
     const route = (action && (action.routeSegment || action.route)) || '';
-    return '/plugin-menu/' + encodeURIComponent(route) + '?source=' + encodeURIComponent(sourceFor(surface));
+    const returnUrl = tvairCurrentLocalReturnUrl();
+    return '/plugin-menu/' + encodeURIComponent(route)
+      + '?source=' + encodeURIComponent(sourceFor(surface))
+      + '&returnUrl=' + encodeURIComponent(returnUrl);
   }
 
   function clearElement(el){ while(el && el.firstChild) el.removeChild(el.firstChild); }
@@ -230,7 +246,7 @@
     return Object.freeze({
       scope: normalizedScope === 'GR' || normalizedScope === 'BS' || normalizedScope === 'CS' || normalizedScope === 'BSCS' ? normalizedScope : 'All',
       surface: sourceFor(surface || 'hamburger'),
-      silent: sourceFor(surface || 'hamburger') === 'tray',
+      silent: false,
       source: 'WebMenu.Epg',
       contract: MENU_SURFACE_CONTRACT
     });
@@ -278,38 +294,28 @@
   const MENU_SURFACE_CONTRACT = 'release_contract';
   const SETTINGS_ENTRY_CONTRACT = MENU_SURFACE_CONTRACT;
   const MENU_COMMANDS = Object.freeze({
-    open:'open-app',
     epgRun:'epg-run',
     epgCancel:'epg-cancel',
     plugin:'plugin-open',
     settings:'settings-open',
     help:'help-open',
-    version:'version-open',
-    exit:'app-exit'
+    version:'version-open'
   });
 
   const MENU_SURFACES = Object.freeze({
     hamburger:'hamburger',
     page:'page',
-    context:'context',
-    tray:'tray'
+    context:'context'
   });
   const MENU_COMMAND_VISIBILITY = Object.freeze({
-    [MENU_COMMANDS.open]: [MENU_SURFACES.tray],
-    [MENU_COMMANDS.exit]: [MENU_SURFACES.tray],
-    [MENU_COMMANDS.epgRun]: [MENU_SURFACES.hamburger, MENU_SURFACES.page, MENU_SURFACES.context, MENU_SURFACES.tray],
-    [MENU_COMMANDS.epgCancel]: [MENU_SURFACES.hamburger, MENU_SURFACES.page, MENU_SURFACES.context, MENU_SURFACES.tray],
-    [MENU_COMMANDS.plugin]: [MENU_SURFACES.hamburger, MENU_SURFACES.page, MENU_SURFACES.context, MENU_SURFACES.tray],
-    [MENU_COMMANDS.settings]: [MENU_SURFACES.hamburger, MENU_SURFACES.page, MENU_SURFACES.context, MENU_SURFACES.tray],
-    [MENU_COMMANDS.help]: [MENU_SURFACES.hamburger, MENU_SURFACES.page, MENU_SURFACES.context, MENU_SURFACES.tray],
-    [MENU_COMMANDS.version]: [MENU_SURFACES.hamburger, MENU_SURFACES.page, MENU_SURFACES.context, MENU_SURFACES.tray]
+    [MENU_COMMANDS.epgRun]: [MENU_SURFACES.hamburger, MENU_SURFACES.page, MENU_SURFACES.context],
+    [MENU_COMMANDS.epgCancel]: [MENU_SURFACES.hamburger, MENU_SURFACES.page, MENU_SURFACES.context],
+    [MENU_COMMANDS.plugin]: [MENU_SURFACES.hamburger, MENU_SURFACES.page, MENU_SURFACES.context],
+    [MENU_COMMANDS.settings]: [MENU_SURFACES.hamburger, MENU_SURFACES.page, MENU_SURFACES.context],
+    [MENU_COMMANDS.help]: [MENU_SURFACES.hamburger, MENU_SURFACES.page, MENU_SURFACES.context],
+    [MENU_COMMANDS.version]: [MENU_SURFACES.hamburger, MENU_SURFACES.page, MENU_SURFACES.context]
   });
 
-  function isCommandVisible(surface, command){
-    const visible = MENU_COMMAND_VISIBILITY[command];
-    if(!visible || visible.length === 0) return true;
-    return visible.indexOf(sourceFor(surface)) >= 0;
-  }
 
   function commandDataset(surface, command, extra){
     return Object.assign({
@@ -350,14 +356,6 @@
     root.appendChild(separator());
     root.appendChild(buildHelpItem(surface));
     root.appendChild(buildVersionItem(surface));
-    if(isCommandVisible(surface, MENU_COMMANDS.exit)){
-      root.appendChild(separator());
-      root.appendChild(item('button', MENU_LABELS.exit, {
-        surface,
-        dataset:commandDataset(surface, MENU_COMMANDS.exit, { tvairMenuTailRole:'exit' }),
-        onClick:()=>{ emitCommand(surface, MENU_COMMANDS.exit); closeAll(); requestExit(); }
-      }));
-    }
   }
 
   async function buildMenu(root, surface){
@@ -371,11 +369,6 @@
     root.dataset.tvairMenuFlyout = 'classic-hover-focus-pane';
     root.setAttribute('role','menu');
 
-    if(isCommandVisible(surface, MENU_COMMANDS.open)){
-      root.appendChild(item('a', MENU_LABELS.open,{ surface, href:'/', dataset:commandDataset(surface, MENU_COMMANDS.open) }));
-      root.appendChild(separator());
-    }
-
     root.appendChild(buildEpgSubmenu(surface, epgState));
     const plugin = buildPluginSubmenu(actions, surface);
     if(plugin) root.appendChild(plugin);
@@ -387,9 +380,11 @@
 
   function openSettings(surface){
     const entrySurface = sourceFor(surface || 'hamburger');
-    if(window.TvAIrSettingsModule && typeof window.TvAIrSettingsModule.open === 'function') return window.TvAIrSettingsModule.open({ source:entrySurface, contract:SETTINGS_ENTRY_CONTRACT });
-    if(typeof window.showCfgModal === 'function') return window.showCfgModal({ source:entrySurface, contract:SETTINGS_ENTRY_CONTRACT });
-    location.href='/?open=settings&settingsEntry=' + encodeURIComponent(entrySurface);
+    if(window.TvAIrSettingsHost && typeof window.TvAIrSettingsHost.open === 'function'){
+      return window.TvAIrSettingsHost.open({ source:entrySurface, contract:SETTINGS_ENTRY_CONTRACT });
+    }
+    console.error('TvAIrSettingsHost is not available.');
+    return false;
   }
   function openMenuPage(surface, command, url, opts){
     opts = opts || {};
@@ -404,8 +399,91 @@
     return null;
   }
   function openHelp(surface){ return openMenuPage(surface, MENU_COMMANDS.help, '/help.html', { target:'_blank' }); }
-  function openVersionInfo(){ if(typeof window.showVersionInfo === 'function') return window.showVersionInfo(); location.href='/?open=version'; }
-  async function requestExit(){ try{ await fetch('/api/app/exit?source=WebContextMenu', { method:'POST', cache:'no-store' }); }catch(_){ } }
+
+  function ensureVersionDialog(){
+    let overlay = q('#ver-overlay');
+    if(overlay) return overlay;
+
+    overlay = document.createElement('div');
+    overlay.id = 'ver-overlay';
+    overlay.className = 'ver-overlay';
+    overlay.setAttribute('role','dialog');
+    overlay.setAttribute('aria-modal','true');
+    overlay.setAttribute('aria-labelledby','tvair-version-title');
+
+    const box = document.createElement('div');
+    box.className = 'ver-box';
+    const head = document.createElement('div');
+    head.className = 'ver-head';
+    const title = document.createElement('span');
+    title.id = 'tvair-version-title';
+    title.className = 'ver-title';
+    title.textContent = 'TvAIr バージョン情報';
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'ver-close';
+    close.setAttribute('aria-label','閉じる');
+    close.textContent = '✕';
+    const body = document.createElement('div');
+    body.className = 'ver-body';
+    const text = document.createElement('div');
+    text.id = 'ver-text';
+    body.appendChild(text);
+    const footer = document.createElement('div');
+    footer.className = 'ver-footer';
+    const ok = document.createElement('button');
+    ok.type = 'button';
+    ok.className = 'ver-ok';
+    ok.textContent = 'OK';
+
+    const hide = ()=>overlay.classList.remove('open');
+    close.addEventListener('click', hide);
+    ok.addEventListener('click', hide);
+    overlay.addEventListener('click', ev=>{ if(ev.target === overlay) hide(); });
+    overlay.addEventListener('keydown', ev=>{ if(ev.key === 'Escape'){ ev.preventDefault(); hide(); } });
+
+    head.appendChild(title);
+    head.appendChild(close);
+    footer.appendChild(ok);
+    box.appendChild(head);
+    box.appendChild(body);
+    box.appendChild(footer);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    return overlay;
+  }
+
+  async function openVersionInfo(){
+    const overlay = ensureVersionDialog();
+    const text = q('#ver-text', overlay) || q('#ver-text');
+    try{
+      const res = await fetch('/api/version', { cache:'no-store' });
+      const data = res.ok ? await res.json() : { version:'unknown' };
+      const version = String(data.version || 'unknown');
+      if(text){
+        clearElement(text);
+        const strong = document.createElement('strong');
+        strong.textContent = 'TvAIr ' + version;
+        text.appendChild(strong);
+        text.appendChild(document.createElement('br'));
+        text.appendChild(document.createElement('br'));
+        text.appendChild(document.createTextNode('録画予約・EPG管理アプリケーション'));
+      }
+    }catch(_){
+      if(text){
+        clearElement(text);
+        const strong = document.createElement('strong');
+        strong.textContent = 'TvAIr';
+        text.appendChild(strong);
+        text.appendChild(document.createElement('br'));
+        text.appendChild(document.createElement('br'));
+        text.appendChild(document.createTextNode('バージョン情報を取得できませんでした。'));
+      }
+    }
+    overlay.classList.add('open');
+    const closeButton = q('.ver-close', overlay);
+    if(closeButton) closeButton.focus();
+  }
 
   async function runEpg(request){
     const req = request && request.scope ? request : createManualEpgRun(request && request.scope, 'hamburger');
@@ -430,7 +508,7 @@
     if(!epgCanCancel(current)) return;
     closeAll();
     if(window.TvAirEpgWidget && typeof window.TvAirEpgWidget.cancel === 'function') return window.TvAirEpgWidget.cancel();
-    try{ await fetch('/api/epg/cancel?source=WebMenu.EpgCancel', { method:'POST', cache:'no-store' }); }catch(_){ }
+    try{ await fetch('/api/epg/cancel?source=WebMenu.VisibleEpgCancel', { method:'POST', cache:'no-store' }); }catch(_){ }
   }
 
   function getMenuRootForButton(btn){
@@ -442,11 +520,16 @@
     return null;
   }
 
+  function setMenuSurfaceOpen(root, open){
+    if(!root) return;
+    root.style.display = open ? 'block' : 'none';
+    root.classList.toggle('open', !!open);
+  }
+
   function closeAll(except){
     if(state.closeTimer) clearTimeout(state.closeTimer);
     qa('.tvair-menu-group.tvair-menu-submenu-open').forEach(closeSubmenu);
-    qa('#menu-dropdown,#page-menu-dropdown,.tvair-menu-surface').forEach(el=>{ if(el !== except){ el.style.display='none'; el.classList.remove('open'); } });
-    const ctx = q('#tvair-context-menu'); if(ctx && ctx !== except) ctx.classList.remove('open');
+    qa('#menu-dropdown,#page-menu-dropdown,.tvair-menu-surface').forEach(el=>{ if(el !== except) setMenuSurfaceOpen(el, false); });
     state.activeGroup = null;
   }
 
@@ -454,9 +537,9 @@
     const root = getMenuRootForButton(btn); if(!root) return;
     const open = root.style.display === 'block' || root.classList.contains('open');
     closeAll(root);
-    if(open){ root.style.display='none'; root.classList.remove('open'); return; }
+    if(open){ setMenuSurfaceOpen(root, false); return; }
     await buildMenu(root, surface);
-    root.style.display='block'; root.classList.add('open');
+    setMenuSurfaceOpen(root, true);
     try{ window.dispatchEvent(new CustomEvent('tvair-menu-opened',{detail:{surface,open:true,version:VERSION}})); }catch(_){ }
   }
 
@@ -476,8 +559,11 @@
     if(t && t.closest && t.closest('input,textarea,[contenteditable="true"],select')) return;
     ev.preventDefault(); ev.stopPropagation();
     const root = ensureContextMenu();
+    closeAll(root);
     await buildMenu(root, 'context');
-    closeAll(root); root.classList.add('open');
+    // Web menu visibility has one owner for first open, reopen, click-away and Escape.
+    // Repeated right-click therefore follows the same state transition instead of a reopen-only repair path.
+    setMenuSurfaceOpen(root, true);
     const w = root.offsetWidth || 220; const h = root.offsetHeight || 260;
     root.style.left = Math.max(4, Math.min(ev.clientX, window.innerWidth - w - 6)) + 'px';
     root.style.top = Math.max(4, Math.min(ev.clientY, window.innerHeight - h - 6)) + 'px';

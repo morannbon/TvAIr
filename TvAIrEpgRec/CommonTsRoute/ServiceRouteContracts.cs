@@ -1,9 +1,9 @@
-namespace TvAIrEpgRec.CommonTsRoute;
+﻿namespace TvAIrEpgRec.CommonTsRoute;
 
 /// <summary>
 /// release_contract shared route contract boundary.
-/// This is intentionally a contract-only type set. Production recording remains on DirectRecorderBridge
-/// until the DirectRecorderBridge TS service-scope implementation is extracted/wrapped, attached, and parity checked.
+/// TvAIrEpgRec is the sole execution owner for recording, EPG acquisition, and pre-record EPG-check.
+/// All modes use this common tuner/service identity route before mode-specific processing.
 /// </summary>
 internal sealed record ServiceTripletContract(
     int NetworkId,
@@ -40,8 +40,7 @@ internal static class CommonTsRouteBoundary
         "service-scoped TS packets",
         "CloseTuner",
         "Release",
-        "FreeLibrary",
-        "stop-cooldown"
+        "FreeLibrary"
     ];
 
     public static readonly string[] ModeNames =

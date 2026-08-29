@@ -1,44 +1,61 @@
-namespace TvAIr.Core;
+﻿namespace TvAIr.Core;
 
 /// <summary>
-/// インメモリの循環バッファでログエントリを保持するリポジトリ。
-/// 最新N件を保持し、古いものは自動的に破棄する。
+/// Developer Diagnostics のインメモリ循環ログ正本。
+///
+/// 開発者版では解析用ログを保持する。一般公開版では TVAIR_DEVELOPER_DIAGNOSTICS を定義せず、
+/// Add/SetPinnedHeader 呼び出しをコンパイル時に除去して、ログ文字列の生成・バッファ保持・
+/// fingerprint管理・EntryAdded配送を発生させない。
+///
+/// UserEventLogService は一般ユーザー向け運用ログの別正本であり、このクラスの無効化対象ではない。
 /// </summary>
 public sealed class LogRepository
 {
-    // release_contract: 表版/裏版ログプロファイル入口。Developmentは従来診断、Releaseは開発者詳細を強く抑制する。
-    private enum RuntimeLogProfile { Development, Release }
-
+#if TVAIR_DEVELOPER_DIAGNOSTICS
     private readonly object gate = new();
     private readonly Queue<LogEntry> buffer;
     private readonly Dictionary<string, DateTime> recentFingerprints = new();
     private readonly int maxSize;
     private readonly bool verboseLogging;
-    private readonly RuntimeLogProfile runtimeProfile;
-
-    // 通常運用ではログ一覧を埋めるだけの詳細トレースを抑制する。
-    // 調査時だけ環境変数 TVAIR_VERBOSE_LOG=1、または実行フォルダに verbose-log.flag を置くと詳細ログを復活させる。
+    private LogEntry? pinnedHeader;
     private static readonly TimeSpan DuplicateSuppressWindow = TimeSpan.FromMinutes(10);
+#endif
 
+#if TVAIR_DEVELOPER_DIAGNOSTICS
     public event Action<LogEntry>? EntryAdded;
+#else
+    // Public build: keep the host contract callable without retaining subscriber delegates.
+    // Developer log delivery is absent, so subscribing here must not create a long-lived root.
+    public event Action<LogEntry>? EntryAdded
+    {
+        add { }
+        remove { }
+    }
+#endif
+
+    /// <summary>
+    /// 開発者ログ保守が利用可能なのは Developer Diagnostics 有効ビルドだけ。
+    /// 公開版から環境変数やflagで復活させる経路は持たない。
+    /// </summary>
+    public bool DeveloperMaintenanceEnabled => DeveloperDiagnostics.Enabled;
 
     public LogRepository(int maxSize = 10000)
     {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
         this.maxSize = maxSize;
         buffer = new Queue<LogEntry>(maxSize);
         verboseLogging = string.Equals(Environment.GetEnvironmentVariable("TVAIR_VERBOSE_LOG"), "1", StringComparison.OrdinalIgnoreCase)
             || File.Exists(Path.Combine(AppContext.BaseDirectory, "verbose-log.flag"));
-        runtimeProfile = ResolveRuntimeLogProfile();
+#endif
     }
 
-
-    private static RuntimeLogProfile ResolveRuntimeLogProfile()
-    {
-        return RuntimeLogProfile.Release;
-    }
-
+    /// <summary>
+    /// 開発者診断の共通入口。公開版では呼び出しと引数評価そのものをコンパイル時に除去する。
+    /// </summary>
+    [System.Diagnostics.Conditional("TVAIR_DEVELOPER_DIAGNOSTICS")]
     public void Add(LogEntry entry)
     {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
         if (ShouldSuppress(entry)) return;
 
         lock (gate)
@@ -62,11 +79,18 @@ public sealed class LogRepository
         }
 
         try { EntryAdded?.Invoke(entry); } catch { }
+#endif
     }
 
+    [System.Diagnostics.Conditional("TVAIR_DEVELOPER_DIAGNOSTICS")]
     public void Add(string eventName, string title, string message)
-        => Add(new LogEntry { Event = eventName, Title = title, Message = message });
+    {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        Add(new LogEntry { Event = eventName, Title = title, Message = message });
+#endif
+    }
 
+#if TVAIR_DEVELOPER_DIAGNOSTICS
     private bool ShouldSuppress(LogEntry entry)
     {
         if (verboseLogging) return false;
@@ -75,16 +99,8 @@ public sealed class LogRepository
         var title = entry.Title ?? string.Empty;
         var msg = entry.Message ?? string.Empty;
 
-        // release_contract: Release profileでは表版向けに開発診断ノイズをさらに抑える。
-        // ユーザー運用ログ(UserOperationEvent)とは正本が別なので、ここを切ってもログタブ/報告用コピーは維持される。
-        if (runtimeProfile == RuntimeLogProfile.Release)
-        {
-            if (ev.StartsWith("EPG_", StringComparison.OrdinalIgnoreCase) && ev != "EPG_RUN_START" && ev != "EPG_RUN_OK" && ev != "EPG_RUN_PARTIAL" && ev != "EPG_RUN_BLOCKED" && ev != "EPG_RUN_FAILED") return true;
-            if (ev.StartsWith("TUNER_", StringComparison.OrdinalIgnoreCase) || ev.StartsWith("CHAIN_TRACE", StringComparison.OrdinalIgnoreCase)) return true;
-            if (ev.Contains("AUDIT", StringComparison.OrdinalIgnoreCase) || ev.Contains("TRACE", StringComparison.OrdinalIgnoreCase)) return true;
-            if (ev == "TaskScheduler" && !msg.Contains("FAILED", StringComparison.OrdinalIgnoreCase)) return true;
-        }
-
+        // 開発者版の通常診断では、高頻度ノイズだけを抑制する。
+        // verbose指定は開発者版の中だけで有効。一般公開版ではAdd呼び出し自体がコンパイル時に除去される。
         // release_contract: 通常運用ログでは、周期監視・keepalive・内部割当トレースを抑制する。
         // 必要な場合は TVAIR_VERBOSE_LOG=1 または verbose-log.flag で詳細診断ログを復活させる。
         if (ev == "ALLOC_TRACE") return true;
@@ -108,7 +124,8 @@ public sealed class LogRepository
         if (ev == "TaskScheduler" && string.Equals(title, "Wake", StringComparison.OrdinalIgnoreCase)
             && (msg.Contains("reason=plan-hash-nochange", StringComparison.OrdinalIgnoreCase)
                 || msg.Contains("reason=nochange", StringComparison.OrdinalIgnoreCase))) return true;
-        if (ev == "TaskScheduler" && string.Equals(title, "WakeDebounce", StringComparison.OrdinalIgnoreCase)
+        if (ev == "TaskScheduler"
+            && string.Equals(title, "WakeCoalesce", StringComparison.OrdinalIgnoreCase)
             && !msg.Contains("失敗", StringComparison.OrdinalIgnoreCase)
             && !msg.Contains("FAILED", StringComparison.OrdinalIgnoreCase)) return true;
         if (ev == "TaskScheduler" && (title.StartsWith("WAKE_CLEANUP_", StringComparison.OrdinalIgnoreCase)
@@ -135,7 +152,7 @@ public sealed class LogRepository
         if (ev == "REC_DUE_SCAN" && !title.StartsWith("R", StringComparison.OrdinalIgnoreCase)) return true;
         if (ev == "REC_TUNER_CHECK" && !msg.Contains("FAIL", StringComparison.OrdinalIgnoreCase)) return true;
 
-        // release_contract: 表版前の通常診断ログ整理。ユーザー運用ログ正本とは分離し、
+        // 開発診断ログはユーザー運用ログの正本と分離し、
         // 録画・競合・Wakeの実異常以外の内部経路トレースを通常ログから外す。
         if (ev == "ALLOC_POLICY") return true;
         if (ev == "ALLOC_ROUTE"
@@ -148,9 +165,6 @@ public sealed class LogRepository
         if (ev.StartsWith("PRE_REC_EPG", StringComparison.OrdinalIgnoreCase)
             || ev.StartsWith("PRE_REC_PRETUNE", StringComparison.OrdinalIgnoreCase)) return true;
         if (ev == "EPG_TUNER_BUSY" || ev == "EPG_TUNER_WAIT") return true;
-        if (ev == "Plugin" && string.Equals(title, "NicoJkPlugin", StringComparison.OrdinalIgnoreCase)
-            && msg.Contains("comment受信 count=", StringComparison.OrdinalIgnoreCase)) return true;
-        if (ev == "PLUGIN_LIVE_COMMENT_RECEIVED" || ev == "PLUGIN_LIVE_COMMENT_DISPATCH") return true;
 
         return false;
     }
@@ -182,17 +196,104 @@ public sealed class LogRepository
         return $"{entry.Event}\u001f{entry.Title}\u001f{entry.Message}";
     }
 
+
+#endif
+
+    /// <summary>
+    /// 開発者ログ固定ヘッダ。公開版では呼び出しとヘッダ構築をコンパイル時に除去する。
+    /// </summary>
+    [System.Diagnostics.Conditional("TVAIR_DEVELOPER_DIAGNOSTICS")]
+    public void SetPinnedHeader(LogEntry header)
+    {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        if (header is null) throw new ArgumentNullException(nameof(header));
+        lock (gate)
+        {
+            pinnedHeader = Clone(header);
+        }
+#endif
+    }
+
+    public int ClearDeveloperEntries()
+    {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        lock (gate)
+        {
+            var removed = buffer.Count;
+            buffer.Clear();
+            recentFingerprints.Clear();
+            return removed;
+        }
+#else
+        return 0;
+#endif
+    }
+
+    public IReadOnlyList<LogEntry> ConsumeAll()
+    {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        lock (gate)
+        {
+            var body = buffer.ToArray();
+            buffer.Clear();
+            recentFingerprints.Clear();
+
+            if (pinnedHeader is null) return body;
+            var rows = new LogEntry[body.Length + 1];
+            rows[0] = Clone(pinnedHeader);
+            Array.Copy(body, 0, rows, 1, body.Length);
+            return rows;
+        }
+#else
+        return Array.Empty<LogEntry>();
+#endif
+    }
+
     public IReadOnlyList<LogEntry> GetAll()
     {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
         lock (gate)
-            return buffer.ToArray();
+        {
+            if (pinnedHeader is null) return buffer.ToArray();
+            var rows = new LogEntry[buffer.Count + 1];
+            rows[0] = Clone(pinnedHeader);
+            var i = 1;
+            foreach (var entry in buffer) rows[i++] = entry;
+            return rows;
+        }
+#else
+        return Array.Empty<LogEntry>();
+#endif
     }
 
     public IReadOnlyList<LogEntry> GetRecent(int count)
     {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
         lock (gate)
-            return buffer.TakeLast(count).ToArray();
+        {
+            if (count <= 0) return Array.Empty<LogEntry>();
+            if (pinnedHeader is null) return buffer.TakeLast(count).ToArray();
+
+            var bodyCount = Math.Max(0, count - 1);
+            var body = buffer.TakeLast(bodyCount).ToArray();
+            var rows = new LogEntry[body.Length + 1];
+            rows[0] = Clone(pinnedHeader);
+            Array.Copy(body, 0, rows, 1, body.Length);
+            return rows;
+        }
+#else
+        return Array.Empty<LogEntry>();
+#endif
     }
+
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+    private static LogEntry Clone(LogEntry entry) => new()
+    {
+        Event = entry.Event,
+        Title = entry.Title,
+        Message = entry.Message,
+        CreatedAt = entry.CreatedAt
+    };
+#endif
 }
 
-// CONFLICT_OVERRIDE_APPLIED

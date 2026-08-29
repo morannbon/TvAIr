@@ -1,4 +1,5 @@
-using TvAIrPlugin;
+﻿using TvAIrPlugin;
+using TvAIrPlugin.Runtime;
 
 
 namespace TvAIr.Plugin;
@@ -10,159 +11,79 @@ namespace TvAIr.Plugin;
 public sealed class PluginRegistry
 {
     private readonly object _sync = new();
-    private readonly List<ITvAIrPlugin> _plugins = new();
-    private readonly Dictionary<ITvAIrPlugin, PluginExternalManifestContract> _externalManifestContracts = new();
-
-    internal void Register(ITvAIrPlugin plugin, PluginExternalManifestContract? externalManifestContract = null)
+    private readonly List<ITvAirRuntimeCapabilityPlugin> _runtimePlugins = new();
+    internal void RegisterRuntime(ITvAirRuntimeCapabilityPlugin plugin)
     {
         lock (_sync)
         {
-            _plugins.Add(plugin);
-            if (externalManifestContract is not null)
+            _runtimePlugins.Add(plugin);
+        }
+    }
+
+    public IReadOnlyList<ITvAirRuntimeCapabilityPlugin> GetRuntimePlugins()
+    {
+        lock (_sync)
+        {
+            return _runtimePlugins.ToList();
+        }
+    }
+
+    public ITvAirRuntimeUiPlugin? FindRuntimeUiPluginNative(string pluginIdOrRoute, out RuntimeUiDefinition? uiDefinition)
+    {
+        var normalizedPluginId = PluginIdentity.Normalize(pluginIdOrRoute);
+        var normalizedRoute = NormalizeRouteAlias(pluginIdOrRoute);
+        lock (_sync)
+        {
+            foreach (var runtime in _runtimePlugins)
             {
-                _externalManifestContracts[plugin] = externalManifestContract;
+                if (runtime is not ITvAirRuntimeUiPlugin uiPlugin)
+                    continue;
+
+                var descriptor = runtime.Descriptor;
+                var definition = descriptor.UiDefinitions.FirstOrDefault(ui =>
+                    string.Equals(PluginIdentity.Normalize(descriptor.PluginId), normalizedPluginId, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(NormalizeRouteAlias(ui.Route), normalizedRoute, StringComparison.OrdinalIgnoreCase));
+                if (definition is null)
+                    continue;
+
+                uiDefinition = definition;
+                return uiPlugin;
             }
         }
+
+        uiDefinition = null;
+        return null;
     }
 
-    public PluginExternalManifestContract? GetExternalManifestContract(ITvAIrPlugin plugin)
+    public ITvAirRuntimeCapabilityPlugin? FindRuntimePlugin(string pluginIdOrRoute)
     {
+        var normalized = PluginIdentity.Normalize(pluginIdOrRoute);
+        var route = NormalizeRouteAlias(pluginIdOrRoute);
         lock (_sync)
         {
-            return _externalManifestContracts.TryGetValue(plugin, out var contract) ? contract : null;
+            return _runtimePlugins.FirstOrDefault(plugin =>
+                string.Equals(PluginIdentity.Normalize(plugin.Descriptor.PluginId), normalized, StringComparison.OrdinalIgnoreCase)
+                || plugin.Descriptor.MenuActions.Any(action =>
+                    string.Equals(NormalizeRouteAlias(action.Route), route, StringComparison.OrdinalIgnoreCase)));
         }
     }
 
-    public IReadOnlyList<ITvAIrPlugin> GetAll()
+    public IReadOnlyList<ITvAirRuntimeAnalysisPlugin> GetRuntimeAnalysisPlugins()
     {
         lock (_sync)
         {
-            return _plugins.ToList();
+            return _runtimePlugins.OfType<ITvAirRuntimeAnalysisPlugin>().ToList();
         }
-    }
-
-    public IReadOnlyList<IAnalysisPlugin> GetAnalysisPlugins()
-    {
-        lock (_sync)
-        {
-            return _plugins.OfType<IAnalysisPlugin>().ToList();
-        }
-    }
-
-    public IReadOnlyList<IViewerPlugin> GetViewerPlugins()
-    {
-        lock (_sync)
-        {
-            return _plugins.OfType<IViewerPlugin>().ToList();
-        }
-    }
-
-    public IReadOnlyList<IManifestPlugin> GetManifestPlugins()
-    {
-        lock (_sync)
-        {
-            return _plugins.OfType<IManifestPlugin>().ToList();
-        }
-    }
-
-    public IReadOnlyList<IUiPlugin> GetUiPlugins()
-    {
-        lock (_sync)
-        {
-            return _plugins.OfType<IUiPlugin>().ToList();
-        }
-    }
-
-    private static bool IsAirhythmRouteCandidate(string? value)
-    {
-        var v = (value ?? string.Empty).Trim().Trim('/').ToLowerInvariant();
-        return v.Equals("airhythm", StringComparison.OrdinalIgnoreCase)
-            || v.Equals("airithm", StringComparison.OrdinalIgnoreCase) // legacy alias
-            || v.Equals("ai-rhythm", StringComparison.OrdinalIgnoreCase)
-            || v.Equals("ai-rithm", StringComparison.OrdinalIgnoreCase) // legacy alias
-            || v.Contains("airhythm", StringComparison.OrdinalIgnoreCase)
-            || v.Contains("airithm", StringComparison.OrdinalIgnoreCase); // legacy alias
     }
 
     private static string NormalizeRouteAlias(string? value)
-        => IsAirhythmRouteCandidate(value) ? "airhythm" : (value ?? string.Empty).Trim().Trim('/');
-
-    public IUiPlugin? FindUiPlugin(string routeSegment)
     {
-        var normalized = NormalizeRouteAlias(routeSegment);
-        lock (_sync)
-        {
-            return _plugins.OfType<IUiPlugin>().FirstOrDefault(p =>
-                string.Equals(NormalizeRouteAlias(p.Ui.RouteSegment), normalized, StringComparison.OrdinalIgnoreCase));
-        }
+        var route = (value ?? string.Empty).Trim().Replace('\\', '/').Trim('/');
+        if (route.StartsWith("plugin/", StringComparison.OrdinalIgnoreCase))
+            route = route["plugin/".Length..].Trim('/');
+        return route;
     }
 
-    public void NotifyRecordingStarted(PluginRecordingInfo info)
-    {
-        foreach (var plugin in GetAll())
-        {
-            try { plugin.OnRecordingStarted(info); } catch { }
-        }
-    }
-
-    public void NotifyRecordingStopped(PluginRecordingInfo info)
-    {
-        foreach (var plugin in GetAll())
-        {
-            try { plugin.OnRecordingStopped(info); } catch { }
-        }
-    }
-
-    public void NotifyPlaybackStarted(PluginPlaybackInfo info)
-    {
-        foreach (var plugin in GetAll())
-        {
-            try { plugin.OnPlaybackStarted(info); } catch { }
-        }
-    }
-
-    public void NotifyPlaybackStopped(PluginPlaybackInfo info)
-    {
-        foreach (var plugin in GetAll())
-        {
-            try { plugin.OnPlaybackStopped(info); } catch { }
-        }
-    }
-
-    public void NotifyPlaybackPositionChanged(PluginPlaybackPosition position)
-    {
-        foreach (var plugin in GetAll())
-        {
-            try { plugin.OnPlaybackPositionChanged(position); } catch { }
-        }
-    }
 }
 
 
-public sealed class PluginExternalManifestContract
-{
-    public string SourcePath { get; set; } = string.Empty;
-    public string Id { get; set; } = string.Empty;
-    public string Name { get; set; } = string.Empty;
-    public string Version { get; set; } = string.Empty;
-    public string Route { get; set; } = string.Empty;
-    public string Entry { get; set; } = string.Empty;
-    public string Description { get; set; } = string.Empty;
-    public string Vendor { get; set; } = string.Empty;
-    public string Icon { get; set; } = string.Empty;
-    public string HostContractVersion { get; set; } = string.Empty;
-    public string SdkVersion { get; set; } = string.Empty;
-    public IReadOnlyList<string> Kind { get; set; } = Array.Empty<string>();
-    public IReadOnlyList<string> Capabilities { get; set; } = Array.Empty<string>();
-    public IReadOnlyList<string> Permissions { get; set; } = Array.Empty<string>();
-    public IReadOnlyList<string> Tags { get; set; } = Array.Empty<string>();
-    public int ToolWindowWidth { get; set; }
-    public int ToolWindowHeight { get; set; }
-    public int ToolWindowMinWidth { get; set; }
-    public int ToolWindowMinHeight { get; set; }
-    public string ToolWindowTitle { get; set; } = string.Empty;
-    public string DefaultMenuActionKind { get; set; } = string.Empty;
-    public string DefaultMenuActionLabel { get; set; } = string.Empty;
-    public int DefaultMenuActionPriority { get; set; }
-    public bool? ToolWindowShowInTaskbar { get; set; }
-}

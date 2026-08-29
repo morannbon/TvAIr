@@ -2,7 +2,7 @@
  * TvAIr shared EPG status widget - release_contract
  *
  * Purpose:
- * - Unify manual EPG operation and status panel across every browser page.
+ * - Own the manual EPG operation/status panel on the TvAIr main page only.
  * - Hamburger/menu EPG actions are execution commands, not just a panel opener.
  * - Uses existing /api/epg/run, /api/epg/status, /api/epg/cancel so common allocation route,
  *   EpgScheduler, EpgCapture, TvAIrEpgRec worker, Wake and tuner allocation remain the authority.
@@ -14,6 +14,7 @@
   let userClosed = false;
   let lastVisiblePhase = 'idle';
   let lastRequestedScope = null;
+  let cancelRequested = false;
   const POS_KEY = 'tvair.epgPanel.position.v1';
   let dragBound = false;
 
@@ -139,11 +140,6 @@
   function setDisabled(id, disabled){ const e=byId(id); if(e) e.disabled = !!disabled; }
   function hidePanel(){ const p = byId(PANEL_ID); if(p) p.classList.remove('show'); }
   // release_contract: EPG専用通知・標準alertを持たず、TvAIr共通の無音通知へ集約する。
-  function hideStartBlockedNotice(){
-    if(window.TvAIrNotification && typeof window.TvAIrNotification.hide === 'function'){
-      window.TvAIrNotification.hide();
-    }
-  }
   function showStartBlockedNotice(message, guidance){
     const line1 = (message || '開始できません').trim();
     const line2 = (guidance || '時間をおいてお試しください。').trim();
@@ -253,7 +249,9 @@
     setText('epg-groups', total > 0 ? (done + '/' + total + ' グループ完了' + runningText + elapsedText) : ('取得中' + elapsedText));
     setText('epg-current', names ? ('取得中: ' + names) : (s.lastRunMessage || '取得中...'));
     setDisplay('epg-start-btn', false);
-    setDisplay('epg-stop-btn', true); setText('epg-stop-btn','キャンセル'); setDisabled('epg-stop-btn', false);
+    setDisplay('epg-stop-btn', true);
+    setText('epg-stop-btn', cancelRequested ? window.TvAirActionButtonState.processingText : 'キャンセル');
+    setDisabled('epg-stop-btn', cancelRequested);
     setDisplay('epg-close-btn', false);
   }
   function renderCompleted(s){
@@ -304,6 +302,7 @@
     }
     const visible = !s || s.uiVisible !== false;
     const phase = visible && s ? (s.phase || 'idle') : 'idle';
+    if(phase !== 'running') cancelRequested = false;
     if(s && (s.targetScope || s.TargetScope) && phase !== 'idle') rememberScope(scopeFromState(s));
     lastVisiblePhase = phase;
     if(phase === 'running') renderRunning(s);
@@ -329,18 +328,23 @@
     }catch(e){ return null; }
   }
   async function pollStatus(){
+    const previousPhase = lastVisiblePhase;
     const s = await refresh(false);
     if(!s) return;
     if(s.phase !== 'running'){
       stopPolling();
-      if(typeof window.loadGuide === 'function' && window.currentDate){
-        setTimeout(()=>{ try{ window.loadGuide(window.currentDate); }catch(_){} }, 1200);
+      // EPG completion/cancellation state is published only after the capture/import owner
+      // has committed its terminal state. Reload the guide on that state transition itself;
+      // do not add an unrelated fixed follow-up delay.
+      if(previousPhase === 'running' && typeof window.loadGuide === 'function' && window.currentDate){
+        try{ await window.loadGuide(window.currentDate); }catch(_){}
       }
     }
   }
 
   async function startManual(scope, opts){
     opts = opts || {};
+    cancelRequested = false;
     scope = rememberScope(scope);
     const current = await getStatus().catch(()=>null);
     if(current && current.phase === 'running'){
@@ -391,7 +395,9 @@
       setText('epg-stop-btn','キャンセル');
       setDisplay('epg-close-btn', false);
       startPolling();
-      setTimeout(()=>pollStatus(), 500);
+      // The run API has already accepted and published the running state. Read it back
+      // immediately; subsequent progress remains owned by the normal polling interval.
+      await pollStatus();
       return body;
     }catch(e){
       hidePanel();
@@ -400,16 +406,23 @@
     }
   }
   async function cancel(){
+    if(cancelRequested) return;
+    cancelRequested = true;
     ensurePanel();
     showPanel();
-    const stop = byId('epg-stop-btn');
-    if(stop){ stop.disabled = true; stop.textContent = 'キャンセル中...'; }
-    try{ await fetch('/api/epg/cancel?source=WebUi.EpgWidgetCancel', { method:'POST', cache:'no-store' }); }
-    catch(_){ }
-    finally{
-      if(stop){ stop.disabled = false; stop.textContent = 'キャンセル'; }
-      stopPolling();
-      setTimeout(()=>refresh(true), 500);
+    setText('epg-stop-btn', window.TvAirActionButtonState.processingText);
+    setDisabled('epg-stop-btn', true);
+    try{
+      const res = await fetch('/api/epg/cancel?source=WebUi.VisibleEpgWidgetCancel', { method:'POST', cache:'no-store' });
+      if(!res.ok) throw new Error('cancel http ' + res.status);
+      // The Host owns cancellation convergence. Keep the normal status poll alive;
+      // while the run remains active, renderRunning() preserves this one-shot state.
+      await refresh(true);
+    }catch(_){
+      // A transport/HTTP failure means the command was not accepted. Restore the
+      // normal running state so the user can explicitly try again.
+      cancelRequested = false;
+      await refresh(true);
     }
   }
   function showStatus(){ userClosed = false; refresh(true); }
@@ -426,8 +439,6 @@
         if(action === 'run') startManual(scope);
         else if(action === 'status') showStatus();
         else if(action === 'cancel') cancel();
-        if(typeof window.closeMenu === 'function') { try{ window.closeMenu(); }catch(_){} }
-        if(typeof window.closePageMenu === 'function') { try{ window.closePageMenu(); }catch(_){} }
       });
     });
   }

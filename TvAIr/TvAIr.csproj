@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk.Web">
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
     <Platforms>AnyCPU;x86;x64</Platforms>
@@ -35,7 +35,21 @@
     <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
     <!-- WMIによるLIVE視聴中TVTestプロセス検出用 -->
     <PackageReference Include="System.Management" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4078.44" />
   </ItemGroup>
+
+  <!-- The WebView2 package contributes Core, WinForms and WPF facade references.
+       TvAIr uses CoreWebView2Controller directly and does not use the WPF facade.
+       Package targets may add references by full path, so remove the actual Reference item
+       by filename after package assets are resolved and before assembly conflict resolution. -->
+  <Target Name="RemoveUnusedWebView2WpfFacade"
+          AfterTargets="ResolvePackageAssets"
+          BeforeTargets="ResolveAssemblyReferences">
+    <ItemGroup>
+      <Reference Remove="@(Reference)"
+                 Condition="'%(Reference.Filename)' == 'Microsoft.Web.WebView2.Wpf'" />
+    </ItemGroup>
+  </Target>
 
   <ItemGroup>
     <ProjectReference Include="..\TvAIrPlugin\TvAIrPlugin.csproj" />
@@ -52,11 +66,6 @@
     </ContentWithTargetPath>
   </ItemGroup>
   <ItemGroup>
-    <ContentWithTargetPath Include="Config\allowed-plugins.json">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <TargetPath>Config\allowed-plugins.json</TargetPath>
-    </ContentWithTargetPath>
-
     <ContentWithTargetPath Include="..\RELEASE_NOTES.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <TargetPath>RELEASE_NOTES.txt</TargetPath>
@@ -76,8 +85,16 @@
   <!-- AribDecodeBridge C++ DLL is built for x86/x64 and copied after Build.
        The flat AribDecodeBridge.dll preserves the existing runtime path; native\x86 and native\x64 keep both architectures available. -->
 
-  <!-- release_contract: LegacyDirectRecorderBridge.exe is no longer copied and the LegacyDirectRecorderBridge project is not part of TvAIr.sln.
-       Any remaining DirectRecorder wording is legacy lineage / internal contract naming, not an executable dependency. -->
+  <!-- TvAIr does not package or depend on LegacyDirectRecorderBridge.exe. Recording execution uses the current recorder bridge path only. -->
+
+  <!-- Remove development-only Runtime Probe residue from reused/overlay build outputs. -->
+  <Target Name="RemoveInternalPluginProbeResidue" BeforeTargets="Build;Publish">
+    <ItemGroup>
+      <InternalPluginProbeResidue Include="$(OutDir)Plugins\PluginRuntimeProbe.dll;$(OutDir)Plugins\PluginRuntimeProbe.pdb;$(OutDir)Plugins\PluginRuntimeProbe.deps.json;$(OutDir)Plugins\PluginRuntimeProbe.runtimeconfig.json" />
+    </ItemGroup>
+    <Delete Files="@(InternalPluginProbeResidue)" />
+    <RemoveDir Directories="$(OutDir)Plugins\PluginRuntimeProbe" Condition="Exists('$(OutDir)Plugins\PluginRuntimeProbe')" />
+  </Target>
 
   <Target Name="CopyTvAIrEpgRecWorker" AfterTargets="Build">
     <PropertyGroup>

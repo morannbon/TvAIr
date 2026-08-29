@@ -3,7 +3,6 @@
 internal sealed class EpgAnalyzer
 {
     private readonly int maxPackets;
-
     public EpgAnalyzer(int maxPackets = 0)
     {
         this.maxPackets = maxPackets > 0 ? maxPackets : int.MaxValue;
@@ -59,6 +58,15 @@ internal sealed class EpgAnalyzer
             eit.RawSectionShortResolverCandidates,
             eit.RawSectionShortResolverMerged,
             eit.RawSectionShortResolverUnresolved,
+            eit.RejectedEventHeaderCount,
+            eit.RejectedBasicScheduleEventHeaderCount,
+            eit.IgnoredOtherTransportStreamEitSectionCount,
+            eit.InvalidEitSectionCount,
+            eit.IgnoredNonCurrentEitSectionCount,
+            eit.IgnoredDuplicateEitSectionCount,
+            eit.IgnoredVersionSwitchEitSectionCount,
+            eit.IgnoredBasicScheduleVersionSwitchEitSectionCount,
+            eit.RejectedEventHeaders.ToArray(),
             eit.TitleDecodes.ToArray(),
             sectionStatuses,
             eventObservations,

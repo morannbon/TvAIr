@@ -691,7 +691,7 @@ static int Decode(const unsigned char* data, int length, wchar_t* buf, int cap) 
 extern "C" __declspec(dllexport)
 const wchar_t* DecodeAribW(const unsigned char* data, int length)
 {
-    static wchar_t buf[4096];
+    thread_local wchar_t buf[4096];
     if(!data||length<=0) { buf[0]=L'\0'; return buf; }
     Decode(data, length, buf, 4096);
     return buf;

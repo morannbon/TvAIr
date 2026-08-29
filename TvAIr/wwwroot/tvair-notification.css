@@ -3,32 +3,25 @@
  * Shared by EPG, settings, and future user-operation result notifications.
  * This is not a toast, balloon, or sound notification.
  */
-:root{
-  --tvair-notice-z: 2147483200;
-  --tvair-notice-title-bg: var(--tvair-dialog-head-bg, var(--tvair-settings-header-bg));
-  --tvair-notice-title-fg: var(--tvair-dialog-head-fg, var(--tvair-settings-header-fg));
-  --tvair-notice-card-bg: var(--tvair-dialog-bg, var(--tvair-settings-panel-bg));
-  --tvair-notice-card-fg: var(--tvair-dialog-fg, var(--tvair-settings-text));
-  --tvair-notice-card-border: var(--tvair-dialog-border, var(--tvair-settings-border-soft));
-  --tvair-notice-muted: var(--tvair-settings-text-muted, var(--tvair-text-muted));
-  --tvair-notice-button-bg: var(--tvair-settings-button-secondary-bg, var(--tvair-button-secondary-bg));
-  --tvair-notice-button-fg: var(--tvair-settings-button-secondary-fg, var(--tvair-button-secondary-fg));
-  --tvair-notice-button-border: var(--tvair-settings-border, var(--tvair-button-secondary-border));
-  --tvair-notice-button-hover: var(--tvair-settings-button-secondary-bg, var(--tvair-button-secondary-hover-bg));
-  --tvair-modal-backdrop:var(--tvair-dialog-backdrop);
-  --tvair-button-secondary-bg:var(--tvair-theme-action-secondary-bg);
-  --tvair-button-secondary-fg:var(--tvair-theme-action-secondary-fg);
-  --tvair-button-secondary-border:var(--tvair-theme-border-default);
-  --tvair-button-secondary-hover-bg:var(--tvair-theme-hover-bg);
-}
 .tvair-notice-overlay{
+  --tvair-notice-z:2147483200;
+  --tvair-notice-title-bg:var(--tvair-dialog-head-bg);
+  --tvair-notice-title-fg:var(--tvair-dialog-head-fg);
+  --tvair-notice-card-bg:var(--tvair-dialog-bg);
+  --tvair-notice-card-fg:var(--tvair-dialog-fg);
+  --tvair-notice-card-border:var(--tvair-dialog-border);
+  --tvair-notice-muted:var(--tvair-role-dialog-muted-fg);
+  --tvair-notice-button-bg:var(--tvair-settings-button-secondary-bg);
+  --tvair-notice-button-fg:var(--tvair-settings-button-secondary-fg);
+  --tvair-notice-button-border:var(--tvair-settings-border);
+  --tvair-notice-button-hover:var(--tvair-role-control-hover-bg);
   display:none;
   position:fixed;
   inset:0;
   z-index:var(--tvair-notice-z);
   align-items:center;
   justify-content:center;
-  background:var(--tvair-modal-backdrop, var(--tvair-overlay-scrim));
+  background:var(--tvair-dialog-backdrop);
   font-family:'Meiryo','メイリオ',sans-serif;
 }
 .tvair-notice-overlay.show{display:flex}
@@ -97,41 +90,47 @@
    List/reservation/user-log CSS must not own notification or toast schema. */
 body:is(.tvair-keyword-page,.tvair-program-reservation-page,.tvair-rule-list-page,.tvair-reservation-page) #toast{
   position:fixed;
-  bottom:20px;
-  right:20px;
-  display:none;
-  padding:var(--tvair-list-toast-pad,10px 16px);
-  border-radius:3px;
+  left:50%;
+  bottom:var(--tvair-status-label-bottom);
+  display:block;
+  max-width:min(78vw,720px);
+  padding:var(--tvair-list-toast-pad);
+  border-radius:999px;
   font-size:12px;
+  line-height:1.45;
+  text-align:center;
+  white-space:normal;
+  overflow-wrap:anywhere;
   z-index:9999;
+  pointer-events:none;
   font-family:'Meiryo','メイリオ',sans-serif;
-  background:var(--tvair-list-toast-bg,var(--tvair-action-primary-bg));
-  border:1px solid var(--tvair-list-toast-border,var(--toast-border));
-  color:var(--tvair-list-toast-fg,var(--tvair-content-inverse));
-  box-shadow:var(--tvair-list-toast-shadow,var(--toast-shadow,var(--tvair-shadow-toast)));
+  background:var(--tvair-role-toast-bg);
+  border:1px solid var(--tvair-role-toast-border);
+  color:var(--tvair-role-toast-fg);
+  box-shadow:var(--tvair-role-toast-shadow);
+  opacity:0;
+  visibility:hidden;
+  transform:translate(-50%,8px);
+  transition:opacity .18s ease,transform .18s ease,visibility 0s linear .18s;
 }
 body:is(.tvair-keyword-page,.tvair-program-reservation-page,.tvair-rule-list-page,.tvair-reservation-page) #toast.show{
-  display:block;
-  animation:tvairNotificationToastIn .2s;
+  opacity:1;
+  visibility:visible;
+  transform:translate(-50%,0);
+  transition:opacity .18s ease,transform .18s ease,visibility 0s;
 }
-@keyframes tvairNotificationToastIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+body:is(.tvair-keyword-page,.tvair-program-reservation-page,.tvair-rule-list-page,.tvair-reservation-page) #toast.leaving{
+  visibility:visible;
+}
+body:is(.tvair-keyword-page,.tvair-program-reservation-page,.tvair-rule-list-page,.tvair-reservation-page) #toast.status-error{
+  background:var(--tvair-role-danger-soft-bg);
+  border-color:var(--tvair-role-danger-border);
+  color:var(--tvair-role-danger-fg);
+}
+body:is(.tvair-keyword-page,.tvair-program-reservation-page,.tvair-rule-list-page,.tvair-reservation-page) #toast.status-warning{
+  background:var(--tvair-role-warning-soft-bg);
+  border-color:var(--tvair-role-warning-border);
+  color:var(--tvair-role-warning-fg);
+}
 body.tvair-reservation-page{--tvair-list-toast-pad:8px 14px}
-body.tvair-program-reservation-page{--tvair-list-toast-bg:var(--nav-bg)}
 
-/* release_contract: single semantic bridge for notification-like surfaces. */
-.tvair-notification,.tvair-dialog,.toast,#toast,.notification,.confirm-dialog{
-  background:var(--winui-card-background-fill-color-default,var(--tvair-role-dialog-bg));
-  color:var(--winui-text-fill-color-primary,var(--tvair-role-dialog-fg));
-  border-color:var(--winui-control-stroke-color-secondary,var(--tvair-role-border-soft));
-}
-.tvair-notification small,.tvair-dialog small,.toast small,#toast small{
-  color:var(--tvair-role-dialog-muted-fg);
-}
-.tvair-notification button,.tvair-dialog button,.toast button,#toast button{
-  background:var(--winui-control-fill-color-default,var(--tvair-role-control-bg));
-  color:var(--winui-text-fill-color-primary,var(--tvair-role-control-fg));
-  border-color:var(--winui-control-stroke-color-default,var(--tvair-role-control-border));
-}
-.tvair-notification button:hover,.tvair-dialog button:hover,.toast button:hover,#toast button:hover{
-  background:var(--tvair-role-control-hover-bg);
-}
