@@ -49,9 +49,9 @@ Assert-True ($sdkContract.Contains("CompatibilityMajor = $compatibilityMajor")) 
 $readmeMd = Read-Text 'README.md'
 $readmeTxt = Read-Text 'README.txt'
 $releaseNotes = Read-Text 'RELEASE_NOTES.txt'
-Assert-True ($readmeMd -match "(?m)^# TvAIr $([regex]::Escape($product))$") 'README.md product version does not match.'
-Assert-True ($readmeTxt -match "(?m)^TvAIr $([regex]::Escape($product)) README$") 'README.txt product version does not match.'
-Assert-True ($releaseNotes -match "(?m)^TvAIr $([regex]::Escape($product))$") 'RELEASE_NOTES.txt product version does not match.'
+Assert-True ($readmeMd -match "(?m)^# TvAIr $([regex]::Escape($product))\r?$") 'README.md product version does not match.'
+Assert-True ($readmeTxt -match "(?m)^TvAIr $([regex]::Escape($product)) README\r?$") 'README.txt product version does not match.'
+Assert-True ($releaseNotes -match "(?m)^TvAIr $([regex]::Escape($product))\r?$") 'RELEASE_NOTES.txt product version does not match.'
 
 $projectFiles = @('TvAIr\TvAIr.csproj', 'TvAIrEpgRec\TvAIrEpgRec.csproj', 'TvAIrPlugin\TvAIrPlugin.csproj')
 foreach ($relativePath in $projectFiles) {
