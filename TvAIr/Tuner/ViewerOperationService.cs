@@ -308,6 +308,30 @@ public sealed class ViewerOperationService
     public ViewerOperationResult EnsureTuned(ViewerOperationEnsureTunedRequest request)
         => EnsureTunedDetailed(request).Operation;
 
+    /// <summary>
+    /// Executes a Host-owned explicit Viewer Operation under the existing ViewerProfile operation gate.
+    /// The preemption callback runs after the profile gate is acquired and immediately before the normal
+    /// EnsureTuned core, preventing timer/manual operations from interleaving between preemption and retune/start.
+    /// </summary>
+    internal ViewerOperationResult EnsureTunedHostManaged(
+        ViewerOperationEnsureTunedRequest request,
+        Func<ViewerOperationPreemptionResult> preempt)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(preempt);
+        if (!_applicationGate.TryAdmit("viewer_ensure_tuned_host_managed", request.PluginId, out var shutdownReason))
+            return ViewerOperationResult.Denied("applicationQuiescing", shutdownReason);
+        var profileId = ResolveOperationProfileId(request.ViewerProfileId, request.GroupHint);
+        lock (GetOperationGate(profileId))
+        {
+            var preemption = preempt();
+            if (!preemption.Success)
+                return ViewerOperationResult.Denied("viewerOperationPreemptionFailed",
+                    string.IsNullOrWhiteSpace(preemption.Message) ? "Viewer automatic state preemption failed." : preemption.Message);
+            return EnsureTunedDetailedCore(request).Operation;
+        }
+    }
+
     internal ViewerOperationEnsureTunedResult EnsureTunedDetailed(ViewerOperationEnsureTunedRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);

@@ -32,6 +32,9 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         ExternalTunerLeaseService externalTuners,
         ViewerSessionRegistry viewerSessions,
         ViewerOperationService viewerOperations,
+        ViewerOperationPreemptionHub viewerPreemption,
+        ViewerReservationStore viewerReservations,
+        ViewerReservationScheduler viewerReservationScheduler,
         TimedTextStreamStore timedTextStreams,
         TvTestSettings tvTestSettings,
         IReadOnlyList<TunerProfile> tunerProfiles,
@@ -44,6 +47,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         RecordingResultStore recordingResults,
         PlaybackProgressStore playbackProgress,
         ReservationScheduler reservationScheduler,
+        PluginManagedExternalLookupHost externalLookupHost,
         string pluginId,
         string pluginDisplayName,
         string pluginsDirectory,
@@ -69,7 +73,8 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         Channels = new ChannelsApi(readModels, permissionGate);
         ServiceMetadata = new ServiceMetadataApi(readModels, permissionGate);
         Tuners = new TunersApi(readModels, permissionGate);
-        Viewers = new ViewersApi(normalizedPluginId, pluginDisplayName, externalTuners, viewerSessions, viewerOperations, readModels, tvTestSettings, ini, tunerProfiles, typedEvents, permissionGate);
+        Viewers = new ViewersApi(normalizedPluginId, pluginDisplayName, externalTuners, viewerSessions, viewerOperations, viewerPreemption, readModels, tvTestSettings, ini, tunerProfiles, typedEvents, permissionGate);
+        ViewerReservations = new ViewerReservationsApi(normalizedPluginId, viewerReservations, viewerReservationScheduler, permissionGate);
         TimedTextStreams = new TimedTextStreamsApi(normalizedPluginId, timedTextStreams, log);
         Backup = UnavailableBackupApi.Instance;
         var pluginDataDirectory = scopedServices.CreateFiles(normalizedPluginId).RootDirectory;
@@ -92,6 +97,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         ExternalJobs = new ExternalJobsApi(permissionGate);
         Hosts = new HostsApi(permissionGate);
         Plugins = new PluginsApi(registry, permissionGate);
+        ExternalLookup = new ExternalLookupApi(normalizedPluginId, pluginDisplayName, externalLookupHost, permissionGate);
     }
 
     public ITvAirLogsApi Logs { get; }
@@ -113,6 +119,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
     public ITvAirServiceMetadataApi ServiceMetadata { get; }
     public ITvAirTunersApi Tuners { get; }
     public ITvAirViewersApi Viewers { get; }
+    public ITvAirViewerReservationsApi ViewerReservations { get; }
     public ITvAirTimedTextStreamsApi TimedTextStreams { get; }
     public ITvAirBackupApi Backup { get; }
     public ITvAirSettingsApi Settings { get; }
@@ -124,6 +131,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
     public ITvAirExternalJobsApi ExternalJobs { get; }
     public ITvAirHostsApi Hosts { get; }
     public ITvAirPluginsApi Plugins { get; }
+    public ITvAirExternalLookupApi ExternalLookup { get; }
 
 
     private sealed class CapabilityPermissionGate
@@ -154,6 +162,28 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         public bool Has(PluginPermission permission) => _permissions.Contains(permission);
     }
 
+
+
+    private sealed class ExternalLookupApi(
+        string pluginId,
+        string pluginDisplayName,
+        PluginManagedExternalLookupHost host,
+        CapabilityPermissionGate permissions) : ITvAirExternalLookupApi
+    {
+        public TvAirExternalLookupCapabilityDto GetCapability()
+        {
+            var declared = permissions.Has(PluginPermission.UseExternalLookup);
+            return new TvAirExternalLookupCapabilityDto
+            {
+                PluginDeclaredPermission = declared,
+                UserAllowed = declared && host.IsUserAllowed(pluginId),
+                Providers = declared ? host.GetProviders() : Array.Empty<TvAirExternalLookupProviderDto>()
+            };
+        }
+
+        public Task<TvAirExternalLookupResultDto> LookupAsync(TvAirExternalLookupRequestDto request, CancellationToken cancellationToken = default)
+            => host.LookupAsync(pluginId, pluginDisplayName, permissions.Has(PluginPermission.UseExternalLookup), request, cancellationToken);
+    }
 
     private sealed class LogPresentationApi(string pluginId, LogPresentationStore store, LogRepository log, CapabilityPermissionGate permissions) : ITvAirLogPresentationApi
     {
@@ -1373,6 +1403,44 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         }
     }
 
+    private sealed class ViewerReservationsApi(
+        string pluginId,
+        ViewerReservationStore store,
+        ViewerReservationScheduler scheduler,
+        CapabilityPermissionGate permissions) : ITvAirViewerReservationsApi
+    {
+        public TvAirViewerReservationMutationResultDto Create(TvAirViewerReservationCreateRequestDto request)
+        {
+            permissions.Require(nameof(ViewerReservationsApi), PluginPermission.ControlViewer);
+            var result = store.Create(pluginId, request);
+            if (result.Success && result.Reservation is { } dto)
+            {
+                var row = store.Get(dto.ReservationId);
+                if (row is not null) scheduler.PublishCreated(row);
+            }
+            return result;
+        }
+
+        public TvAirViewerReservationMutationResultDto Cancel(string reservationId)
+        {
+            permissions.Require(nameof(ViewerReservationsApi), PluginPermission.ControlViewer);
+            var result = store.Cancel(pluginId, reservationId);
+            if (result.Success && result.Reservation is { } dto)
+            {
+                var row = store.Get(dto.ReservationId);
+                if (row is not null) scheduler.PublishCancelled(row);
+            }
+            return result;
+        }
+
+        public IReadOnlyList<TvAirViewerReservationDto> List(TvAirViewerReservationQueryDto? query = null)
+        {
+            permissions.Require(nameof(ViewerReservationsApi), PluginPermission.ControlViewer);
+            query ??= new TvAirViewerReservationQueryDto();
+            return store.ListOwned(pluginId, query.ViewerProfileId, query.IncludeTerminal).Select(ViewerReservationStore.ToDto).ToArray();
+        }
+    }
+
     private sealed class TimedTextStreamsApi(string pluginId, TimedTextStreamStore store, LogRepository log) : ITvAirTimedTextStreamsApi
     {
         private static readonly TimeSpan Retention = TimeSpan.FromHours(6);
@@ -1399,6 +1467,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         ExternalTunerLeaseService externalTuners,
         ViewerSessionRegistry viewerSessions,
         ViewerOperationService viewerOperations,
+        ViewerOperationPreemptionHub viewerPreemption,
         PluginReadModelSource readModels,
         TvTestSettings tvTestSettings,
         IniSettingsService ini,
@@ -1691,6 +1760,12 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
                 request.ViewerSessionId,
                 request.ExpectedGeneration,
                 request.Reason)));
+        }
+
+        public IDisposable SubscribeOperationPreempting(Action<TvAirViewerOperationPreemptingDto> handler)
+        {
+            permissions.Require(nameof(ViewersApi), PluginPermission.ControlViewer);
+            return viewerPreemption.Subscribe(pluginId, handler);
         }
 
         private static bool TryTriplet(int networkId, int transportStreamId, int serviceId, out ushort nid, out ushort tsid, out ushort sid)

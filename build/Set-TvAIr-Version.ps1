@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^\d+\.\d+\.\d+$')]
@@ -148,11 +148,7 @@ Update-TextFile 'README.md' {
 }
 Update-TextFile 'README.txt' {
     param($text)
-    [regex]::Replace($text, '(?m)^TvAIr \d+\.\d+\.\d+ README$', "TvAIr $product README", 1)
-}
-Update-TextFile 'RELEASE_NOTES.txt' {
-    param($text)
-    [regex]::Replace($text, '(?m)^TvAIr \d+\.\d+\.\d+$', "TvAIr $product", 1)
+    [regex]::Replace($text, '(?m)^# TvAIr \d+\.\d+\.\d+$', "# TvAIr $product", 1)
 }
 
 $webFiles = Get-ChildItem -LiteralPath (Join-Path $root 'TvAIr\wwwroot') -Recurse -File |

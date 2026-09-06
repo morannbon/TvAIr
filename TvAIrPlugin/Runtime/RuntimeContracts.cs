@@ -423,12 +423,14 @@ public interface ITvAirPluginRuntimeContext
     global::TvAIrPlugin.ITvAirChannelsApi Channels { get; }
     global::TvAIrPlugin.ITvAirTunersApi Tuners { get; }
     global::TvAIrPlugin.Viewers.ITvAirViewersApi Viewers { get; }
+    global::TvAIrPlugin.Viewers.ITvAirViewerReservationsApi ViewerReservations { get; }
     global::TvAIrPlugin.ITvAirTimedTextStreamsApi TimedTextStreams { get; }
     global::TvAIrPlugin.ITvAirBackupApi Backup { get; }
     global::TvAIrPlugin.ITvAirSettingsApi Settings { get; }
     global::TvAIrPlugin.ITvAirSystemApi System { get; }
     global::TvAIrPlugin.ITvAirLogsApi Logs { get; }
     global::TvAIrPlugin.ITvAirPluginsApi Plugins { get; }
+    global::TvAIrPlugin.ITvAirExternalLookupApi ExternalLookup { get; }
 }
 
 public interface ITvAirRuntimeCapabilityPlugin

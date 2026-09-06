@@ -1,4 +1,4 @@
-(function(){
+﻿(function(){
   'use strict';
   const FRAME_URL='/?settingsHost=1';
   let overlay=null;
@@ -57,5 +57,5 @@
     if(e.data.action==='close') close();
   });
 
-  window.TvAIrSettingsHost={version:'1.2.0',open,close,contract:'shared-non-navigating-settings-host'};
+  window.TvAIrSettingsHost={version:'1.2.1',open,close,contract:'shared-non-navigating-settings-host'};
 })();

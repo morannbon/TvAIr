@@ -5,10 +5,10 @@ using TvAIr.Tuner;
 namespace TvAIr.Schedule;
 
 /// <summary>
-/// System EPG（録画前EPG確認 / 定時EPG）の次責務を決める唯一の計画正本。
+/// System EPGのうち、録画前EPG確認（PreRec）の次責務候補を決める計画正本。
 ///
 /// DEVELOPER_APPROVAL_REQUIRED:
-/// - System EPGの計画・責務・Projection・ON/OFF組合せ・Daily fallback・PreRec置換契約は保護領域。
+/// - System EPGの計画・責務・Projection・ON/OFF組合せ・PreRec選択契約は保護領域。
 /// - 実装変更、再構築、責務分割/統合、補正経路追加、既存正常経路の置換は、必ず事前の開発者明示承認を得ること。
 /// - 「次」「続けて」「進めて」等の通常の進行指示は、この保護領域を変更する承認とはみなさない。
 /// - 不具合調査でSystem EPG周辺が疑わしく見えても、ログと実機でこの正本自体の欠陥が確定するまでは変更しない。
@@ -21,9 +21,9 @@ namespace TvAIr.Schedule;
 ///      その先頭は10時間先でも「直近予約」とするが、各物理Tunerごとの先頭を拾ってはならない。
 /// - PreRec ON時は、時間軸候補を現在Allocationの物理録画Tunerへ投影し、同一Tunerでは最も近い1件だけを持つ。
 ///   時間軸候補が無い場合だけ、予約リスト全体の先頭1件をPreRec責務にする。
-/// - Daily ON時は基本状態/収束先をDailyとし、PreRec責務を持つTunerだけ一時的にPreRecへ置換する。
-/// - ON/ON: Dailyを基本に上記PreRecだけ置換。ON/OFF: Dailyのみ。
-///   OFF/ON: 上記PreRecのみ。OFF/OFF: System責務なし。
+/// - このPlanはPreRec候補選択だけを表示側へ提供する。Dailyの実行計画・永続行・予約一覧の最終表示選択は所有しない。
+/// - 予約一覧はDaily ONなら永続化済みDaily行を基本候補として保持し、このPlanが選んだPreRec候補と比較して、
+///   各録画Tunerの現在/次のSystem EPGを1件投影する。
 /// - PriorityName(T1.. / S1..) は親予約の現在のAllocation結果をそのまま使う。
 ///   System EPG側で遠い将来の物理Tunerを独自に再割当・固定しない。
 /// </summary>
@@ -114,7 +114,8 @@ public sealed class SystemEpgResponsibilityPlanService
         // 「直近」は二軸であり、各Tunerの未来先頭を独立に先取りする意味ではない。
         // まず現在から3時間以内の予約イベント群を時間軸候補とする。
         // 時間軸候補が一件も無い場合だけ、予約リスト全体の先頭1件を遠距離fallback候補とする。
-        // Daily ON時はDailyが基本状態/収束先であり、この候補が載るTunerだけ一時的にPreRecへ置換する。
+        // この選択結果はPreRec候補だけを表す。Dailyとの表示順序はReservationPresentationServiceが
+        // 永続化済みDaily行と比較して決めるため、ここでDaily表示を置換・抑制しない。
         var activeCandidates = candidates
             .Where(x => x.IsActiveIntent)
             .OrderBy(x => x.Start)

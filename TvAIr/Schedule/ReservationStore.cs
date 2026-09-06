@@ -906,6 +906,7 @@ public sealed class ReservationStore
         int ReservationId,
         bool Added,
         bool Reactivated,
+        bool RefreshedBroadcastSlot,
         Reservation Reservation);
 
     /// <summary>
@@ -949,7 +950,98 @@ public sealed class ReservationStore
             tx.Commit();
             log.Add("RESERVATION_DEDUPE", "ATOMIC_ADD",
                 $"result=REUSE_EXISTING existing=R{duplicate.Id} requestedSource={r.Source} status={duplicate.Status} dataVersion={duplicate.DataVersion} key={key} rule=release_contract");
-            return new AddOrGetActiveParentResult(duplicate.Id, false, false, duplicate);
+            return new AddOrGetActiveParentResult(duplicate.Id, false, false, false, duplicate);
+        }
+
+        // BROADCAST_SLOT_EVENT_REBIND_INVARIANT:
+        // EPG編成差替えでEventIdだけが変わっても、同一NID/TSID/SIDかつ同一番組開始時刻には
+        // 同時に二つの番組は存在しない。放送枠identityは録画マージン適用後のStartTimeではなく、
+        // ScheduledStartTime（未設定時はStartTime）を正本とする。古いScheduled予約を別予約として追加せず、
+        // 同じReservationIdのまま現行イベントへ更新して共通Allocationへ流す。
+        // Starting/Recording/Stoppingは実行中identityなので書換えず再利用する。
+        var broadcastSlotStart = r.ScheduledStartTime ?? r.StartTime;
+        if (r.EventId != 0)
+        {
+            Reservation? sameBroadcastSlot;
+            using (var readSlot = con.CreateCommand())
+            {
+                readSlot.Transaction = tx;
+                readSlot.CommandText = """
+                    SELECT id, network_id, transport_stream_id, service_id, event_id,
+                           title, start_time, end_time, status, source, created_at, updated_at,
+                           channel_argument, is_conflicted, is_enabled, tuner_name, actual_tuner_name,
+                           recording_started_at, recording_finished_at, service_name,
+                           scheduled_start_time, source_rule_id, source_rule_name,
+                           is_user_chain, user_chain_previous_id, user_chain_root_id,
+                           recording_recovery_chain_id, recovery_parent_reservation_id, data_version,
+                           reservation_intent, created_through, created_by_plugin_id
+                    FROM reservations
+                    WHERE source <> 'epg'
+                      AND is_enabled = 1
+                      AND status IN ('scheduled', 'starting', 'recording', 'stopping')
+                      AND event_id <> 0
+                      AND network_id = $nid
+                      AND transport_stream_id = $tsid
+                      AND service_id = $sid
+                      AND COALESCE(scheduled_start_time, start_time) = $broadcastStart
+                    ORDER BY CASE WHEN status IN ('recording', 'stopping') THEN 0
+                                  WHEN status = 'starting' THEN 1 ELSE 2 END, id;
+                    """;
+                readSlot.Parameters.AddWithValue("$nid", r.NetworkId);
+                readSlot.Parameters.AddWithValue("$tsid", r.TransportStreamId);
+                readSlot.Parameters.AddWithValue("$sid", r.ServiceId);
+                readSlot.Parameters.AddWithValue("$broadcastStart", broadcastSlotStart.ToString("O"));
+                sameBroadcastSlot = ReadReservations(readSlot).FirstOrDefault();
+            }
+
+            if (sameBroadcastSlot is not null)
+            {
+                if (sameBroadcastSlot.Status != ReservationStatus.Scheduled)
+                {
+                    tx.Commit();
+                    log.Add("RESERVATION_DEDUPE", "BROADCAST_SLOT",
+                        $"result=REUSE_ACTIVE_SLOT existing=R{sameBroadcastSlot.Id} requestedSource={r.Source} status={sameBroadcastSlot.Status} oldEventId={sameBroadcastSlot.EventId} requestedEventId={r.EventId} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} broadcastStart={broadcastSlotStart:MM/dd HH:mm:ss} action=no_parallel_same_service_slot rule=release_contract");
+                    return new AddOrGetActiveParentResult(sameBroadcastSlot.Id, false, false, false, sameBroadcastSlot);
+                }
+
+                using var refresh = con.CreateCommand();
+                refresh.Transaction = tx;
+                refresh.CommandText = """
+                    UPDATE reservations
+                    SET event_id = $eid,
+                        title = $title,
+                        end_time = $end,
+                        channel_argument = $charg,
+                        service_name = $svcname,
+                        data_version = data_version + 1,
+                        updated_at = $now
+                    WHERE id = $id
+                      AND status = 'scheduled'
+                      AND is_enabled = 1
+                      AND data_version = $dataVersion;
+                    """;
+                refresh.Parameters.AddWithValue("$eid", r.EventId);
+                refresh.Parameters.AddWithValue("$title", r.Title);
+                refresh.Parameters.AddWithValue("$end", r.EndTime.ToString("O"));
+                refresh.Parameters.AddWithValue("$charg", r.ChannelArgument);
+                refresh.Parameters.AddWithValue("$svcname", r.ServiceName);
+                refresh.Parameters.AddWithValue("$now", now);
+                refresh.Parameters.AddWithValue("$id", sameBroadcastSlot.Id);
+                refresh.Parameters.AddWithValue("$dataVersion", sameBroadcastSlot.DataVersion);
+
+                if (refresh.ExecuteNonQuery() == 1)
+                {
+                    tx.Commit();
+                    var refreshed = GetById(sameBroadcastSlot.Id)
+                        ?? throw new InvalidOperationException($"Refreshed broadcast-slot reservation R{sameBroadcastSlot.Id} could not be reloaded.");
+                    log.Add("RESERVATION_DEDUPE", "BROADCAST_SLOT",
+                        $"result=REFRESHED_EXISTING existing=R{refreshed.Id} requestedSource={r.Source} oldEventId={sameBroadcastSlot.EventId} newEventId={refreshed.EventId} oldTitle={TrimTitleForAudit(sameBroadcastSlot.Title)} newTitle={TrimTitleForAudit(refreshed.Title)} oldEnd={sameBroadcastSlot.EndTime:MM/dd HH:mm:ss} newEnd={refreshed.EndTime:MM/dd HH:mm:ss} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} broadcastStart={broadcastSlotStart:MM/dd HH:mm:ss} dataVersion={sameBroadcastSlot.DataVersion}->{refreshed.DataVersion} action=rebind_same_reservation_id_then_common_allocation rule=release_contract");
+                    mutationJournal.Record(ReservationMutationKind.Updated, sameBroadcastSlot, refreshed,
+                        nameof(Reservation.EventId), nameof(Reservation.Title), nameof(Reservation.EndTime),
+                        nameof(Reservation.ChannelArgument), nameof(Reservation.ServiceName), nameof(Reservation.DataVersion));
+                    return new AddOrGetActiveParentResult(refreshed.Id, false, false, true, refreshed);
+                }
+            }
         }
 
         // IMMEDIATE_RETRY_SINGLE_ID_CONTRACT (developer-approved repair):
@@ -1041,7 +1133,7 @@ public sealed class ReservationStore
                     mutationJournal.Record(ReservationMutationKind.Updated, failedImmediate, reactivated,
                         nameof(Reservation.Status), nameof(Reservation.StartTime), nameof(Reservation.EndTime),
                         nameof(Reservation.IsConflicted), nameof(Reservation.TunerName), nameof(Reservation.ActualTunerName));
-                    return new AddOrGetActiveParentResult(reactivated.Id, false, true, reactivated);
+                    return new AddOrGetActiveParentResult(reactivated.Id, false, true, false, reactivated);
                 }
             }
         }
@@ -1062,7 +1154,7 @@ public sealed class ReservationStore
                   ($nid, $tsid, $sid, $eid,
                    $title, $start, $end, $status, $source, $now, $now,
                    $charg, 0, 1, '', $svcname,
-                   $start, $sourceRuleId, $sourceRuleName,
+                   $scheduledStart, $sourceRuleId, $sourceRuleName,
                    $isUserChain, $userChainPreviousId, $userChainRootId, 0,
                    $reservationIntent, $createdThrough, $createdByPluginId);
                 SELECT last_insert_rowid();
@@ -1078,6 +1170,7 @@ public sealed class ReservationStore
             cmd.Parameters.AddWithValue("$source", r.Source.ToString().ToLowerInvariant());
             cmd.Parameters.AddWithValue("$charg", r.ChannelArgument);
             cmd.Parameters.AddWithValue("$svcname", r.ServiceName);
+            cmd.Parameters.AddWithValue("$scheduledStart", (r.ScheduledStartTime ?? r.StartTime).ToString("O"));
             if (r.SourceRuleId.HasValue) cmd.Parameters.AddWithValue("$sourceRuleId", r.SourceRuleId.Value); else cmd.Parameters.AddWithValue("$sourceRuleId", DBNull.Value);
             cmd.Parameters.AddWithValue("$sourceRuleName", r.SourceRuleName ?? "");
             cmd.Parameters.AddWithValue("$isUserChain", r.IsUserChain ? 1 : 0);
@@ -1093,7 +1186,7 @@ public sealed class ReservationStore
         log.Add("RESERVATION_AUDIT", "ADD_ATOMIC",
             $"service={TrimForAudit(r.ServiceName)} title={TrimTitleForAudit(r.Title)} rawTitleBlank={RawTitleBlankForAudit(r.Title)} id=R{newId} status={r.Status} source={r.Source} enabled={r.IsEnabled} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} key={key} rule=release_contract");
         mutationJournal.Record(ReservationMutationKind.Added, null, added);
-        return new AddOrGetActiveParentResult(newId, true, false, added);
+        return new AddOrGetActiveParentResult(newId, true, false, false, added);
     }
 
     // RESERVATION_PROVENANCE_PARAMETER_INVARIANT:
@@ -3517,8 +3610,8 @@ WHERE source <> 'Epg'
     /// titleで同一Tuner行を識別し、Plannerが確定枠を持つ場合はその枠へ、
     /// UNPLACED_PENDING_DEADLINE中は設定時刻(canonical)の責務表示へ更新する。
     /// 実行開始の正本はEpgSchedulerの可動枠Plannerであり、この行自体を通常録画として実行しない。
-    /// 予約一覧ではSystemEpgResponsibilityPlanServiceが各Tunerの先頭PreRec有無を決め、
-    /// PreRec責務が無いTunerだけこのDaily責務をfallback表示する。
+    /// 予約一覧ではこの永続化済みDaily行をDaily時刻の正本として保持し、
+    /// SystemEpgResponsibilityPlanServiceが選んだPreRec候補と比較して各Tunerの現在/次のSystem EPGを投影する。
     /// 定時EPG取得と録画前EPG確認は別実行契約であり、互いを実行代替しない。
     /// 通常録画の競合計画には含めない。
     /// </summary>

@@ -1,3 +1,5 @@
+﻿using TvAIr.Core;
+
 namespace TvAIr.Epg.Projection;
 
 /// <summary>
@@ -6,6 +8,7 @@ namespace TvAIr.Epg.Projection;
 /// </summary>
 public interface IProgramEventSource
 {
+    IReadOnlyList<ProjectedProgramEvent> ProjectCommittedDbEvents(IReadOnlyList<EpgEvent> committedEvents);
     IReadOnlyList<ProjectedProgramEvent> GetAll();
     IReadOnlyList<ProjectedProgramEvent> GetByRange(DateTime from, DateTime to);
     ProjectedProgramEvent? GetByEventKey(ushort networkId, ushort transportStreamId, ushort serviceId, ushort eventId);

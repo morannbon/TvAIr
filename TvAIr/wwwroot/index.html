@@ -2,32 +2,43 @@
 
 <html lang="ja">
 <head>
-<!-- TvAIr-UI-Version: 1.2.0 -->
+<!-- TvAIr-UI-Version: 1.2.1 -->
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.0"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.0"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.1"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.1"/>
 
-<link href="/tvair-ui-foundation.css?v=1.2.0" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.0-theme207" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.0-modules251" rel="stylesheet"/>
-<link href="/tvair-epg-panel.css?v=1.2.0" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.0-owner203" rel="stylesheet"/>
-<link href="/tvair-settings-host.css?v=1.2.0" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.2.1" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.1-theme207" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.1-modules251" rel="stylesheet"/>
+<link href="/tvair-epg-panel.css?v=1.2.1" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.1-owner203" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.1" rel="stylesheet"/>
 
-<script src="/tvair-theme.js?v=1.2.0"></script>
-<script src="/tvair-action-button-state.js?v=1.2.0"></script>
-<script src="/tvair-reservation-action-state.js?v=1.2.0"></script>
-<script>var TVA_IR_UI_VERSION="1.2.0";</script>
-<script src="/genre-shared.js?v=1.2.0"></script>
-
-
-
+<script src="/tvair-theme.js?v=1.2.1"></script>
+<script src="/tvair-page-view-state.js?v=1.2.1"></script>
+<script src="/tvair-action-button-state.js?v=1.2.1"></script>
+<script src="/tvair-reservation-action-state.js?v=1.2.1"></script>
+<script>var TVA_IR_UI_VERSION="1.2.1";</script>
+<script src="/genre-shared.js?v=1.2.1"></script>
 
 
 
-</head>
+
+
+
+<style>
+.cfg-network-master-title{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.cfg-network-master-toggle{display:inline-flex;align-items:center;gap:10px;font-size:13px;font-weight:600;cursor:pointer;user-select:none}
+.cfg-network-master-toggle input{position:absolute;opacity:0;pointer-events:none}
+.cfg-network-master-switch{position:relative;width:42px;height:22px;border-radius:999px;background:var(--control-border,#8a8f98);transition:.16s ease;box-shadow:inset 0 0 0 1px rgba(0,0,0,.12)}
+.cfg-network-master-switch::after{content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:var(--panel-bg,#fff);transition:.16s ease;box-shadow:0 1px 3px rgba(0,0,0,.25)}
+.cfg-network-master-toggle input:checked + .cfg-network-master-switch{background:var(--accent,#2f6fed)}
+.cfg-network-master-toggle input:checked + .cfg-network-master-switch::after{transform:translateX(20px)}
+.cfg-network-disabled{opacity:.52}
+.cfg-network-disabled input[type="checkbox"],.cfg-network-disabled input[type="radio"]{accent-color:gray}
+</style></head>
 <body class="tvair-guide-page">
 <script>if(new URLSearchParams(location.search).get('settingsHost')==='1'){document.body.classList.add('tvair-settings-frame');document.title='TvAIr 設定';}</script>
 <div class="tvair-topnav" id="nav">
@@ -134,10 +145,6 @@
 <div class="cfg-note">EPGデータの保存場所を変更する場合に指定します。</div>
 </div>
 <div class="cfg-row">
-<label>ポート番号</label>
-<input id="cfg-port" type="number"/>
-</div>
-<div class="cfg-row">
 <label class="ui-checkbox-inline"><input class="ui-check-inline" id="cfg-startup-enabled" type="checkbox"/> Windows起動時にTvAIrを自動起動する</label>
 </div>
 <div class="cfg-row">
@@ -159,7 +166,15 @@
 </div>
 <div class="cfg-panel" id="cfg-panel-network">
 <div class="cfg-section">
-<div class="cfg-section-title">ネットワーク</div>
+<div class="cfg-section-title cfg-network-master-title"><span>ネットワーク</span><label class="cfg-network-master-toggle"><span id="cfg-network-usage-label">ネットワーク利用OFF</span><input id="cfg-network-usage-enabled" type="checkbox"/><span class="cfg-network-master-switch" aria-hidden="true"></span></label></div>
+</div>
+<div id="cfg-network-dependent">
+<div class="cfg-section">
+<div class="cfg-row">
+<label>ポート番号</label>
+<input id="cfg-port" type="number"/>
+<div class="cfg-note">ポート番号の変更はTvAIrの再起動後に反映されます。</div>
+</div>
 <div class="cfg-row">
 <label class="ui-checkbox-inline"><input class="ui-check-inline" id="cfg-network-lan-enabled" type="checkbox"/> LANからの接続を許可する</label>
 </div>
@@ -172,8 +187,11 @@
 <div class="cfg-input-wrap"><input autocomplete="new-password" id="cfg-network-password" type="password"/><button class="btn btn-secondary" onclick="toggleCfgPasswordVisibility('cfg-network-password',this)" type="button">表示</button><span class="cfg-note" id="cfg-network-password-status"></span></div>
 <div class="cfg-note" id="cfg-network-password-rule"></div>
 </div>
-<div class="cfg-row">
-<div class="cfg-note">変更はTvAIrの再起動後に反映されます。</div>
+</div>
+<div class="cfg-section">
+<div class="cfg-section-title">プラグインのインターネット接続</div>
+<div class="cfg-note">初期値は不許可です。許可したプラグインだけが、TvAIrを通じて必要な外部情報を取得できます。許可をOFFにすると進行中の通信も停止します。</div>
+<div id="cfg-plugin-internet-list" class="cfg-checkbox-stack"><div class="cfg-note">読み込み中...</div></div>
 </div>
 </div>
 </div>
@@ -430,9 +448,9 @@
 </div>
 </div>
 </div>
-<script src="/tvair-notification.js?v=1.2.0"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.0"></script>
-<script src="/tvair-epg-widget.js?v=1.2.0-ui7"></script>
+<script src="/tvair-notification.js?v=1.2.1"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.1"></script>
+<script src="/tvair-epg-widget.js?v=1.2.1-ui7"></script>
 <script>
 const PROGRAM_GUIDE_GEOMETRY=Object.freeze({
   dayStartHour:4,
@@ -1071,17 +1089,26 @@ function resetGenreColorsToDefault(){
 // 番組表の寸法定数は、読込済みのテーマ／UI CSS変数を正本として一度だけ取得する。
 const _rootStyle=getComputedStyle(document.documentElement);
 // 番組セル描画定数（CSS変数と一元管理・renderGuide外で一度だけ取得）
+function readRequiredProgramCellCssNumber(tokenName){
+  const raw=_rootStyle.getPropertyValue(tokenName).trim();
+  const value=parseFloat(raw);
+  if(!raw || !Number.isFinite(value)){
+    throw new Error('ProgramCell CSS token is missing or invalid: '+tokenName);
+  }
+  return value;
+}
+
 const _cellConst={
-  padV: parseFloat(_rootStyle.getPropertyValue('--prog-padding-v'))||3,
-  descFitSafe: parseFloat(_rootStyle.getPropertyValue('--prog-desc-fit-safe'))||2,
-  descSafe: parseFloat(_rootStyle.getPropertyValue('--prog-desc-safe'))||6,
-  footerTopGap: parseFloat(_rootStyle.getPropertyValue('--prog-footer-pad-top'))||3,
-  footerBottomPad: parseFloat(_rootStyle.getPropertyValue('--prog-footer-pad-bottom'))||2,
-  actionRowGap: parseFloat(_rootStyle.getPropertyValue('--prog-btn-gap'))||3,
-  actionRowHeight: parseFloat(_rootStyle.getPropertyValue('--prog-btn-h'))||20,
+  padV: readRequiredProgramCellCssNumber('--prog-padding-v'),
+  descFitSafe: readRequiredProgramCellCssNumber('--prog-desc-fit-safe'),
+  descSafe: readRequiredProgramCellCssNumber('--prog-desc-safe'),
+  footerTopGap: readRequiredProgramCellCssNumber('--prog-footer-pad-top'),
+  footerBottomPad: readRequiredProgramCellCssNumber('--prog-footer-pad-bottom'),
+  actionRowGap: readRequiredProgramCellCssNumber('--prog-btn-gap'),
+  actionRowHeight: readRequiredProgramCellCssNumber('--prog-btn-h'),
   // ProgramGuide columns have one CSS-owned fixed width.  Read it once instead of
   // forcing getBoundingClientRect()/offsetWidth for every detached program cell.
-  guideColW: parseFloat(_rootStyle.getPropertyValue('--tvair-guide-col-w'))||180,
+  guideColW: readRequiredProgramCellCssNumber('--tvair-guide-col-w'),
 };
 // Broadcast wave colors are CSS role tokens; service headers use wave-* classes so theme changes do not require inline style refresh.
 
@@ -1096,6 +1123,11 @@ function cacheRemember(cache, key, value, limit){
   if(cache.size >= limit) cache.clear();
   cache.set(key, value);
   return value;
+}
+
+function clearProgramCellMeasureCaches(){
+  _skeletonMeasureCache.clear();
+  _descHtmlCache.clear();
 }
 
 function ensureLayoutMeasureDiv(){
@@ -1179,14 +1211,18 @@ function createProgButtonsWrap(defs, actionLayoutProfile){
 
   const wrap=document.createElement('div');
   wrap.className='prog-btns';
-  wrap.dataset.actionCount=String(Array.isArray(defs) ? defs.length : 0);
-  wrap.dataset.actionLayoutProfile=profile;
 
   // ProgramCellActionSlotLayoutContract:
   // The top action lane is always a two-column grid.  Primary actions occupy the left
   // slot and enable/disable occupies the right slot; an unused slot is genuinely empty.
-  // Future cells reserve a second row from the beginning so a later Chain projection
-  // never steals body-text height.  On-air/recording cells own only the top row.
+  // IMPORTANT UI INVARIANT: action buttons belong to the normal content flow immediately
+  // after title/outline/detail.  NEVER push .prog-footer to the physical bottom of the cell
+  // (for example with margin-top:auto, absolute positioning, bottom:0, or equivalent).
+  // ボタンを最底辺にしたい、ボタンを幅いっぱいに広げたい場合は開発者の承認を得ること
+  // Body-text stability is achieved only by the independent action-lane height reservation;
+  // it must never be achieved by bottom-anchoring the visible buttons.
+  // Future cells reserve a second action row in the body budget so Chain eligibility does not
+  // change fitted text.  On-air/recording cells render only the top visible row.
   const top=document.createElement('div');
   top.className='prog-btn-grid';
   const chainRow=document.createElement('div');
@@ -1209,7 +1245,6 @@ function createProgButtonsWrap(defs, actionLayoutProfile){
     }
     el.classList.add('prog-btn-slot-primary');
     top.appendChild(el);
-    if(!wrap.dataset.primaryAction && action) wrap.dataset.primaryAction=action;
   });
 
   // Keep an empty top row only when the profile itself reserves action geometry.
@@ -1223,7 +1258,6 @@ function createProgFooter(defs, actionLayoutProfile){
   if(!btnWrap) return null;
   const footer=document.createElement('div');
   footer.className='prog-footer';
-  footer.dataset.actionLayoutProfile=String(actionLayoutProfile||'none');
   footer.appendChild(btnWrap);
   return footer;
 }
@@ -1243,16 +1277,53 @@ function measureFooterHeight(actionLayoutProfile){
     + (Math.max(0,rows-1) * _cellConst.actionRowGap);
 }
 
-function measureProgramSkeleton(measureDiv, startHtml, titleHtml, includeTitle){
-  const cacheKey=(includeTitle ? '1' : '0')+'|'+startHtml+'|'+(includeTitle ? titleHtml : '');
+function measureProgramSkeleton(measureDiv, startHtml, titleHtml, includeTitle, measureWidth){
+  // ProgramCellInnerGeometryContract:
+  // Cell-internal fitting must use the same rendered font/wrapping/margins as the real cell.
+  // offsetHeight alone excludes margins, so measure outer block height explicitly.  Width is
+  // part of the cache identity because title wrapping is width-dependent.
+  const widthKey=Math.max(1,Math.round(Number(measureWidth)||_cellConst.guideColW||1));
+  const cacheKey=widthKey+'|'+(includeTitle ? '1' : '0')+'|'+startHtml+'|'+(includeTitle ? titleHtml : '');
   if(_skeletonMeasureCache.has(cacheKey)) return _skeletonMeasureCache.get(cacheKey);
   measureDiv.innerHTML = startHtml + (includeTitle ? titleHtml : '');
+  const outerBlockHeight=function(el){
+    if(!el) return 0;
+    const cs=getComputedStyle(el);
+    const mt=parseFloat(cs.marginTop)||0;
+    const mb=parseFloat(cs.marginBottom)||0;
+    return el.getBoundingClientRect().height + mt + mb;
+  };
   const startEl = measureDiv.firstElementChild;
   const titleEl = includeTitle ? startEl && startEl.nextElementSibling : null;
   return cacheRemember(_skeletonMeasureCache, cacheKey, {
-    startH: startEl ? startEl.offsetHeight : 0,
-    titleH: titleEl ? titleEl.offsetHeight : 0,
+    startH: outerBlockHeight(startEl),
+    titleH: outerBlockHeight(titleEl),
   }, _measureCacheLimit.skeleton);
+}
+
+function measureProgramCellVerticalChrome(measureDiv){
+  // ProgramCellInnerGeometryContract: padding and borders consume frame height too.
+  // Read the actual ProgramCell CSS rather than relying on a parallel arithmetic copy.
+  const cs=getComputedStyle(measureDiv);
+  return (parseFloat(cs.paddingTop)||0)
+    + (parseFloat(cs.paddingBottom)||0)
+    + (parseFloat(cs.borderTopWidth)||0)
+    + (parseFloat(cs.borderBottomWidth)||0);
+}
+
+function measureDescCandidateHeight(measureDiv, html){
+  if(!html) return 0;
+  measureDiv.innerHTML=html;
+  const desc=measureDiv.firstElementChild;
+  if(!desc) return 0;
+  const rectH=desc.getBoundingClientRect().height;
+  const scrollH=desc.scrollHeight || 0;
+  return Math.max(rectH, scrollH);
+}
+
+function buildDescHtmlByVerifiedLayout(cellText, durMin, textAvail, measureWidth, measureDiv){
+  // Backward-compatible local entry; actual fitting is owned by one DOM-measured contract.
+  return buildDescHtmlFromActualFit(cellText,durMin,textAvail,measureWidth,measureDiv);
 }
 
 function findProgramGuideRecordingId(evKey, ev){
@@ -1593,16 +1664,12 @@ function resetProgramCellActionVisualStateContract(div){
   delete div.dataset.offair;
   delete div.dataset.actionUnsafe;
   delete div.dataset.programActionMode;
-  delete div.dataset.programActionLayout;
-  delete div.dataset.programCanChain;
 }
 
 function applyProgramCellActionStateDatasetContract(div, actionState){
   const a=actionState || {};
   resetProgramCellActionVisualStateContract(div);
   div.dataset.programActionMode=String(a.mode || 'no-action');
-  div.dataset.programActionLayout=String(a.actionLayoutProfile || 'none');
-  div.dataset.programCanChain=a.canUserChain ? '1' : '0';
   if(a.offair){
     div.classList.add('epg-gap','epg-offair');
     div.dataset.offair='1';
@@ -1704,157 +1771,80 @@ function buildProgramButtonDefs(div, ev, evKey, isOnAir, isEnded, displayState, 
 }
 
 
-function buildDescHtmlByPriority(cellText, durMin, textAvail, measureWidth){
-  // release_contract: ProgramGuide cellText capacity layout with clipped-line guard.
-  // The cell frame is fixed.  This creates a cell-local view from full cellText by
-  // calculating whole visual lines once from the available lane.  It does not DOM-probe,
-  // build alternate HTML candidates, or fill spare space by expanding text.  The final
-  // line is reserved with a bottom glyph guard so descenders are not clipped by overflow.
+function buildDescHtmlFromActualFit(cellText, durMin, textAvail, measureWidth, measureDiv){
+  // ProgramCellBodyActualFitContract:
+  // Body capacity is decided only by the real ProgramCell CSS in the hidden measure surface.
+  // No glyph-width/line-count estimator is allowed here.  Priority is outline -> detail -> items;
+  // when a higher-priority source must be trimmed, every lower-priority source is omitted.
+  // ProgramCellBodyFitCacheContract:
+  // The expensive DOM fit result is memoized only by the complete visual input identity.
+  // This cache may skip repeated measurement, but it must never change the fitted HTML, text
+  // priority, action layout, ProgramCell geometry, or any button appearance/state transition.
   const cell=cellText || {};
-  const originalOutline = (cell.outline === null || cell.outline === undefined) ? '' : String(cell.outline).trim();
-  const originalDetail = (cell.detail === null || cell.detail === undefined) ? '' : String(cell.detail).trim();
-  const originalItems = (cell.items === null || cell.items === undefined) ? '' : String(cell.items).trim();
-  const dur = Number(durMin);
-  const availPx = Number(textAvail);
-  const linePx = Math.max(1, parseFloat(_rootStyle.getPropertyValue('--prog-desc-lh')) || 15);
-  if(!Number.isFinite(dur) || dur < 10 || !Number.isFinite(availPx)) return '';
-  if(originalOutline === '' && originalDetail === '' && originalItems === '') return '';
-
-  const bottomGlyphGuardPx = Math.max(3, Math.ceil(linePx * 0.24));
-  const allowedLines = Math.max(0, Math.floor((availPx - _cellConst.descFitSafe - bottomGlyphGuardPx) / linePx));
-  if(allowedLines <= 0) return '';
-
-  measureWidth=Math.round(Number(measureWidth) || _cellConst.guideColW || 112);
-  if(!Number.isFinite(measureWidth) || measureWidth <= 0) measureWidth = 112;
-  const unitsPerLine = Math.max(7, Math.min(22, Math.floor((measureWidth - 10) / 9.2)));
-  const separatorLines = 1;
-  const minOptionalLines = 1;
-
-  const sampleKey=function(v){
-    const t=String(v||'');
-    if(t.length <= 96) return t.length+':'+t;
-    return t.length+':'+t.slice(0,64)+'…'+t.slice(-24);
+  const outline=(cell.outline === null || cell.outline === undefined) ? '' : String(cell.outline).trim();
+  const detail=(cell.detail === null || cell.detail === undefined) ? '' : String(cell.detail).trim();
+  const items=(cell.items === null || cell.items === undefined) ? '' : String(cell.items).trim();
+  const dur=Number(durMin);
+  const avail=Math.max(0,Number(textAvail)||0);
+  const width=Math.max(1,Number(measureWidth)||_cellConst.guideColW||1);
+  const cacheKey=JSON.stringify([width,dur,avail,outline,detail,items]);
+  if(_descHtmlCache.has(cacheKey)) return _descHtmlCache.get(cacheKey);
+  const remember=function(html){
+    return cacheRemember(_descHtmlCache, cacheKey, html, _measureCacheLimit.desc);
   };
-  const useCompactCache = (originalOutline.length + originalDetail.length + originalItems.length) <= 512;
-  const descCacheKey = useCompactCache
-    ? 'cell-text-capacity-layout-v523-title-outline-gap-rate\u001f'+dur+'\u001f'+allowedLines+'\u001f'+unitsPerLine+'\u001f'+(_rootStyle.getPropertyValue('--prog-title-outline-gap-rate')||'')+'\u001f'+sampleKey(originalOutline)+'\u001f'+sampleKey(originalDetail)+'\u001f'+sampleKey(originalItems)
-    : '';
-  if(useCompactCache && _descHtmlCache.has(descCacheKey)) return _descHtmlCache.get(descCacheKey);
+  if(!Number.isFinite(dur) || dur < 10 || avail<=0) return remember('');
+  if(!outline && !detail && !items) return remember('');
 
-  const charUnits=function(ch){
-    const code=ch.codePointAt(0) || 0;
-    if(ch==='\n' || ch==='\r') return unitsPerLine;
-    if(/\s/.test(ch)) return 0.5;
-    if(code <= 0x007f) return 0.62;
-    if(code >= 0xff61 && code <= 0xff9f) return 0.62;
-    return 1;
+  const renderHtml=function(o,d,i){
+    const parts=[];
+    if(o) parts.push("<span class='prog-desc-text prog-desc-title-outline-gap' aria-hidden='true' data-body-gap='title-outline'>&nbsp;</span>");
+    if(o) parts.push("<span class='prog-desc-text prog-desc-summary' data-body-source='cellText.outline'>"+esc(o)+"</span>");
+    if(o && (d || i)) parts.push("<hr class='prog-sep' data-body-boundary='outline-detail'>");
+    if(d) parts.push("<span class='prog-desc-text prog-desc-detail' data-body-source='cellText.detail'>"+esc(d)+"</span>");
+    if(i) parts.push("<span class='prog-desc-text prog-desc-items' data-body-source='cellText.items'>"+esc(i)+"</span>");
+    return parts.length ? "<div class='prog-desc prog-desc-celltext-fitted' data-body-direct-handoff='true' data-display-priority='celltext-actual-fit'>"+parts.join('')+"</div>" : '';
   };
-  const takePrefixLines=function(text, lineBudget){
-    const t=String(text||'').trim();
-    if(!t || lineBudget <= 0) return { text:'', usedLines:0, complete:t.length===0 };
-    let line=1;
-    let units=0;
-    let out='';
-    let complete=true;
-    for(const ch of t){
-      if(ch==='\r') continue;
-      if(ch==='\n'){
-        if(line >= lineBudget){ complete=false; break; }
-        out += ch;
-        line++;
-        units=0;
-        continue;
-      }
-      const u=charUnits(ch);
-      if(units > 0 && units + u > unitsPerLine){
-        if(line >= lineBudget){ complete=false; break; }
-        line++;
-        units=0;
-      }
-      if(u > unitsPerLine && units === 0){
-        // Extremely defensive: a single unusual glyph still consumes exactly one line.
-        if(line > lineBudget){ complete=false; break; }
-        out += ch;
-        units=unitsPerLine;
-      }else{
-        out += ch;
-        units += u;
-      }
+  const fits=function(html){
+    if(!html) return true;
+    return measureDescCandidateHeight(measureDiv,html) <= avail + 0.5;
+  };
+  const fitPrefix=function(text, makeHtml){
+    const glyphs=Array.from(String(text||''));
+    if(glyphs.length===0) return {text:'', complete:true};
+    if(fits(makeHtml(glyphs.join('')))) return {text:glyphs.join(''), complete:true};
+    let lo=0, hi=glyphs.length;
+    while(lo<hi){
+      const mid=Math.ceil((lo+hi)/2);
+      if(fits(makeHtml(glyphs.slice(0,mid).join('').trimEnd()))) lo=mid;
+      else hi=mid-1;
     }
-    out = out.trimEnd();
-    if(out.length < t.length) complete=false;
-    const usedLines = out ? line : 0;
-    return { text:out, usedLines:usedLines, complete:complete || out.length===t.length };
+    const value=glyphs.slice(0,lo).join('').trimEnd();
+    return {text:value, complete:lo>=glyphs.length};
   };
 
-  // release_contract: if an outline/summary is actually displayed, reserve a theme
-  // variable-driven gap between the title and the outline.  The base is the
-  // outline line-height; the rate is controlled by --prog-title-outline-gap-rate.
-  // When the outline is not displayed, this gap is deleted too.
-  let titleOutlineGapRate = parseFloat(_rootStyle.getPropertyValue('--prog-title-outline-gap-rate'));
-  if(!Number.isFinite(titleOutlineGapRate)) titleOutlineGapRate = 1;
-  titleOutlineGapRate = Math.max(0, Math.min(1, titleOutlineGapRate));
-  const titleOutlineGapPx = originalOutline ? (linePx * titleOutlineGapRate) : 0;
-  const contentLineBudget = originalOutline
-    ? Math.max(0, Math.floor((availPx - _cellConst.descFitSafe - bottomGlyphGuardPx - titleOutlineGapPx) / linePx))
-    : allowedLines;
-  if(originalOutline && contentLineBudget <= 0) return useCompactCache ? cacheRemember(_descHtmlCache, descCacheKey, '', _measureCacheLimit.desc) : '';
-
-  let remainLines = contentLineBudget;
-  let outline='';
-  let detail='';
-  let items='';
-  let outlineComplete=true;
-  let detailComplete=true;
-
-  if(originalOutline){
-    const picked=takePrefixLines(originalOutline, remainLines);
-    outline=picked.text;
-    remainLines=Math.max(0, remainLines-picked.usedLines);
-    outlineComplete=picked.complete;
+  let o='';
+  if(outline){
+    const picked=fitPrefix(outline, v=>renderHtml(v,'',''));
+    o=picked.text;
+    if(!o) return remember('');
+    if(!picked.complete) return remember(renderHtml(o,'',''));
   }
 
-  // Strict priority: when outline itself is trimmed, lower-priority body is not shown.
-  if(outlineComplete){
-    const hasOptionalSource = !!(originalDetail || originalItems);
-    let optionalLines = remainLines;
-    let canShowBoundary = false;
-    if(outline && hasOptionalSource && optionalLines > separatorLines + minOptionalLines){
-      optionalLines -= separatorLines;
-      canShowBoundary = true;
-    }
-
-    if(!outline || canShowBoundary){
-      if(originalDetail && optionalLines > 0){
-        const picked=takePrefixLines(originalDetail, optionalLines);
-        detail=picked.text;
-        optionalLines=Math.max(0, optionalLines-picked.usedLines);
-        detailComplete=picked.complete;
-      }
-
-      // Tail deletion contract: if detail exists and had to be trimmed, items are
-      // deleted before detail is cut.  Items are shown only after complete detail,
-      // or when there is no detail source at all.
-      const mayShowItems = originalItems && (!originalDetail || detailComplete);
-      if(mayShowItems && optionalLines >= minOptionalLines){
-        const picked=takePrefixLines(originalItems, optionalLines);
-        items=picked.text;
-      }
-
-      if(outline && !detail && !items){
-        canShowBoundary=false;
-      }
-    }
+  let d='';
+  if(detail){
+    const picked=fitPrefix(detail, v=>renderHtml(o,v,''));
+    d=picked.text;
+    if(!picked.complete) return remember(renderHtml(o,d,''));
   }
 
-  const parts=[];
-  if(outline) parts.push("<span class='prog-desc-text prog-desc-title-outline-gap' aria-hidden='true' data-body-gap='title-outline'>&nbsp;</span>");
-  if(outline) parts.push("<span class='prog-desc-text prog-desc-summary' data-body-source='cellText.outline'>"+esc(outline)+"</span>");
-  if(outline && (detail || items)) parts.push("<hr class='prog-sep' data-body-boundary='outline-detail'>");
-  if(detail) parts.push("<span class='prog-desc-text prog-desc-detail' data-body-source='cellText.detail'>"+esc(detail)+"</span>");
-  if(items) parts.push("<span class='prog-desc-text prog-desc-items' data-body-source='cellText.items'>"+esc(items)+"</span>");
-  const html = parts.length ? "<div class='prog-desc prog-desc-celltext-fitted' data-body-direct-handoff='true' data-display-priority='celltext-capacity-layout-title-outline-gap-rate-guard'>"+parts.join('')+"</div>" : '';
-  return useCompactCache ? cacheRemember(_descHtmlCache, descCacheKey, html, _measureCacheLimit.desc) : html;
+  let i='';
+  if(items){
+    const picked=fitPrefix(items, v=>renderHtml(o,d,v));
+    i=picked.text;
+  }
+
+  const html=renderHtml(o,d,i);
+  return remember(fits(html) ? html : '');
 }
 
 // ── UIトレースはリリース運用では送信しない ─────────────────────────
@@ -2032,6 +2022,9 @@ function reapplyGenreFilter(){
 // This does not refetch EPG, rebuild cellText, or change cell geometry.
 function syncProgramGuideThemeRuntime(detail, reason){
   if(!document.body || !document.body.classList.contains('tvair-guide-page')) return false;
+  // Theme application can alter computed ProgramCell metrics; never reuse a fit measured
+  // under a previous visual contract.
+  clearProgramCellMeasureCaches();
   const d=detail || {};
   const effective=resolveEffectiveThemeName(d.effective || d.rawEffective || d.selected || document.documentElement.getAttribute('data-theme'));
   if(d.selected){
@@ -2193,20 +2186,6 @@ function buildReservationMaps(rsvData){
   window.recordingMap=new Map(recordingRows.map(r=>[eventKeyOf(r), r.id]));
   window.recordingIdentityMap=new Map(recordingRows.map(r=>[identityKeyOf(r), r.id]));
 
-
-  // release_contract:
-  // (C) / チェーン表示はユーザー明示チェーンだけに限定する。
-  // 同一channelArgumentで end_time==next.start_time というだけの自動チェーン表示は禁止。
-  window.chainJoinSet=new Set();
-
-  // チェーン判定用: EPGイベントのサービスキー → channelArgument
-  // （EPGイベントにchannelArgumentがないため予約データから逆引きする）
-  window.channelArgByService=new Map();
-  (rsvData||[]).filter(r=>r.channelArgument).forEach(r=>{
-    const svcKey=r.networkId+":"+r.transportStreamId+":"+r.serviceId;
-    if(!window.channelArgByService.has(svcKey))
-      window.channelArgByService.set(svcKey, r.channelArgument);
-  });
 }
 
 // スクロール位置を復元し、ヘッダーのtransformを同期する（縦横一元管理）
@@ -2662,31 +2641,41 @@ function renderProgramCellContentByPriorityContract(div, ev, buttonDefs, layout)
   applyProgramCellFrameLayoutDatasetContract(div, frame);
 
   const actionLayoutProfile=String((layout && layout.actionLayoutProfile) || 'none');
-  const footerReserveH=measureFooterHeight(actionLayoutProfile);
-  const {startH,titleH}=measureProgramSkeleton(measureDiv, startHtml, titleHtml, true);
+  // ProgramCellInnerActionBudgetContract:
+  // A program cell's body geometry never changes merely because the clock crosses start/end or
+  // because its buttons appear/disappear.  The body always reserves the cell's maximum two-row
+  // action lane; actionLayoutProfile controls only which buttons are actually rendered.
+  // End-of-program therefore means "remove buttons only" and cannot expand/reflow body text.
+  // IMPORTANT UI INVARIANT: this reserved height is a fitting budget only.  It does NOT authorize
+  // moving the visible footer to the cell bottom.  Visible buttons must remain directly after the
+  // rendered title/outline/detail in normal flow.
+  const footerReserveH=measureFooterHeight('future-two-row');
+  const {startH,titleH}=measureProgramSkeleton(measureDiv, startHtml, titleHtml, true, measureWidth);
+  const verticalChromeH=measureProgramCellVerticalChrome(measureDiv);
 
   // release_contract ProgramCellContentPriorityRendererContract:
   // Initial render and reservation-state diff reflow must use this single renderer.
   // Time/title/action footer/raw descriptor provenance remain mandatory;
   // outline/detail/items are the only flexible lane and are tail-trimmed through
-  // buildDescHtmlByPriority().
+  // buildDescHtmlFromActualFit().
   const titleSafePx=2;
-  const PAD_V=_cellConst.padV;
-  // Program cells are rendered from the authoritative frame height.  Reading
-  // offsetHeight here would force synchronous layout while the grid is still being built.
+  // Program cells are rendered from the authoritative frame height.  The frame itself remains
+  // untouched; only its internal lanes are fitted here.  CSS padding/border and child margins
+  // are already included in verticalChromeH/startH/titleH.
   const safeHeight=Number.isFinite(ht) && ht>0 ? ht : PROGRAM_GUIDE_GEOMETRY.minCellHeight;
-  const maxTitleH=Math.max(0, safeHeight - PAD_V*2 - startH - footerReserveH - titleSafePx);
+  const maxTitleH=Math.max(0, safeHeight - verticalChromeH - startH - footerReserveH - titleSafePx);
   const titleReserveH=Math.min(titleH, maxTitleH);
   div.style.setProperty('--prog-title-max-height', Math.floor(maxTitleH)+'px');
 
   div.classList.remove('has-desc','no-desc');
   div.innerHTML=startHtml + titleHtml;
 
-  const rawAvail=safeHeight - PAD_V*2 - startH - titleReserveH - footerReserveH - _cellConst.descSafe;
+  const rawAvail=safeHeight - verticalChromeH - startH - titleReserveH - footerReserveH - _cellConst.descSafe;
   const avail=canRenderDesc ? Math.max(0, rawAvail) : 0;
+  div.style.setProperty('--prog-desc-max-height', Math.max(0,Math.floor(avail))+'px');
   applyProgramCellChromeDatasetContract(div, ev, chrome);
   const cellText=(chrome && chrome.cellText) || getProgramGuideCellText(ev);
-  const descBlockHtml=buildDescHtmlByPriority(cellText, durMin, avail, measureWidth);
+  const descBlockHtml=buildDescHtmlByVerifiedLayout(cellText, durMin, avail, measureWidth, measureDiv);
   if(descBlockHtml){
     div.classList.add('has-desc');
     div.dataset.bodyDirectHandoff='true';
@@ -3421,9 +3410,9 @@ function renderGuide(data, traceReason='renderGuide'){
         chrome,
         nowMs
       });
-      // ProgramCell flow contract: buttons stay near title/content in normal flow.
-      // They are not bottom-fixed and are not full-width.  Initial render and
-      // reservation/time-state refresh share the same unified render entry.
+      // ProgramCell flow contract: buttons follow the rendered title/outline/detail lane
+      // in normal flow and must never be pushed to the physical bottom of the cell.
+      // Initial render and reservation/time-state refresh share the same unified render entry.
       renderProgramCellFromStructureContract(div, ev, structure, {
         measureDiv:_measureDiv,
         measureWidth:_cellConst.guideColW
@@ -4491,7 +4480,7 @@ function completeCfgSave(){
   hideCfgModal();
 }
 window.TvAIrSettingsModule = window.TvAIrSettingsModule || {
-  version:'1.2.0',
+  version:'1.2.1',
   open:()=>showCfgModal(),
   close:()=>hideCfgModal(),
   contract:'single-settings-module-web-modal-basis'
@@ -4964,7 +4953,7 @@ async function toggleCfgPasswordVisibility(id, button){
   }catch(error){
     showCfgDialog(error && error.message ? error.message : 'パスワードを表示できません。');
   }finally{
-    if(button) button.disabled=false;
+    if(button) button.disabled=!(document.getElementById('cfg-network-usage-enabled')?.checked===true);
   }
 }
 function setPasswordFieldState(id, hasPassword, length){
@@ -5005,6 +4994,135 @@ function passwordSavePayload(id, plainKey, clearKey){
   return { [plainKey]:value, [clearKey]:false };
 }
 
+
+function updateNetworkUsageUi(){
+  const master=document.getElementById('cfg-network-usage-enabled');
+  const label=document.getElementById('cfg-network-usage-label');
+  const dependent=document.getElementById('cfg-network-dependent');
+  if(!master || !label || !dependent) return;
+  const enabled=master.checked===true;
+  label.textContent=enabled?'ネットワーク利用ON':'ネットワーク利用OFF';
+  dependent.classList.toggle('cfg-network-disabled',!enabled);
+  for(const el of dependent.querySelectorAll('input,select,textarea,button')){
+    if(!enabled){
+      if(el.id==='cfg-network-lan-enabled') window._cfgNetworkStoredLanAccessEnabled=el.checked===true;
+      if(el.type==='checkbox' || el.type==='radio') el.checked=false;
+      el.disabled=true;
+    }else{
+      el.disabled=false;
+    }
+  }
+  if(enabled){
+    const lan=document.getElementById('cfg-network-lan-enabled');
+    if(lan) lan.checked=window._cfgNetworkStoredLanAccessEnabled===true;
+    loadPluginInternetAccess();
+  }
+}
+
+async function requestNetworkUsageChange(){
+  const master=document.getElementById('cfg-network-usage-enabled');
+  if(!master) return;
+  const requested=master.checked===true;
+  master.checked=!requested;
+  master.disabled=true;
+  updateNetworkUsageUi();
+  try{
+    const currentRes=await fetch('/api/settings?ts='+Date.now(),{cache:'no-store'});
+    if(!currentRes.ok) throw new Error('settings read failed');
+    const current=await currentRes.json();
+    const payload={...current,networkUsageEnabled:requested,networkPasswordPlain:null,clearNetworkPassword:false,taskPasswordPlain:null,clearTaskPassword:false};
+    const res=await fetch('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const result=await res.json().catch(()=>({}));
+    if(!res.ok){ showCfgDialog(result.message||'ネットワーク利用設定の変更に失敗しました。'); return; }
+    master.checked=requested;
+    window._cfgImmediateNetworkSettingSaved=true;
+    updateNetworkUsageUi();
+    await loadPluginInternetAccess();
+  }catch(_){
+    showCfgDialog('ネットワーク利用設定の変更に失敗しました。');
+  }finally{
+    master.disabled=false;
+  }
+}
+
+document.getElementById('cfg-network-usage-enabled')?.addEventListener('change',requestNetworkUsageChange);
+
+async function loadPluginInternetAccess(){
+  const host=document.getElementById('cfg-plugin-internet-list');
+  if(!host) return;
+  host.innerHTML='<div class="cfg-note">読み込み中...</div>';
+  try{
+    const res=await fetch('/api/plugin-internet-access?ts='+Date.now(),{cache:'no-store'});
+    if(!res.ok) throw new Error('status '+res.status);
+    const d=await res.json();
+    const networkUsageEnabled=d.networkUsageEnabled===true;
+    const plugins=Array.isArray(d.plugins)?d.plugins:[];
+    host.innerHTML='';
+    if(!plugins.length){ host.innerHTML='<div class="cfg-note">プラグインは読み込まれていません。</div>'; }
+    for(const p of plugins){
+      const row=document.createElement('label');
+      row.className='ui-checkbox-inline';
+      const box=document.createElement('input');
+      box.type='checkbox'; box.className='ui-check-inline'; box.checked=networkUsageEnabled && p.allowed===true;
+      box.disabled=!networkUsageEnabled || p.declaredPermission!==true;
+      box.dataset.pluginId=p.pluginId||'';
+      box.addEventListener('change',()=>requestPluginInternetAccessChange(box,p));
+      const text=document.createElement('span');
+      text.textContent=`${p.displayName||p.pluginId}${p.declaredPermission===true?'':'（インターネット接続に未対応）'}`;
+      row.appendChild(box); row.appendChild(text); host.appendChild(row);
+    }
+    const providerStatus=Array.isArray(d.providerStatus)?d.providerStatus:[];
+    const availableProviders=providerStatus.filter(p=>p && p.runtimeEnabled!==false && p.credentialConfigured!==false);
+    if(availableProviders.length){
+      const serviceNote=document.createElement('div');
+      serviceNote.className='cfg-note';
+      serviceNote.style.marginTop='8px';
+      serviceNote.appendChild(document.createTextNode('登録されている外部情報サービス: '));
+      availableProviders.forEach((provider,index)=>{
+        if(index>0) serviceNote.appendChild(document.createTextNode(' / '));
+        const name=provider.displayName||provider.providerId||'外部サービス';
+        const url=String(provider.websiteUrl||'').trim();
+        if(/^https:\/\//i.test(url)){
+          const link=document.createElement('a');
+          link.href=url;
+          link.target='_blank';
+          link.rel='noopener noreferrer';
+          link.textContent=name;
+          serviceNote.appendChild(link);
+        }else{
+          serviceNote.appendChild(document.createTextNode(name));
+        }
+      });
+      host.appendChild(serviceNote);
+    }
+  }catch(_){
+    host.innerHTML='<div class="cfg-note">プラグインのインターネット接続設定の取得に失敗しました。</div>';
+  }
+}
+
+function requestPluginInternetAccessChange(box, plugin){
+  const requested=box.checked===true;
+  box.checked=!requested;
+  const apply=async()=>{
+    box.disabled=true;
+    try{
+      const res=await fetch('/api/plugin-internet-access',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({pluginId:plugin.pluginId,allowed:requested})});
+      const d=await res.json().catch(()=>({}));
+      if(!res.ok){ showCfgDialog(d.message||'プラグインのインターネット接続設定の変更に失敗しました。'); await loadPluginInternetAccess(); return; }
+      window._cfgImmediateNetworkSettingSaved=true;
+      await loadPluginInternetAccess();
+    }catch(_){
+      showCfgDialog('プラグインのインターネット接続設定の変更に失敗しました。');
+      await loadPluginInternetAccess();
+    }
+  };
+  if(requested){
+    showCfgConfirm(`${plugin.displayName||plugin.pluginId} のインターネット接続を許可します。\n\nTvAIrを通じて、このプラグインが必要な外部情報を取得できるようになります。\n\n許可しますか？`, apply);
+  }else{
+    apply();
+  }
+}
+
 async function loadCfg(){
   try{
     await ensureSettingsSelectionContract();
@@ -5014,6 +5132,12 @@ async function loadCfg(){
     window._cfgOriginalSystemTheme = loadedTheme;
     window._cfgSelectedSystemTheme = loadedTheme;
     window._cfgThemeTouched = false;
+    // NETWORK_SETTINGS_IMMEDIATE_SAVE_SESSION_CONTRACT
+    // Network master / Plugin internet / Provider credential changes are applied immediately,
+    // but the settings window remains open until the user presses Save.  Remember that an
+    // immediate network change occurred so the final Save reports successful completion even
+    // when the canonical settings PUT itself has no additional persisted difference.
+    window._cfgImmediateNetworkSettingSaved = false;
     window._cfgLoadedRaw = d;
     await hydrateThemeFromServerSettings(d, 'loadCfg');
     window._cfgDefaultThemeGenrePalettes = normalizeThemeGenrePalettes({
@@ -5053,10 +5177,14 @@ async function loadCfg(){
     document.getElementById('cfg-postend-margin').value=d.postEndMarginSeconds;
     document.getElementById('cfg-recording-after-action').value=d.recordingAfterAction;
     document.getElementById('cfg-recording-after-action-delay').value=d.recordingAfterActionDelayMinutes;
-    document.getElementById('cfg-network-lan-enabled').checked=d.networkLanAccessEnabled===true;
+    window._cfgNetworkStoredLanAccessEnabled=d.networkLanAccessEnabled===true;
+    document.getElementById('cfg-network-usage-enabled').checked=d.networkUsageEnabled===true;
+    document.getElementById('cfg-network-lan-enabled').checked=window._cfgNetworkStoredLanAccessEnabled;
     document.getElementById('cfg-network-session-minutes').value=d.networkSessionLifetimeMinutes;
     setPasswordFieldState('cfg-network-password', d.networkHasPassword===true, d.networkPasswordLength||0);
     document.getElementById('cfg-network-password-status').textContent=d.networkHasPassword===true?'パスワード設定済み':'パスワード未設定';
+    await loadPluginInternetAccess();
+    updateNetworkUsageUi();
     document.getElementById('cfg-show-tvairepgrec-taskbar-icon').checked=d.showTvAIrEpgRecTaskbarIcon !== false;
     document.getElementById('cfg-user-log-detail-enabled').checked=d.userLogDetailEnabled===true;
     document.getElementById('cfg-user-log-detail-reservation-source').checked=d.userLogDetailReservationSource===true;
@@ -5187,7 +5315,8 @@ async function saveCfgCore(){
     startupEnabled: document.getElementById('cfg-startup-enabled').checked,
     taskUserName: (document.getElementById('cfg-task-username').value||'').trim(),
     ...passwordSavePayload('cfg-task-password', 'taskPasswordPlain', 'clearTaskPassword'),
-    networkLanAccessEnabled: document.getElementById('cfg-network-lan-enabled').checked,
+    networkUsageEnabled: document.getElementById('cfg-network-usage-enabled').checked,
+    networkLanAccessEnabled: document.getElementById('cfg-network-usage-enabled').checked ? document.getElementById('cfg-network-lan-enabled').checked : window._cfgNetworkStoredLanAccessEnabled===true,
     networkSessionLifetimeMinutes: cfgIntegerValue('cfg-network-session-minutes', raw.networkSessionLifetimeMinutes),
     ...passwordSavePayload('cfg-network-password', 'networkPasswordPlain', 'clearNetworkPassword'),
     epgEnabled: document.getElementById('cfg-epg-enabled').checked,
@@ -5249,7 +5378,11 @@ async function saveCfgCore(){
       }else if(needsRestart){
         showCfgDialog(result.message || '設定を保存しました\n一部の変更はTvAIrの再起動後に反映されます。', ()=>completeCfgSave());
       }else if(persistedChanged){
+        window._cfgImmediateNetworkSettingSaved=false;
         showCfgDialog(result.message || '設定を保存しました', ()=>completeCfgSave());
+      }else if(window._cfgImmediateNetworkSettingSaved===true){
+        window._cfgImmediateNetworkSettingSaved=false;
+        showCfgDialog('設定を保存しました。', ()=>completeCfgSave());
       }else{
         showCfgDialog(result.message || '変更はありません', ()=>completeCfgSave());
       }
@@ -5314,12 +5447,31 @@ window.addEventListener('tvair-settings-saved', async event=>{
 // ── 初期化 ───────────────────────────────────────────────────────
 const tvairSettingsFrameMode = document.body.classList.contains('tvair-settings-frame');
 if(!tvairSettingsFrameMode){
+  const savedProgramGuideViewState = window.TvAIrPageViewState ? TvAIrPageViewState.read('program-guide') : null;
+  let initialGuideTop = null;
+  let initialGuideLeft = null;
+  if(savedProgramGuideViewState && savedProgramGuideViewState.meta && savedProgramGuideViewState.meta.date){
+    const restoredDate = ProgramGuideDateState.clamp(savedProgramGuideViewState.meta.date);
+    if(restoredDate){
+      currentDate = restoredDate;
+      initialGuideTop = Number.isFinite(Number(savedProgramGuideViewState.top)) ? Math.max(0,Number(savedProgramGuideViewState.top)) : null;
+      initialGuideLeft = Number.isFinite(Number(savedProgramGuideViewState.left)) ? Math.max(0,Number(savedProgramGuideViewState.left)) : null;
+      lastScrollIntent = {type:'scroll'};
+    }
+  }
+  if(window.TvAIrPageViewState){
+    TvAIrPageViewState.register({
+      key:'program-guide',
+      root:()=>document.getElementById('guide-scroll'),
+      meta:()=>({date:currentDate})
+    });
+  }
   buildDateNav();
   buildTimeNav();
   loadGenreColorSettings().finally(()=>{
     buildGenreNav();
-    // 初回位置も loadGuide() の lastScrollIntent='now' 契約へ一本化する。
-    loadGuide(currentDate, null, null, 'initial');
+    // Same-session return restores the prior guide coordinates; first visit keeps the existing now-position contract.
+    loadGuide(currentDate, initialGuideTop, initialGuideLeft, initialGuideTop===null?'initial':'initial-view-state-restore');
   });
 }else{
   window.addEventListener('load',()=>showCfgModal(),{once:true});
@@ -5353,8 +5505,8 @@ if(!tvairSettingsFrameMode){
   bindGuideTopOperationUi();
 }
 </script>
-<script src="/tvair-settings-host.js?v=1.2.0"></script>
-<script src="/tvair-menu-spine.js?v=1.2.0"></script>
+<script src="/tvair-settings-host.js?v=1.2.1"></script>
+<script src="/tvair-menu-spine.js?v=1.2.1"></script>
 <script>
 (function(){
   try{

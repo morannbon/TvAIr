@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+<Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
     <Platforms>AnyCPU;x86;x64</Platforms>
@@ -63,12 +63,6 @@
     <ContentWithTargetPath Include="wwwroot\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <TargetPath>wwwroot\%(RecursiveDir)%(Filename)%(Extension)</TargetPath>
-    </ContentWithTargetPath>
-  </ItemGroup>
-  <ItemGroup>
-    <ContentWithTargetPath Include="..\RELEASE_NOTES.txt">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <TargetPath>RELEASE_NOTES.txt</TargetPath>
     </ContentWithTargetPath>
   </ItemGroup>
 

@@ -25,6 +25,7 @@ public interface ITvAirPluginContext
     ITvAirServiceMetadataApi ServiceMetadata { get; }
     ITvAirTunersApi Tuners { get; }
     ITvAirViewersApi Viewers { get; }
+    ITvAirViewerReservationsApi ViewerReservations { get; }
     ITvAirTimedTextStreamsApi TimedTextStreams { get; }
     ITvAirBackupApi Backup { get; }
     ITvAirSettingsApi Settings { get; }
@@ -36,6 +37,7 @@ public interface ITvAirPluginContext
     ITvAirExternalJobsApi ExternalJobs { get; }
     ITvAirHostsApi Hosts { get; }
     ITvAirPluginsApi Plugins { get; }
+    ITvAirExternalLookupApi ExternalLookup { get; }
 }
 
 // Runtime plugin implementations receive ITvAirPluginContext through
@@ -985,6 +987,72 @@ public interface ITvAirViewersApi
     TvAirViewerOperationResultDto Activate(TvAirViewerActivateRequestDto request);
     TvAirViewerOperationResultDto Stop(TvAirViewerStopRequestDto request);
     TvAirViewerOperationResultDto StopCompatible(TvAirViewerCompatibleStopRequestDto request);
+    /// <summary>Host-owned explicit Viewer Operation直前の同期preemption境界。handler内でViewer Operationを再入させない。</summary>
+    IDisposable SubscribeOperationPreempting(Action<TvAirViewerOperationPreemptingDto> handler);
+}
+
+/// <summary>
+/// Host-owned one-shot Viewer Reservation contract. Reservations conflict only when ViewerProfileId and ScheduledStart are both equal.
+/// ScheduledEnd remains programme metadata and is not a ViewerProfile occupancy boundary.
+/// </summary>
+public interface ITvAirViewerReservationsApi
+{
+    TvAirViewerReservationMutationResultDto Create(TvAirViewerReservationCreateRequestDto request);
+    TvAirViewerReservationMutationResultDto Cancel(string reservationId);
+    IReadOnlyList<TvAirViewerReservationDto> List(TvAirViewerReservationQueryDto? query = null);
+}
+
+/// <summary>One future Viewer Operation request; ViewerProfileId + ScheduledStart identifies its execution slot.</summary>
+public sealed class TvAirViewerReservationCreateRequestDto
+{
+    public string ViewerProfileId { get; init; } = string.Empty;
+    public int NetworkId { get; init; }
+    public int TransportStreamId { get; init; }
+    public int ServiceId { get; init; }
+    public int EventId { get; init; }
+    public DateTimeOffset ScheduledStart { get; init; }
+    public DateTimeOffset? ScheduledEnd { get; init; }
+}
+
+public sealed class TvAirViewerReservationQueryDto
+{
+    public string? ViewerProfileId { get; init; }
+    public bool IncludeTerminal { get; init; }
+}
+
+public sealed class TvAirViewerReservationDto
+{
+    public string ReservationId { get; init; } = string.Empty;
+    public string OwnerPluginId { get; init; } = string.Empty;
+    public string ViewerProfileId { get; init; } = string.Empty;
+    public int NetworkId { get; init; }
+    public int TransportStreamId { get; init; }
+    public int ServiceId { get; init; }
+    public int EventId { get; init; }
+    public DateTimeOffset ScheduledStart { get; init; }
+    public DateTimeOffset? ScheduledEnd { get; init; }
+    public string State { get; init; } = string.Empty;
+    public string FailureReason { get; init; } = string.Empty;
+    public DateTimeOffset CreatedAt { get; init; }
+    public DateTimeOffset UpdatedAt { get; init; }
+}
+
+public sealed class TvAirViewerReservationMutationResultDto
+{
+    public bool Success { get; init; }
+    public string ErrorCode { get; init; } = string.Empty;
+    public string Message { get; init; } = string.Empty;
+    public TvAirViewerReservationDto? Reservation { get; init; }
+}
+
+public sealed class TvAirViewerOperationPreemptingDto
+{
+    public string ViewerProfileId { get; init; } = string.Empty;
+    public string OperationId { get; init; } = string.Empty;
+    public string SourceKind { get; init; } = string.Empty;
+    public string SourceOwnerId { get; init; } = string.Empty;
+    public string ViewerReservationId { get; init; } = string.Empty;
+    public DateTimeOffset OccurredAt { get; init; }
 }
 
 
@@ -1505,7 +1573,9 @@ public enum TvAirEventType
     ReservationConflictChanged,
     RecordingResultFinalized,
     ViewerSessionChanged,
-    RuntimeWindowLifecycleChanged
+    RuntimeWindowLifecycleChanged,
+    PluginPermissionChanged,
+    ViewerReservationChanged
 }
 
 /// <summary>共通イベント包絡。追加プロパティは既存プラグインとのバイナリ互換を維持する。</summary>
@@ -1537,6 +1607,8 @@ public sealed class TvAirEventDto
     public TvAirRecordingResultDto? RecordingResult { get; init; }
     /// <summary>Host-managed Runtime ToolWindow のライフサイクル確定事実。RuntimeWindowLifecycleChanged のときだけ設定される。</summary>
     public TvAirRuntimeWindowLifecycleDto? RuntimeWindowLifecycle { get; init; }
+    /// <summary>Host-owned future Viewer Operation reservation state. Set for ViewerReservationChanged.</summary>
+    public TvAirViewerReservationDto? ViewerReservation { get; init; }
     public IReadOnlyDictionary<string, string> Details { get; init; } = new Dictionary<string, string>();
 }
 

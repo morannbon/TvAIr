@@ -5,8 +5,8 @@ namespace TvAIrPlugin;
 /// <summary>Directory.Build.propsから生成されるTvAIrPlugin SDK 1.0.0以降の公開契約正本。</summary>
 public static class TvAIrPluginSdkContract
 {
-    public const string SdkVersion = "1.1.5";
-    public const string HostContractVersion = "1.1.5";
+    public const string SdkVersion = "1.1.7";
+    public const string HostContractVersion = "1.1.7";
     public const string MinimumSupportedHostContractVersion = "1.0.0";
     public const int CompatibilityMajor = 1;
 

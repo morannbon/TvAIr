@@ -28,6 +28,11 @@ public static class SettingsDefaults
     public const bool ShowTvAIrEpgRecTaskbarIcon = true;
     public const bool StartupEnabled = false;
 
+    // NETWORK_USAGE_MASTER_INVARIANT
+    // true=通常のネットワーク設定を評価する。false=完全閉域モードとしてloopback以外の通信を実効停止する。
+    // 下位のLAN/Plugin設定値は保持し、NetworkUsageEnabled=trueへ戻した時だけ再評価する。
+    public const bool NetworkUsageEnabled = false;
+
     // NETWORK_ACCESS_SETTINGS_INVARIANT
     // 待受範囲、認証、設定画面、保存、読込、標準に戻すはこの正本を共有する。
     public const bool NetworkLanAccessEnabled = false;

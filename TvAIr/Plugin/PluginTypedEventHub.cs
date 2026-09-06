@@ -181,7 +181,7 @@ public sealed class PluginTypedEventHub : IDisposable
             OperationId = source.OperationId, SourceOwnerId = source.SourceOwnerId, DataRevision = source.DataRevision, ChangeKind = source.ChangeKind,
             EventType = source.EventType, ReservationId = source.ReservationId, ServiceName = ResolveEventServiceName(source), ProgramTitle = source.ProgramTitle,
             Reservation = NormalizeSnapshot(source.Reservation), BeforeReservation = NormalizeSnapshot(source.BeforeReservation), AfterReservation = NormalizeSnapshot(source.AfterReservation),
-            ChangedFields = source.ChangedFields, RecordingResult = NormalizeRecordingResult(source.RecordingResult), RuntimeWindowLifecycle = source.RuntimeWindowLifecycle, Details = source.Details
+            ChangedFields = source.ChangedFields, RecordingResult = NormalizeRecordingResult(source.RecordingResult), RuntimeWindowLifecycle = source.RuntimeWindowLifecycle, ViewerReservation = source.ViewerReservation, Details = source.Details
         };
         Subscriber[] targets;
         lock (gate)
@@ -191,6 +191,19 @@ public sealed class PluginTypedEventHub : IDisposable
                 && !string.IsNullOrWhiteSpace(dto.RuntimeWindowLifecycle?.PluginId))
             {
                 var ownerPluginId = PluginIdentity.Normalize(dto.RuntimeWindowLifecycle.PluginId);
+                candidates = candidates.Where(x => string.Equals(x.PluginId, ownerPluginId, StringComparison.OrdinalIgnoreCase));
+            }
+            if (dto.EventType == TvAirEventType.PluginPermissionChanged
+                && dto.Details.TryGetValue("pluginId", out var permissionPluginId)
+                && !string.IsNullOrWhiteSpace(permissionPluginId))
+            {
+                var ownerPluginId = PluginIdentity.Normalize(permissionPluginId);
+                candidates = candidates.Where(x => string.Equals(x.PluginId, ownerPluginId, StringComparison.OrdinalIgnoreCase));
+            }
+            if (dto.EventType == TvAirEventType.ViewerReservationChanged
+                && !string.IsNullOrWhiteSpace(dto.SourceOwnerId))
+            {
+                var ownerPluginId = PluginIdentity.Normalize(dto.SourceOwnerId);
                 candidates = candidates.Where(x => string.Equals(x.PluginId, ownerPluginId, StringComparison.OrdinalIgnoreCase));
             }
             targets = candidates.ToArray();

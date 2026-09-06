@@ -246,6 +246,10 @@ var iniSettings = new IniSettingsService(
     firstRunAppSettings.Port);
 builder.Services.AddSingleton(iniSettings);
 builder.Services.AddSingleton<NetworkAccessSecurity>();
+builder.Services.AddSingleton<PluginInternetAccessPermissionStore>();
+builder.Services.AddSingleton<PluginExternalLookupCredentialStore>();
+builder.Services.AddSingleton<IPluginExternalLookupGateway, PluginExternalLookupGateway>();
+builder.Services.AddSingleton<PluginManagedExternalLookupHost>();
 
 // ─── 設定バインド（ini で上書き） ────────────────────────────────
 builder.Services.Configure<AppSettings>(opt =>
@@ -378,6 +382,8 @@ builder.Services.AddSingleton<ExternalTunerLeaseService>();
 builder.Services.AddSingleton<ViewerSessionRegistry>();
 builder.Services.AddSingleton<ViewerOwnershipService>();
 builder.Services.AddSingleton<ViewerOperationService>();
+builder.Services.AddSingleton<ViewerOperationPreemptionHub>();
+builder.Services.AddSingleton<ViewerReservationStore>();
 
 // ─── 予約 ────────────────────────────────────────────────────────
 builder.Services.AddSingleton<ChainDirectRecorderSessionRegistry>();
@@ -400,6 +406,8 @@ builder.Services.AddSingleton<EpgStore>();
 builder.Services.AddSingleton<DbProgramEventSource>();
 builder.Services.AddSingleton<ExternalEpgSourceStore>();
 builder.Services.AddSingleton<IProgramEventSource, ProgramGuideProjectionService>();
+builder.Services.AddSingleton<ViewerReservationScheduler>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<ViewerReservationScheduler>());
 builder.Services.AddSingleton<ServiceLogoStore>();
 builder.Services.AddSingleton<EpgLogoExtractor>();
 builder.Services.AddSingleton<SystemSleepInhibitionService>();
@@ -534,7 +542,11 @@ var port = iniSettings.Port;
 // LAN無効時も外部要求は共通境界で403となり、設定変更でlistenerを再構築しない。
 builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
+var networkUsageGate = new NetworkUsageGate(iniSettings);
+builder.Services.AddSingleton(networkUsageGate);
+
 bool IsNetworkLanAccessActive() =>
+    networkUsageGate.Enabled &&
     iniSettings.NetworkLanAccessEnabled &&
     !string.IsNullOrWhiteSpace(iniSettings.NetworkPasswordEncrypted);
 
@@ -809,7 +821,7 @@ app.MapGet("/network-login", (HttpContext context) =>
     context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'self'; base-uri 'none'";
     var html = $$$"""
 <!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>TvAIr 接続</title><link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.0-css-final199"></head><body class="tvair-generated-login"><main><h1>TvAIrへ接続</h1><form id="login"><label for="password">接続用パスワード</label><input id="password" type="password" autocomplete="current-password" required minlength="12"><button type="submit">接続</button><div id="message" class="message" role="status"></div></form></main>
+<title>TvAIr 接続</title><link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.1-css-final199"></head><body class="tvair-generated-login"><main><h1>TvAIrへ接続</h1><form id="login"><label for="password">接続用パスワード</label><input id="password" type="password" autocomplete="current-password" required minlength="12"><button type="submit">接続</button><div id="message" class="message" role="status"></div></form></main>
 <script>
 const form=document.getElementById('login'),password=document.getElementById('password'),message=document.getElementById('message');
 form.addEventListener('submit',async e=>{e.preventDefault();message.textContent='確認しています…';try{const r=await fetch('/api/network-auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:password.value}),credentials:'same-origin'});const j=await r.json().catch(()=>({}));if(!r.ok){message.textContent=j.message||'接続できませんでした。';return;}location.replace({{{returnUrlJson}}});}catch{message.textContent='接続できませんでした。';}});
@@ -1810,7 +1822,7 @@ static IResult RenderPluginWindowHost(string windowId, HttpRequest http, PluginW
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{title}}</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.0-css-final199">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.1-css-final199">
 </head>
 <body class="tvair-plugin-window-page">
 <div class="{{hostClass}}" data-window-id="{{encodedWindowId}}" data-window-revision="{{initialRevision}}" data-tool-host="{{toolHost.ToString().ToLowerInvariant()}}">
@@ -2207,10 +2219,10 @@ static IResult RenderPluginVersionInfoPage(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-notification.css?v=1.2.0-owner203">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.2.1-owner203">
 </head>
 <body>
-<script src="/tvair-notification.js?v=1.2.0"></script>
+<script src="/tvair-notification.js?v=1.2.1"></script>
 <script>
 document.addEventListener('DOMContentLoaded',function(){
   if(window.TvAIrNotify){ TvAIrNotify({ title:'{{safeTitle}}', message:'{{safeVersion}}', onOk:function(){ location.replace('{{safeReturn}}'); } }); }
@@ -2264,7 +2276,7 @@ static IResult RenderPluginDefaultMenuInfo(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeName}} 情報</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.0-css-final199">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.1-css-final199">
 </head>
 <body class="tvair-plugin-info-page"><div class="card"><h1>{{safeName}} 情報</h1><div class="row"><div class="k">Version</div><div class="v">{{safeVersion}}</div></div><div class="row"><div class="k">Route</div><div class="v">{{safeRoute}}</div></div><div class="row"><div class="k">Action</div><div class="v">{{safeKind}}</div></div><p>{{safeDescription}}</p><a class="button" href="/">番組表へ戻る</a></div></body>
 </html>
@@ -2285,7 +2297,7 @@ static IResult PluginHtmlMessage(string title, string message, int statusCode, s
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.0-css-final199">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.1-css-final199">
 </head>
 <body class="tvair-message-page"><div class="card"><h1>{{safeTitle}}</h1><p>{{safeMessage}}</p><a class="button" href="{{safeHref}}">{{safeLinkText}}</a></div></body>
 </html>
@@ -2345,7 +2357,7 @@ static string BuildPluginFloatingButtonsHtml(RuntimeUiRenderContext context, str
     if (normalized.Length == 0) return string.Empty;
 
     var sb = new System.Text.StringBuilder();
-    sb.Append("<link rel=\"stylesheet\" href=\"/tvair-generated-surfaces.css?v=1.2.0-css-final199\">");
+    sb.Append("<link rel=\"stylesheet\" href=\"/tvair-generated-surfaces.css?v=1.2.1-css-final199\">");
 
     foreach (var group in normalized.GroupBy(x => x.Item.Position))
     {
@@ -3375,14 +3387,14 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; media-src 'self' data:">
 <title>{{{{safeTitle}}}} - TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.0">
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.0">
-<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.2.0">
-<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.0-theme204">
-<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.2.0-modules205">
-<link rel="stylesheet" href="/tvair-notification.css?v=1.2.0-owner203">
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.0-css-final199">
-<script src="/tvair-theme.js?v=1.2.0"></script>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.1">
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.1">
+<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.2.1">
+<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.1-theme204">
+<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.2.1-modules205">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.2.1-owner203">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.1-css-final199">
+<script src="/tvair-theme.js?v=1.2.1"></script>
 </head>
 <body class="tvair-non-program-page tvair-plugin-shell-page {{{{themeClass}}}}{{{{contentOnlyClass}}}}" data-plugin-route="{{{{safeRoute}}}}" data-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme="{{{{safeSelectedTheme}}}}" data-tvair-selected-theme="{{{{safeSelectedTheme}}}}" data-tvair-effective-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme-scope="all">
 <div id="nav">
@@ -3403,10 +3415,10 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
 {{{{pluginBody}}}}
   </main>
 </div>
-<script src="/tvair-notification.js?v=1.2.0"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.0"></script>
-<script src="/tvair-safe-event-host.js?v=1.2.0"></script>
-<script src="/tvair-menu-spine.js?v=1.2.0"></script>
+<script src="/tvair-notification.js?v=1.2.1"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.1"></script>
+<script src="/tvair-safe-event-host.js?v=1.2.1"></script>
+<script src="/tvair-menu-spine.js?v=1.2.1"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -3687,16 +3699,16 @@ static string BuildPluginToolWindowContentHtml(string title, string route, strin
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; media-src 'self' data:">
 <title>{{safeTitle}} - TvAIr Tool Window</title>
-<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.0-theme204">
-<script src="/tvair-theme.js?v=1.2.0"></script>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.0-css-final199">
+<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.1-theme204">
+<script src="/tvair-theme.js?v=1.2.1"></script>
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.1-css-final199">
 {{pluginHead}}
 </head>
 <body class="tvair-plugin-toolwindow-content-only {{themeClass}}" data-plugin-route="{{safeRoute}}" data-theme="{{safeEffectiveTheme}}" data-tvair-theme="{{safeSelectedTheme}}" data-tvair-selected-theme="{{safeSelectedTheme}}" data-tvair-effective-theme="{{safeEffectiveTheme}}" data-tvair-theme-scope="all" data-tvair-host-kind="winforms_webbrowser_fallback_direct_content" data-tvair-toolwindow-contract="release_contract">
 <div class="tvair-toolwindow-content-root">
 {{pluginContent}}
 </div>
-<script src="/tvair-safe-event-host.js?v=1.2.0"></script>
+<script src="/tvair-safe-event-host.js?v=1.2.1"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -4982,90 +4994,22 @@ app.MapGet("/api/epg/events", (string? date, EpgStore store, ReservationStore re
     var projectedOnlyCount = timelineEvents.Count(e => !e.DbEventExists);
     var dbWithOverlayCount = timelineEvents.Count(e => string.Equals(e.ProjectionState, ProjectedEventStates.DbWithOverlay, StringComparison.OrdinalIgnoreCase));
     log.Add("PROGRAM_GUIDE_PROJECTED_DISPLAY_HANDOFF", "API",
-        $"result=OK date={baseDate:yyyy-MM-dd} projectedOnly={projectedOnlyCount} dbWithOverlay={dbWithOverlayCount} displayEvents={displayEvents.Count} elapsedMs={requestStopwatch.ElapsedMilliseconds} diagnostics=release_compact source=IProgramEventSource target=programguide_display dbWrite=none rule=program_guide_projection_contract");
+        $"result=OK date={baseDate:yyyy-MM-dd} projectedOnly={projectedOnlyCount} dbWithOverlay={dbWithOverlayCount} displayEvents={displayEvents.Count} elapsedMs={requestStopwatch.ElapsedMilliseconds} diagnostics=compact source=IProgramEventSource target=programguide_display dbWrite=none rule=program_guide_projection_contract");
 
-    var dbWithOverlayEvents = timelineEvents
-        .Where(e => string.Equals(e.ProjectionState, ProjectedEventStates.DbWithOverlay, StringComparison.OrdinalIgnoreCase))
+    var blankTitleIndexes = displayEvents
+        .Select((display, index) => (display, index))
+        .Where(x => string.IsNullOrEmpty(x.display.CellText.Title))
+        .Take(24)
         .ToList();
-    if (dbWithOverlayEvents.Count > 0)
+    if (blankTitleIndexes.Count > 0)
     {
-        var titleDbUsed = dbWithOverlayEvents.Count(e => string.Equals(e.ProjectionTitleSource, "db", StringComparison.OrdinalIgnoreCase));
-        var titleOverlayUsed = dbWithOverlayEvents.Count(e => string.Equals(e.ProjectionTitleSource, "overlay", StringComparison.OrdinalIgnoreCase));
-        var titleOverlayCandidateIgnored = dbWithOverlayEvents.Count(e => e.ProjectionTitleDbPresent && e.ProjectionTitleOverlayCandidatePresent);
-        var titleBothMissing = dbWithOverlayEvents.Count(e => !e.ProjectionTitleDbPresent && !e.ProjectionTitleOverlayCandidatePresent);
-
-        var outlineDbPresent = dbWithOverlayEvents.Count(e => e.ProjectionOutlineDbPresent);
-        var outlineDbMissingOverlayPresent = dbWithOverlayEvents.Count(e => !e.ProjectionOutlineDbPresent && e.ProjectionOutlineOverlayCandidatePresent);
-        var outlineOverlayUsed = dbWithOverlayEvents.Count(e => string.Equals(e.ProjectionOutlineSource, "overlay", StringComparison.OrdinalIgnoreCase));
-        var outlineDbPresentOverlayIgnored = dbWithOverlayEvents.Count(e => e.ProjectionOutlineDbPresent && e.ProjectionOutlineOverlayCandidatePresent);
-        var outlineBothMissing = dbWithOverlayEvents.Count(e => !e.ProjectionOutlineDbPresent && !e.ProjectionOutlineOverlayCandidatePresent);
-
-        var detailDbPresent = dbWithOverlayEvents.Count(e => e.ProjectionDetailDbPresent);
-        var detailDbMissingOverlayPresent = dbWithOverlayEvents.Count(e => !e.ProjectionDetailDbPresent && e.ProjectionDetailOverlayCandidatePresent);
-        var detailOverlayUsed = dbWithOverlayEvents.Count(e => string.Equals(e.ProjectionDetailSource, "overlay", StringComparison.OrdinalIgnoreCase));
-        var detailDbPresentOverlayIgnored = dbWithOverlayEvents.Count(e => e.ProjectionDetailDbPresent && e.ProjectionDetailOverlayCandidatePresent);
-        var detailBothMissing = dbWithOverlayEvents.Count(e => !e.ProjectionDetailDbPresent && !e.ProjectionDetailOverlayCandidatePresent);
-
-        log.Add("DB_WITH_OVERLAY_FIELD_MERGE_SUMMARY", "API",
-            $"result=OK date={baseDate:yyyy-MM-dd} dbWithOverlay={dbWithOverlayEvents.Count} " +
-            $"titleDbUsed={titleDbUsed} titleOverlayUsed={titleOverlayUsed} titleOverlayCandidateIgnored={titleOverlayCandidateIgnored} titleBothMissing={titleBothMissing} " +
-            $"outlineDbPresent={outlineDbPresent} outlineDbMissingOverlayPresent={outlineDbMissingOverlayPresent} outlineOverlayUsed={outlineOverlayUsed} outlineDbPresentOverlayIgnored={outlineDbPresentOverlayIgnored} outlineBothMissing={outlineBothMissing} " +
-            $"detailDbPresent={detailDbPresent} detailDbMissingOverlayPresent={detailDbMissingOverlayPresent} detailOverlayUsed={detailOverlayUsed} detailDbPresentOverlayIgnored={detailDbPresentOverlayIgnored} detailBothMissing={detailBothMissing} " +
-            $"titlePolicy=db_first overlayTitleUse=only_when_db_missing outlinePolicy=db_first_fill_missing detailPolicy=db_first_fill_missing dbWrite=none rule=db_with_overlay_field_merge_contract");
-    }
-
-    var rawBlankTitleCount = displayEvents.Count(e => string.IsNullOrEmpty(e.CellText.Title));
-    var titleLessDescriptorCount = displayEvents.Count(e => string.IsNullOrEmpty(e.CellText.Title) && string.IsNullOrEmpty(e.RawShortEventDescriptorHex));
-    var rawExtendedDescriptorHexCount = displayEvents.Count(e => !string.IsNullOrEmpty(e.RawExtendedEventDescriptorHex));
-    var cellTitleCount = displayEvents.Count(e => !string.IsNullOrEmpty(e.CellText.Title));
-    var cellOutlineCount = displayEvents.Count(e => !string.IsNullOrEmpty(e.CellText.Outline));
-    var cellDetailCount = displayEvents.Count(e => !string.IsNullOrEmpty(e.CellText.Detail));
-    var cellItemsCount = displayEvents.Count(e => !string.IsNullOrEmpty(e.CellText.Items));
-
-    log.Add("PROGRAMGUIDE_CELL_TEXT_DIRECT_HANDOFF", "API",
-        $"result=OK date={baseDate:yyyy-MM-dd} events={displayEvents.Count} blankTitle={rawBlankTitleCount} titleLessDescriptor={titleLessDescriptorCount} rawExtendedDescriptorHex={rawExtendedDescriptorHexCount} cellTitle={cellTitleCount} cellOutline={cellOutlineCount} cellDetail={cellDetailCount} cellItems={cellItemsCount} cellTextSource=db_raw_descriptor_common_decoder_or_projected_event boundary=outline_detail_separator_kept dbReadFilters=none dbWrite=none ch2Filter=removed reservationTitleBorrow=removed dtoDirectField=cellText legacyBodyFields=deleted rule=release_contract");
-
-    if (rawBlankTitleCount > 0)
-    {
-        const int blankTitleDiagnosticLimit = 24;
-        var blankTitleDiagnostics = timelineEvents
-            .Select((projected, index) => new
-            {
-                Projected = projected,
-                Display = index < displayEvents.Count ? displayEvents[index] : null
-            })
-            .Where(x => x.Display is not null && string.IsNullOrEmpty(x.Display.CellText.Title))
-            .Take(blankTitleDiagnosticLimit)
-            .ToList();
-
-        foreach (var item in blankTitleDiagnostics)
+        foreach (var item in blankTitleIndexes)
         {
-            var projected = item.Projected;
-            var display = item.Display!;
-            var dbTitle = projected.DbEvent is null ? string.Empty : EpgProjection.Title(projected.DbEvent);
-            var overlayTitle = projected.Title ?? string.Empty;
-            var rawShortHex = projected.DbEvent?.RawShortEventDescriptorHex ?? string.Empty;
-            var rawExtendedHex = projected.DbEvent?.RawExtendedEventDescriptorHex ?? string.Empty;
-            var rawLoopHex = projected.DbEvent?.RawDescriptorLoopHex ?? string.Empty;
-
+            var projected = timelineEvents[item.index];
+            var display = item.display;
             log.Add("PROGRAMGUIDE_BLANK_TITLE_DIAGNOSTIC", "API",
-                $"result=OBSERVED date={baseDate:yyyy-MM-dd} " +
-                $"nid={projected.NetworkId} tsid={projected.TransportStreamId} sid={projected.ServiceId} eventId={projected.EventId} " +
-                $"start={projected.Start:yyyy-MM-ddTHH:mm:ss} end={projected.End:yyyy-MM-ddTHH:mm:ss} service={SafeProgramGuideDiagnosticValue(display.ServiceName)} " +
-                $"projectionState={SafeProgramGuideDiagnosticValue(projected.ProjectionState)} sourceKind={SafeProgramGuideDiagnosticValue(projected.SourceKind)} " +
-                $"sourcePluginId={SafeProgramGuideDiagnosticValue(projected.SourcePluginId)} sourceEventKey={SafeProgramGuideDiagnosticValue(projected.SourceEventKey)} " +
-                $"dbEventExists={projected.DbEventExists} dbTitlePresent={!string.IsNullOrWhiteSpace(dbTitle)} overlayTitlePresent={!string.IsNullOrWhiteSpace(overlayTitle)} " +
-                $"dbTitle={SafeProgramGuideDiagnosticValue(dbTitle)} overlayTitle={SafeProgramGuideDiagnosticValue(overlayTitle)} finalCellTitle={SafeProgramGuideDiagnosticValue(display.CellText.Title)} " +
-                $"rawShortPresent={!string.IsNullOrWhiteSpace(rawShortHex)} rawShortBytes={ProgramGuideHexByteLength(rawShortHex)} " +
-                $"rawExtendedPresent={!string.IsNullOrWhiteSpace(rawExtendedHex)} rawExtendedBytes={ProgramGuideHexByteLength(rawExtendedHex)} " +
-                $"descriptorLoopPresent={!string.IsNullOrWhiteSpace(rawLoopHex)} descriptorLoopBytes={ProgramGuideHexByteLength(rawLoopHex)} " +
-                $"projectionTitleSource={SafeProgramGuideDiagnosticValue(projected.ProjectionTitleSource)} " +
-                $"rule=programguide_blank_title_source_trace");
+                $"result=OBSERVED date={baseDate:yyyy-MM-dd} nid={projected.NetworkId} tsid={projected.TransportStreamId} sid={projected.ServiceId} eventId={projected.EventId} start={projected.Start:yyyy-MM-ddTHH:mm:ss} end={projected.End:yyyy-MM-ddTHH:mm:ss} service={SafeProgramGuideDiagnosticValue(display.ServiceName)} projectionState={SafeProgramGuideDiagnosticValue(projected.ProjectionState)} sourceKind={SafeProgramGuideDiagnosticValue(projected.SourceKind)} sourcePluginId={SafeProgramGuideDiagnosticValue(projected.SourcePluginId)} sourceEventKey={SafeProgramGuideDiagnosticValue(projected.SourceEventKey)} rule=programguide_blank_title_source_trace");
         }
-
-        log.Add("PROGRAMGUIDE_BLANK_TITLE_DIAGNOSTIC_SUMMARY", "API",
-            $"result=OBSERVED date={baseDate:yyyy-MM-dd} blankTitle={rawBlankTitleCount} emitted={blankTitleDiagnostics.Count} truncated={rawBlankTitleCount > blankTitleDiagnosticLimit} " +
-            $"limit={blankTitleDiagnosticLimit} purpose=source_boundary_trace dbWrite=none rule=programguide_blank_title_source_trace");
     }
 
 #endif
@@ -5920,24 +5864,27 @@ app.MapPost("/api/reservations", (HttpRequest request, Reservation r, Reservatio
         r.EndTime   = r.EndTime.ToLocalTime();
 
         // release_contract:
-        // Immediate は「番組表の当該イベントを今から録る」操作であり、予約本体の時間軸は実開始側を正本にする。
-        // EPG 番組開始時刻は requestEvent/EPG DB の event metadata として残し、StartTime / occupancy / segmentStart へは流し込まない。
-        // 初期予約作成時点で現在時刻より前の開始時刻を生成しない。
+        // Immediate は「番組表の当該イベントを今から録る」操作。
+        // 録画実行の時間軸は StartTime（実開始）を正本とする一方、放送枠identityは
+        // ScheduledStartTime（EPG番組開始）を正本として分離する。これにより放送中に
+        // StartTimeを現在時刻へ進めても、同一サービス・同一番組開始枠のEventId差替えは
+        // AddOrGetActiveParentの共通rebind境界へ収束する。
         if (r.Source == ReservationSource.Immediate)
         {
             var immediateNow = DateTime.Now;
             var requestedStart = r.StartTime;
             var eventStart = requestEvent?.Start;
+            r.ScheduledStartTime = eventStart ?? requestedStart;
             if (r.StartTime < immediateNow && r.EndTime > immediateNow)
             {
                 r.StartTime = immediateNow;
                 log.Add("IMMEDIATE_START_TIME_GUARD", sourceText,
-                    $"result=APPLIED source=Immediate oldStart={requestedStart:MM/dd HH:mm:ss} effectiveStart={r.StartTime:MM/dd HH:mm:ss} eventStart={(eventStart.HasValue ? eventStart.Value.ToString("MM/dd HH:mm:ss") : "-")} end={r.EndTime:MM/dd HH:mm:ss} policy=reservation_start_uses_runtime_actual_start eventMetadataPreserved=True occupancyRewindPrevented=True segmentStartRewindPrevented=True rule=release_contract");
+                    $"result=APPLIED source=Immediate oldStart={requestedStart:MM/dd HH:mm:ss} effectiveStart={r.StartTime:MM/dd HH:mm:ss} eventStart={(eventStart.HasValue ? eventStart.Value.ToString("MM/dd HH:mm:ss") : "-")} end={r.EndTime:MM/dd HH:mm:ss} scheduledStart={r.ScheduledStartTime:MM/dd HH:mm:ss} policy=reservation_start_uses_runtime_actual_start_broadcast_slot_uses_epg_start eventMetadataPreserved=True occupancyRewindPrevented=True segmentStartRewindPrevented=True rule=release_contract");
             }
             else
             {
                 log.Add("IMMEDIATE_START_TIME_GUARD", sourceText,
-                    $"result=NOT_APPLIED source=Immediate reason=no_past_start_to_guard oldStart={requestedStart:MM/dd HH:mm:ss} effectiveStart={r.StartTime:MM/dd HH:mm:ss} eventStart={(eventStart.HasValue ? eventStart.Value.ToString("MM/dd HH:mm:ss") : "-")} end={r.EndTime:MM/dd HH:mm:ss} rule=release_contract");
+                    $"result=NOT_APPLIED source=Immediate reason=no_past_start_to_guard oldStart={requestedStart:MM/dd HH:mm:ss} effectiveStart={r.StartTime:MM/dd HH:mm:ss} eventStart={(eventStart.HasValue ? eventStart.Value.ToString("MM/dd HH:mm:ss") : "-")} scheduledStart={r.ScheduledStartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} rule=release_contract");
             }
         }
 
@@ -5960,7 +5907,7 @@ app.MapPost("/api/reservations", (HttpRequest request, Reservation r, Reservatio
         using var eventScope = typedEvents.BeginOutboxScope(out var commitEvents);
         var addResult = store.AddOrGetActiveParent(r);
         var id = addResult.ReservationId;
-        if (!addResult.Added && !addResult.Reactivated)
+        if (!addResult.Added && !addResult.Reactivated && !addResult.RefreshedBroadcastSlot)
         {
             log.Add("RESERVATION_DEDUPE", sourceText,
                 $"result=REUSE_EXISTING existing=R{id} requestedSource={sourceText} existingStatus={addResult.Reservation.Status} existingDataVersion={addResult.Reservation.DataVersion} service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] rawTitleBlank={ReservationTitleDisplayContract.RawBlankFlag(r.Title)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eid={r.EventId} commonRoute=ATOMIC_ADD rule=release_contract");
@@ -5979,13 +5926,14 @@ app.MapPost("/api/reservations", (HttpRequest request, Reservation r, Reservatio
             log.Add("PROJECTED_RESERVATION_METADATA", sourceText,
                 $"result=SAVED reservation=R{id} projectionState={projectedEvent.ProjectionState} sourceKind={projectedEvent.SourceKind} sourcePluginId={SafeProjectedEventLogValue(projectedEvent.SourcePluginId)} sourceEventKey={SafeProjectedEventLogValue(projectedEvent.SourceEventKey)} projectedEventId={SafeProjectedEventLogValue(projectedEvent.Key.Value)} dbEventExists={projectedEvent.DbEventExists} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eid={r.EventId} rule=projected_reservation_contract");
         }
-        log.Add("Reservation", addResult.Reactivated ? "Retry" : "Add",
-            $"{(addResult.Reactivated ? "予約再試行" : "予約追加")}: service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] id=R{id} source={sourceText} {r.StartTime:HH:mm}〜{r.EndTime:HH:mm} newReservationId={!addResult.Reactivated} rule=release_contract");
+        log.Add("Reservation", addResult.Reactivated ? "Retry" : addResult.RefreshedBroadcastSlot ? "Refresh" : "Add",
+            $"{(addResult.Reactivated ? "予約再試行" : addResult.RefreshedBroadcastSlot ? "予約情報更新" : "予約追加")}: service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] id=R{id} source={sourceText} {r.StartTime:HH:mm}〜{r.EndTime:HH:mm} newReservationId={addResult.Added} broadcastSlotRefreshed={addResult.RefreshedBroadcastSlot} rule=release_contract");
 
         var isImmediate = r.Source == ReservationSource.Immediate;
 
         // INTERACTIVE_RESERVATION_ALLOCATION_ORDER_INVARIANT — 変更禁止:
-        // 番組表の通常予約/今すぐ録画は、予約追加後に共通割当single-flightの確定結果を待ってからAPI応答する。
+        // 番組表の通常予約/今すぐ録画は、予約追加または同一放送枠の現行EventId再結合後に
+        // 共通割当single-flightの確定結果を待ってからAPI応答する。
         // pending batchへの合流だけで応答すると、割当未確定予約がUI/Due監視へ露出し、
         // 物理Tuner、イベント単位優先順位、競合結果、チェーン固定Tunerが未確定のまま次状態へ進み得るため禁止する。
         // 一方、当該ユーザーMutationと無関係なKeywordMatcher全件照合とProgramRule再生成は同期クリティカルパスへ混載しない。
@@ -6008,7 +5956,7 @@ app.MapPost("/api/reservations", (HttpRequest request, Reservation r, Reservatio
 
         var added = store.GetById(id);
         commitEvents();
-        log.Add("PLUGIN_TYPED_EVENT_OUTBOX", sourceText, $"result=COMMITTED operation=ReservationAdd reservation=R{id} rule=typed_event_outbox");
+        log.Add("PLUGIN_TYPED_EVENT_OUTBOX", sourceText, $"result=COMMITTED operation={(addResult.RefreshedBroadcastSlot ? "ReservationRefreshBroadcastSlot" : addResult.Reactivated ? "ReservationRetry" : "ReservationAdd")} reservation=R{id} rule=typed_event_outbox");
 
         // EPG実行中はそのwave占有を固定し、後着の予約／今すぐ録画は共通競合判定へ委ねる。
         // 録画要求からEPGを自動停止・縮小・再配置しない。EPG停止はVisible/Silent各UIの明示キャンセルだけが所有する。
@@ -6017,10 +5965,11 @@ app.MapPost("/api/reservations", (HttpRequest request, Reservation r, Reservatio
             id,
             message = isImmediate
                 ? (allocationResult.Deferred ? "録画準備を受け付けました。" : "録画準備を開始しました。")
-                : (addResult.Reactivated ? "録画を再試行しました。" : "予約しました。"),
+                : (addResult.Reactivated ? "録画を再試行しました。" : addResult.RefreshedBroadcastSlot ? "予約情報を現行番組へ更新しました。" : "予約しました。"),
             isConflicted = added?.IsConflicted ?? false,
-            reused = addResult.Reactivated,
+            reused = addResult.Reactivated || addResult.RefreshedBroadcastSlot,
             reactivated = addResult.Reactivated,
+            refreshedBroadcastSlot = addResult.RefreshedBroadcastSlot,
             preparing = isImmediate && (allocationResult.Deferred || added?.Status == ReservationStatus.Scheduled),
             allocationDeferred = allocationResult.Deferred,
             allocationReason = allocationResult.Reason,
@@ -7019,6 +6968,112 @@ static bool FixedTimePasswordEquals(string left, string right)
 // 設定取得。保存値の投影はIniSettingsService.ToDtoだけを正本とする。
 // 初回Host値も構築時にRuntime/Persisted snapshotへ取り込まれているため、API側で再補完しない。
 app.MapGet("/api/settings", (IniSettingsService ini) => Results.Ok(ini.ToWebDto()));
+app.MapGet("/api/plugin-internet-access", (PluginRegistry registry, PluginInternetAccessPermissionStore permissions, PluginManagedExternalLookupHost externalLookup, NetworkUsageGate networkUsage) =>
+{
+    var providers = externalLookup.GetProviders();
+    var providerStatus = externalLookup.GetProviderHostStatus();
+    var items = registry.GetRuntimePlugins()
+        .Select(plugin =>
+        {
+            var id = PluginIdentity.Normalize(plugin.Descriptor.PluginId);
+            var declared = PluginPermissionResolver.Resolve(plugin.Descriptor.RequiredPermissions).Contains(PluginPermission.UseExternalLookup);
+            return new
+            {
+                pluginId = id,
+                displayName = plugin.Descriptor.DisplayName,
+                version = plugin.Descriptor.Version,
+                declaredPermission = declared,
+                allowed = permissions.IsAllowed(id),
+                effective = externalLookup.IsPluginAccessEffective(id, declared)
+            };
+        })
+        .OrderBy(x => x.displayName, StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+    return Results.Ok(new
+    {
+        defaultAllowed = false,
+        networkUsageEnabled = networkUsage.Enabled,
+        gatewayEnabled = externalLookup.GatewayEnabled,
+        providers,
+        providerStatus,
+        plugins = items,
+        policy = new
+        {
+            hostManaged = true,
+            rawUrlAllowed = false,
+            schemes = new[] { "https" },
+            methods = new[] { "GET", "HEAD" },
+            cookies = false,
+            pluginSuppliedCredentials = false,
+            hostManagedProviderCredentials = true,
+            uploads = false,
+            websockets = false
+        }
+    });
+});
+
+app.MapGet("/api/plugin-external-lookup-credentials", (PluginManagedExternalLookupHost externalLookup) =>
+{
+    return Results.Ok(new { providers = externalLookup.GetProviderHostStatus() });
+});
+
+app.MapPut("/api/plugin-external-lookup-credentials", (PluginExternalLookupCredentialUpdateDto dto, PluginExternalLookupCredentialStore credentials, PluginManagedExternalLookupHost externalLookup, NetworkUsageGate networkUsage, HttpContext context, LogRepository log) =>
+{
+    if (!networkUsage.Enabled)
+        return Results.Json(new { message = "ネットワーク利用OFF中は変更できません。" }, statusCode: StatusCodes.Status409Conflict);
+    if (!NetworkAccessSecurity.IsLoopback(context.Connection.RemoteIpAddress))
+        return Results.Json(new { message = "外部情報サービスの認証情報はTvAIrを起動しているPCで設定してください。" }, statusCode: StatusCodes.Status403Forbidden);
+
+    var providerId = (dto.ProviderId ?? string.Empty).Trim().ToLowerInvariant();
+    if (!credentials.Supports(providerId))
+        return Results.BadRequest(new { message = "この外部情報サービスでは認証情報の設定は不要です。" });
+
+    try
+    {
+        var changed = credentials.SetCredential(providerId, dto.Credential);
+        var configured = credentials.HasCredential(providerId);
+        log.Add("PLUGIN_EXTERNAL_LOOKUP_CREDENTIAL", providerId,
+            $"result={(changed ? "CHANGED" : "NO_CHANGE")} configured={configured} storage=dpapi_current_user secretLogged=False rule=plugin_managed_external_lookup_contract");
+        return Results.Ok(new { providerId, configured, changed, providers = externalLookup.GetProviderHostStatus() });
+    }
+    catch (ArgumentException ex)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
+});
+
+app.MapPut("/api/plugin-internet-access", (PluginInternetAccessUpdateDto dto, PluginRegistry registry, PluginInternetAccessPermissionStore permissions, PluginManagedExternalLookupHost externalLookup, NetworkUsageGate networkUsage, PluginTypedEventHub typedEvents, LogRepository log) =>
+{
+    if (!networkUsage.Enabled)
+        return Results.Json(new { message = "ネットワーク利用OFF中は変更できません。" }, statusCode: StatusCodes.Status409Conflict);
+    var id = PluginIdentity.Normalize(dto.PluginId);
+    var plugin = registry.GetRuntimePlugins().FirstOrDefault(x => string.Equals(PluginIdentity.Normalize(x.Descriptor.PluginId), id, StringComparison.OrdinalIgnoreCase));
+    if (plugin is null) return Results.NotFound(new { message = "Pluginが見つかりません。" });
+    var declared = PluginPermissionResolver.Resolve(plugin.Descriptor.RequiredPermissions).Contains(PluginPermission.UseExternalLookup);
+    if (dto.Allowed && !declared)
+        return Results.BadRequest(new { message = "このプラグインはインターネット接続に対応していません。プラグインの更新が必要です。" });
+
+    var changed = permissions.SetAllowed(id, dto.Allowed);
+    if (changed)
+    {
+        externalLookup.OnPermissionChanged(id, dto.Allowed);
+        typedEvents.Publish(new TvAirEventDto
+        {
+            EventType = TvAirEventType.PluginPermissionChanged,
+            EntityId = $"plugin-permission:{id}:external-lookup",
+            ChangeKind = dto.Allowed ? "Enabled" : "Disabled",
+            Details = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["pluginId"] = id,
+                ["permission"] = "ExternalLookup",
+                ["allowed"] = dto.Allowed ? "true" : "false"
+            }
+        });
+        log.Add("PLUGIN_EXTERNAL_LOOKUP_PERMISSION", plugin.Descriptor.DisplayName,
+            $"result=CHANGED pluginId={id} allowed={dto.Allowed} default=deny inFlightAction={(dto.Allowed ? "none" : "cancel")} rule=plugin_managed_external_lookup_contract");
+    }
+    return Results.Ok(new { pluginId = id, allowed = permissions.IsAllowed(id), changed });
+});
 
 app.MapGet("/api/settings/password/{kind}", (string kind, IniSettingsService ini, HttpContext context) =>
 {
@@ -7344,12 +7399,6 @@ static IReadOnlyList<ChannelTarget> BuildCurrentProgramGuideChannels(ChannelFile
 static HashSet<string> BuildProgramGuideChannelServiceKeySet(IEnumerable<ChannelTarget> channels)
     => channels.Select(ProgramGuideChannelServiceKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-static string SafeProgramGuideProjectionLogValue(string? value)
-{
-    if (string.IsNullOrWhiteSpace(value)) return "-";
-    return value.Replace("\r", " ").Replace("\n", " ").Replace("\t", " ").Replace("|", "/").Replace("\"", "'").Trim();
-}
-
 static string NormalizeProgramGuideServiceName(string? value)
 {
     if (string.IsNullOrWhiteSpace(value)) return string.Empty;
@@ -7359,11 +7408,13 @@ static string NormalizeProgramGuideServiceName(string? value)
 }
 
 static ProgramGuideEpgEventDto NormalizeProgramGuideEventForDisplay(EpgEvent e, IReadOnlyDictionary<string, string>? serviceDisplayNameByKey = null)
+    => NormalizeProgramGuideEventForDisplayWithCellText(e, serviceDisplayNameByKey, ProgramGuideCellTextDecoder.Decode(e));
+
+static ProgramGuideEpgEventDto NormalizeProgramGuideEventForDisplayWithCellText(EpgEvent e, IReadOnlyDictionary<string, string>? serviceDisplayNameByKey, ProgramGuideCellText cellText)
 {
     // release_contract: ProgramGuideの廃止済みbody routeは再導入しない。
     // 番組表セル/API投影はDB raw descriptorから作ったCellTextを正本にする。
     // 番組表セル本文は現在のCellText正本だけから生成する。
-    var cellText = ProgramGuideCellTextDecoder.Decode(e);
     var displayServiceName = serviceDisplayNameByKey is not null
         && serviceDisplayNameByKey.TryGetValue(ProgramGuideServiceKey3(e.NetworkId, e.TransportStreamId, e.ServiceId), out var currentName)
         && !string.IsNullOrWhiteSpace(currentName)
@@ -7452,13 +7503,6 @@ static ProjectedProgramGuideProjectionFallbackContext BuildProjectedProgramGuide
         ctx.ByNameOnly[g.Key] = Ordered(g);
     }
 
-    foreach (var g in events
-        .Where(e => !e.DbEventExists)
-        .GroupBy(ProjectedProgramGuideOverlayGroupKey, StringComparer.OrdinalIgnoreCase))
-    {
-        ctx.OverlayOnlyGroupsByIdentity[g.Key] = Ordered(g);
-    }
-
     return ctx;
 }
 
@@ -7535,159 +7579,31 @@ static IReadOnlyList<ProjectedProgramEvent> ResolveProjectedProgramGuideChannelE
     return Array.Empty<ProjectedProgramEvent>();
 }
 
-static string ProjectedProgramGuideOverlayGroupKey(ProjectedProgramEvent e)
-{
-    var serviceName = NormalizeProgramGuideServiceName(e.ServiceName);
-    if (!string.IsNullOrWhiteSpace(serviceName))
-        return $"name:{serviceName}";
-
-    return $"identity:{e.SourcePluginId}:{e.NetworkId}:{e.TransportStreamId}:{e.ServiceId}";
-}
-
-static bool ProjectedProgramGuideHasAnyTimeOverlap(ProjectedProgramEvent overlay, IReadOnlyList<ProjectedProgramEvent> timeline)
-{
-    foreach (var ev in timeline)
-    {
-        if (ev.End <= overlay.Start || ev.Start >= overlay.End) continue;
-        return true;
-    }
-    return false;
-}
-
-static int ProjectedProgramGuideOverlayFitScore(IReadOnlyList<ProjectedProgramEvent> overlays, IReadOnlyList<ProjectedProgramEvent> baseEvents, ChannelTarget ch, DateTime dayStart, DateTime dayEnd)
-{
-    if (overlays.Count == 0) return int.MinValue;
-
-    var compatible = 0;
-    var overlap = 0;
-    var adjacency = 0;
-    var normalizedChannelName = NormalizeProgramGuideServiceName(ch.Name);
-
-    foreach (var overlay in overlays)
-    {
-        if (!ProjectedProgramGuideOverlapsDay(overlay, dayStart, dayEnd)) continue;
-        if (ProjectedProgramGuideHasAnyTimeOverlap(overlay, baseEvents))
-        {
-            overlap++;
-            continue;
-        }
-
-        compatible++;
-
-        var nearestBoundaryMinutes = double.PositiveInfinity;
-        foreach (var ev in baseEvents)
-        {
-            if (ev.End <= overlay.Start)
-                nearestBoundaryMinutes = Math.Min(nearestBoundaryMinutes, (overlay.Start - ev.End).Duration().TotalMinutes);
-            if (ev.Start >= overlay.End)
-                nearestBoundaryMinutes = Math.Min(nearestBoundaryMinutes, (ev.Start - overlay.End).Duration().TotalMinutes);
-        }
-
-        nearestBoundaryMinutes = Math.Min(nearestBoundaryMinutes, Math.Abs((overlay.Start - dayStart).TotalMinutes));
-        nearestBoundaryMinutes = Math.Min(nearestBoundaryMinutes, Math.Abs((dayEnd - overlay.End).TotalMinutes));
-
-        if (nearestBoundaryMinutes <= 15) adjacency += 8;
-        else if (nearestBoundaryMinutes <= 60) adjacency += 4;
-        else if (nearestBoundaryMinutes <= 180) adjacency += 1;
-    }
-
-    // Do not reject an overlay-only group only because every candidate row
-    // overlaps existing DB-backed timeline rows.  Assignment and DB-overlap
-    // suppression are separate steps: first bridge the overlay-only group to a
-    // display channel, then let BuildProjectedProgramGuideTimelineEvents count
-    // and suppress DB-overlapping rows.  Returning int.MinValue here leaves
-    // overlayAssignedCandidates at zero even though overlay-only rows exist.
-    var hasInRangeOverlay = compatible > 0 || overlap > 0;
-    if (!hasInRangeOverlay) return int.MinValue;
-
-    var identityBonus = 0;
-    foreach (var overlay in overlays.Take(3))
-    {
-        if (overlay.ServiceId == ch.ServiceId) identityBonus += 300;
-        if (string.Equals(NormalizeProgramGuideServiceName(overlay.ServiceName), normalizedChannelName, StringComparison.OrdinalIgnoreCase)) identityBonus += 500;
-        if (!string.IsNullOrWhiteSpace(overlay.SourceEventKey)
-            && !string.IsNullOrWhiteSpace(normalizedChannelName)
-            && NormalizeProgramGuideServiceName(overlay.SourceEventKey).Contains(normalizedChannelName, StringComparison.OrdinalIgnoreCase))
-        {
-            identityBonus += 200;
-        }
-    }
-
-    // The score is used only for runtime display assignment of overlay-only
-    // rows.  Penalize overlaps strongly, but do not require a unique service
-    // identity: the caller may use this as a bridge after the normal service
-    // fallback table has already proven the visible display services.
-    return compatible * 1000 + adjacency * 10 + identityBonus - overlap * 2000;
-}
-
-static Dictionary<string, string> BuildProjectedProgramGuideOverlayGroupChannelMap(
+static IReadOnlyList<ProjectedProgramGuideChannelRequestInput> BuildProjectedProgramGuideChannelRequestInputs(
     IReadOnlyList<ChannelTarget> channels,
     IReadOnlyDictionary<string, IReadOnlyList<ProjectedProgramEvent>> byKey,
     ProjectedProgramGuideProjectionFallbackContext fallbackContext,
     DateTime dayStart,
     DateTime dayEnd)
 {
-    var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-    if (fallbackContext.OverlayOnlyGroupsByIdentity.Count == 0) return result;
-
-    var baseEventsByChannel = new Dictionary<string, IReadOnlyList<ProjectedProgramEvent>>(StringComparer.OrdinalIgnoreCase);
-    foreach (var ch in channels)
+    var inputs = new ProjectedProgramGuideChannelRequestInput[channels.Count];
+    for (var i = 0; i < channels.Count; i++)
     {
-        var channelEvents = ResolveProjectedProgramGuideChannelEvents(ch, byKey, fallbackContext, dayStart, dayEnd, out _);
-        baseEventsByChannel[ProgramGuideChannelServiceKey(ch)] = channelEvents
+        var ch = channels[i];
+        var resolved = ResolveProjectedProgramGuideChannelEvents(ch, byKey, fallbackContext, dayStart, dayEnd, out _);
+        var baseEvents = (IReadOnlyList<ProjectedProgramEvent>)resolved
             .Where(e => e.DbEventExists)
             .OrderBy(e => e.Start)
             .ThenBy(e => e.End)
             .ThenBy(e => e.EventId)
             .ToList();
+        inputs[i] = new ProjectedProgramGuideChannelRequestInput(
+            ProgramGuideChannelServiceKey(ch),
+            baseEvents);
     }
 
-    foreach (var group in fallbackContext.OverlayOnlyGroupsByIdentity)
-    {
-        var overlays = group.Value
-            .Where(e => !e.DbEventExists && ProjectedProgramGuideOverlapsDay(e, dayStart, dayEnd))
-            .OrderBy(e => e.Start)
-            .ThenBy(e => e.End)
-            .ThenBy(e => e.EventId)
-            .ToList();
-        if (overlays.Count == 0) continue;
-
-        string? bestChannelKey = null;
-        var bestScore = int.MinValue;
-        var secondScore = int.MinValue;
-
-        foreach (var ch in channels)
-        {
-            var channelKey = ProgramGuideChannelServiceKey(ch);
-            var baseEvents = baseEventsByChannel.TryGetValue(channelKey, out var values) ? values : Array.Empty<ProjectedProgramEvent>();
-            var score = ProjectedProgramGuideOverlayFitScore(overlays, baseEvents, ch, dayStart, dayEnd);
-            if (score > bestScore)
-            {
-                secondScore = bestScore;
-                bestScore = score;
-                bestChannelKey = channelKey;
-            }
-            else if (score > secondScore)
-            {
-                secondScore = score;
-            }
-        }
-
-        if (bestChannelKey is null || bestScore == int.MinValue) continue;
-
-        // Overlay-only rows have already been proven to exist by the projection
-        // merge and the visible service fallback table is built separately.
-        // Do not drop the bridge merely because several visible channels have
-        // the same temporal score; use the deterministic best channel selected
-        // above and let the per-channel DB-overlap suppression reject unsafe
-        // rows.  This connects daySorted overlay-only rows to the displayed
-        // timeline instead of leaving overlayAssignedCandidates at zero.
-        result[group.Key] = bestChannelKey;
-    }
-
-    return result;
+    return inputs;
 }
-
 
 static IReadOnlyList<ProjectedProgramEvent> ProjectedProgramGuideNormalizeServiceDayEvents(
     IEnumerable<ProjectedProgramEvent> events,
@@ -7727,6 +7643,7 @@ static IReadOnlyList<ProjectedProgramEvent> BuildProjectedProgramGuideTimelineEv
     LogRepository log,
     DateOnly baseDate)
 {
+
     var daySortedEvents = sortedEvents
         .Where(e => ProjectedProgramGuideOverlapsDay(e, dayStart, dayEnd))
         .OrderBy(ProjectedProgramGuideEventServiceKey, StringComparer.OrdinalIgnoreCase)
@@ -7745,98 +7662,21 @@ static IReadOnlyList<ProjectedProgramEvent> BuildProjectedProgramGuideTimelineEv
             StringComparer.OrdinalIgnoreCase);
 
     var fallbackContext = BuildProjectedProgramGuideProjectionFallbackContext(daySortedEvents);
-    var displaySidCounts = channels
-        .GroupBy(ch => ch.ServiceId)
-        .ToDictionary(g => g.Key, g => g.Count());
-    var displayExactKeys = channels
-        .Select(ProgramGuideChannelServiceKey)
-        .ToHashSet(StringComparer.OrdinalIgnoreCase);
-    var displayNames = channels
-        .Select(ch => NormalizeProgramGuideServiceName(ch.Name))
-        .Where(name => !string.IsNullOrWhiteSpace(name))
-        .ToHashSet(StringComparer.OrdinalIgnoreCase);
-    var overlayGroupChannelMap = BuildProjectedProgramGuideOverlayGroupChannelMap(channels, byKey, fallbackContext, dayStart, dayEnd);
-    var fallbackHits = new List<string>();
+
+    // Resolve each visible channel once and retain only the base timeline required by final
+    // timeline construction. Diagnostic bridge scoring is intentionally not on the request path.
+    var channelInputs = BuildProjectedProgramGuideChannelRequestInputs(channels, byKey, fallbackContext, dayStart, dayEnd);
+
     var overlayTotalInRange = daySortedEvents.Count(e => !e.DbEventExists);
     var overlayAssignedCandidates = 0;
     var overlayAcceptedTotal = 0;
     var overlaySuppressedByDbOverlapTotal = 0;
-    var overlayOnlyIdentityExactCandidates = 0;
-    var overlayOnlyRejectedIdentityNotExact = 0;
-    var overlayOnlyRejectedSidOnly = 0;
-    var overlayOnlyRejectedNameOnly = 0;
-    var overlayOnlyRejectedBridgeOnly = 0;
-    var overlayOnlyRejectedDbOverlap = 0;
-    var overlayOnlyRejectedServiceUnmatched = 0;
-    var overlayOnlyRejectSamples = new List<string>();
+    // Overlay-only adoption below is exact-service only; no diagnostic bridge scoring is performed on the request path.
 
-    void CountOverlayOnlyReject(ProjectedProgramEvent ev, string reason, string identityMatch, string matchedChannelKey = "-")
+    foreach (var channelInput in channelInputs)
     {
-        switch (reason)
-        {
-            case "bridge_only_not_allowed": overlayOnlyRejectedBridgeOnly++; break;
-            case "sid_only_not_allowed": overlayOnlyRejectedSidOnly++; break;
-            case "name_only_not_allowed": overlayOnlyRejectedNameOnly++; break;
-            case "db_overlap": overlayOnlyRejectedDbOverlap++; break;
-            case "service_unmatched": overlayOnlyRejectedServiceUnmatched++; break;
-            default: overlayOnlyRejectedIdentityNotExact++; break;
-        }
-
-        if (overlayOnlyRejectSamples.Count < 12)
-        {
-            overlayOnlyRejectSamples.Add(
-                $"reason={reason}:identityMatch={identityMatch}:channel={SafeProgramGuideProjectionLogValue(matchedChannelKey)}:nid={ev.NetworkId}:tsid={ev.TransportStreamId}:sid={ev.ServiceId}:eventId={ev.EventId}:start={ev.Start:MMddHHmm}:end={ev.End:MMddHHmm}:title={SafeProgramGuideProjectionLogValue(ev.Title)}");
-        }
-    }
-
-    foreach (var overlay in daySortedEvents.Where(e => !e.DbEventExists && ProjectedProgramGuideOverlapsDay(e, dayStart, dayEnd)))
-    {
-        var overlayServiceKey = ProjectedProgramGuideEventServiceKey(overlay);
-        if (displayExactKeys.Contains(overlayServiceKey))
-        {
-            overlayOnlyIdentityExactCandidates++;
-            if (ProjectedProgramGuideIsFullyCoveredByDbTimelineInDay(overlay, daySortedEvents, dayStart, dayEnd))
-                CountOverlayOnlyReject(overlay, "db_overlap", "exact", overlayServiceKey);
-            continue;
-        }
-
-        if (overlayGroupChannelMap.TryGetValue(ProjectedProgramGuideOverlayGroupKey(overlay), out var bridgeChannelKey))
-        {
-            CountOverlayOnlyReject(overlay, "bridge_only_not_allowed", "bridge", bridgeChannelKey);
-            continue;
-        }
-
-        if (displaySidCounts.ContainsKey(overlay.ServiceId))
-        {
-            CountOverlayOnlyReject(overlay, "sid_only_not_allowed", "sid", "-");
-            continue;
-        }
-
-        var normalizedOverlayName = NormalizeProgramGuideServiceName(overlay.ServiceName);
-        if (!string.IsNullOrWhiteSpace(normalizedOverlayName) && displayNames.Contains(normalizedOverlayName))
-        {
-            CountOverlayOnlyReject(overlay, "name_only_not_allowed", "name", "-");
-            continue;
-        }
-
-        CountOverlayOnlyReject(overlay, "service_unmatched", "none", "-");
-    }
-
-    foreach (var ch in channels)
-    {
-        var key = ProgramGuideChannelServiceKey(ch);
-        var list = ResolveProjectedProgramGuideChannelEvents(ch, byKey, fallbackContext, dayStart, dayEnd, out var resolveSource);
-        if (!string.Equals(resolveSource, "exact", StringComparison.OrdinalIgnoreCase) && list.Count > 0 && fallbackHits.Count < 12)
-        {
-            fallbackHits.Add($"{SafeProgramGuideProjectionLogValue(ch.Name)}:{key}->{ProjectedProgramGuideEventServiceKey(list[0])}:{resolveSource}:events={list.Count}");
-        }
-
-        var baseEvents = list
-            .Where(e => e.DbEventExists)
-            .OrderBy(e => e.Start)
-            .ThenBy(e => e.End)
-            .ThenBy(e => e.EventId)
-            .ToList();
+        var key = channelInput.ChannelKey;
+        var baseEvents = channelInput.BaseEvents;
 
         // overlay-only is a hole-fill mechanism only.  Do not adopt rows reached
         // through service fallback, SID-only, name-only, or bridge assignment.
@@ -7886,10 +7726,9 @@ static IReadOnlyList<ProjectedProgramEvent> BuildProjectedProgramGuideTimelineEv
         {
             if (overlay.End <= dayStart || overlay.Start >= dayEnd) continue;
 
-            var displayOverlay = ProjectedProgramGuideAlignOverlayToChannel(overlay, ch);
             var uncoveredFragments = ProjectedProgramGuideSubtractDbTimeline(
-                displayOverlay,
-                acceptedForChannel,
+                overlay,
+                baseEvents,
                 dayStart,
                 dayEnd);
 
@@ -7923,78 +7762,22 @@ static IReadOnlyList<ProjectedProgramEvent> BuildProjectedProgramGuideTimelineEv
     }
 
 
+
     if (overlayTotalInRange > 0 || overlayAcceptedTotal > 0 || overlaySuppressedByDbOverlapTotal > 0)
     {
         var overlayUnmatched = Math.Max(0, overlayTotalInRange - overlayAssignedCandidates);
         log.Add("PROGRAM_GUIDE_PROJECTED_OVERLAY_TIMELINE_SUMMARY", "API",
             $"result=OK date={baseDate:yyyy-MM-dd} overlayTotalInRange={overlayTotalInRange} overlayAssignedCandidates={overlayAssignedCandidates} overlayAccepted={overlayAcceptedTotal} overlaySuppressedByDbOverlap={overlaySuppressedByDbOverlapTotal} overlayUnmatchedChannels={overlayUnmatched} displayTimelineEvents={result.Count} dbWrite=none rule=program_guide_projection_contract");
 
-        log.Add("OVERLAY_ONLY_ADOPTION_SUMMARY", "API",
-            $"result=OK date={baseDate:yyyy-MM-dd} acceptedExternalEvents=runtime_store mergeCandidates={overlayTotalInRange} overlayOnlyCandidates={overlayTotalInRange} identityExactCandidates={overlayOnlyIdentityExactCandidates} rejectedIdentityNotExact={overlayOnlyRejectedIdentityNotExact} rejectedSidOnly={overlayOnlyRejectedSidOnly} rejectedNameOnly={overlayOnlyRejectedNameOnly} rejectedBridgeOnly={overlayOnlyRejectedBridgeOnly} dbOverlapPreflight={overlayOnlyRejectedDbOverlap} rejectedDbOverlap={overlaySuppressedByDbOverlapTotal} rejectedSameServiceDbEvent={overlaySuppressedByDbOverlapTotal} rejectedServiceUnmatched={overlayOnlyRejectedServiceUnmatched} overlayOnlyDisplayed={overlayAcceptedTotal} dbWithOverlay=see_PROGRAM_GUIDE_PROJECTED_DISPLAY_HANDOFF sample={SafeProgramGuideProjectionLogValue(string.Join('|', overlayOnlyRejectSamples))} policy=exact_nid_tsid_sid_and_no_db_overlap bridge=column_resolution_only_not_adoption dbWrite=none rule=program_guide_overlay_only_strict_adoption");
     }
 
-    if (fallbackHits.Count > 0)
-    {
-        log.Add("PROGRAMGUIDE_SERVICE_PROJECTION_FALLBACK", "APPLIED",
-            $"result=APPLIED date={baseDate:yyyy-MM-dd} count={fallbackHits.Count} sample={SafeProgramGuideProjectionLogValue(string.Join('|', fallbackHits))} rule=release_contract");
-    }
 
     return result;
 }
 
-static ProjectedProgramEvent ProjectedProgramGuideAlignOverlayToChannel(ProjectedProgramEvent source, ChannelTarget ch)
-{
-    if (source.DbEventExists) return source;
-
-    if (source.NetworkId == ch.OriginalNetworkId
-        && source.TransportStreamId == ch.TransportStreamId
-        && source.ServiceId == ch.ServiceId)
-    {
-        return source;
-    }
-
-    return new ProjectedProgramEvent
-    {
-        Key = source.Key,
-        ProjectionState = source.ProjectionState,
-        NetworkId = ch.OriginalNetworkId,
-        TransportStreamId = ch.TransportStreamId,
-        ServiceId = ch.ServiceId,
-        EventId = source.EventId,
-        Start = source.Start,
-        End = source.End,
-        DurationSeconds = source.DurationSeconds,
-        CanonicalStart = source.CanonicalStart,
-        CanonicalEnd = source.CanonicalEnd,
-        IsTimelineFragment = source.IsTimelineFragment,
-        TimelineFragmentReason = source.TimelineFragmentReason,
-        ServiceName = string.IsNullOrWhiteSpace(ch.Name) ? source.ServiceName : ch.Name,
-        Title = source.Title,
-        ShortText = source.ShortText,
-        ExtendedText = source.ExtendedText,
-        CellText = source.CellText,
-        Genre = source.Genre,
-        GenreCodes = source.GenreCodes,
-        DbEventExists = false,
-        DbEvent = null,
-        SourceKind = source.SourceKind,
-        SourcePluginId = source.SourcePluginId,
-        SourceEventKey = source.SourceEventKey,
-        ProjectionTitleDbPresent = source.ProjectionTitleDbPresent,
-        ProjectionTitleOverlayCandidatePresent = source.ProjectionTitleOverlayCandidatePresent,
-        ProjectionTitleSource = source.ProjectionTitleSource,
-        ProjectionOutlineDbPresent = source.ProjectionOutlineDbPresent,
-        ProjectionOutlineOverlayCandidatePresent = source.ProjectionOutlineOverlayCandidatePresent,
-        ProjectionOutlineSource = source.ProjectionOutlineSource,
-        ProjectionDetailDbPresent = source.ProjectionDetailDbPresent,
-        ProjectionDetailOverlayCandidatePresent = source.ProjectionDetailOverlayCandidatePresent,
-        ProjectionDetailSource = source.ProjectionDetailSource
-    };
-}
-
 static IReadOnlyList<ProjectedProgramEvent> ProjectedProgramGuideSubtractDbTimeline(
     ProjectedProgramEvent overlay,
-    IReadOnlyList<ProjectedProgramEvent> timeline,
+    IReadOnlyList<ProjectedProgramEvent> sortedExactDbTimeline,
     DateTime dayStart,
     DateTime dayEnd)
 {
@@ -8002,58 +7785,39 @@ static IReadOnlyList<ProjectedProgramEvent> ProjectedProgramGuideSubtractDbTimel
     var end = overlay.End > dayEnd ? dayEnd : overlay.End;
     if (end <= start) return Array.Empty<ProjectedProgramEvent>();
 
-    var covered = timeline
-        .Where(ev => ev.DbEventExists)
-        .Where(ev => ev.NetworkId == overlay.NetworkId
-                     && ev.TransportStreamId == overlay.TransportStreamId
-                     && ev.ServiceId == overlay.ServiceId)
-        .Select(ev => (Start: ev.Start < start ? start : ev.Start, End: ev.End > end ? end : ev.End))
-        .Where(x => x.End > x.Start)
-        .OrderBy(x => x.Start)
-        .ThenBy(x => x.End)
-        .ToList();
-
-    if (covered.Count == 0)
-        return new[] { CloneProjectedProgramGuideTimelineEvent(overlay, start, end) };
-
-    var merged = new List<(DateTime Start, DateTime End)>();
-    foreach (var interval in covered)
+    // sortedExactDbTimeline is already restricted to this exact NID/TSID/SID and ordered
+    // by Start.  Walk its interval union directly so overlay-only rows do not allocate a
+    // LINQ pipeline plus covered/merged temporary lists on every ProgramGuide render.
+    List<ProjectedProgramEvent>? fragments = null;
+    var cursor = start;
+    foreach (var ev in sortedExactDbTimeline)
     {
-        if (merged.Count == 0 || interval.Start > merged[^1].End)
+        if (!ev.DbEventExists) continue;
+        if (ev.End <= cursor) continue;
+        if (ev.Start >= end) break;
+
+        var coveredStart = ev.Start < start ? start : ev.Start;
+        var coveredEnd = ev.End > end ? end : ev.End;
+        if (coveredEnd <= coveredStart) continue;
+
+        if (coveredStart > cursor)
         {
-            merged.Add(interval);
-            continue;
+            fragments ??= new List<ProjectedProgramEvent>();
+            fragments.Add(CloneProjectedProgramGuideTimelineEvent(overlay, cursor, coveredStart));
         }
 
-        if (interval.End > merged[^1].End)
-            merged[^1] = (merged[^1].Start, interval.End);
-    }
-
-    var fragments = new List<ProjectedProgramEvent>();
-    var cursor = start;
-    foreach (var interval in merged)
-    {
-        if (interval.Start > cursor)
-            fragments.Add(CloneProjectedProgramGuideTimelineEvent(overlay, cursor, interval.Start));
-
-        if (interval.End > cursor)
-            cursor = interval.End;
+        if (coveredEnd > cursor)
+            cursor = coveredEnd;
         if (cursor >= end) break;
     }
 
     if (cursor < end)
+    {
+        fragments ??= new List<ProjectedProgramEvent>();
         fragments.Add(CloneProjectedProgramGuideTimelineEvent(overlay, cursor, end));
+    }
 
-    return fragments;
-}
-
-static bool ProjectedProgramGuideIsFullyCoveredByDbTimelineInDay(
-    ProjectedProgramEvent overlay,
-    IReadOnlyList<ProjectedProgramEvent> dayEvents,
-    DateTime dayStart,
-    DateTime dayEnd)
-{
-    return ProjectedProgramGuideSubtractDbTimeline(overlay, dayEvents, dayStart, dayEnd).Count == 0;
+    return fragments is null ? Array.Empty<ProjectedProgramEvent>() : fragments;
 }
 
 static ProjectedProgramEvent CloneProjectedProgramGuideTimelineEvent(ProjectedProgramEvent source, DateTime start, DateTime end)
@@ -8062,6 +7826,7 @@ static ProjectedProgramEvent CloneProjectedProgramGuideTimelineEvent(ProjectedPr
     return new ProjectedProgramEvent
     {
         Key = source.Key,
+        ProjectedEventId = source.ProjectedEventId,
         ProjectionState = source.ProjectionState,
         NetworkId = source.NetworkId,
         TransportStreamId = source.TransportStreamId,
@@ -8103,13 +7868,17 @@ static ProgramGuideEpgEventDto NormalizeProjectedProgramGuideEventForDisplay(Pro
     if (e.DbEvent is not null && e.DbEventExists && string.Equals(e.ProjectionState, ProjectedEventStates.DbOnly, StringComparison.OrdinalIgnoreCase))
         return NormalizeProgramGuideEventForDisplay(e.DbEvent, serviceDisplayNameByKey);
 
+    return NormalizeProjectedProgramGuideEventForDisplayWithCellText(e, serviceDisplayNameByKey, BuildProjectedProgramGuideCellText(e));
+}
+
+static ProgramGuideEpgEventDto NormalizeProjectedProgramGuideEventForDisplayWithCellText(ProjectedProgramEvent e, IReadOnlyDictionary<string, string>? serviceDisplayNameByKey, ProgramGuideCellText cellText)
+{
     var displayServiceName = serviceDisplayNameByKey is not null
         && serviceDisplayNameByKey.TryGetValue(ProjectedProgramGuideEventServiceKey(e), out var currentName)
         && !string.IsNullOrWhiteSpace(currentName)
             ? currentName
             : e.ServiceName;
 
-    var cellText = BuildProjectedProgramGuideCellText(e);
     return new ProgramGuideEpgEventDto(
         e.NetworkId,
         e.TransportStreamId,
@@ -8134,7 +7903,7 @@ static ProgramGuideEpgEventDto NormalizeProjectedProgramGuideEventForDisplay(Pro
         e.DbEvent?.RawExtendedEventDescriptorHex ?? string.Empty,
         e.DbEvent?.RawDescriptorLoopHex ?? string.Empty,
         cellText,
-        e.Key.Value,
+        e.ProjectedEventId,
         e.ProjectionState,
         e.SourceKind,
         e.SourcePluginId,
@@ -8182,16 +7951,7 @@ static string SafeProgramGuideDiagnosticValue(string? value)
     return text.Length <= 160 ? text : text[..160] + "…";
 }
 
-static int ProgramGuideHexByteLength(string? value)
-{
-    if (string.IsNullOrWhiteSpace(value)) return 0;
-    var hexDigits = 0;
-    foreach (var ch in value)
-    {
-        if (Uri.IsHexDigit(ch)) hexDigits++;
-    }
-    return hexDigits / 2;
-}
+
 #endif
 
 static string SafeRuntimePrereqLogValue(string? value)
@@ -8217,8 +7977,11 @@ sealed class ProjectedProgramGuideProjectionFallbackContext
     public Dictionary<string, List<ProjectedProgramEvent>> ByGroupSidUnique { get; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, List<ProjectedProgramEvent>> BySidName { get; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, List<ProjectedProgramEvent>> ByNameOnly { get; } = new(StringComparer.OrdinalIgnoreCase);
-    public Dictionary<string, List<ProjectedProgramEvent>> OverlayOnlyGroupsByIdentity { get; } = new(StringComparer.OrdinalIgnoreCase);
 }
+
+sealed record ProjectedProgramGuideChannelRequestInput(
+    string ChannelKey,
+    IReadOnlyList<ProjectedProgramEvent> BaseEvents);
 
 
 

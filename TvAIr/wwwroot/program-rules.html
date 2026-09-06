@@ -5,19 +5,21 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>自動検索予約リスト — TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.0-ui2"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.0-ui2"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.1-ui2"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.1-ui2"/>
 
-<link href="/tvair-ui-foundation.css?v=1.2.0-ui2" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.0-theme206" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.0-modules251" rel="stylesheet"/>
-<link href="/tvair-list-module.css?v=1.2.0-list206" rel="stylesheet"/>
-<link href="/tvair-program-rules.css?v=1.2.0-owner203" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.0-owner203" rel="stylesheet"/>
-<link href="/tvair-settings-host.css?v=1.2.0" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.2.1-ui2" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.1-theme206" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.1-modules251" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.2.1-list206" rel="stylesheet"/>
+<link href="/tvair-program-rules.css?v=1.2.1-owner203" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.1-owner203" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.1" rel="stylesheet"/>
 
-<script src="/tvair-theme.js?v=1.2.0-ui2"></script>
-<script src="/tvair-action-button-state.js?v=1.2.0"></script>
+<script src="/tvair-theme.js?v=1.2.1-ui2"></script>
+<script src="/tvair-page-view-state.js?v=1.2.1-ui2"></script>
+<script src="/tvair-action-button-state.js?v=1.2.1"></script>
+<script src="/tvair-search-enter.js?v=1.2.1"></script>
 
 
 
@@ -80,12 +82,12 @@
 <div class="panel-title">検索条件</div>
 <div class="field">
 <label>キーワード <span class="required">*</span></label>
-<input class="input" id="pattern" type="text"/>
+<input class="input" id="pattern" type="text" data-tvair-search-enter-target="#preview-search-btn"/>
 <div class="note" id="pattern-hint">正規表現ONの例: (?=.*オリンピック)((?=.*卓球)|(?=.*バレー))(?=.*女子);.*(NiziU|西野七瀬)</div>
 </div>
 <div class="field mt8">
 <label>除外キーワード</label>
-<input class="input" id="exclude-pattern" type="text"/>
+<input class="input" id="exclude-pattern" type="text" data-tvair-search-enter-target="#preview-search-btn"/>
 <div class="note" id="exclude-hint">正規表現ONの例: 録画;ハイライト;男子</div>
 </div>
 <div class="field-actions">
@@ -416,15 +418,19 @@ async function moveRule(index, delta, btn){
 }
 
 document.addEventListener('keydown',e=>{if(e.key==='Escape') closeModal();}); document.getElementById('modal-overlay').addEventListener('click',e=>{if(e.target===document.getElementById('modal-overlay')) closeModal();});
-buildGenreChecks(); buildDayChecks(); buildTimeOptions(); syncTimeEnabled(); syncRegexMode(); bindRulePageActions(); Promise.all([loadChannels(), loadRules()]).catch(err=>showToast('読み込みに失敗しました。'));
+buildGenreChecks(); buildDayChecks(); buildTimeOptions(); syncTimeEnabled(); syncRegexMode(); bindRulePageActions();
+if(window.TvAIrPageViewState) TvAIrPageViewState.register({key:'program-rules',root:()=>document.getElementById('page-scroll')});
+Promise.all([loadChannels(), loadRules()])
+  .then(()=>{ if(window.TvAIrPageViewState) TvAIrPageViewState.restore('program-rules',()=>document.getElementById('page-scroll'),{retries:3}); })
+  .catch(err=>showToast('読み込みに失敗しました。'));
 
 /* Page menu behavior is owned by tvair-menu-spine.js. */
 
 </script>
 
-<script src="/tvair-notification.js?v=1.2.0-ui2"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.0-ui2"></script>
-<script src="/tvair-settings-host.js?v=1.2.0"></script>
-<script src="/tvair-menu-spine.js?v=1.2.0-ui2"></script>
+<script src="/tvair-notification.js?v=1.2.1-ui2"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.1-ui2"></script>
+<script src="/tvair-settings-host.js?v=1.2.1"></script>
+<script src="/tvair-menu-spine.js?v=1.2.1-ui2"></script>
 </body>
 </html>

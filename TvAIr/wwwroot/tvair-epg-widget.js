@@ -139,17 +139,7 @@
   function setDisplay(id, show){ const e=byId(id); if(e) e.style.display = show ? 'inline-block' : 'none'; }
   function setDisabled(id, disabled){ const e=byId(id); if(e) e.disabled = !!disabled; }
   function hidePanel(){ const p = byId(PANEL_ID); if(p) p.classList.remove('show'); }
-  // release_contract: EPG専用通知・標準alertを持たず、TvAIr共通の無音通知へ集約する。
-  function showStartBlockedNotice(message, guidance){
-    const line1 = (message || '開始できません').trim();
-    const line2 = (guidance || '時間をおいてお試しください。').trim();
-    if(window.TvAIrNotification && typeof window.TvAIrNotification.show === 'function'){
-      window.TvAIrNotification.show({ title:'TvAIr', message:line1, subMessage:line2 });
-      return;
-    }
-    // 共通通知JSの読み込み漏れを標準alertで隠さない。読み込み順/HTML側の共通化漏れとして検知できるようにする。
-    try{ console.warn('[TvAIrNotification] unavailable', line1, line2); }catch(_){ }
-  }
+  // release_contract: Manual EPG run result/notification is owned by TvAIrManualEpgRunContract.
 
   function updateMenuGuard(s){
     const running = !!(s && s.phase === 'running');
@@ -357,27 +347,15 @@
     }
     userClosed = false;
     try{
-      let res;
-      let body = {};
-      if(window.TvAIrManualEpgRunContract && typeof window.TvAIrManualEpgRunContract.run === 'function'){
-        const manual = await window.TvAIrManualEpgRunContract.run({ scope, surface:opts.surface || 'epgPanel', silent:false });
-        res = manual.response;
-        body = manual.body || {};
-      }else{
-        const qs = new URLSearchParams();
-        qs.set('scope', scope);
-        qs.set('source', opts.source || 'WebEpgPanel.Epg');
-        res = await fetch('/api/epg/run?' + qs.toString(), { method:'POST', cache:'no-store' });
-        try{ body = await res.json(); }catch(_){ }
+      if(!window.TvAIrManualEpgRunContract || typeof window.TvAIrManualEpgRunContract.run !== 'function'){
+        throw new Error('ManualEpgRunContract unavailable');
       }
+      const manual = await window.TvAIrManualEpgRunContract.run({ scope, surface:opts.surface || 'epgPanel', silent:false });
+      const res = manual.response;
+      const body = manual.body || {};
       if(!res.ok || body.started === false){
         hidePanel();
         stopPolling();
-        if(body && body.blocked){
-          showStartBlockedNotice(body.message, body.guidance);
-        } else if(body && body.message) {
-          showStartBlockedNotice(body.message, '時間をおいてお試しください。');
-        }
         const s = await getStatus().catch(()=>null);
         if(s) updateMenuGuard(s);
         return body;
@@ -401,7 +379,6 @@
       return body;
     }catch(e){
       hidePanel();
-      showStartBlockedNotice('開始できません', '時間をおいてお試しください。');
       return { started:false, message:e.message };
     }
   }

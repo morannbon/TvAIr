@@ -8,7 +8,16 @@ namespace TvAIr.Epg.Projection;
 /// </summary>
 public sealed class ProjectedProgramEvent
 {
+    private string? _projectedEventId;
+
     public ProjectedEventKey Key { get; init; } = null!;
+    // ProgramGuide/予約契約で使う安定IDはKeyの不変内容から一度だけ文字列化する。
+    // 同一snapshot内の再表示ごとにUri escaping/日時文字列化を繰り返さない。
+    public string ProjectedEventId
+    {
+        get => _projectedEventId ??= Key.Value;
+        init => _projectedEventId = value;
+    }
     public string ProjectionState { get; init; } = ProjectedEventStates.DbOnly;
 
     public ushort NetworkId { get; init; }

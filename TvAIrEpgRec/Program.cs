@@ -2043,6 +2043,7 @@ internal sealed class TsReadProbeSummary
     public long TargetServiceEventsWithDecodedShortEvent { get; set; }
     public long TargetMatchedFromTripletCount { get; set; }
     public long TargetMatchedEventListCount { get; set; }
+    public bool ExpectedTargetEventSeen { get; set; }
     public Dictionary<int, long> TargetServiceDescriptorTagCounts { get; set; } = new();
     public bool EpgIntermediateModelProbe { get; set; }
     public bool EpgIntermediateModelOk { get; set; }
@@ -3669,7 +3670,8 @@ internal static class BonDriverNativeProbe
                         // A bitrate-dependent chunk cap shortens high-bitrate TS captures and creates a second,
                         // hidden duration rule. Record mode is also time/stop-signal governed. Short diagnostic
                         // variants keep their bounded chunk guard.
-                        var maxChunks = isRecordModeForLimit || isFullNormalEpgMode
+                        var isPreRecordEpgCheckMode = string.Equals(summary.Mode, "epg-check", StringComparison.OrdinalIgnoreCase);
+                        var maxChunks = isRecordModeForLimit || isFullNormalEpgMode || isPreRecordEpgCheckMode
                             ? long.MaxValue
                             : isTargetServiceEit ? Math.Max(200, readSecondsLimit * 120) : 200;
                         var callIndex = 0;
@@ -3734,7 +3736,7 @@ internal static class BonDriverNativeProbe
                                     await WriteRecordBufferAsync(recordStream, buffer, copySize, summary, progress).ConfigureAwait(false);
                                     if (summary.RecordBytesWritten == 0) await TryRecoverRecordStartupZeroOutputAsync("ts_read_but_no_record_output").ConfigureAwait(false);
                                     var exactPreRecordEventSeen = summary.ExpectedEventId > 0
-                                        && summary.TargetServiceEitEvents.Any(e => e.EventId == summary.ExpectedEventId);
+                                        && summary.ExpectedTargetEventSeen;
                                     var epgCheckReady = string.Equals(summary.Mode, "epg-check", StringComparison.OrdinalIgnoreCase)
                                         ? (summary.ExpectedEventId > 0 ? exactPreRecordEventSeen : summary.TargetServiceEventsWithShortEvent >= summary.TargetServiceEventMin)
                                         : summary.TargetServiceEventsWithShortEvent >= summary.TargetServiceEventMin;
@@ -3819,7 +3821,7 @@ internal static class BonDriverNativeProbe
                                         await WriteRecordBufferAsync(recordStream, buffer, copySize, summary, progress).ConfigureAwait(false);
                                         if (summary.RecordBytesWritten == 0) await TryRecoverRecordStartupZeroOutputAsync("ts_read_but_no_record_output").ConfigureAwait(false);
                                         var exactPreRecordEventSeen = summary.ExpectedEventId > 0
-                                            && summary.TargetServiceEitEvents.Any(e => e.EventId == summary.ExpectedEventId);
+                                            && summary.ExpectedTargetEventSeen;
                                         var epgCheckReady = string.Equals(summary.Mode, "epg-check", StringComparison.OrdinalIgnoreCase)
                                             ? (summary.ExpectedEventId > 0 ? exactPreRecordEventSeen : summary.TargetServiceEventsWithShortEvent >= summary.TargetServiceEventMin)
                                             : summary.TargetServiceEventsWithShortEvent >= summary.TargetServiceEventMin;
@@ -3878,7 +3880,7 @@ internal static class BonDriverNativeProbe
                             || string.Equals(summary.Purpose, "mode_epg_check_after_directrecbridge_common_ts_route_facade_dbwrite_false", StringComparison.OrdinalIgnoreCase);
                         var baseTsReadOk = summary.BytesRead > 0 && summary.PacketsRead > 0 && summary.SyncErrors == 0;
                         var exactPreRecordEventObserved = summary.ExpectedEventId <= 0
-                            || summary.TargetServiceIntermediateEvents.Any(e => e.EventId == summary.ExpectedEventId);
+                            || summary.ExpectedTargetEventSeen;
                         var epgCheckTargetOk = summary.TargetServiceEitPriorityOk
                             && string.Equals(summary.TargetServiceEitWaitResult, "TARGET_SEEN", StringComparison.OrdinalIgnoreCase)
                             && summary.EpgIntermediateModelOk
@@ -4721,6 +4723,10 @@ internal static class BonDriverNativeProbe
                 if (ev.ShortEventDescriptorSeen) summary.TargetServiceEventsWithShortEvent++;
                 if (ev.ShortEventDecoded) summary.TargetServiceEventsWithDecodedShortEvent++;
                 foreach (var tag in ev.DescriptorTags) Increment(summary.TargetServiceDescriptorTagCounts, tag);
+                if (summary.ExpectedEventId > 0 && ev.EventId == summary.ExpectedEventId)
+                {
+                    summary.ExpectedTargetEventSeen = true;
+                }
                 if (summary.TargetServiceEitEvents.Count < 12) summary.TargetServiceEitEvents.Add(ev);
             }
             pos = descEnd;

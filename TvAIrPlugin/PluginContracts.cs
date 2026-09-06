@@ -135,7 +135,10 @@ public enum PluginPermission
     ReadContentDiscovery,
 
     // Runtime UI共通のHost-owned File / Folder Picker。既存enum ordinalを維持するため末尾追加。
-    UsePathPicker
+    UsePathPicker,
+
+    // Host-managed external lookup. Raw network access is never granted to plugins.
+    UseExternalLookup
 }
 
 public sealed class PluginChannelQuery

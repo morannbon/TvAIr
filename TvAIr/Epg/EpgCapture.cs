@@ -3527,7 +3527,7 @@ public sealed class EpgCapture
             {
                 try
                 {
-                    var keywordAdded = keywordMatcher.RunMatching();
+                    var keywordAdded = keywordMatcher.RunMatching(rawEvents);
                     if (keywordAdded > 0)
                     {
                         projectionPromotion.RunAllocationRoute(

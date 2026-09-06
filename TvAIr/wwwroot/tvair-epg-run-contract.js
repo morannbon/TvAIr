@@ -1,5 +1,5 @@
 /* TvAIr Manual EPG Run Contract release_contract
-   Owns the manual EPG run request shape for Web surfaces only.
+   Owns the manual EPG run request/result contract for Web surfaces, including user-visible failure notification.
    Tray EPG is Host-owned by TrayIconService and does not pass through this JavaScript contract.
    API boundary uses scope. targetScope remains server/internal state terminology only. */
 (function(){
@@ -66,17 +66,36 @@
     return qs.toString();
   }
 
+  function notifyFailure(message, guidance){
+    const line1 = String(message || 'EPG取得を開始できません。').trim() || 'EPG取得を開始できません。';
+    const line2 = String(guidance || '').trim();
+    if(window.TvAIrNotification && typeof window.TvAIrNotification.show === 'function'){
+      window.TvAIrNotification.show({ title:'TvAIr', message:line1, subMessage:line2 });
+      return;
+    }
+    try{ console.warn('[TvAIrManualEpgRunContract] notification unavailable', line1, line2); }catch(_){ }
+  }
+
   async function run(request){
     const req = create(request);
-    const res = await fetch('/api/epg/run?' + toQuery(req), { method:'POST', cache:'no-store' });
+    let res;
     let body = {};
-    try{ body = await res.json(); }catch(_){ }
-    body.manualEpgRunContract = req.contract;
-    body.manualEpgRunSurface = req.surface;
-    body.manualEpgRunSource = req.source;
-    body.manualEpgRunSilent = req.silent;
-    body.manualEpgRunScope = req.scope;
-    return { response:res, body, request:req };
+    try{
+      res = await fetch('/api/epg/run?' + toQuery(req), { method:'POST', cache:'no-store' });
+      try{ body = await res.json(); }catch(_){ }
+      body.manualEpgRunContract = req.contract;
+      body.manualEpgRunSurface = req.surface;
+      body.manualEpgRunSource = req.source;
+      body.manualEpgRunSilent = req.silent;
+      body.manualEpgRunScope = req.scope;
+      if(!res.ok || body.started === false){
+        notifyFailure(body.message, body.guidance || (!body.blocked ? '時間をおいてお試しください。' : ''));
+      }
+      return { response:res, body, request:req };
+    }catch(e){
+      notifyFailure('EPG取得を開始できません。', '時間をおいてお試しください。');
+      throw e;
+    }
   }
 
   window.TvAIrManualEpgRunContract = Object.freeze({

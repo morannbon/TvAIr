@@ -59,6 +59,9 @@ internal sealed class PluginReservationOperationService
                     draft.ServiceName),
                 StartTime = draft.StartTime.AddMinutes(-Math.Max(0, draft.PreMarginMinutes)),
                 EndTime = draft.EndTime.AddMinutes(Math.Max(0, draft.PostMarginMinutes)),
+                // BROADCAST_SLOT_EVENT_REBIND_INVARIANT: Plugin固有の録画前マージンをStartTimeへ適用しても、
+                // 同一番組の放送枠identityはHostへ渡された番組本来の開始時刻で保持する。
+                ScheduledStartTime = draft.StartTime,
                 Status = ReservationStatus.Scheduled,
                 Source = MapIntentToSource(draft.Intent),
                 Intent = draft.Intent,
@@ -98,6 +101,14 @@ internal sealed class PluginReservationOperationService
                 id = addResult.ReservationId;
                 added = addResult.Added;
                 committedReservation = addResult.Reservation;
+                if (addResult.RefreshedBroadcastSlot)
+                {
+                    ReevaluateAllocations(owner, "RefreshBroadcastSlot");
+                    commitEvents();
+                    AddAuditLog(owner, "AddReservation",
+                        $"result=REFRESHED_EXISTING title={draft.Title} id=R{id} status={committedReservation.Status} dataVersion={committedReservation.DataVersion} action=rebind_same_reservation_id_then_common_allocation rule=release_contract");
+                    return new PluginReservationMutationResult(true, id, "既存予約を現行番組へ更新しました。");
+                }
             }
 
             if (!added)

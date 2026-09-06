@@ -5,24 +5,25 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>予約リスト — TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.0"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.0"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.1"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.1"/>
 
-<link href="/tvair-ui-foundation.css?v=1.2.0" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.0-theme206" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.0-modules251" rel="stylesheet"/>
-<link href="/tvair-list-module.css?v=1.2.0-list206" rel="stylesheet"/>
-<link href="/tvair-reservations.css?v=1.2.0-css-final199" rel="stylesheet"/>
-<link href="/tvair-user-log.css?v=1.2.0" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.0-owner203" rel="stylesheet"/>
-<link href="/tvair-settings-host.css?v=1.2.0" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.2.1" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.1-theme206" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.1-modules251" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.2.1-list206" rel="stylesheet"/>
+<link href="/tvair-reservations.css?v=1.2.1-css-final199" rel="stylesheet"/>
+<link href="/tvair-user-log.css?v=1.2.1" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.1-owner203" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.1" rel="stylesheet"/>
 
-<script src="/tvair-theme.js?v=1.2.0"></script>
-<script src="/tvair-action-button-state.js?v=1.2.0"></script>
-<script src="/tvair-reservation-action-state.js?v=1.2.0"></script>
-<script src="/tvair-program-time-action.js?v=1.2.0"></script>
-<script src="/genre-shared.js?v=1.2.0"></script>
-<script src="/tvair-user-log.js?v=1.2.0"></script>
+<script src="/tvair-theme.js?v=1.2.1"></script>
+<script src="/tvair-page-view-state.js?v=1.2.1"></script>
+<script src="/tvair-action-button-state.js?v=1.2.1"></script>
+<script src="/tvair-reservation-action-state.js?v=1.2.1"></script>
+<script src="/tvair-program-time-action.js?v=1.2.1"></script>
+<script src="/genre-shared.js?v=1.2.1"></script>
+<script src="/tvair-user-log.js?v=1.2.1"></script>
 
 
 
@@ -233,15 +234,25 @@ function initialReservationFilterFromLocation(){
     if(explicit) return normalizeReservationFilterValue(explicit);
     const hash = String(window.location.hash || '').replace(/^#/, '');
     if(hash) return normalizeReservationFilterValue(hash);
-    const stored = sessionStorage.getItem('tvair_reservation_current_filter');
+    const stored = window.TvAIrPageViewState
+      ? TvAIrPageViewState.getField('reservations','filter',null)
+      : null;
     if(stored) return normalizeReservationFilterValue(stored);
+    const legacyStored = sessionStorage.getItem('tvair_reservation_current_filter');
+    if(legacyStored){
+      if(window.TvAIrPageViewState) TvAIrPageViewState.setField('reservations','filter',legacyStored);
+      return normalizeReservationFilterValue(legacyStored);
+    }
   }catch(_){ }
   return 'active';
 }
 
 function persistReservationFilterLocation(filter){
   const f = normalizeReservationFilterValue(filter);
-  try{ sessionStorage.setItem('tvair_reservation_current_filter', f); }catch(_){ }
+  try{
+    if(window.TvAIrPageViewState) TvAIrPageViewState.setField('reservations','filter',f);
+    sessionStorage.removeItem('tvair_reservation_current_filter');
+  }catch(_){ }
   try{
     if(!window.history || !window.history.replaceState) return;
     const url = new URL(window.location.href);
@@ -1236,30 +1247,16 @@ function renderSpecialGroups(){
         </tr>`;
       }
 
-      const statusKey   = String(r.status || '').toLowerCase();
-      const isRecording = statusKey === 'recording';
-      const isDone      = statusKey === 'completed' || statusKey === 'cancelled' || statusKey === 'failed';
-      const isEnabled   = r.isEnabled !== false;
-      const disabledClass = (!isDone && !isEnabled) ? 'disabled-row' : '';
-      const cancelledClass = statusKey === 'cancelled' ? 'cancelled-row' : '';
-      const displayConflict = hasDisplayConflict(r);
-      const conflictClass = displayConflict ? ' conflicted' : '';
-
+      const row = buildReservationRowPresentation(r);
       const toggleBtn = buildReservationEnabledToggle(r);
-      const rowAttr = buildGenreRowAttr(r);
-      const genreClass = buildGenreRowClass(r, {
-        disabled: !!disabledClass,
-        cancelled: !!cancelledClass,
-        conflicted: displayConflict
-      });
-      return `<tr class="row-${idx % 2 === 0 ? 'odd' : 'even'}${conflictClass} ${disabledClass} ${cancelledClass}${reservationSemanticClass(r)}${genreClass}"${reservationSemanticAttrs(r)}${rowAttr}>
+      return `<tr class="row-${idx % 2 === 0 ? 'odd' : 'even'}${row.conflictClass}${row.disabledClass}${row.cancelledClass}${row.semanticClass}${row.genreClass}"${row.semanticAttrs}${row.rowAttr}>
         <td class="col-no tvair-genre-list-index-cell tvair-reservation-list-index-cell" data-cell-role="list-index">${idx + 1}</td>
         <td class="col-toggle tvair-reservation-state-cell" data-cell-role="reservation-state">${toggleBtn}</td>
-        <td class="col-date tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="date-metadata">${fmtDate(r.startTime)}</td>
-        <td class="col-time tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="time-metadata">${fmtTime(r.startTime, r.endTime)}</td>
-        <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata">${esc(getDisplayServiceName(r))}</td>
-        <td class="col-title tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="title-data">${esc(buildDisplayTitle(r))}</td>
-        <td class="col-status tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="source-metadata"><span class="source-label" data-state-role="source-label">${esc(r.sourceLabel || "—")}</span></td>
+        <td class="col-date tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="date-metadata">${row.dateText}</td>
+        <td class="col-time tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="time-metadata">${row.timeText}</td>
+        <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata">${row.serviceText}</td>
+        <td class="col-title tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="title-data">${row.titleText}</td>
+        <td class="col-status tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="source-metadata"><span class="source-label" data-state-role="source-label">${row.sourceText}</span></td>
       </tr>`;
     }).join('');
 
@@ -1294,6 +1291,43 @@ function renderSpecialGroups(){
     </section>`;
   }).join('');
   normalizeReservationFamilySemanticRows(keywordWrap);
+}
+
+function buildReservationRowPresentation(r, options){
+  const opts = options || {};
+  const logPlain = opts.logPlain === true;
+  const statusKey = String((r && r.status) || '').toLowerCase();
+  const isDone = statusKey === 'completed' || statusKey === 'cancelled' || statusKey === 'failed';
+  const isEnabled = !r || r.isEnabled !== false;
+  const displayConflict = !logPlain && hasDisplayConflict(r);
+  const disabledClass = (!logPlain && !isDone && !isEnabled) ? ' disabled-row' : '';
+  const cancelledClass = (!logPlain && statusKey === 'cancelled') ? ' cancelled-row' : '';
+  const conflictClass = displayConflict ? ' conflicted' : '';
+  const rowAttr = buildGenreRowAttr(r);
+  const genreClass = buildGenreRowClass(r, {
+    disabled: !!disabledClass,
+    cancelled: !!cancelledClass,
+    conflicted: displayConflict,
+    logPlain
+  });
+  return {
+    statusKey,
+    isDone,
+    isEnabled,
+    displayConflict,
+    disabledClass,
+    cancelledClass,
+    conflictClass,
+    semanticClass: reservationSemanticClass(r, { logPlain }),
+    semanticAttrs: reservationSemanticAttrs(r, { logPlain }),
+    rowAttr,
+    genreClass,
+    dateText: fmtDate(r.startTime),
+    timeText: fmtTime(r.startTime, r.endTime),
+    serviceText: esc(getDisplayServiceName(r)),
+    titleText: esc(buildDisplayTitle(r)),
+    sourceText: esc(r.sourceLabel || '—')
+  };
 }
 
 function buildReservationEnabledToggle(r){
@@ -1337,33 +1371,18 @@ function renderKeywordGroups(){
       .filter(r => r && r.source !== 'epg')
       .sort((a,b)=>new Date(a.startTime)-new Date(b.startTime));
     const rows = items.map((r, idx) => {
-      const statusKey   = String(r.status || '').toLowerCase();
-      const isRecording = statusKey === 'recording';
-      const isDone      = statusKey === 'completed' || statusKey === 'cancelled' || statusKey === 'failed';
-      const isEnabled   = r.isEnabled !== false;
-      const disabledClass = (!isDone && !isEnabled) ? 'disabled-row' : '';
-      const cancelledClass = statusKey === 'cancelled' ? 'cancelled-row' : '';
-      const displayConflict = hasDisplayConflict(r);
-      const conflictClass = displayConflict ? ' conflicted' : '';
-
       // Mutable reservation state is resolved from allData by id. The keyword
       // projection owns rule membership only and cannot overwrite the UI state.
+      const row = buildReservationRowPresentation(r);
       const toggleBtn = buildReservationEnabledToggle(r);
-
-      const rowAttr = buildGenreRowAttr(r);
-      const genreClass = buildGenreRowClass(r, {
-        disabled: !!disabledClass,
-        cancelled: !!cancelledClass,
-        conflicted: displayConflict
-      });
-      return `<tr class="row-${idx % 2 === 0 ? 'odd' : 'even'}${conflictClass} ${disabledClass} ${cancelledClass}${reservationSemanticClass(r)}${genreClass}"${reservationSemanticAttrs(r)}${rowAttr}>
+      return `<tr class="row-${idx % 2 === 0 ? 'odd' : 'even'}${row.conflictClass}${row.disabledClass}${row.cancelledClass}${row.semanticClass}${row.genreClass}"${row.semanticAttrs}${row.rowAttr}>
         <td class="col-no tvair-genre-list-index-cell tvair-reservation-list-index-cell" data-cell-role="list-index">${idx + 1}</td>
         <td class="col-toggle tvair-reservation-state-cell" data-cell-role="reservation-state">${toggleBtn}</td>
-        <td class="col-date tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="date-metadata">${fmtDate(r.startTime)}</td>
-        <td class="col-time tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="time-metadata">${fmtTime(r.startTime, r.endTime)}</td>
-        <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata">${esc(getDisplayServiceName(r))}</td>
-        <td class="col-title tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="title-data">${esc(buildDisplayTitle(r))}</td>
-        <td class="col-status tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="source-metadata"><span class="source-label" data-state-role="source-label">${esc(r.sourceLabel || "—")}</span></td>
+        <td class="col-date tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="date-metadata">${row.dateText}</td>
+        <td class="col-time tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="time-metadata">${row.timeText}</td>
+        <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata">${row.serviceText}</td>
+        <td class="col-title tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="title-data">${row.titleText}</td>
+        <td class="col-status tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="source-metadata"><span class="source-label" data-state-role="source-label">${row.sourceText}</span></td>
       </tr>`;
     }).join('');
 
@@ -1477,11 +1496,10 @@ function render(){
   empty.style.display = 'none';
 
   tbody.innerHTML = rows.map((r, i) => {
-    const isRecording = r.status === 'recording';
-    const isDone      = r.status === 'completed' || r.status === 'cancelled' || r.status === 'failed';
-    const isEnabled   = r.isEnabled !== false;
-    const isEpg       = r.source === 'epg';
-    const canToggleEnabled = r.canToggleEnabled === true;
+    const logPlain = currentFilter === 'done';
+    const row = buildReservationRowPresentation(r, { logPlain });
+    const isRecording = row.statusKey === 'recording';
+    const isEpg = r.source === 'epg';
     const canCancel = r.canCancel === true;
 
     // All reservation-family tabs use the same canonical toggle projection.
@@ -1492,13 +1510,9 @@ function render(){
     const tunerText = (displayTunerName || '—') + (explicitChainMark ? '（C）' : '');
     const tunerCell = currentFilter === 'done'
       ? `<span class="tuner-normal">${esc(tunerText)}</span>`
-      : (hasDisplayConflict(r)
+      : (row.displayConflict
         ? `<span class="tuner-conflict">競合</span>`
         : `<span class="tuner-normal">${esc(tunerText)}</span>`);
-
-    // 局名
-    const chName = getDisplayServiceName(r);
-    const chCell = esc(chName);
 
     // タイトル（EPGエントリは青文字イタリック）
     const titleClass = isEpg ? 'title-epg' : 'title-normal';
@@ -1525,42 +1539,29 @@ function render(){
     }
     actionBtn = reservationPendingActionButton(r, actionBtn);
 
-    const logPlain = currentFilter === 'done';
-    const displayConflict = !logPlain && hasDisplayConflict(r);
-    const conflictClass = displayConflict ? ' conflicted' : '';
-    const disabledClass = (!logPlain && !isDone && !isEnabled) ? ' disabled-row' : '';
-    const cancelledClass = (!logPlain && r.status === 'cancelled') ? ' cancelled-row' : '';
-    const chainClass    = (!logPlain && explicitChainMark) ? ` chain-${r.chainRole}` : '';
-    const rowClass = `row-${i % 2 === 0 ? 'odd' : 'even'}${conflictClass}${disabledClass}${cancelledClass}${chainClass}`;
-
-    const rowAttr = buildGenreRowAttr(r);
-    const genreClass = buildGenreRowClass(r, {
-      disabled: !!disabledClass,
-      cancelled: !!cancelledClass,
-      conflicted: displayConflict,
-      logPlain
-    });
+    const chainClass = (!logPlain && explicitChainMark) ? ` chain-${r.chainRole}` : '';
+    const rowClass = `row-${i % 2 === 0 ? 'odd' : 'even'}${row.conflictClass}${row.disabledClass}${row.cancelledClass}${chainClass}`;
     if(currentFilter === 'done'){
-      return `<tr class="${rowClass}${reservationSemanticClass(r,{ logPlain })}${genreClass}" data-reservation-id="${r.id}" data-reservation-source="${esc(r.source || '')}"${reservationSemanticAttrs(r,{ logPlain })}${rowAttr}>
+      return `<tr class="${rowClass}${row.semanticClass}${row.genreClass}" data-reservation-id="${r.id}" data-reservation-source="${esc(r.source || '')}"${row.semanticAttrs}${row.rowAttr}>
         <td class="col-no tvair-genre-list-index-cell tvair-reservation-list-index-cell" data-cell-role="list-index">${i + 1}</td>
         <td class="col-tuner tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="priority-metadata">${tunerCell}</td>
-        <td class="col-date tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="date-metadata">${fmtDate(r.startTime)}</td>
-        <td class="col-time tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="time-metadata">${fmtTime(r.startTime, r.endTime)}</td>
-        <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata">${chCell}</td>
-        <td class="col-title tvair-genre-list-text-cell tvair-reservation-list-text-cell ${titleClass}" data-cell-role="title-data">${esc(buildDisplayTitle(r))}</td>
-        <td class="col-status tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="source-metadata"><span class="source-label" data-state-role="source-label">${esc(r.sourceLabel || "—")}</span></td>
+        <td class="col-date tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="date-metadata">${row.dateText}</td>
+        <td class="col-time tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="time-metadata">${row.timeText}</td>
+        <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata">${row.serviceText}</td>
+        <td class="col-title tvair-genre-list-text-cell tvair-reservation-list-text-cell ${titleClass}" data-cell-role="title-data">${row.titleText}</td>
+        <td class="col-status tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="source-metadata"><span class="source-label" data-state-role="source-label">${row.sourceText}</span></td>
       </tr>`;
     }
 
-    return `<tr class="${rowClass}${reservationSemanticClass(r,{ logPlain })}${genreClass}" data-reservation-id="${r.id}" data-reservation-source="${esc(r.source || '')}"${reservationSemanticAttrs(r,{ logPlain })}${rowAttr}>
+    return `<tr class="${rowClass}${row.semanticClass}${row.genreClass}" data-reservation-id="${r.id}" data-reservation-source="${esc(r.source || '')}"${row.semanticAttrs}${row.rowAttr}>
       <td class="col-no tvair-genre-list-index-cell tvair-reservation-list-index-cell" data-cell-role="list-index">${i + 1}</td>
       <td class="col-toggle tvair-reservation-state-cell" data-cell-role="reservation-state">${toggleBtn}</td>
       <td class="col-tuner tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="priority-metadata">${tunerCell}</td>
-      <td class="col-date tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="date-metadata">${fmtDate(r.startTime)}</td>
-      <td class="col-time tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="time-metadata">${fmtTime(r.startTime, r.endTime)}</td>
-      <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata">${chCell}</td>
-      <td class="col-title tvair-genre-list-text-cell tvair-reservation-list-text-cell ${titleClass}" data-cell-role="title-data">${esc(buildDisplayTitle(r))}</td>
-      <td class="col-status tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="source-metadata"><span class="source-label" data-state-role="source-label">${esc(r.sourceLabel || "—")}</span></td>
+      <td class="col-date tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="date-metadata">${row.dateText}</td>
+      <td class="col-time tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="time-metadata">${row.timeText}</td>
+      <td class="col-ch tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="service-metadata">${row.serviceText}</td>
+      <td class="col-title tvair-genre-list-text-cell tvair-reservation-list-text-cell ${titleClass}" data-cell-role="title-data">${row.titleText}</td>
+      <td class="col-status tvair-genre-list-text-cell tvair-reservation-list-text-cell" data-cell-role="source-metadata"><span class="source-label" data-state-role="source-label">${row.sourceText}</span></td>
       <td class="col-action tvair-reservation-action-cell" data-cell-role="reservation-action"><div class="reservation-action-slot">${actionBtn}</div></td>
     </tr>`;
   }).join('');
@@ -1831,10 +1832,21 @@ window.addEventListener('resize', updateReservationScrollLayout);
 window.addEventListener('load', () => { ensureReservationRailObserver(); updateReservationScrollLayout(); });
 
 persistReservationFilterLocation(currentFilter);
+if(window.TvAIrPageViewState){
+  TvAIrPageViewState.register({key:'reservations',root:()=>document.getElementById('content-region')});
+}
 updateFilterTabActive();
 applyReservationListRole();
 updateGenreColorButton();
-load(true).then(() => { applyConflictJumpHint(); updateFilterTabActive(); applyReservationListRole(); updateGenreColorButton(); updateReservationScrollLayout(); scheduleNextPoll(true); });
+load(true).then(() => {
+  updateFilterTabActive();
+  applyReservationListRole();
+  updateGenreColorButton();
+  updateReservationScrollLayout();
+  if(window.TvAIrPageViewState) TvAIrPageViewState.restore('reservations',()=>document.getElementById('content-region'),{retries:3});
+  applyConflictJumpHint();
+  scheduleNextPoll(true);
+});
 
 /* Page menu behavior is owned by tvair-menu-spine.js. */
 
@@ -1847,9 +1859,9 @@ document.addEventListener('DOMContentLoaded', ()=>{
 });
 
 </script>
-<script src="/tvair-notification.js?v=1.2.0"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.0"></script>
-<script src="/tvair-settings-host.js?v=1.2.0"></script>
-<script src="/tvair-menu-spine.js?v=1.2.0"></script>
+<script src="/tvair-notification.js?v=1.2.1"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.1"></script>
+<script src="/tvair-settings-host.js?v=1.2.1"></script>
+<script src="/tvair-menu-spine.js?v=1.2.1"></script>
 </body>
 </html>

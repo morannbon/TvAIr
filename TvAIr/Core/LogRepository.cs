@@ -60,17 +60,24 @@ public sealed class LogRepository
 
         lock (gate)
         {
-            var fp = BuildFingerprint(entry);
+            // ExternalLookup success is a per-request contract trace. Different queries can legitimately
+            // produce the same provider/operation/status/body-size message, so exact-message dedupe must
+            // not collapse distinct successful requests. The ring buffer remains bounded by maxSize.
+            var bypassDuplicateSuppression = string.Equals(entry.Event, "PLUGIN_EXTERNAL_LOOKUP", StringComparison.Ordinal);
             var now = DateTime.Now;
-            var suppressWindow = GetDuplicateSuppressWindow(entry);
-            if (recentFingerprints.TryGetValue(fp, out var last) && now - last < suppressWindow)
-                return;
-            recentFingerprints[fp] = now;
-
-            if (recentFingerprints.Count > maxSize * 2)
+            if (!bypassDuplicateSuppression)
             {
-                foreach (var key in recentFingerprints.Where(kv => now - kv.Value > GetDuplicateSuppressWindowForFingerprintKey(kv.Key)).Select(kv => kv.Key).ToList())
-                    recentFingerprints.Remove(key);
+                var fp = BuildFingerprint(entry);
+                var suppressWindow = GetDuplicateSuppressWindow(entry);
+                if (recentFingerprints.TryGetValue(fp, out var last) && now - last < suppressWindow)
+                    return;
+                recentFingerprints[fp] = now;
+
+                if (recentFingerprints.Count > maxSize * 2)
+                {
+                    foreach (var key in recentFingerprints.Where(kv => now - kv.Value > GetDuplicateSuppressWindowForFingerprintKey(kv.Key)).Select(kv => kv.Key).ToList())
+                        recentFingerprints.Remove(key);
+                }
             }
 
             if (buffer.Count >= maxSize)

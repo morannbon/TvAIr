@@ -1,23 +1,19 @@
-﻿<Project>
+<Project>
   <PropertyGroup>
-    <TvAIrProductVersion>1.2.0</TvAIrProductVersion>
-    <TvAIrFileVersion>1.2.0.0</TvAIrFileVersion>
-    <TvAIrAssemblyVersion>1.2.0.0</TvAIrAssemblyVersion>
-    <TvAIrPluginSdkVersion>1.1.5</TvAIrPluginSdkVersion>
+    <TvAIrProductVersion>1.2.1</TvAIrProductVersion>
+    <TvAIrFileVersion>1.2.1.0</TvAIrFileVersion>
+    <TvAIrAssemblyVersion>1.2.1.0</TvAIrAssemblyVersion>
+    <TvAIrPluginSdkVersion>1.1.7</TvAIrPluginSdkVersion>
     <TvAIrPluginSdkAssemblyVersion>1.0.0.0</TvAIrPluginSdkAssemblyVersion>
-    <TvAIrPluginHostContractVersion>1.1.5</TvAIrPluginHostContractVersion>
+    <TvAIrPluginHostContractVersion>1.1.7</TvAIrPluginHostContractVersion>
     <TvAIrPublicContractName>release_contract</TvAIrPublicContractName>
     <TvAIrPluginHostContractName>plugin-host-foundation</TvAIrPluginHostContractName>
     <TvAIrPluginCompatibilityMajor>1</TvAIrPluginCompatibilityMajor>
     <TvAIrMinimumSupportedPluginHostContractVersion>1.0.0</TvAIrMinimumSupportedPluginHostContractVersion>
     <!--
-      Developer Diagnostics canonical build boundary:
-      - Development source keeps diagnostics available.
-      - Normal deliverables keep diagnostics enabled (default true).
-      - Only an explicitly requested public-release deliverable sets TvAIrDeveloperDiagnostics=false.
-      - OFF means no developer-log generation/retention/exposure and no diagnostic-only side work.
-      - User operational logs are a separate responsibility and remain enabled.
-      - Do not reintroduce per-log release-time deletion, runtime flags, or a mandatory release-generator workflow.
+      Developer Diagnostics build boundary.
+      Public source defaults diagnostics to OFF. Diagnostic-only processing is excluded when OFF,
+      while user operational logs and product behavior remain unchanged.
     -->
     <TvAIrDeveloperDiagnostics Condition="'$(TvAIrDeveloperDiagnostics)' == ''">false</TvAIrDeveloperDiagnostics>
     <DefineConstants Condition="'$(TvAIrDeveloperDiagnostics)' == 'true'">$(DefineConstants);TVAIR_DEVELOPER_DIAGNOSTICS</DefineConstants>

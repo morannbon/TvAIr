@@ -5,20 +5,21 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>キーワード検索 — TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.0"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.0"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.1"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.1"/>
 
-<link href="/tvair-ui-foundation.css?v=1.2.0" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.0-theme206" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.0-modules251" rel="stylesheet"/>
-<link href="/tvair-list-module.css?v=1.2.0-list206" rel="stylesheet"/>
-<link href="/tvair-keyword.css?v=1.2.0-owner203" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.0-owner203" rel="stylesheet"/>
-<link href="/tvair-settings-host.css?v=1.2.0" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.2.1" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.1-theme206" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.1-modules251" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.2.1-list206" rel="stylesheet"/>
+<link href="/tvair-keyword.css?v=1.2.1-owner203" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.1-owner203" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.1" rel="stylesheet"/>
 
-<script src="/tvair-theme.js?v=1.2.0"></script>
-<script src="/tvair-action-button-state.js?v=1.2.0"></script>
-<script src="/tvair-program-time-action.js?v=1.2.0"></script>
+<script src="/tvair-theme.js?v=1.2.1"></script>
+<script src="/tvair-action-button-state.js?v=1.2.1"></script>
+<script src="/tvair-program-time-action.js?v=1.2.1"></script>
+<script src="/tvair-search-enter.js?v=1.2.1"></script>
 
 
 
@@ -48,11 +49,11 @@
 <div class="form-section-title">キーワード</div>
 <div class="form-row">
 <label>タイトルキーワード</label>
-<input id="kw-title" type="text"/>
+<input id="kw-title" type="text" data-tvair-search-enter-target="#search-btn"/>
 </div>
 <div class="form-row">
 <label>詳細キーワード</label>
-<input id="kw-desc" type="text"/>
+<input id="kw-desc" type="text" data-tvair-search-enter-target="#search-btn"/>
 </div>
 <div class="opt-row tvair-choice-row">
 <label class="opt-label"><input id="opt-desc-search" type="checkbox"/> 説明文も検索</label>
@@ -383,7 +384,6 @@ async function stopKeywordReservation(id,btn){
 }
 
 
-document.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey) doSearch();});
 
 // 初期化
 initTimeSelects();
@@ -396,9 +396,9 @@ loadChannels();
 /* Page menu behavior is owned by tvair-menu-spine.js. */
 
 </script>
-<script src="/tvair-notification.js?v=1.2.0"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.0"></script>
-<script src="/tvair-settings-host.js?v=1.2.0"></script>
-<script src="/tvair-menu-spine.js?v=1.2.0"></script>
+<script src="/tvair-notification.js?v=1.2.1"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.1"></script>
+<script src="/tvair-settings-host.js?v=1.2.1"></script>
+<script src="/tvair-menu-spine.js?v=1.2.1"></script>
 </body>
 </html>

@@ -52,6 +52,9 @@ public sealed class IniSettingsService
     public bool   ShowTvAIrEpgRecTaskbarIcon { get; private set; } = SettingsDefaults.ShowTvAIrEpgRecTaskbarIcon;
     public bool   StartupEnabled        { get; private set; } = SettingsDefaults.StartupEnabled;
 
+    // NETWORK_USAGE_MASTER_INVARIANT
+    public bool NetworkUsageEnabled { get; private set; } = SettingsDefaults.NetworkUsageEnabled;
+
     // NETWORK_ACCESS_SETTINGS_INVARIANT
     public bool NetworkLanAccessEnabled { get; private set; } = SettingsDefaults.NetworkLanAccessEnabled;
     public int NetworkSessionLifetimeMinutes { get; private set; } = SettingsDefaults.NetworkSessionLifetimeMinutes;
@@ -177,6 +180,7 @@ public sealed class IniSettingsService
         UseNodshowOption     = GetBool(dict, "UseNodshowOption",     UseNodshowOption);
         ShowTvAIrEpgRecTaskbarIcon = GetBool(dict, "ShowTvAIrEpgRecTaskbarIcon", ShowTvAIrEpgRecTaskbarIcon);
         StartupEnabled       = GetBool(dict, "StartupEnabled",       StartupEnabled);
+        NetworkUsageEnabled = GetBool(dict, "NetworkUsageEnabled", NetworkUsageEnabled);
         NetworkLanAccessEnabled = GetBool(dict, "NetworkLanAccessEnabled", NetworkLanAccessEnabled);
         NetworkSessionLifetimeMinutes = SettingsDefaults.NormalizeNetworkSessionLifetimeMinutes(GetInt(dict, "NetworkSessionLifetimeMinutes", NetworkSessionLifetimeMinutes));
         NetworkPasswordEncrypted = GetStr(dict, "NetworkPasswordEncrypted", NetworkPasswordEncrypted);
@@ -349,6 +353,7 @@ public sealed class IniSettingsService
         UseNodshowOption     = dto.UseNodshowOption;
         ShowTvAIrEpgRecTaskbarIcon = dto.ShowTvAIrEpgRecTaskbarIcon;
         StartupEnabled       = dto.StartupEnabled;
+        NetworkUsageEnabled = dto.NetworkUsageEnabled;
         NetworkLanAccessEnabled = dto.NetworkLanAccessEnabled;
         NetworkSessionLifetimeMinutes = SettingsDefaults.NormalizeNetworkSessionLifetimeMinutes(dto.NetworkSessionLifetimeMinutes);
         if (dto.ClearNetworkPassword)
@@ -451,6 +456,7 @@ public sealed class IniSettingsService
             $"Port                 = {_persistedPort}",
             "",
             "[Network]",
+            $"NetworkUsageEnabled = {(NetworkUsageEnabled ? "true" : "false")}",
             $"NetworkLanAccessEnabled = {(NetworkLanAccessEnabled ? "true" : "false")}",
             $"NetworkSessionLifetimeMinutes = {NetworkSessionLifetimeMinutes}",
             $"NetworkPasswordEncrypted = {NetworkPasswordEncrypted}",
@@ -579,7 +585,7 @@ public sealed class IniSettingsService
         LaterProgramPriority, PseudoContinuousRecording,
         PreStartMarginSeconds, PostEndMarginSeconds, WakeMinutesBefore,
         WakeAdditionalSeconds, UseMinOption, UseNodshowOption,
-        ShowTvAIrEpgRecTaskbarIcon, StartupEnabled, NetworkLanAccessEnabled,
+        ShowTvAIrEpgRecTaskbarIcon, StartupEnabled, NetworkUsageEnabled, NetworkLanAccessEnabled,
         NetworkSessionLifetimeMinutes, NetworkPasswordEncrypted, RecordingAfterAction,
         RecordingAfterActionDelayMinutes, UserLogDetailEnabled, UserLogDetailReservationSource,
         UserLogDetailScheduledTime, UserLogDetailActualRecordingTime, UserLogDetailRecordingQuality,
@@ -616,6 +622,7 @@ public sealed class IniSettingsService
         UseNodshowOption = state.UseNodshowOption;
         ShowTvAIrEpgRecTaskbarIcon = state.ShowTvAIrEpgRecTaskbarIcon;
         StartupEnabled = state.StartupEnabled;
+        NetworkUsageEnabled = state.NetworkUsageEnabled;
         NetworkLanAccessEnabled = state.NetworkLanAccessEnabled;
         NetworkSessionLifetimeMinutes = state.NetworkSessionLifetimeMinutes;
         NetworkPasswordEncrypted = state.NetworkPasswordEncrypted;
@@ -653,7 +660,7 @@ public sealed class IniSettingsService
         int PreStartMarginSeconds, int PostEndMarginSeconds,
         int WakeMinutesBefore, int WakeAdditionalSeconds,
         bool UseMinOption, bool UseNodshowOption, bool ShowTvAIrEpgRecTaskbarIcon, bool StartupEnabled,
-        bool NetworkLanAccessEnabled, int NetworkSessionLifetimeMinutes, string NetworkPasswordEncrypted,
+        bool NetworkUsageEnabled, bool NetworkLanAccessEnabled, int NetworkSessionLifetimeMinutes, string NetworkPasswordEncrypted,
         string RecordingAfterAction, int RecordingAfterActionDelayMinutes, bool UserLogDetailEnabled,
         bool UserLogDetailReservationSource, bool UserLogDetailScheduledTime, bool UserLogDetailActualRecordingTime,
         bool UserLogDetailRecordingQuality, bool UserLogDetailStateChange, bool UserLogDetailEndOrFailureReason,
@@ -701,6 +708,7 @@ public sealed class IniSettingsService
         UseNodshowOption     = _persistedUseNodshowOption,
         ShowTvAIrEpgRecTaskbarIcon = ShowTvAIrEpgRecTaskbarIcon,
         StartupEnabled       = StartupEnabled,
+        NetworkUsageEnabled = NetworkUsageEnabled,
         NetworkLanAccessEnabled = NetworkLanAccessEnabled,
         NetworkSessionLifetimeMinutes = NetworkSessionLifetimeMinutes,
         NetworkHasPassword = !string.IsNullOrWhiteSpace(NetworkPasswordEncrypted),
@@ -766,6 +774,7 @@ public sealed class IniSettingsService
             PostEndMarginSeconds = current.PostEndMarginSeconds,
             ShowTvAIrEpgRecTaskbarIcon = current.ShowTvAIrEpgRecTaskbarIcon,
             StartupEnabled = current.StartupEnabled,
+            NetworkUsageEnabled = current.NetworkUsageEnabled,
             NetworkLanAccessEnabled = current.NetworkLanAccessEnabled,
             NetworkSessionLifetimeMinutes = current.NetworkSessionLifetimeMinutes,
             RecordingAfterAction = current.RecordingAfterAction,
@@ -1106,6 +1115,7 @@ public class IniSettingsValuesDto
     public bool   UseNodshowOption      { get; set; } = SettingsDefaults.UseNodshowOption;
     public bool   ShowTvAIrEpgRecTaskbarIcon { get; set; } = SettingsDefaults.ShowTvAIrEpgRecTaskbarIcon;
     public bool   StartupEnabled        { get; set; } = SettingsDefaults.StartupEnabled;
+    public bool NetworkUsageEnabled { get; set; } = SettingsDefaults.NetworkUsageEnabled;
     public bool NetworkLanAccessEnabled { get; set; } = SettingsDefaults.NetworkLanAccessEnabled;
     public int NetworkSessionLifetimeMinutes { get; set; } = SettingsDefaults.NetworkSessionLifetimeMinutes;
     public string RecordingAfterAction  { get; set; } = SettingsDefaults.RecordingAfterAction;
@@ -1149,6 +1159,7 @@ public class WebSettingsValuesDto
     public int PostEndMarginSeconds { get; set; } = SettingsDefaults.PostEndMarginSeconds;
     public bool ShowTvAIrEpgRecTaskbarIcon { get; set; } = SettingsDefaults.ShowTvAIrEpgRecTaskbarIcon;
     public bool StartupEnabled { get; set; } = SettingsDefaults.StartupEnabled;
+    public bool NetworkUsageEnabled { get; set; } = SettingsDefaults.NetworkUsageEnabled;
     public bool NetworkLanAccessEnabled { get; set; } = SettingsDefaults.NetworkLanAccessEnabled;
     public int NetworkSessionLifetimeMinutes { get; set; } = SettingsDefaults.NetworkSessionLifetimeMinutes;
     public string RecordingAfterAction { get; set; } = SettingsDefaults.RecordingAfterAction;

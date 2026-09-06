@@ -2619,7 +2619,7 @@ public sealed class EpgScheduler : BackgroundService
 
     /// <summary>
     /// DEVELOPER_APPROVAL_REQUIRED: System EPG / PreRec責務生成は保護領域。
-    /// 事前の開発者明示承認なしに、ON/OFF組合せ、Daily fallback、PreRec置換、6物理録画Tuner責務の契約を変更しない。
+    /// 事前の開発者明示承認なしに、ON/OFF組合せ、PreRec候補選択、6物理録画Tuner責務の契約を変更しない。
     /// 「次」「続けて」「進めて」等は変更承認ではない。他案件の修正に便乗して触らない。
     /// 設定された「○分前EPG確認」を、録画用Tunerごとの直近対象予約へ登録する。
     ///
@@ -2731,8 +2731,9 @@ public sealed class EpgScheduler : BackgroundService
         // 各物理録画Tunerごとの未来先頭を独立に先取りしてはならない。
 
         // SYSTEM_EPG_RESPONSIBILITY_PLAN_SINGLE_SOURCE_INVARIANT:
-        // PreRec Intent生成も予約一覧投影も同じSystemEpgResponsibilityPlanServiceを正本とする。
-        // Daily ON時はDailyを基本状態/収束先とし、上記直近PreRecが載るTunerだけ一時的に置換する。
+        // PreRec候補の「直近」選択はSystemEpgResponsibilityPlanServiceだけを正本とする。
+        // 予約一覧はこの選択結果と永続化済みDaily行をReservationPresentationServiceで比較投影し、
+        // Scheduler内部の責務割当そのものを表示正本として再利用しない。
         // PriorityNameは親予約の現在Allocation結果であり、System側で物理Tunerを独自固定しない。
         var responsibilityPlan = systemEpgResponsibilityPlan.Build(reservationStore.GetAll(), now);
         var selectedParentIdsSet = responsibilityPlan.ParentIds;
@@ -2742,16 +2743,6 @@ public sealed class EpgScheduler : BackgroundService
         var responsibilityMap = string.Join(',', responsibilityPlan.PreRecordResponsibilities
             .OrderBy(x => x.PriorityName, StringComparer.OrdinalIgnoreCase)
             .Select(x => $"{SafeValue(x.PriorityName)}:R{x.ParentReservationId}"));
-        var preRecordPriorityNames = responsibilityPlan.PreRecordResponsibilities
-            .Where(x => !string.IsNullOrWhiteSpace(x.PriorityName))
-            .Select(x => x.PriorityName)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var dailyFallbackMap = ini.EpgEnabled
-            ? string.Join(',', responsibilityPlan.RecordingTuners
-                .Where(t => !preRecordPriorityNames.Contains(t.Name))
-                .Select(t => t.Name)
-                .OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
-            : string.Empty;
         var intentParents = userScheduled
             .Where(r => selectedParentIdsSet.Contains(r.Id))
             .OrderBy(r => r.StartTime)
@@ -2919,7 +2910,7 @@ public sealed class EpgScheduler : BackgroundService
         }
 
         log.Add("EPG_SCHEDULER", "PreRecEpg",
-            $"result={(registeredCount > 0 ? "REGISTERED" : "NO_REGISTER")} candidates={userScheduled.Count} registered={registeredCount} dedupeReused={dedupeReuseCount} dedupeParents=[{string.Join(',', dedupeParentIds.Select(x => $"R{x}"))}] staleDeleted={staleCleanup.Deleted} staleParents=[{staleCleanup.ParentIds}] sourceCandidates={preRecordSourceCandidates.Count} excludedSource={excludedSource} skippedDisabled={skippedDisabled} skippedConflicted={skippedConflicted} skippedExpiredDeadline={skippedExpiredDeadline} deletedExpiredDeadline={deletedExpiredDeadline} preMin={preMin} durMin={durMin} systemMode=daily:{ini.EpgEnabled}/prerec:{ini.EpgPreRecordMinutes > 0} responsibilities=[{responsibilityMap}] dailyFallback=[{dailyFallbackMap}] manualIncluded=True skippedUserChainChild={skippedUserChainChild} countsExclusive=True deletedObsolete={deletedObsoleteChildren} routeMutations={epgEntryMutationCount} wakeRefresh=by_caller rule=system_epg_nearest_dual_axis_global_head_contract");
+            $"result={(registeredCount > 0 ? "REGISTERED" : "NO_REGISTER")} candidates={userScheduled.Count} registered={registeredCount} dedupeReused={dedupeReuseCount} dedupeParents=[{string.Join(',', dedupeParentIds.Select(x => $"R{x}"))}] staleDeleted={staleCleanup.Deleted} staleParents=[{staleCleanup.ParentIds}] sourceCandidates={preRecordSourceCandidates.Count} excludedSource={excludedSource} skippedDisabled={skippedDisabled} skippedConflicted={skippedConflicted} skippedExpiredDeadline={skippedExpiredDeadline} deletedExpiredDeadline={deletedExpiredDeadline} preMin={preMin} durMin={durMin} systemMode=daily:{ini.EpgEnabled}/prerec:{ini.EpgPreRecordMinutes > 0} responsibilities=[{responsibilityMap}] manualIncluded=True skippedUserChainChild={skippedUserChainChild} countsExclusive=True deletedObsolete={deletedObsoleteChildren} routeMutations={epgEntryMutationCount} wakeRefresh=by_caller rule=system_epg_nearest_dual_axis_global_head_contract");
         return epgEntryMutationCount > 0 || registeredCount > 0;
     }
 

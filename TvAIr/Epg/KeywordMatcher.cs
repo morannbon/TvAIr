@@ -241,6 +241,17 @@ public sealed class KeywordMatcher
 
     public int RunMatching()
     {
+        return RunMatchingScoped(null);
+    }
+
+    public int RunMatching(IReadOnlyList<EpgEvent> committedEvents)
+    {
+        ArgumentNullException.ThrowIfNull(committedEvents);
+        return RunMatchingScoped(committedEvents);
+    }
+
+    private int RunMatchingScoped(IReadOnlyList<EpgEvent>? committedEvents)
+    {
         // release_contract KeywordMatcherSingleFlight:
         // EPG imports can complete concurrently (per transport stream and external source).
         // Each completion may request keyword matching.  The existing-reservation snapshot and
@@ -252,11 +263,11 @@ public sealed class KeywordMatcher
         // they re-read the authoritative reservation store and converge idempotently.
         lock (_runMatchingGate)
         {
-            return RunMatchingSingleFlightCore();
+            return RunMatchingSingleFlightCore(committedEvents);
         }
     }
 
-    private int RunMatchingSingleFlightCore()
+    private int RunMatchingSingleFlightCore(IReadOnlyList<EpgEvent>? committedEvents)
     {
         var rules = _rsvStore.GetKeywordRules().Where(r => r.Enabled).OrderBy(r => r.SortOrder).ThenBy(r => r.Id).ToList();
         if (rules.Count == 0) return 0;
@@ -267,14 +278,19 @@ public sealed class KeywordMatcher
 
         var now = DateTime.Now;
         _rsvStore.PurgeExpiredKeywordCancelOnce(now);
-        // One RunMatching execution must observe one programme-source snapshot.  The production
-        // matcher and projection-boundary diagnostics previously called GetAll independently,
-        // duplicating the full projection allocation for every EPG import.  Reuse the same
-        // immutable run-local snapshot for both consumers; matching and guard semantics stay
-        // unchanged while the second full source projection is eliminated.
-        var futureEvents = _programEvents.GetAll()
+        // A full RunMatching execution observes one programme-source snapshot. Incremental EPG
+        // matching instead projects only the rows from the transport stream that was just
+        // committed. Both paths feed the same matching pipeline below; only the input scope differs.
+        // The final EpgCompletePostImport pass remains the full authoritative convergence pass.
+        var sourceEvents = committedEvents is null
+            ? _programEvents.GetAll()
+            : _programEvents.ProjectCommittedDbEvents(committedEvents);
+        var futureEvents = sourceEvents
             .Where(e => e.End > now)
             .ToList();
+        var matchScope = committedEvents is null
+            ? "all_future_programmes_x_all_enabled_rules"
+            : "committed_ts_future_programmes_x_all_enabled_rules";
         var events = GetFutureSafeEvents(futureEvents, now)
             .ToList();
         // ServiceId単独をキーにすると地上波とBS/CSでServiceIdが衝突した際に
@@ -552,7 +568,7 @@ public sealed class KeywordMatcher
         // bounded evidence, but reserve KEYWORD_MATCH_GLOBAL_CROSSCHECK for the post-commit
         // authoritative result emitted after Add/suppression processing completes.
         _log.Add("KEYWORD_MATCH_GLOBAL_PRECOMMIT", "KeywordMatcher",
-            $"result={(crosscheckUnaccounted == 0 ? "SETTLED" : "PENDING_ADD")} scope=all_future_programmes_x_all_enabled_rules events={events.Count} rules={compiled.Count} pairs={crosscheckPairs} expectedOccurrences={crosscheckExpected} existingEvent={crosscheckExistingEvent} existingSchedule={crosscheckExistingSchedule} keywordCancel={crosscheckKeywordCancel} manualStop={crosscheckManualStop} pendingAdd={crosscheckUnaccounted} sourceExpected=[{FormatSourceCounts(crosscheckSourceExpected)}] rule=keyword_match_global_precommit");
+            $"result={(crosscheckUnaccounted == 0 ? "SETTLED" : "PENDING_ADD")} scope={matchScope} events={events.Count} rules={compiled.Count} pairs={crosscheckPairs} expectedOccurrences={crosscheckExpected} existingEvent={crosscheckExistingEvent} existingSchedule={crosscheckExistingSchedule} keywordCancel={crosscheckKeywordCancel} manualStop={crosscheckManualStop} pendingAdd={crosscheckUnaccounted} sourceExpected=[{FormatSourceCounts(crosscheckSourceExpected)}] rule=keyword_match_global_precommit");
         if (crosscheckUnaccounted > 0)
         {
             _log.Add("KEYWORD_MATCH_GLOBAL_PENDING_ADD", "KeywordMatcher",
@@ -686,7 +702,11 @@ public sealed class KeywordMatcher
 
                 try
                 {
-                    var reservationId = _rsvStore.Add(rsv);
+                    // BROADCAST_SLOT_EVENT_REBIND_INVARIANT:
+                    // 自動検索も番組表/Pluginと同じatomic parent入口を通す。EventId差替えで同一放送枠の
+                    // 旧予約が残っていても別ReservationIdを生成せず、既存予約へ収束させる。
+                    var addResult = _rsvStore.AddOrGetActiveParent(rsv);
+                    var reservationId = addResult.ReservationId;
                     _projectionMetadataStore.UpsertFromProjectedEvent(reservationId, ev);
                     if (string.Equals(ev.ProjectionState, ProjectedEventStates.OverlayOnly, StringComparison.OrdinalIgnoreCase)
                         || string.Equals(ev.SourceKind, ProjectedEventSourceKinds.ExternalEpg, StringComparison.OrdinalIgnoreCase))
@@ -696,9 +716,16 @@ public sealed class KeywordMatcher
                     }
                     existing.Add(evKey);
                     existingSchedule.Add(scheduleKey);
-                    totalAdded++;
-                    _log.Add("RESERVE_ENTRY", "Keyword", $"共通入口要求/確定 source=Keyword id=R{reservationId} title=[{safeTitle}] service=[{canonicalServiceName}] ruleId={rule.Id} rule=[{TrimRuleLabel(rule.Pattern)}] start={ev.Start:MM/dd HH:mm} end={ev.End:MM/dd HH:mm}");
-                    _log.Add("KEYWORD_MATCH", safeTitle, $"自動検索予約: id=R{reservationId} 「{safeTitle}」 ({ev.Start:MM/dd HH:mm}) ルール:「{TrimRuleLabel(rule.Pattern)}」");
+                    if (addResult.Added)
+                    {
+                        totalAdded++;
+                        _log.Add("RESERVE_ENTRY", "Keyword", $"共通入口要求/確定 source=Keyword id=R{reservationId} title=[{safeTitle}] service=[{canonicalServiceName}] ruleId={rule.Id} rule=[{TrimRuleLabel(rule.Pattern)}] start={ev.Start:MM/dd HH:mm} end={ev.End:MM/dd HH:mm}");
+                        _log.Add("KEYWORD_MATCH", safeTitle, $"自動検索予約: id=R{reservationId} 「{safeTitle}」 ({ev.Start:MM/dd HH:mm}) ルール:「{TrimRuleLabel(rule.Pattern)}」");
+                    }
+                    else if (addResult.RefreshedBroadcastSlot)
+                    {
+                        _log.Add("RESERVE_ENTRY", "Keyword", $"共通入口要求/更新 source=Keyword id=R{reservationId} title=[{safeTitle}] service=[{canonicalServiceName}] ruleId={rule.Id} rule=[{TrimRuleLabel(rule.Pattern)}] start={ev.Start:MM/dd HH:mm} end={ev.End:MM/dd HH:mm} newReservationId=False broadcastSlotRefreshed=True rule=release_contract");
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -754,7 +781,7 @@ public sealed class KeywordMatcher
         }
 
         _log.Add("KEYWORD_MATCH_GLOBAL_CROSSCHECK", "KeywordMatcher",
-            $"result={(postUnaccounted == 0 ? "OK" : "UNACCOUNTED")} phase=post_commit scope=all_future_programmes_x_all_enabled_rules events={events.Count} rules={compiled.Count} pairs={crosscheckPairs} expectedOccurrences={crosscheckExpected} existingEvent={postExistingEvent} existingSchedule={postExistingSchedule} keywordCancel={postKeywordCancel} manualStop={postManualStop} unaccounted={postUnaccounted} conservation={crosscheckExpected}={postExistingEvent}+{postExistingSchedule}+{postKeywordCancel}+{postManualStop}+{postUnaccounted} sourceExpected=[{FormatSourceCounts(crosscheckSourceExpected)}] addedThisRun={totalAdded} rule=keyword_match_global_crosscheck");
+            $"result={(postUnaccounted == 0 ? "OK" : "UNACCOUNTED")} phase=post_commit scope={matchScope} events={events.Count} rules={compiled.Count} pairs={crosscheckPairs} expectedOccurrences={crosscheckExpected} existingEvent={postExistingEvent} existingSchedule={postExistingSchedule} keywordCancel={postKeywordCancel} manualStop={postManualStop} unaccounted={postUnaccounted} conservation={crosscheckExpected}={postExistingEvent}+{postExistingSchedule}+{postKeywordCancel}+{postManualStop}+{postUnaccounted} sourceExpected=[{FormatSourceCounts(crosscheckSourceExpected)}] addedThisRun={totalAdded} rule=keyword_match_global_crosscheck");
         if (postUnaccounted > 0)
         {
             var postRuleSummary = string.Join(",", postRuleUnaccounted.OrderBy(x => x.Key).Select(x => $"rule{x.Key}={x.Value}"));

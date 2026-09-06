@@ -74,13 +74,16 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
         ExternalProgramSource = hostApis.ExternalProgramSource;
         Channels = hostApis.Channels;
         Tuners = hostApis.Tuners;
-        Viewers = new RuntimeViewersApi(hostApis.Viewers);
+        _runtimeViewersApi = new RuntimeViewersApi(hostApis.Viewers);
+        Viewers = _runtimeViewersApi;
+        ViewerReservations = new RuntimeViewerReservationsApi(hostApis.ViewerReservations);
         TimedTextStreams = hostApis.TimedTextStreams;
         Backup = hostApis.Backup;
         Settings = hostApis.Settings;
         System = hostApis.System;
         Logs = hostApis.Logs;
         Plugins = hostApis.Plugins;
+        ExternalLookup = hostApis.ExternalLookup;
     }
 
     private readonly PluginRuntimeManager _runtimeManager;
@@ -92,6 +95,7 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
     private readonly PluginWebRuntimeManager _webRuntimeManager;
     private readonly PluginEventChannel _eventChannel;
     private readonly VideoOverlayHost _videoOverlayHost;
+    private readonly RuntimeViewersApi _runtimeViewersApi;
     private readonly TvAIr.Core.LogRepository _log;
 
     public ITvAirRuntimeApi Runtime { get; }
@@ -118,12 +122,14 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
     public ITvAirChannelsApi Channels { get; }
     public ITvAirTunersApi Tuners { get; }
     public TvAIrPlugin.Viewers.ITvAirViewersApi Viewers { get; }
+    public TvAIrPlugin.Viewers.ITvAirViewerReservationsApi ViewerReservations { get; }
     public ITvAirTimedTextStreamsApi TimedTextStreams { get; }
     public ITvAirBackupApi Backup { get; }
     public ITvAirSettingsApi Settings { get; }
     public ITvAirSystemApi System { get; }
     public ITvAirLogsApi Logs { get; }
     public ITvAirPluginsApi Plugins { get; }
+    public ITvAirExternalLookupApi ExternalLookup { get; }
 
 
     private sealed class RuntimePathPickerApi : ITvAirPathPickerApi
@@ -156,9 +162,11 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
         }
     }
 
-    private sealed class RuntimeViewersApi : TvAIrPlugin.Viewers.ITvAirViewersApi
+    private sealed class RuntimeViewersApi : TvAIrPlugin.Viewers.ITvAirViewersApi, IDisposable
     {
         private readonly global::TvAIrPlugin.ITvAirViewersApi _hostApi;
+        private readonly object _subscriptionGate = new();
+        private readonly List<IDisposable> _preemptionSubscriptions = new();
 
         public RuntimeViewersApi(global::TvAIrPlugin.ITvAirViewersApi hostApi)
         {
@@ -271,6 +279,53 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
                 Reason = "runtime_viewer_stop"
             });
             return Task.FromResult(ToRuntimeOperation(result));
+        }
+
+        public IDisposable SubscribeOperationPreempting(Action<TvAIrPlugin.Viewers.TvAirViewerOperationPreempting> handler)
+        {
+            ArgumentNullException.ThrowIfNull(handler);
+            var subscription = _hostApi.SubscribeOperationPreempting(dto => handler(new TvAIrPlugin.Viewers.TvAirViewerOperationPreempting
+            {
+                ViewerProfileId = dto.ViewerProfileId,
+                OperationId = dto.OperationId,
+                SourceKind = dto.SourceKind,
+                SourceOwnerId = dto.SourceOwnerId,
+                ViewerReservationId = dto.ViewerReservationId,
+                OccurredAt = dto.OccurredAt
+            }));
+            lock (_subscriptionGate) _preemptionSubscriptions.Add(subscription);
+            return new TrackedSubscription(this, subscription);
+        }
+
+        private void RemoveSubscription(IDisposable subscription)
+        {
+            lock (_subscriptionGate) _preemptionSubscriptions.Remove(subscription);
+            subscription.Dispose();
+        }
+
+        public void Dispose()
+        {
+            IDisposable[] subscriptions;
+            lock (_subscriptionGate)
+            {
+                subscriptions = _preemptionSubscriptions.ToArray();
+                _preemptionSubscriptions.Clear();
+            }
+            foreach (var subscription in subscriptions) subscription.Dispose();
+        }
+
+        private sealed class TrackedSubscription : IDisposable
+        {
+            private RuntimeViewersApi? _owner;
+            private IDisposable? _inner;
+            public TrackedSubscription(RuntimeViewersApi owner, IDisposable inner) { _owner = owner; _inner = inner; }
+            public void Dispose()
+            {
+                var inner = Interlocked.Exchange(ref _inner, null);
+                var owner = Interlocked.Exchange(ref _owner, null);
+                if (inner is not null && owner is not null) owner.RemoveSubscription(inner);
+                else inner?.Dispose();
+            }
         }
 
         private TvAirOperationResult<TvAIrPlugin.Viewers.TvAirViewerOperationDto> ToRuntimeOperation(
@@ -425,6 +480,73 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
                     : null,
                 ChannelSpace = source.ChannelSpace,
                 ChannelIndex = source.ChannelIndex
+            };
+    }
+
+    private sealed class RuntimeViewerReservationsApi : TvAIrPlugin.Viewers.ITvAirViewerReservationsApi
+    {
+        private readonly global::TvAIrPlugin.ITvAirViewerReservationsApi _hostApi;
+        public RuntimeViewerReservationsApi(global::TvAIrPlugin.ITvAirViewerReservationsApi hostApi)
+            => _hostApi = hostApi ?? throw new ArgumentNullException(nameof(hostApi));
+
+        public Task<TvAirOperationResult<TvAIrPlugin.Viewers.TvAirViewerReservation>> CreateAsync(
+            TvAIrPlugin.Viewers.TvAirViewerReservationCreateRequest request, CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(request);
+            cancellationToken.ThrowIfCancellationRequested();
+            var result = _hostApi.Create(new global::TvAIrPlugin.TvAirViewerReservationCreateRequestDto
+            {
+                ViewerProfileId = request.ViewerProfileId,
+                NetworkId = request.Service.NetworkId,
+                TransportStreamId = request.Service.TransportStreamId,
+                ServiceId = request.Service.ServiceId,
+                EventId = request.EventId,
+                ScheduledStart = request.ScheduledStart,
+                ScheduledEnd = request.ScheduledEnd
+            });
+            return Task.FromResult(ToRuntimeResult(result));
+        }
+
+        public Task<TvAirOperationResult<TvAIrPlugin.Viewers.TvAirViewerReservation>> CancelAsync(string reservationId, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(ToRuntimeResult(_hostApi.Cancel(reservationId)));
+        }
+
+        public IReadOnlyList<TvAIrPlugin.Viewers.TvAirViewerReservation> List(TvAIrPlugin.Viewers.TvAirViewerReservationQuery? query = null)
+            => _hostApi.List(new global::TvAIrPlugin.TvAirViewerReservationQueryDto
+            {
+                ViewerProfileId = query?.ViewerProfileId,
+                IncludeTerminal = query?.IncludeTerminal ?? false
+            }).Select(ToRuntimeReservation).ToArray();
+
+        private static TvAirOperationResult<TvAIrPlugin.Viewers.TvAirViewerReservation> ToRuntimeResult(global::TvAIrPlugin.TvAirViewerReservationMutationResultDto result)
+        {
+            if (result.Success && result.Reservation is { } reservation)
+                return TvAirOperationResult<TvAIrPlugin.Viewers.TvAirViewerReservation>.Ok(ToRuntimeReservation(reservation));
+            return TvAirOperationResult<TvAIrPlugin.Viewers.TvAirViewerReservation>.Fail(
+                string.Equals(result.ErrorCode, "viewerReservationNotFound", StringComparison.OrdinalIgnoreCase) ? TvAirErrorCode.EntityNotFound : TvAirErrorCode.InvalidRequest,
+                string.IsNullOrWhiteSpace(result.Message) ? "Viewer reservation operation failed." : result.Message);
+        }
+
+        private static TvAIrPlugin.Viewers.TvAirViewerReservation ToRuntimeReservation(global::TvAIrPlugin.TvAirViewerReservationDto source)
+            => new()
+            {
+                ReservationId = source.ReservationId,
+                ViewerProfileId = source.ViewerProfileId,
+                Service = new TvAIrPlugin.Viewers.TvAirServiceIdentityDto
+                {
+                    NetworkId = checked((ushort)source.NetworkId),
+                    TransportStreamId = checked((ushort)source.TransportStreamId),
+                    ServiceId = checked((ushort)source.ServiceId)
+                },
+                EventId = checked((ushort)source.EventId),
+                ScheduledStart = source.ScheduledStart,
+                ScheduledEnd = source.ScheduledEnd,
+                State = source.State,
+                FailureReason = source.FailureReason,
+                CreatedAt = source.CreatedAt,
+                UpdatedAt = source.UpdatedAt
             };
     }
 
@@ -926,6 +1048,7 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
 
     public void Dispose()
     {
+        _runtimeViewersApi.Dispose();
         _videoOverlayHost.Dispose();
         _webRuntimeManager.Dispose();
         _eventChannel.Dispose();

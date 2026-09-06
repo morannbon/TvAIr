@@ -18,6 +18,25 @@ public sealed class DbProgramEventSource : IProgramEventSource
 
     public DbProgramEventSource(EpgStore epgStore) => _epgStore = epgStore;
 
+    public IReadOnlyList<ProjectedProgramEvent> ProjectCommittedDbEvents(IReadOnlyList<EpgEvent> committedEvents)
+    {
+        ArgumentNullException.ThrowIfNull(committedEvents);
+        if (committedEvents.Count == 0) return Array.Empty<ProjectedProgramEvent>();
+
+        // CommitCapture normalizes descriptor-backed fields before writing. Read only the keys
+        // from this committed batch so incremental matching sees the same DB authority as GetAll(),
+        // without rebuilding the full DB projection snapshot after every transport-stream commit.
+        var keys = committedEvents
+            .Select(e => (e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId))
+            .Distinct()
+            .ToArray();
+        var storedEvents = _epgStore.GetByEventKeys(keys);
+        var rows = new ProjectedProgramEvent[storedEvents.Count];
+        for (var i = 0; i < storedEvents.Count; i++)
+            rows[i] = ToProjected(storedEvents[i]);
+        return rows;
+    }
+
     public IReadOnlyList<ProjectedProgramEvent> GetAll()
         => GetSnapshot().Rows;
 

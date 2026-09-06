@@ -46,6 +46,7 @@ public sealed class SettingsChangeApplicationService
     private readonly EpgScheduler _epgScheduler;
     private readonly StartupRegistryService _startupService;
     private readonly NetworkAccessSecurity _networkSecurity;
+    private readonly NetworkUsageGate _networkUsage;
     private readonly ReservationAllocationRouteService _allocationRoute;
     private readonly ReservationScheduler _reservationScheduler;
     private readonly LogRepository _log;
@@ -59,6 +60,7 @@ public sealed class SettingsChangeApplicationService
         EpgScheduler epgScheduler,
         StartupRegistryService startupService,
         NetworkAccessSecurity networkSecurity,
+        NetworkUsageGate networkUsage,
         ReservationAllocationRouteService allocationRoute,
         ReservationScheduler reservationScheduler,
         LogRepository log,
@@ -70,6 +72,7 @@ public sealed class SettingsChangeApplicationService
         _epgScheduler = epgScheduler;
         _startupService = startupService;
         _networkSecurity = networkSecurity;
+        _networkUsage = networkUsage;
         _allocationRoute = allocationRoute;
         _reservationScheduler = reservationScheduler;
         _log = log;
@@ -119,6 +122,7 @@ public sealed class SettingsChangeApplicationService
         UseNodshowOption = current.UseNodshowOption,
         ShowTvAIrEpgRecTaskbarIcon = requested.ShowTvAIrEpgRecTaskbarIcon,
         StartupEnabled = requested.StartupEnabled,
+        NetworkUsageEnabled = requested.NetworkUsageEnabled,
         NetworkLanAccessEnabled = requested.NetworkLanAccessEnabled,
         NetworkSessionLifetimeMinutes = requested.NetworkSessionLifetimeMinutes,
         RecordingAfterAction = requested.RecordingAfterAction,
@@ -263,7 +267,9 @@ public sealed class SettingsChangeApplicationService
         var taskPasswordChanged =
             !string.IsNullOrEmpty(dto.TaskPasswordPlain) ||
             (dto.ClearTaskPassword && before.TaskHasPassword);
+        var networkUsageChanged = before.NetworkUsageEnabled != after.NetworkUsageEnabled;
         var networkAccessChanged =
+            networkUsageChanged ||
             before.NetworkLanAccessEnabled != after.NetworkLanAccessEnabled ||
             before.NetworkSessionLifetimeMinutes != after.NetworkSessionLifetimeMinutes ||
             before.NetworkHasPassword != after.NetworkHasPassword ||
@@ -345,7 +351,14 @@ public sealed class SettingsChangeApplicationService
         var postCommitWarnings = new List<string>();
         var revokedNetworkSessions = 0;
         var clearedNetworkLoginFailures = 0;
-        if ((before.NetworkLanAccessEnabled && !after.NetworkLanAccessEnabled) || networkPasswordChanged)
+        if (networkUsageChanged)
+        {
+            _networkUsage.Apply(after.NetworkUsageEnabled);
+            _log.Add("NETWORK_USAGE_MASTER", "Settings",
+                $"result=CHANGED enabled={after.NetworkUsageEnabled} mode={(after.NetworkUsageEnabled ? "normal" : "closed_network")} nonLoopback={(after.NetworkUsageEnabled ? "evaluate_lower_policy" : "deny")} inFlightExternal={(after.NetworkUsageEnabled ? "unchanged" : "cancel")} rule=network_usage_master_contract");
+        }
+
+        if ((before.NetworkUsageEnabled && !after.NetworkUsageEnabled) || (before.NetworkLanAccessEnabled && !after.NetworkLanAccessEnabled) || networkPasswordChanged)
         {
             // NETWORK_ACCESS_IMMEDIATE_SESSION_INVALIDATION_CONTRACT
             // LAN無効化は新規要求を拒否するだけでなく、既存セッションもその場で失効させる。
@@ -353,11 +366,11 @@ public sealed class SettingsChangeApplicationService
             // パスワード変更時は旧資格情報で発行したセッションに加え、旧パスワード由来の
             // login failure/blockも破棄し、新しい資格情報を保存直後から利用可能にする。
             var invalidation = _networkSecurity.InvalidateAccessState(
-                clearLoginFailures: networkPasswordChanged);
+                clearLoginFailures: networkPasswordChanged || (before.NetworkUsageEnabled && !after.NetworkUsageEnabled));
             revokedNetworkSessions = invalidation.RevokedSessions;
             clearedNetworkLoginFailures = invalidation.ClearedLoginFailures;
             _log.Add("NETWORK_ACCESS_SESSION_INVALIDATED", "Settings",
-                $"reason={(networkPasswordChanged ? "credential_changed" : "lan_disabled")} revoked={revokedNetworkSessions} clearedLoginFailures={clearedNetworkLoginFailures} lan={before.NetworkLanAccessEnabled}->{after.NetworkLanAccessEnabled} rule=network_access_immediate_apply_contract");
+                $"reason={(networkPasswordChanged ? "credential_changed" : (before.NetworkUsageEnabled && !after.NetworkUsageEnabled ? "network_master_disabled" : "lan_disabled"))} revoked={revokedNetworkSessions} clearedLoginFailures={clearedNetworkLoginFailures} network={before.NetworkUsageEnabled}->{after.NetworkUsageEnabled} lan={before.NetworkLanAccessEnabled}->{after.NetworkLanAccessEnabled} rule=network_access_immediate_apply_contract");
         }
 
         if (channelMapChanged)
@@ -545,6 +558,7 @@ public sealed class SettingsChangeApplicationService
             current.UseMinOption != requested.UseMinOption || current.UseNodshowOption != requested.UseNodshowOption ||
             current.ShowTvAIrEpgRecTaskbarIcon != requested.ShowTvAIrEpgRecTaskbarIcon ||
             current.StartupEnabled != requested.StartupEnabled ||
+            current.NetworkUsageEnabled != requested.NetworkUsageEnabled ||
             current.NetworkLanAccessEnabled != requested.NetworkLanAccessEnabled ||
             current.NetworkSessionLifetimeMinutes != SettingsDefaults.NormalizeNetworkSessionLifetimeMinutes(requested.NetworkSessionLifetimeMinutes) ||
             !EqualsIgnoreCase(current.RecordingAfterAction, IniSettingsService.NormalizeRecordingAfterAction(requested.RecordingAfterAction)) ||
@@ -606,7 +620,7 @@ public sealed class SettingsChangeApplicationService
             throw new SettingsValidationException(nameof(IniSettingsUpdateDto.NetworkPasswordPlain), $"接続用パスワードは{SettingsDefaults.NetworkPasswordMinLength}文字以上で入力してください。");
 
         var willHavePassword = !requested.ClearNetworkPassword && (before.NetworkHasPassword || hasNewPassword);
-        if (requested.NetworkLanAccessEnabled && !willHavePassword)
+        if (requested.NetworkUsageEnabled && requested.NetworkLanAccessEnabled && !willHavePassword)
             throw new SettingsValidationException(nameof(IniSettingsUpdateDto.NetworkPasswordPlain), "LANからの接続を許可するには、接続用パスワードを設定してください。");
     }
 

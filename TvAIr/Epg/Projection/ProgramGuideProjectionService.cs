@@ -5,7 +5,8 @@ namespace TvAIr.Epg.Projection;
 
 /// <summary>
 /// DB由来イベントと外部EPGイベントをProjectedProgramEventへ合成する入口。
-/// 現段階では外部EPGストアは空なので、既存出力はDbProgramEventSourceと同一になる。
+/// DB世代と外部EPG世代が変わらない間は、全体の合成結果を1つのimmutable snapshotとして再利用する。
+/// GetByRangeは同じsnapshotから範囲抽出し、日付移動ごとの再Merge・再投影を行わない。
 /// </summary>
 public sealed class ProgramGuideProjectionService : IProgramEventSource
 {
@@ -22,11 +23,87 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
         _log = log;
     }
 
+    public IReadOnlyList<ProjectedProgramEvent> ProjectCommittedDbEvents(IReadOnlyList<EpgEvent> committedEvents)
+    {
+        ArgumentNullException.ThrowIfNull(committedEvents);
+        var dbEvents = _dbSource.ProjectCommittedDbEvents(committedEvents);
+        if (dbEvents.Count == 0) return dbEvents;
+
+        var externalSnapshot = _externalStore.GetAll();
+        if (externalSnapshot.Count == 0) return dbEvents;
+
+        // Incremental matching is scoped to rows that were just committed.  Preserve the same
+        // DB-first overlay semantics as GetAll(), but do not rebuild the unrelated full guide.
+        var serviceKeys = dbEvents
+            .Select(e => (e.NetworkId, e.TransportStreamId, e.ServiceId))
+            .ToHashSet();
+        var relevantExternal = externalSnapshot
+            .Where(e => serviceKeys.Contains((e.NetworkId, e.TransportStreamId, e.ServiceId)))
+            .ToArray();
+        if (relevantExternal.Length == 0) return dbEvents;
+
+        var externalByEventIdentity = relevantExternal
+            .Where(e => e.EventId != 0)
+            .GroupBy(e => EventIdentity(e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId))
+            .ToDictionary(g => g.Key, g => g.ToArray());
+        var externalByTimingIdentity = relevantExternal
+            .GroupBy(e => TimingIdentity(e.NetworkId, e.TransportStreamId, e.ServiceId, e.Start, e.End))
+            .ToDictionary(g => g.Key, g => g.ToArray());
+
+        ExternalEpgEvent? FindExternal(ProjectedProgramEvent db)
+        {
+            if (db.EventId != 0
+                && externalByEventIdentity.TryGetValue(
+                    EventIdentity(db.NetworkId, db.TransportStreamId, db.ServiceId, db.EventId),
+                    out var sameEventId))
+            {
+                var exact = sameEventId.FirstOrDefault(e => IsSameBroadcastEvent(db, e));
+                if (exact is not null) return exact;
+            }
+
+            return externalByTimingIdentity.TryGetValue(
+                    TimingIdentity(db.NetworkId, db.TransportStreamId, db.ServiceId, db.Start, db.End),
+                    out var sameTiming)
+                ? sameTiming.FirstOrDefault(e => IsSameBroadcastEvent(db, e))
+                : null;
+        }
+
+        var result = new ProjectedProgramEvent[dbEvents.Count];
+        for (var i = 0; i < dbEvents.Count; i++)
+        {
+            var db = dbEvents[i];
+            var external = FindExternal(db);
+            result[i] = external is null ? db : OverlayDbEvent(db, external);
+        }
+
+        return result;
+    }
+
     public IReadOnlyList<ProjectedProgramEvent> GetAll()
     {
-#if TVAIR_DEVELOPER_DIAGNOSTICS
-        var allocatedAtEntry = GC.GetTotalAllocatedBytes(precise: false);
-#endif
+        var snapshot = GetFullMergedSnapshot();
+        return snapshot.Rows;
+    }
+
+    public IReadOnlyList<ProjectedProgramEvent> GetByRange(DateTime from, DateTime to)
+    {
+        // ProgramGuideProjectionContract:
+        // 日付移動は表示範囲を変えるだけで、DB/External EPGの世代自体は変えない。
+        // 同一revision中はGetAllと同じ合成snapshotを正本とし、範囲ごとのMergeを禁止する。
+        // 日付別cacheを積み増さず、保持する合成世代は常にこの1本だけとする。
+        var snapshot = GetFullMergedSnapshot();
+        var rows = new List<ProjectedProgramEvent>();
+        foreach (var row in snapshot.Rows)
+        {
+            if (row.End > from && row.Start < to)
+                rows.Add(row);
+        }
+
+        return rows;
+    }
+
+    private FullMergedSnapshot GetFullMergedSnapshot()
+    {
         var dbSnapshot = _dbSource.CaptureProjectionSnapshot();
         var externalSnapshot = _externalStore.CaptureProjectionSnapshot();
 
@@ -34,12 +111,7 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
         if (cached is not null
             && cached.DbRevision == dbSnapshot.Revision
             && cached.ExternalRevision == externalSnapshot.Revision)
-        {
-#if TVAIR_DEVELOPER_DIAGNOSTICS
-            LogProjectionAllocation("GetAll", allocatedAtEntry, dbSnapshot.Rows.Count, externalSnapshot.Rows.Count, cached.Rows.Count);
-#endif
-            return cached.Rows;
-        }
+            return cached;
 
         lock (_fullSnapshotGate)
         {
@@ -47,48 +119,21 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
             if (cached is not null
                 && cached.DbRevision == dbSnapshot.Revision
                 && cached.ExternalRevision == externalSnapshot.Revision)
-            {
-#if TVAIR_DEVELOPER_DIAGNOSTICS
-                LogProjectionAllocation("GetAll", allocatedAtEntry, dbSnapshot.Rows.Count, externalSnapshot.Rows.Count, cached.Rows.Count);
-#endif
-                return cached.Rows;
-            }
+                return cached;
 
             var merged = Merge(dbSnapshot.Rows, externalSnapshot.Rows, _log, "GetAll", null, null);
             var stableRows = Array.AsReadOnly(merged.ToArray());
-            cached = new FullMergedSnapshot(dbSnapshot.Revision, externalSnapshot.Revision, stableRows);
+            cached = new FullMergedSnapshot(
+                dbSnapshot.Revision,
+                externalSnapshot.Revision,
+                dbSnapshot.Rows.Count,
+                externalSnapshot.Rows.Count,
+                stableRows);
             Volatile.Write(ref _fullSnapshot, cached);
-#if TVAIR_DEVELOPER_DIAGNOSTICS
-            LogProjectionAllocation("GetAll", allocatedAtEntry, dbSnapshot.Rows.Count, externalSnapshot.Rows.Count, stableRows.Count);
-#endif
-            return stableRows;
+            return cached;
         }
     }
 
-    public IReadOnlyList<ProjectedProgramEvent> GetByRange(DateTime from, DateTime to)
-    {
-#if TVAIR_DEVELOPER_DIAGNOSTICS
-        var allocatedAtEntry = GC.GetTotalAllocatedBytes(precise: false);
-#endif
-        var db = _dbSource.GetByRange(from, to);
-        var external = _externalStore.GetByRange(from, to);
-        var route = $"GetByRange:{from:yyyyMMddHHmm}-{to:yyyyMMddHHmm}";
-        var merged = Merge(db, external, _log, route, from, to);
-#if TVAIR_DEVELOPER_DIAGNOSTICS
-        LogProjectionAllocation(route, allocatedAtEntry, db.Count, external.Count, merged.Count);
-#endif
-        return merged;
-    }
-
-#if TVAIR_DEVELOPER_DIAGNOSTICS
-    private void LogProjectionAllocation(string route, long allocatedAtEntry, int dbCount, int externalCount, int mergedCount)
-    {
-        var allocatedAtExit = GC.GetTotalAllocatedBytes(precise: false);
-        var allocatedDelta = Math.Max(0, allocatedAtExit - allocatedAtEntry);
-        _log.Add("PROGRAM_GUIDE_PROJECTION_ALLOCATION", "ExternalEpg",
-            $"result=OK route={route} allocatedEntryBytes={allocatedAtEntry} allocatedExitBytes={allocatedAtExit} allocatedDeltaBytes={allocatedDelta} dbEvents={dbCount} externalEvents={externalCount} merged={mergedCount} scope=process_wide_approximate concurrentAllocationsMayBeIncluded=True rule=longrun_memory_allocation_diagnostic");
-    }
-#endif
 
     public ProjectedProgramEvent? GetByEventKey(ushort networkId, ushort transportStreamId, ushort serviceId, ushort eventId)
     {
@@ -152,7 +197,6 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
         if (externalEvents.Count == 0) return dbEvents;
 
 #if TVAIR_DEVELOPER_DIAGNOSTICS
-        var allocatedAtMergeEntry = GC.GetTotalAllocatedBytes(precise: false);
         var elapsed = Stopwatch.StartNew();
 #endif
         var result = new List<ProjectedProgramEvent>(dbEvents.Count + externalEvents.Count);
@@ -274,10 +318,8 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
         var merged = result.OrderBy(e => e.Start).ThenBy(e => e.NetworkId).ThenBy(e => e.TransportStreamId).ThenBy(e => e.ServiceId).ToList();
 #if TVAIR_DEVELOPER_DIAGNOSTICS
         elapsed.Stop();
-        var allocatedAtMergeExit = GC.GetTotalAllocatedBytes(precise: false);
-        var mergeAllocatedDelta = Math.Max(0, allocatedAtMergeExit - allocatedAtMergeEntry);
         log.Add("PROGRAM_GUIDE_PROJECTION_MERGE", "ExternalEpg",
-            $"result=OK route={route} dbEvents={dbEvents.Count} externalEvents={externalEvents.Count} dbWithOverlay={dbWithOverlay} overlayOnly={overlayOnly} directDbPromoted={directDbPromoted} externalSuppressedByDbIdentity={externalSuppressedByDbIdentity} overlayFragments={overlayFragments} overlayFullyCovered={overlayFullyCovered} directDbLookupKeys={directDbLookupKeys} directDbLookupRows={directDbLookupRows} merged={merged.Count} elapsedMs={elapsed.ElapsedMilliseconds} mergeAllocatedDeltaBytes={mergeAllocatedDelta} allocationScope=process_wide_approximate matchStrategy=request_local_identity_index directDbStrategy=batched_event_identity_lookup target=runtime_projection rule=program_guide_projection_contract");
+            $"result=OK route={route} dbEvents={dbEvents.Count} externalEvents={externalEvents.Count} dbWithOverlay={dbWithOverlay} overlayOnly={overlayOnly} directDbPromoted={directDbPromoted} externalSuppressedByDbIdentity={externalSuppressedByDbIdentity} overlayFragments={overlayFragments} overlayFullyCovered={overlayFullyCovered} directDbLookupKeys={directDbLookupKeys} directDbLookupRows={directDbLookupRows} merged={merged.Count} elapsedMs={elapsed.ElapsedMilliseconds} matchStrategy=request_local_identity_index directDbStrategy=batched_event_identity_lookup target=runtime_projection rule=program_guide_projection_contract");
 #endif
         return merged;
     }
@@ -487,6 +529,8 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
     private sealed record FullMergedSnapshot(
         long DbRevision,
         long ExternalRevision,
+        int DbCount,
+        int ExternalCount,
         IReadOnlyList<ProjectedProgramEvent> Rows);
 
 }

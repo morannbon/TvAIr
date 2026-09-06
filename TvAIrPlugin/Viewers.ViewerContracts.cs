@@ -140,4 +140,65 @@ public interface ITvAirViewersApi
     Task<TvAirOperationResult<TvAirViewerOperationDto>> RestartAsync(TvAirViewerRestartRequest request, CancellationToken cancellationToken = default);
     Task<TvAirOperationResult<TvAirViewerOperationDto>> ActivateAsync(TvAirViewerActivateRequest request, CancellationToken cancellationToken = default);
     Task<TvAirOperationResult<TvAirViewerOperationDto>> StopAsync(TvAirViewerStopRequest request, CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Registers a synchronous profile-scoped preemption callback. The callback runs under the Host
+    /// ViewerProfile operation gate immediately before a Host-owned explicit Viewer Operation.
+    /// Handlers must only clear plugin-local automatic state and must not start another Viewer Operation.
+    /// Disposing the returned registration removes the callback.
+    /// </summary>
+    IDisposable SubscribeOperationPreempting(Action<TvAirViewerOperationPreempting> handler);
+}
+
+public sealed record TvAirViewerOperationPreempting
+{
+    public required string ViewerProfileId { get; init; }
+    public required string OperationId { get; init; }
+    public required string SourceKind { get; init; }
+    public string SourceOwnerId { get; init; } = string.Empty;
+    public string ViewerReservationId { get; init; } = string.Empty;
+    public DateTimeOffset OccurredAt { get; init; }
+}
+
+/// <summary>
+/// Requests one future Host-owned Viewer Operation. ViewerProfileId + ScheduledStart is the execution-slot identity;
+/// ScheduledEnd is programme metadata and never extends ViewerProfile occupancy.
+/// </summary>
+public sealed record TvAirViewerReservationCreateRequest
+{
+    public required string ViewerProfileId { get; init; }
+    public required TvAirServiceIdentityDto Service { get; init; }
+    public required ushort EventId { get; init; }
+    public required DateTimeOffset ScheduledStart { get; init; }
+    public DateTimeOffset? ScheduledEnd { get; init; }
+}
+
+public sealed record TvAirViewerReservationQuery
+{
+    public string? ViewerProfileId { get; init; }
+    public bool IncludeTerminal { get; init; }
+}
+
+public sealed record TvAirViewerReservation
+{
+    public required string ReservationId { get; init; }
+    public required string ViewerProfileId { get; init; }
+    public required TvAirServiceIdentityDto Service { get; init; }
+    public required ushort EventId { get; init; }
+    public required DateTimeOffset ScheduledStart { get; init; }
+    public DateTimeOffset? ScheduledEnd { get; init; }
+    public required string State { get; init; }
+    public string FailureReason { get; init; } = string.Empty;
+    public DateTimeOffset CreatedAt { get; init; }
+    public DateTimeOffset UpdatedAt { get; init; }
+}
+
+/// <summary>
+/// Host-owned one-shot Viewer Reservation contract. A successful Viewer Operation completes the reservation exactly once;
+/// later EPG changes, manual tuning, zapping, window lifetime, or Host restart must not replay that reservation.
+/// </summary>
+public interface ITvAirViewerReservationsApi
+{
+    Task<TvAirOperationResult<TvAirViewerReservation>> CreateAsync(TvAirViewerReservationCreateRequest request, CancellationToken cancellationToken = default);
+    Task<TvAirOperationResult<TvAirViewerReservation>> CancelAsync(string reservationId, CancellationToken cancellationToken = default);
+    IReadOnlyList<TvAirViewerReservation> List(TvAirViewerReservationQuery? query = null);
 }

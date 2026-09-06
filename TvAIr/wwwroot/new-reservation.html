@@ -5,19 +5,20 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>プログラム予約 — TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.0-ui2"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.0-ui2"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.1-ui2"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.1-ui2"/>
 
-<link href="/tvair-ui-foundation.css?v=1.2.0-ui2" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.0-theme206" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.0-modules251" rel="stylesheet"/>
-<link href="/tvair-list-module.css?v=1.2.0-list206" rel="stylesheet"/>
-<link href="/tvair-program-reservation.css?v=1.2.0-owner204" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.0-owner203" rel="stylesheet"/>
-<link href="/tvair-settings-host.css?v=1.2.0" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.2.1-ui2" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.1-theme206" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.1-modules251" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.2.1-list206" rel="stylesheet"/>
+<link href="/tvair-program-reservation.css?v=1.2.1-owner204" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.1-owner203" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.1" rel="stylesheet"/>
 
-<script src="/tvair-theme.js?v=1.2.0-ui2"></script>
-<script src="/tvair-action-button-state.js?v=1.2.0"></script>
+<script src="/tvair-theme.js?v=1.2.1-ui2"></script>
+<script src="/tvair-page-view-state.js?v=1.2.1-ui2"></script>
+<script src="/tvair-action-button-state.js?v=1.2.1"></script>
 
 
 
@@ -578,16 +579,18 @@ buildTimeSelects('f-sh','f-sm',0,0);
 buildTimeSelects('f-eh','f-em',0,30);
 buildTimeSelects('e-sh','e-sm',0,0);
 buildTimeSelects('e-eh','e-em',0,30);
-loadChannels();
-load();
+if(window.TvAIrPageViewState) TvAIrPageViewState.register({key:'program-reservation',root:()=>document.getElementById('page-scroll')});
+Promise.all([loadChannels(), load()]).then(()=>{
+  if(window.TvAIrPageViewState) TvAIrPageViewState.restore('program-reservation',()=>document.getElementById('page-scroll'),{retries:3});
+});
 
 /* Page menu behavior is owned by tvair-menu-spine.js. */
 
 </script>
 
-<script src="/tvair-notification.js?v=1.2.0-ui2"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.0-ui2"></script>
-<script src="/tvair-settings-host.js?v=1.2.0"></script>
-<script src="/tvair-menu-spine.js?v=1.2.0-ui2"></script>
+<script src="/tvair-notification.js?v=1.2.1-ui2"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.1-ui2"></script>
+<script src="/tvair-settings-host.js?v=1.2.1"></script>
+<script src="/tvair-menu-spine.js?v=1.2.1-ui2"></script>
 </body>
 </html>

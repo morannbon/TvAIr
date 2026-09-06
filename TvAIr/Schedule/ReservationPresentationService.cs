@@ -129,62 +129,75 @@ public sealed class ReservationPresentationService
             .GroupBy(x => x.ParentReservationId)
             .ToDictionary(g => g.Key, g => g.First());
 
-        var visibleRows = new List<Reservation>();
-        var priorityNames = new Dictionary<int, string>();
-
-        // EPG確認はSystemEpgResponsibilityPlanが選んだ直近責務だけを表示する。
-        // 直近は「現在から概ね3時間以内の予約イベント群」と、そこに候補が無い場合の
-        // 「予約リスト全体の先頭1件」の二軸。各Tunerごとの未来先頭を独立に先取りしない。
-        // Presentation層独自の再計算は禁止。
+        var preRecordRowsByTuner = new Dictionary<string, List<Reservation>>(StringComparer.OrdinalIgnoreCase);
         if (preRecordEnabled)
         {
+            // PreRecの「直近」判定そのものはSystemEpgResponsibilityPlanを正本とする。
+            // Presentationは、その正本が選んだPreRecをどの録画Tunerの予定として見せるかだけ投影する。
             foreach (var row in activeSystemRows
                          .Where(IsPreRecordEpgRow)
-                         .Where(r => r.SourceRuleId.HasValue && selectedByParent.ContainsKey(r.SourceRuleId.Value))
-                         .OrderBy(r => r.Status == ReservationStatus.Recording ? 0 : 1)
-                         .ThenBy(r => r.StartTime)
-                         .ThenBy(r => r.Id))
+                         .Where(r => r.SourceRuleId.HasValue && selectedByParent.ContainsKey(r.SourceRuleId.Value)))
             {
-                visibleRows.Add(row);
                 var responsibility = selectedByParent[row.SourceRuleId!.Value];
-                if (!string.IsNullOrWhiteSpace(responsibility.PriorityName))
-                    priorityNames[row.Id] = responsibility.PriorityName;
+                if (string.IsNullOrWhiteSpace(responsibility.PriorityName))
+                    continue;
+
+                if (!preRecordRowsByTuner.TryGetValue(responsibility.PriorityName, out var rows))
+                {
+                    rows = new List<Reservation>();
+                    preRecordRowsByTuner[responsibility.PriorityName] = rows;
+                }
+                rows.Add(row);
             }
         }
 
+        var dailyRowsByTuner = new Dictionary<string, List<Reservation>>(StringComparer.OrdinalIgnoreCase);
         if (dailyEnabled)
         {
             // SYSTEM_EPG_DAILY_ENTRY_SINGLE_SOURCE:
             // 定時EPGの表示時刻はEpgSchedulerがPlanner結果から永続化したSystemDailyEpg行だけを正本とする。
-            // Presentation層で設定時刻・深度・局数から仮想枠を再計算すると、可動枠の後方移動や
-            // pending/skipで実行行が存在しない状態を後段から上書きしてしまうため、仮想Daily行は生成しない。
-            var dailyRows = activeSystemRows
+            // Presentation層で設定時刻・深度・局数から仮想枠を再計算しない。
+            dailyRowsByTuner = activeSystemRows
                 .Where(IsDailyEpgRow)
                 .Where(r => !string.IsNullOrWhiteSpace(r.TunerName))
-                .GroupBy(r => r.TunerName, StringComparer.OrdinalIgnoreCase)
+                .GroupBy(r => r.TunerName!, StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
+        }
 
-            // 選択済み直近PreRecが責務を持つTunerだけ、同じTunerのDaily fallbackを隠す。
-            // それ以外はDailyへ収束する。ON/ONでも1物理録画Tunerあたり可視System責務は最大1件。
-            var usedPriorityNames = plan.PreRecordResponsibilities
-                .Where(x => !string.IsNullOrWhiteSpace(x.PriorityName))
-                .Select(x => x.PriorityName)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var visibleRows = new List<Reservation>();
+        var priorityNames = new Dictionary<int, string>();
 
-            foreach (var tuner in recordingTuners)
+        // RESERVATION_LIST_SYSTEM_EPG_NEXT_ACTION:
+        // 予約一覧はScheduler内部の「責務割当」を見せる画面ではなく、各録画Tunerで次に実行予定の
+        // System EPGを1件だけ示す。Daily ON時は永続化済みDaily行を基本候補として保持し、PreRecは
+        // 同じ候補列で開始順を比較して、Dailyより先に来る場合だけ次予定として選ぶ。
+        // 「そのTunerにPreRec責務が存在する」という理由だけで、より早いDailyを隠してはならない。
+        foreach (var tuner in recordingTuners)
+        {
+            var candidates = new List<Reservation>();
+
+            if (dailyEnabled && dailyRowsByTuner.TryGetValue(tuner.Name, out var dailyRows))
             {
-                if (usedPriorityNames.Contains(tuner.Name))
-                    continue;
-                if (!dailyRows.TryGetValue(tuner.Name, out var tunerRows))
-                    continue;
-
-                var daily = SelectVisibleDailyEpg(tunerRows);
-                if (daily is null)
-                    continue;
-
-                visibleRows.Add(daily);
-                priorityNames[daily.Id] = tuner.Name;
+                var daily = SelectVisibleDailyEpg(dailyRows);
+                if (daily is not null)
+                    candidates.Add(daily);
             }
+
+            if (preRecordEnabled && preRecordRowsByTuner.TryGetValue(tuner.Name, out var preRecordRows))
+            {
+                candidates.AddRange(preRecordRows);
+            }
+
+            var next = candidates
+                .OrderBy(r => r.Status == ReservationStatus.Recording ? 0 : 1)
+                .ThenBy(r => r.StartTime)
+                .ThenBy(r => r.Id)
+                .FirstOrDefault();
+            if (next is null)
+                continue;
+
+            visibleRows.Add(next);
+            priorityNames[next.Id] = tuner.Name;
         }
 
         return new SystemEpgVisibleProjection(recordingTuners, visibleRows, priorityNames);

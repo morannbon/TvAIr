@@ -4,14 +4,14 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
 <title>TvAIr 設定ヘルプ</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.0"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.0"/>
-<link href="/tvair-ui-foundation.css?v=1.2.0" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.0-theme206" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.0-modules251" rel="stylesheet"/>
-<link href="/tvair-help.css?v=1.2.0-owner260" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.0-owner203" rel="stylesheet"/>
-<script src="/tvair-theme.js?v=1.2.0"></script>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.1"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.1"/>
+<link href="/tvair-ui-foundation.css?v=1.2.1" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.1-theme206" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.1-modules251" rel="stylesheet"/>
+<link href="/tvair-help.css?v=1.2.1-owner260" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.1-owner203" rel="stylesheet"/>
+<script src="/tvair-theme.js?v=1.2.1"></script>
 </head>
 <body class="tvair-non-program-page tvair-page-width-wide tvair-help-page">
 <header class="help-window-bar" aria-label="ヘルプ見出し">
@@ -37,18 +37,17 @@
         <h2>EPG取得</h2>
         <article class="setting-card"><h3>定期取得を有効にする</h3><p>毎日、指定した時刻を基準に番組情報を自動取得します。</p></article>
         <article class="setting-card"><h3>定期取得時刻</h3><p>定期EPG取得の基準時刻を設定します。録画との競合時は、取得可能な時間帯へ自動調整される場合があります。</p></article>
-        <article class="setting-card"><h3>取得深度</h3><p>EPG取得で、1つの放送局に使用する取得時間を選びます。</p><p><strong>浅（120秒）</strong>：取得時間を短くします。</p><p><strong>中（180秒）</strong>：取得時間と取得範囲のバランスを取ります。</p><p><strong>深（240秒）</strong>：より先の番組情報まで取得します。</p><p><strong>最深（300秒）</strong>：取得範囲を優先します。チャンネル数が多い環境では、全体の取得完了まで時間がかかります。</p></article>
+        <article class="setting-card"><h3>取得深度</h3><p>EPG取得で、1つの放送局に使用する取得時間を選びます。EPG取得中は変更できません。</p><p><strong>浅（120秒）</strong>：取得時間を短くします。</p><p><strong>中（180秒）</strong>：取得時間と取得範囲のバランスを取ります。</p><p><strong>深（240秒）</strong>：より先の番組情報まで取得します。</p><p><strong>最深（300秒）</strong>：取得範囲を優先します。チャンネル数が多い環境では、全体の取得完了まで時間がかかります。</p></article>
         <article class="setting-card"><h3>放送前EPG確認を有効にする</h3><p>録画前に番組情報を確認し、番組の開始・終了時刻の変更に追従します。</p></article>
-        <article class="setting-card"><h3>放送前EPG確認（時間追従）</h3><p>録画開始の何分前から確認するかを設定します。</p></article>
+        <article class="setting-card"><h3>放送前EPG確認（時間追従）</h3><p>録画開始の5・10・15・20分前から選択し、番組情報を確認するタイミングを設定します。開始時刻が近い場合は録画を優先します。</p></article>
       </div>
       <div class="help-group">
         <h2>その他</h2>
         <article class="setting-card"><h3>dataフォルダ</h3><p>EPGデータの保存場所を変更したい場合に指定します。通常は変更する必要はありません。</p></article>
-        <article class="setting-card"><h3>ポート番号</h3><p>TvAIrが使用するポート番号です。他のアプリと重複する場合に変更します。</p></article>
         <article class="setting-card"><h3>Windows起動時にTvAIrを自動起動する</h3><p>Windowsの起動時にTvAIrを自動起動します。予約録画や定時EPG取得を常時運用する場合に使用します。</p></article>
-        <article class="setting-card"><h3>WindowsログインID</h3><p>スリープ復帰を伴う予約録画や定時EPG取得で使用します。</p></article>
-        <article class="setting-card"><h3>Windowsログインパスワード</h3><p>WindowsログインIDに対応するパスワードです。</p></article>
-        <article class="setting-card"><h3>スリープ復帰</h3><p>次の予約録画や定時EPG取得に合わせてWindowsを復帰させます。</p></article>
+        <article class="setting-card"><h3>WindowsログインID</h3><p>予約録画や定時EPG取得に合わせてWindowsを復帰させるためのタスク設定で使用します。</p></article>
+        <article class="setting-card"><h3>Windowsログインパスワード</h3><p>WindowsログインIDに対応するパスワードです。スリープ復帰用のタスク設定に使用します。</p></article>
+        <article class="setting-card"><h3>スリープ復帰</h3><p>予約録画や定時EPG取得に合わせたWindowsの復帰準備状態を表示します。</p></article>
       </div>
     </section>
 
@@ -56,9 +55,16 @@
       <header class="help-section-head"><p class="help-kicker">ネットワーク</p><h1>ネットワーク</h1></header>
       <div class="help-group">
         <h2>ネットワーク</h2>
-        <article class="setting-card"><h3>LANからの接続を許可する</h3><p>同じLAN内の別端末からTvAIrへ接続する場合に有効にします。</p></article>
+        <article class="setting-card"><h3>ネットワーク利用ON / OFF</h3><p>TvAIrのネットワーク利用全体を切り替えます。初期状態はOFFです。</p><p>OFFの間はLANからの接続と、プラグインによる外部情報の取得を行いません。下位のネットワーク設定は操作できず、進行中の外部通信も停止します。ONに戻すと保存済みの下位設定に従って利用可否を再評価します。</p></article>
+        <article class="setting-card"><h3>ポート番号</h3><p>TvAIrが使用するポート番号です。他のアプリと重複する場合に変更します。変更はTvAIrの再起動後に反映されます。</p></article>
+        <article class="setting-card"><h3>LANからの接続を許可する</h3><p>同じLAN内の別端末からTvAIrへ接続する場合に有効にします。最上位の「ネットワーク利用」がONの場合だけ利用できます。</p></article>
         <article class="setting-card"><h3>セッション有効時間（分）</h3><p>接続用パスワードで認証した状態を維持する時間です。短くすると再認証が増えます。</p></article>
         <article class="setting-card"><h3>接続用パスワード</h3><p>LAN内の別端末からTvAIrへ接続する際の認証に使用するパスワードです。12文字以上で設定してください。英字・数字・記号などの文字種に必須条件はありません。大文字と小文字は区別されます。</p></article>
+      </div>
+      <div class="help-group">
+        <h2>プラグインのインターネット接続</h2>
+        <article class="setting-card"><h3>プラグインごとの利用許可</h3><p>インターネット接続に対応したプラグインごとに、TvAIrを通じた外部情報の取得を許可します。初期状態は不許可です。</p><p>最上位の「ネットワーク利用」がONで、対象プラグインの許可もONの場合だけ利用できます。許可をOFFにすると、そのプラグインの進行中の外部通信も停止します。</p></article>
+        <article class="setting-card"><h3>登録されている外部情報サービス</h3><p>現在TvAIrで利用可能な外部情報サービスがある場合、その名称を表示します。表示されたサービス名から各サービスのWebサイトを確認できます。</p></article>
       </div>
     </section>
 
@@ -108,8 +114,7 @@
       <header class="help-section-head"><p class="help-kicker">ログ</p><h1>ログ</h1></header>
       <div class="help-group">
         <h2>ユーザーログ</h2>
-        <article class="setting-card"><h3>シンプル表示</h3><p>通常の確認に必要な内容だけを表示します。</p></article>
-        <article class="setting-card"><h3>詳細表示</h3><p>下の項目から、ログに追加して表示する情報を選択できます。</p></article>
+        <article class="setting-card"><h3>詳細表示</h3><p>有効にすると、下の項目からログに追加して表示する情報を選択できます。無効の場合は通常の確認に必要な内容だけを表示します。</p></article>
       </div>
       <div class="help-group">
         <h2>詳細表示する情報</h2>
@@ -156,6 +161,6 @@
   if(window.self !== window.top){ document.body.classList.add('in-modal'); }
 })();
 </script>
-<script src="/tvair-notification.js?v=1.2.0"></script>
+<script src="/tvair-notification.js?v=1.2.1"></script>
 </body>
 </html>
