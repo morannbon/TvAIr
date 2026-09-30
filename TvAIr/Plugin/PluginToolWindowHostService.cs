@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Plugin;
+namespace TvAIr.Plugin;
 
 using System.Collections.Concurrent;
 using System.Threading;
@@ -127,8 +127,8 @@ public sealed class PluginToolWindowHostService
             targets = _windows.Values.Where(window => window.IsAlive).ToArray();
         }
 
-        var selected = NormalizeTheme(selectedTheme);
-        var effective = ResolveEffectiveTheme(selected);
+        var selected = HostThemeStateContract.NormalizeSelected(selectedTheme);
+        var effective = HostThemeStateContract.ResolveEffective(selected);
         var queued = 0;
         var failed = 0;
         Exception? firstFailure = null;
@@ -163,28 +163,6 @@ public sealed class PluginToolWindowHostService
         return queued;
     }
 
-
-    private static string NormalizeTheme(string? value)
-    {
-        var normalized = (value ?? string.Empty).Trim().ToLowerInvariant();
-        return normalized is "light" or "dark" ? normalized : "current";
-    }
-
-    private static string ResolveEffectiveTheme(string selectedTheme)
-    {
-        if (selectedTheme is "light" or "dark") return selectedTheme;
-        try
-        {
-            using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
-            var value = key?.GetValue("AppsUseLightTheme");
-            var light = value is int i ? i != 0 : value?.ToString() != "0";
-            return light ? "light" : "dark";
-        }
-        catch
-        {
-            return "light";
-        }
-    }
 
     public PluginToolWindowHostCapabilities GetCapabilities()
     {

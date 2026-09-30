@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^\d+\.\d+\.\d+$')]
@@ -146,10 +146,8 @@ Update-TextFile 'README.md' {
     $text = [regex]::Replace($text, '(?m)^# TvAIr \d+\.\d+\.\d+$', "# TvAIr $product", 1)
     [regex]::Replace($text, 'TvAIr \d+\.\d+\.\d+のVisual Studio 2022用ソース一式です。', "TvAIr $productのVisual Studio 2022用ソース一式です。", 1)
 }
-Update-TextFile 'README.txt' {
-    param($text)
-    [regex]::Replace($text, '(?m)^# TvAIr \d+\.\d+\.\d+$', "# TvAIr $product", 1)
-}
+$readmeCanonical = Get-Content -LiteralPath (Join-Path $root 'README.md') -Raw -Encoding UTF8
+Set-Content -LiteralPath (Join-Path $root 'README.txt') -Value $readmeCanonical -Encoding utf8
 
 $webFiles = Get-ChildItem -LiteralPath (Join-Path $root 'TvAIr\wwwroot') -Recurse -File |
     Where-Object { $_.Extension -in '.html', '.js', '.css' }

@@ -88,12 +88,12 @@
   display:inline-flex;
   align-items:center;
   justify-content:center;
-  padding:4px 13px;
-  min-height:26px;
+  padding:4px var(--tvair-button-pad-x-dialog-action);
+  min-height:var(--tvair-button-h-dialog-action);
   border:1px solid var(--tvair-role-control-border);
-  border-radius:3px;
+  border-radius:var(--tvair-button-radius);
   cursor:pointer;
-  font-size:12px;
+  font-size:var(--tvair-button-font-standard);
   line-height:1.5;
   white-space:nowrap;
   box-shadow:none;

@@ -151,17 +151,10 @@ public sealed class RecordingPowerResponsibilityGuardService : BackgroundService
     }
 
     private bool IsRelevantResponsibility(Reservation reservation, DateTime now)
-    {
-        if (reservation.Source == ReservationSource.Epg)
-            return false;
-
-        if (reservation.Status is ReservationStatus.Starting or ReservationStatus.Recording or ReservationStatus.Stopping)
-            return true;
-
-        return reservation.Status == ReservationStatus.Scheduled
-            && reservation.IsEnabled
-            && reservation.EndTime.AddSeconds(Math.Max(10, _ini.PostEndMarginSeconds)) >= now;
-    }
+        => ReservationRuntimeResponsibilityPolicy.IsPowerResponsibilityRelevant(
+            reservation,
+            now,
+            _ini.PostEndMarginSeconds);
 
     private TimeSpan Synchronize(DateTime now)
     {
@@ -301,23 +294,15 @@ public sealed class RecordingPowerResponsibilityGuardService : BackgroundService
     }
 
     private bool ShouldHold(Reservation reservation, DateTime now)
-    {
-        if (reservation.Source == ReservationSource.Epg)
-            return false;
-
-        if (reservation.Status is ReservationStatus.Starting or ReservationStatus.Recording or ReservationStatus.Stopping)
-            return true;
-
-        if (reservation.Status != ReservationStatus.Scheduled || !reservation.IsEnabled)
-            return false;
-
-        var due = GetRecordingDue(reservation);
-        return due <= now.AddSeconds(RecordingResponsibilityTiming.DueLookAheadSeconds)
-            && reservation.EndTime.AddSeconds(Math.Max(10, _ini.PostEndMarginSeconds)) >= now;
-    }
+        => ReservationRuntimeResponsibilityPolicy.ShouldHoldPower(
+            reservation,
+            now,
+            _ini.PreStartMarginSeconds,
+            _ini.PostEndMarginSeconds,
+            RecordingResponsibilityTiming.DueLookAheadSeconds);
 
     private DateTime GetRecordingDue(Reservation reservation)
-        => reservation.StartTime.AddSeconds(-_ini.PreStartMarginSeconds);
+        => ReservationRuntimeResponsibilityPolicy.GetDueAt(reservation, _ini.PreStartMarginSeconds);
 
     private static string BuildReleaseReason(Reservation reservation, DateTime now)
     {

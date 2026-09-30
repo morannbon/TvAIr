@@ -90,7 +90,7 @@ body[data-theme="dark"]{
 :root{
 --nav-btn-bg:var(--tvair-bg-c);
   
-  /* Genre standard palettes are owned by IniSettingsService. CSS only provides a neutral bootstrap until saved/default settings are projected. */
+  /* Genre standard/default/preset palettes are owned by SettingsDefaults and projected through /api/settings. CSS only provides a neutral bootstrap until the canonical palette is applied. */
   --genre-news:var(--tvair-role-card-bg,#f0f0f0);--genre-sports:var(--tvair-role-card-bg,#f0f0f0);--genre-info:var(--tvair-role-card-bg,#f0f0f0);--genre-drama:var(--tvair-role-card-bg,#f0f0f0);--genre-music:var(--tvair-role-card-bg,#f0f0f0);--genre-variety:var(--tvair-role-card-bg,#f0f0f0);--genre-movie:var(--tvair-role-card-bg,#f0f0f0);--genre-anime:var(--tvair-role-card-bg,#f0f0f0);--genre-docu:var(--tvair-role-card-bg,#f0f0f0);--genre-other:var(--tvair-role-card-bg,#f0f0f0);
   /* Native WinForms dialogs use the same theme contract source; values preserve the existing native appearance. */
   --tvair-native-dialog-panel:#FFFFFF;
@@ -103,7 +103,6 @@ body[data-theme="dark"]{
   --tvair-native-dialog-button-secondary:#F6F7F9;
   --tvair-native-dialog-focus:#707B8A;
   --tvair-native-dialog-menu-selected:#485260;
-  --prog-padding-v:3px;--prog-padding-h:4px;--prog-title-font-size:11px;--prog-title-lh:1.35;--prog-time-font-size:11px;--prog-time-lh:1.25;--prog-desc-font-size:10px;--prog-desc-lh:16px;--prog-title-outline-gap-rate:.7;--prog-title-outline-gap:calc(var(--prog-desc-lh) * var(--prog-title-outline-gap-rate));--prog-desc-fit-safe:6px;--prog-desc-safe:9px;--prog-footer-pad-top:3px;--prog-footer-pad-bottom:2px;--prog-btn-gap:3px;--prog-btn-h:20px;--prog-btn-min-w:42px;--tvair-program-action-guide-width:calc((var(--tvair-guide-col-w) - (2 * var(--prog-padding-h)) - var(--prog-btn-gap)) / 2);
   --list-row-disabled:var(--tvair-bg-disabled);--list-row-disabled-hover:var(--tvair-bg-d);
 --rsv-done-text:var(--tvair-success-a);--btn-lite-bg:var(--tvair-bg-c);--btn-lite-border:var(--tvair-border-a);--btn-lite-text:var(--tvair-text-b);--btn-lite-hover:var(--tvair-bg-hover);
 }
@@ -564,7 +563,6 @@ body[data-theme="light"]{
   --tvair-log-action-danger-border:var(--tvair-danger-a);
   --tvair-log-action-danger-fg:#7f1d1d;
 
-  --tvair-reservation-action-button-min-width:64px;
 }
 
 html[data-theme="dark"],

@@ -40,7 +40,7 @@ body.tvair-rule-list-page #rules-table td:nth-child(5){text-align:center}
 .hit-meta{margin-top:2px;font-size:11px;color:var(--tvair-role-text-fg);font-weight:bold}
 .badge{display:inline-block;padding:1px 6px;border-radius:999px;border:1px solid var(--tvair-role-border);background:var(--tvair-role-subpanel-bg);color:var(--tvair-role-text-soft-fg);font-size:11px;margin-right:4px;margin-bottom:2px}
 /* release_contract: .order-btn/.action-btn geometry is owned by tvair-list-module.css. */
-.order-btn,.action-btn{border-radius:2px}
+.order-btn,.action-btn{border-radius:var(--tvair-button-radius)}
 .order-btn{background:var(--btn-lite-bg);color:var(--nav-bg);border:1px solid var(--tvair-role-border)}.order-btn:hover{background:var(--tvair-role-control-hover-bg)}.order-btn:disabled{opacity:.35;cursor:default}
 .action-btn.edit{background:var(--btn-lite-bg);color:var(--nav-bg);border:1px solid var(--tvair-role-border)}.action-btn.edit:hover{background:var(--tvair-role-control-hover-bg)}
 .action-btn.del{background:var(--tvair-role-action-danger-soft-bg);color:var(--tvair-role-action-danger-bg);border:1px solid var(--tvair-role-action-danger-bg)}.action-btn.del:hover{background:var(--tvair-role-action-danger-soft-bg)}

@@ -5,25 +5,25 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>予約リスト — TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.1"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.1"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.2"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.2"/>
 
-<link href="/tvair-ui-foundation.css?v=1.2.1" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.1-theme206" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.1-modules251" rel="stylesheet"/>
-<link href="/tvair-list-module.css?v=1.2.1-list206" rel="stylesheet"/>
-<link href="/tvair-reservations.css?v=1.2.1-css-final199" rel="stylesheet"/>
-<link href="/tvair-user-log.css?v=1.2.1" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.1-owner203" rel="stylesheet"/>
-<link href="/tvair-settings-host.css?v=1.2.1" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.2.2" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.2" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.2" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.2.2" rel="stylesheet"/>
+<link href="/tvair-reservations.css?v=1.2.2" rel="stylesheet"/>
+<link href="/tvair-user-log.css?v=1.2.2" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.2" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.2" rel="stylesheet"/>
 
-<script src="/tvair-theme.js?v=1.2.1"></script>
-<script src="/tvair-page-view-state.js?v=1.2.1"></script>
-<script src="/tvair-action-button-state.js?v=1.2.1"></script>
-<script src="/tvair-reservation-action-state.js?v=1.2.1"></script>
-<script src="/tvair-program-time-action.js?v=1.2.1"></script>
-<script src="/genre-shared.js?v=1.2.1"></script>
-<script src="/tvair-user-log.js?v=1.2.1"></script>
+<script src="/tvair-theme.js?v=1.2.2"></script>
+<script src="/tvair-page-view-state.js?v=1.2.2"></script>
+<script src="/tvair-action-button-state.js?v=1.2.2"></script>
+<script src="/tvair-reservation-action-state.js?v=1.2.2"></script>
+<script src="/tvair-program-time-action.js?v=1.2.2"></script>
+<script src="/genre-shared.js?v=1.2.2"></script>
+<script src="/tvair-user-log.js?v=1.2.2"></script>
 
 
 
@@ -156,7 +156,7 @@ function reconcileReservationActionStates(snapshot){
 function reservationPendingActionButton(r, fallback){
   const state=getReservationActionState(r&&r.id);
   if(!state || (state.action!=='stop' && state.action!=='cancel')) return fallback;
-  return `<button class="rsv-btn program-cell-action-btn tvair-program-action-control tvair-action-button program-action-transient" data-program-action="${esc(state.action)}" data-action-role="reservation-action-pending" data-action-context="reservation-list-row" disabled aria-busy="true">${esc(state.text)}</button>`;
+  return `<button class="rsv-btn program-cell-action-btn tvair-program-action-control tvair-action-button program-cell-action-btn--list-context program-action-transient" data-program-action="${esc(state.action)}" data-action-role="reservation-action-pending" data-action-context="reservation-list-row" disabled aria-busy="true">${esc(state.text)}</button>`;
 }
 function reservationPendingToggleButton(r, fallback){
   const state=getReservationActionState(r&&r.id);
@@ -936,6 +936,11 @@ async function refreshReservations(btn){
       return;
     }
     scheduleNextPoll(true);
+    // Manual refresh is an explicit re-read of the current reservation subtab.
+    // The reservation page owns #content-region as its only vertical scroll root,
+    // so return that root to the top after every successful refresh.
+    const contentRegion = document.getElementById('content-region');
+    if(contentRegion) contentRegion.scrollTop = 0;
     showToast(`${refreshLabel}を更新しました。`);
   }catch(_){
     showToast(`${refreshLabel}の更新に失敗しました。`, 3200, 'error');
@@ -1115,10 +1120,19 @@ function getStationGroupMeta(item){
 }
 
 function getDisplayServiceName(item){
+  const exactServiceName = String((item && (item.serviceName || item.channelName)) || '').trim();
+  if(exactServiceName) return exactServiceName;
+
+  const channelArgument = String((item && item.channelArgument) || '').trim();
+  if(channelArgument) return channelArgument;
+
+  // Station grouping is only for the station-list grouping/order.
+  // Reservation rows must never replace an exact NID+TSID+SID service name
+  // with the representative label of the physical GR transport stream.
   const meta = getStationGroupMeta(item || {});
   const label = String(meta && meta.label || '').trim();
   if(label && label !== '（局名不明）') return label;
-  return String((item && (item.serviceName || item.channelName || item.channelArgument)) || '—').trim() || '—';
+  return '—';
 }
 
 async function loadStationChannelMeta(){
@@ -1226,14 +1240,14 @@ function renderSpecialGroups(){
         let actionBtn='';
         if(activeReservation){
           if(activeStatus==='recording'){
-            actionBtn=`<button class="rsv-btn program-cell-action-btn tvair-program-action-control tvair-action-button" data-program-action="stop" data-action-role="reservation-stop" data-action-context="${String(currentFilter||'candidate').replace(/[^a-z0-9_-]/gi,'')}-list-row" onclick="stopRec(${Number(activeReservation.id)||0},this)">録画停止</button>`;
+            actionBtn=`<button class="rsv-btn program-cell-action-btn tvair-program-action-control tvair-action-button program-cell-action-btn--list-context" data-program-action="stop" data-action-role="reservation-stop" data-action-context="${String(currentFilter||'candidate').replace(/[^a-z0-9_-]/gi,'')}-list-row" onclick="stopRec(${Number(activeReservation.id)||0},this)">録画停止</button>`;
           }else if(activeStatus==='scheduled' && timeAction.action==='reserve'){
-            actionBtn=`<button class="rsv-btn program-cell-action-btn tvair-program-action-control tvair-action-button" data-program-action="cancel" data-action-role="reservation-cancel" data-action-context="${String(currentFilter||'candidate').replace(/[^a-z0-9_-]/gi,'')}-list-row" onclick="cancelReservation(${Number(activeReservation.id)||0},this)">予約取消</button>`;
+            actionBtn=`<button class="rsv-btn program-cell-action-btn tvair-program-action-control tvair-action-button program-cell-action-btn--list-context" data-program-action="cancel" data-action-role="reservation-cancel" data-action-context="${String(currentFilter||'candidate').replace(/[^a-z0-9_-]/gi,'')}-list-row" onclick="cancelReservation(${Number(activeReservation.id)||0},this)">予約取消</button>`;
           }else{
-            actionBtn=`<button class="rsv-btn program-cell-action-btn tvair-program-action-control tvair-action-button program-action-transient" disabled aria-busy="true">${window.TvAirActionButtonState.processingText}</button>`;
+            actionBtn=`<button class="rsv-btn program-cell-action-btn tvair-program-action-control tvair-action-button program-cell-action-btn--list-context program-action-transient" disabled aria-busy="true">${window.TvAirActionButtonState.processingText}</button>`;
           }
         }else if(timeAction.action!=='none'){
-          actionBtn=`<button class="rsv-btn program-cell-action-btn tvair-program-action-control tvair-action-button" data-program-action="${timeAction.action}" data-action-role="program-${timeAction.action}" data-action-label="${timeAction.label}" data-action-context="${String(currentFilter||'candidate').replace(/[^a-z0-9_-]/gi,'')}-list-row" onclick='reserveTaggedProgram(${JSON.stringify(r).replace(/'/g,"&#39;")},this)'>${timeAction.label}</button>`;
+          actionBtn=`<button class="rsv-btn program-cell-action-btn tvair-program-action-control tvair-action-button program-cell-action-btn--list-context" data-program-action="${timeAction.action}" data-action-role="program-${timeAction.action}" data-action-label="${timeAction.label}" data-action-context="${String(currentFilter||'candidate').replace(/[^a-z0-9_-]/gi,'')}-list-row" onclick='reserveTaggedProgram(${JSON.stringify(r).replace(/'/g,"&#39;")},this)'>${timeAction.label}</button>`;
         }
         const rowAttr = buildGenreRowAttr(r);
         const rowClass = buildGenreRowClass(r, { disabled:false, cancelled:false, conflicted:false });
@@ -1506,7 +1520,9 @@ function render(){
     const toggleBtn = buildReservationEnabledToggle(r);
 
     const displayTunerName = reservationDisplayTunerName(r, { logPlain: currentFilter === 'done' });
-    const explicitChainMark = !!(r.chainRole && r.chainRole !== 'tail' && r.source !== 'keyword' && r.source !== 'epg' && r.source !== 'system');
+    // (C) means this reservation itself was added by the explicit Chain button.
+    // Do not infer it from head/mid/tail topology: A→B→C marks B/C, not the ordinary head A.
+    const explicitChainMark = r.isUserChain === true;
     const tunerText = (displayTunerName || '—') + (explicitChainMark ? '（C）' : '');
     const tunerCell = currentFilter === 'done'
       ? `<span class="tuner-normal">${esc(tunerText)}</span>`
@@ -1526,9 +1542,9 @@ function render(){
       actionBtn = `<span class="reservation-action-empty" data-state-role="empty-action-cell" data-state-context="reservation-list-row">—</span>`;
     } else if(isRecording){
       // release_contract: プログラム予約も実行後は共通停止ルートで止められるようにする。
-      actionBtn = `<button class="rsv-btn program-cell-action-btn tvair-program-action-control tvair-action-button" data-program-action="stop" data-action-role="recording-stop" data-action-label="録画停止" data-action-context="reservation-list-row" onclick="stopRec(${r.id},this)">録画停止</button>`;
+      actionBtn = `<button class="rsv-btn program-cell-action-btn tvair-program-action-control tvair-action-button program-cell-action-btn--list-context" data-program-action="stop" data-action-role="recording-stop" data-action-label="録画停止" data-action-context="reservation-list-row" onclick="stopRec(${r.id},this)">録画停止</button>`;
     } else if(canCancel){
-      actionBtn = `<button class="rsv-btn program-cell-action-btn tvair-program-action-control tvair-action-button" data-program-action="cancel" data-action-role="reservation-cancel" data-action-label="予約取消" data-action-context="reservation-list-row" onclick="cancelReservation(${r.id},this)">予約取消</button>`;
+      actionBtn = `<button class="rsv-btn program-cell-action-btn tvair-program-action-control tvair-action-button program-cell-action-btn--list-context" data-program-action="cancel" data-action-role="reservation-cancel" data-action-label="予約取消" data-action-context="reservation-list-row" onclick="cancelReservation(${r.id},this)">予約取消</button>`;
     } else if(isEpg){
       actionBtn = `<span class="reservation-action-empty" data-state-role="empty-action-cell" data-state-context="reservation-list-row">—</span>`;
     } else if(r.status === 'scheduled'){
@@ -1859,9 +1875,9 @@ document.addEventListener('DOMContentLoaded', ()=>{
 });
 
 </script>
-<script src="/tvair-notification.js?v=1.2.1"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.1"></script>
-<script src="/tvair-settings-host.js?v=1.2.1"></script>
-<script src="/tvair-menu-spine.js?v=1.2.1"></script>
+<script src="/tvair-notification.js?v=1.2.2"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.2"></script>
+<script src="/tvair-settings-host.js?v=1.2.2"></script>
+<script src="/tvair-menu-spine.js?v=1.2.2"></script>
 </body>
 </html>

@@ -44,13 +44,18 @@ public sealed class NetworkUsageGate : IDisposable
     }
 
     public CancellationTokenSource CreateLinkedCancellation(CancellationToken cancellationToken)
+        => CreateLinkedCancellation(cancellationToken, CancellationToken.None);
+
+    public CancellationTokenSource CreateLinkedCancellation(CancellationToken cancellationToken, CancellationToken additionalToken)
     {
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             if (_enabled == 0)
                 throw new OperationCanceledException("Network usage is disabled.", _networkEpoch.Token);
-            return CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _networkEpoch.Token);
+            return additionalToken.CanBeCanceled
+                ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, additionalToken, _networkEpoch.Token)
+                : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _networkEpoch.Token);
         }
     }
 

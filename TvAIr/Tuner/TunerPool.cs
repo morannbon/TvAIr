@@ -1,4 +1,4 @@
-using TvAIr.Core;
+﻿using TvAIr.Core;
 
 namespace TvAIr.Tuner;
 
@@ -72,6 +72,16 @@ public sealed class TunerPool : IDisposable
 
         public void UpdatePlannedEndTime(DateTime plannedEndTime)
         {
+            PlannedEndTime = plannedEndTime;
+        }
+
+        public void TransferRecordingOwner(int reservationId, int processId, DateTime plannedEndTime)
+        {
+            if (UsageKind != TunerUsageKind.Recording || LeaseState != TunerLeaseState.Active)
+                throw new InvalidOperationException($"Recording owner transfer requires an active recording lease. usage={UsageKind} state={LeaseState}");
+
+            ReservationId = reservationId;
+            ProcessId = processId;
             PlannedEndTime = plannedEndTime;
         }
 
@@ -526,12 +536,6 @@ public sealed class TunerPool : IDisposable
         return lease;
     }
 
-    private static string TrimForLog(string? value, int max)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return "-";
-        var normalized = value.Replace("\r", " ").Replace("\n", " ").Trim();
-        return normalized.Length <= max ? normalized : normalized[..max] + "…";
-    }
 
     public int CountEpgSlots(string group)
     {
@@ -986,6 +990,23 @@ public sealed class TunerPool : IDisposable
         _log.Add("TUNER_TRACE", group, afterLog!);
     }
 
+    internal void TransferRecordingOwner(Slot slot, TunerLeaseIdentity identity, int reservationId, int processId, DateTime plannedEndTime, string reason)
+    {
+        string? logMessage;
+        lock (_gate)
+        {
+            if (!slot.Matches(identity))
+                throw new InvalidOperationException(BuildStaleLeaseLogUnsafe(slot, identity, "transfer_recording_owner"));
+
+            var previousReservationId = slot.ReservationId;
+            slot.TransferRecordingOwner(reservationId, processId, plannedEndTime);
+            PublishStateChangeUnsafe();
+            logMessage = $"result=TRANSFERRED slot={slot.SlotIndex} name={slot.Name} did={slot.Did} previousReservationId={(previousReservationId.HasValue ? previousReservationId.Value.ToString() : "-")} reservationId={reservationId} pid={processId} plannedEnd={plannedEndTime:MM/dd HH:mm:ss} reason={reason} leaseId={identity.PoolLeaseId} generation={identity.OccupancyGeneration} version={_snapshotVersion} rule=chain_continuous_capture_owner_transfer_contract";
+        }
+
+        _log.Add("TUNER_RECORDING_OWNER_TRANSFER", slot.Group, logMessage);
+    }
+
     internal void UpdatePlannedEndTime(Slot slot, TunerLeaseIdentity identity, DateTime plannedEndTime, string reason)
     {
         string? staleLog = null;
@@ -1002,6 +1023,10 @@ public sealed class TunerPool : IDisposable
             else
             {
                 var before = slot.PlannedEndTime;
+                // High-priority chain scans run every 500ms. An unchanged deadline is not a state mutation.
+                if (before.HasValue && before.Value == plannedEndTime)
+                    return;
+
                 var reservationId = slot.ReservationId;
                 var beforeStatus = GetStatusSummaryUnsafe();
                 beforeLog = $"[TUNER] stage=update_planned_end slot={slot.SlotIndex} name={slot.Name} did={slot.Did} reservationId={(reservationId.HasValue ? reservationId.Value.ToString() : "-")} before={(before.HasValue ? before.Value.ToString("MM/dd HH:mm:ss") : "-")} after={plannedEndTime:MM/dd HH:mm:ss} reason={reason} leaseId={identity.PoolLeaseId} generation={identity.OccupancyGeneration} status={beforeStatus}";
@@ -1225,6 +1250,24 @@ public sealed class TunerLease : IDisposable
         {
             EnsureActiveForMutationUnsafe("update_planned_end");
             _pool.UpdatePlannedEndTime(_slot, _identity, plannedEndTime, reason);
+        }
+        finally
+        {
+            Monitor.Exit(_releaseGate);
+        }
+    }
+
+    /// <summary>
+    /// 連続録画の共有captureを停止せず、同じ物理leaseの論理録画ownerだけを後続予約へ引き継ぐ。
+    /// lease identity / generation / BonDriver / PIDは変更しない。
+    /// </summary>
+    public void TransferRecordingOwner(int reservationId, int processId, DateTime plannedEndTime, string reason)
+    {
+        EnterReleaseGateOrThrow("transfer_recording_owner");
+        try
+        {
+            EnsureActiveForMutationUnsafe("transfer_recording_owner");
+            _pool.TransferRecordingOwner(_slot, _identity, reservationId, processId, plannedEndTime, reason);
         }
         finally
         {

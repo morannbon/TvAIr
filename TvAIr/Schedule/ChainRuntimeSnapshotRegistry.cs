@@ -1,17 +1,17 @@
-namespace TvAIr.Schedule;
+﻿namespace TvAIr.Schedule;
 
 /// <summary>
 /// release_contract: チェーン実行セッションの読み取り用レジストリ。
 /// CHAIN_AUDIT が共通割り当てスナップショットだけでは録画中の前番組を
 /// 評価対象外として見失う場合、実行中セッションの actualTuner / DID / pid を参照する。
-/// 録画実行・停止・Bridge継続・ファイル切替には介入しない。
+/// 録画実行やcontinuous captureのsegment切替には介入せず、実行中セッションの参照だけを提供する。
 /// </summary>
-public sealed class ChainDirectRecorderSessionRegistry
+public sealed class ChainRuntimeSnapshotRegistry
 {
     private readonly object gate = new();
-    private readonly Dictionary<int, ChainDirectRecorderSession> byCurrentReservationId = new();
+    private readonly Dictionary<int, ChainRuntimeSnapshot> byCurrentReservationId = new();
 
-    public bool Bind(ChainDirectRecorderSession session)
+    public bool Bind(ChainRuntimeSnapshot session)
     {
         lock (gate)
         {
@@ -21,7 +21,7 @@ public sealed class ChainDirectRecorderSessionRegistry
         }
     }
 
-    public bool Remove(int currentReservationId, out ChainDirectRecorderSession? removed)
+    public bool Remove(int currentReservationId, out ChainRuntimeSnapshot? removed)
     {
         lock (gate)
         {
@@ -35,7 +35,7 @@ public sealed class ChainDirectRecorderSessionRegistry
         }
     }
 
-    public bool TryGetByCurrentReservationId(int currentReservationId, out ChainDirectRecorderSession? session)
+    public bool TryGetByCurrentReservationId(int currentReservationId, out ChainRuntimeSnapshot? session)
     {
         lock (gate)
         {
@@ -43,7 +43,7 @@ public sealed class ChainDirectRecorderSessionRegistry
         }
     }
 
-    public IReadOnlyList<ChainDirectRecorderSession> Snapshot()
+    public IReadOnlyList<ChainRuntimeSnapshot> Snapshot()
     {
         lock (gate)
         {

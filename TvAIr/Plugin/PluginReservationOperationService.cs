@@ -88,7 +88,7 @@ internal sealed class PluginReservationOperationService
                     reservation,
                     draft.ChainPreviousReservationId.Value,
                     canonicalRoot,
-                    _ini.LaterProgramPriority && _ini.PseudoContinuousRecording);
+                    _ini.UserChainRecordingEnabled);
                 if (!chainResult.Applied || chainResult.Reservation is not { } committedChainReservation)
                     return new PluginReservationMutationResult(false, chainResult.ReservationId == 0 ? null : chainResult.ReservationId, chainResult.Reason);
                 id = chainResult.ReservationId;

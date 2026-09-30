@@ -1,4 +1,4 @@
-﻿using System.Threading.Channels;
+using System.Threading.Channels;
 using TvAIr.Core;
 using TvAIr.Channel;
 using TvAIr.Schedule;
@@ -235,12 +235,13 @@ public sealed class PluginTypedEventHub : IDisposable
     {
         try
         {
-            return ServiceIdentityContract.ResolveCurrentServiceName(
+            return ServiceIdentityContract.ResolveReservationServiceName(
                 channelLoader.Load().Targets,
                 networkId,
                 transportStreamId,
                 serviceId,
-                fallback);
+                projectedEventServiceName: null,
+                storedFallback: fallback);
         }
         catch
         {

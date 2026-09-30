@@ -41,18 +41,11 @@
   const BOOTSTRAP_COLORS = readCssBootstrapPalette();
   const LIGHT_COLORS = Object.assign({}, BOOTSTRAP_COLORS);
   const DARK_COLORS = Object.assign({}, BOOTSTRAP_COLORS);
-  const LIGHT_SAMPLE_COLORS = Object.freeze([
-    '#d3ffcb','#ffcbee','#b8f0ac','#ffbbbb',
-    '#b4f2ff','#faffb4','#cbfcf4','#dcdcfe',
-    '#f0f0f0','#fff0c2','#ffd8b4','#c8e0ff',
-    '#e6d0ff','#c9ffd9','#ffe1ec','#e8e8e8'
-  ]);
-  const DARK_SAMPLE_COLORS = Object.freeze([
-    '#1f5a45','#245c7a','#2d6f61','#704332',
-    '#286b78','#6b5a24','#563a73','#394f95',
-    '#3f5366','#7a5f2a','#704456','#2f6670',
-    '#664985','#35705e','#7a3f4e','#4a5058'
-  ]);
+  // Preset choices are projected from SettingsDefaults through /api/settings.
+  // Browser code owns no light/dark palette literals.
+  const LIGHT_SAMPLE_COLORS = [];
+  const DARK_SAMPLE_COLORS = [];
+
   let currentTheme = 'light';
   let currentPalettes = {
     light: Object.assign({}, LIGHT_COLORS),
@@ -89,6 +82,13 @@
       if(defaultLight) Object.assign(LIGHT_COLORS, normalizePalette(defaultLight, LIGHT_COLORS));
       if(defaultDark) Object.assign(DARK_COLORS, normalizePalette(defaultDark, DARK_COLORS));
     }
+    const presets = src.themeGenrePresetColors || src.ThemeGenrePresetColors || null;
+    if(presets){
+      const lightPresets = presets.light || presets.Light;
+      const darkPresets = presets.dark || presets.Dark;
+      if(Array.isArray(lightPresets)){ LIGHT_SAMPLE_COLORS.splice(0, LIGHT_SAMPLE_COLORS.length, ...lightPresets.map(x=>normalizeHexColor(x, '')).filter(Boolean)); }
+      if(Array.isArray(darkPresets)){ DARK_SAMPLE_COLORS.splice(0, DARK_SAMPLE_COLORS.length, ...darkPresets.map(x=>normalizeHexColor(x, '')).filter(Boolean)); }
+    }
     const tp = src.themeGenrePalettes || src.ThemeGenrePalettes || null;
     const lightSrc = (tp && (tp.light || tp.Light)) || LIGHT_COLORS;
     const darkSrc = (tp && (tp.dark || tp.Dark)) || DARK_COLORS;
@@ -98,7 +98,19 @@
     currentTheme = normalizeThemeName(theme);
     if(palettes) currentPalettes = normalizeThemePalettes({ themeGenrePalettes: palettes });
     const colors = normalizePalette(currentPalettes[currentTheme], currentTheme === 'dark' ? DARK_COLORS : LIGHT_COLORS);
-    Object.keys(VAR_BY_CLASS).forEach(cls => document.documentElement.style.setProperty(VAR_BY_CLASS[cls], colors[cls]));
+    Object.keys(VAR_BY_CLASS).forEach(cls => {
+      const color = colors[cls];
+      document.documentElement.style.setProperty(VAR_BY_CLASS[cls], color);
+      const key = String(cls || 'g-other').replace(/^g-/, '');
+      const contrast = window.TvAIrTheme && typeof window.TvAIrTheme.resolveContrast === 'function'
+        ? window.TvAIrTheme.resolveContrast(color)
+        : null;
+      if(contrast){
+        document.documentElement.style.setProperty('--genre-' + key + '-fg-main', contrast.main);
+        document.documentElement.style.setProperty('--genre-' + key + '-fg-soft', contrast.soft);
+        document.documentElement.style.setProperty('--genre-' + key + '-fg-muted', contrast.muted);
+      }
+    });
     window.dispatchEvent(new CustomEvent('tvair:genre-colors-applied', { detail: { theme: currentTheme, colors: colorsSnapshot(), palettes: currentPalettes } }));
     return colors;
   }
@@ -165,12 +177,20 @@
     };
   }
 
+  // Theme State is Host-owned. Genre palette projection is shared here so every
+  // consumer (ProgramGuide and reservation-family lists) follows the same effective theme
+  // without page-local theme listeners or independent theme inference.
+  window.addEventListener('tvair-theme-state-applied', ev => {
+    const detail = (ev && ev.detail) || {};
+    applyPaletteForTheme(detail.effective || detail.rawEffective || detail.selected || currentTheme, currentPalettes);
+  });
+
   window.TvAirGenre = Object.freeze({
     DEFS: Object.freeze(DEFS.slice()),
     LIGHT_COLORS,
     DARK_COLORS,
-    LIGHT_SAMPLE_COLORS,
-    DARK_SAMPLE_COLORS,
+    get LIGHT_SAMPLE_COLORS(){ return LIGHT_SAMPLE_COLORS.slice(); },
+    get DARK_SAMPLE_COLORS(){ return DARK_SAMPLE_COLORS.slice(); },
     VAR_BY_CLASS: Object.freeze(Object.assign({}, VAR_BY_CLASS)),
     get COLORS(){ return colorsSnapshot(); },
     get THEME_PALETTES(){ return palettesSnapshot(); },

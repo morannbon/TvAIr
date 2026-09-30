@@ -18,9 +18,6 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
     private const string TvMazeProviderId = "tvmaze";
     private const string TvMazeApiHost = "api.tvmaze.com";
     private const string TvMazeWebsiteUrl = "https://www.tvmaze.com/";
-    private const string JikanProviderId = "jikan";
-    private const string JikanApiHost = "api.jikan.moe";
-    private const string JikanWebsiteUrl = "https://jikan.moe/";
 
     private const int GlobalConcurrency = 4;
     private const int PerPluginConcurrency = 2;
@@ -30,7 +27,7 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
     private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(10);
 
     private readonly LogRepository _log;
-    private readonly PluginInternetAccessPermissionStore _permissionStore;
+    private readonly PluginInternetAccessGate _internetAccess;
     private readonly PluginExternalLookupCredentialStore _credentialStore;
     private readonly IPluginExternalLookupGateway _gateway;
     private readonly IReadOnlyDictionary<string, ProviderDefinition> _providers;
@@ -39,10 +36,10 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
     private readonly CancellationTokenSource _shutdown = new();
     private int _disposed;
 
-    public PluginManagedExternalLookupHost(LogRepository log, PluginInternetAccessPermissionStore permissionStore, PluginExternalLookupCredentialStore credentialStore, IPluginExternalLookupGateway gateway)
+    public PluginManagedExternalLookupHost(LogRepository log, PluginInternetAccessGate internetAccess, PluginExternalLookupCredentialStore credentialStore, IPluginExternalLookupGateway gateway)
     {
         _log = log;
-        _permissionStore = permissionStore;
+        _internetAccess = internetAccess;
         _credentialStore = credentialStore;
         _gateway = gateway;
         _providers = BuildProviderCatalog();
@@ -69,12 +66,11 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
         => provider.RuntimeEnabled
            && (!provider.RequiresCredential || _credentialStore.HasCredential(provider.ProviderId));
 
-    public bool IsUserAllowed(string pluginId) => _permissionStore.IsAllowed(pluginId);
+    public bool IsUserAllowed(string pluginId) => _internetAccess.IsUserAllowed(pluginId);
 
     public bool IsPluginAccessEffective(string pluginId, bool descriptorPermission)
         => _gateway.Enabled
-           && descriptorPermission
-           && _permissionStore.IsAllowed(PluginIdentity.Normalize(pluginId))
+           && _internetAccess.IsEffective(PluginIdentity.Normalize(pluginId), descriptorPermission)
            && _providers.Values.Any(IsRuntimeAvailable);
 
     public IReadOnlyList<PluginExternalLookupProviderHostStatusDto> GetProviderHostStatus()
@@ -111,7 +107,7 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
             return Result(TvAirExternalLookupResultCode.ProviderNotAllowed, providerId, operation, "Network usage is disabled by TvAIr settings.");
         if (!descriptorPermission)
             return Result(TvAirExternalLookupResultCode.PermissionDenied, providerId, operation, "UseExternalLookup permission is required.");
-        if (!_permissionStore.IsAllowed(id))
+        if (!_internetAccess.IsEffective(id, descriptorPermission))
             return Result(TvAirExternalLookupResultCode.PermissionDenied, providerId, operation, "Internet access is disabled for this plugin in TvAIr settings.");
         if (request is null || string.IsNullOrWhiteSpace(providerId) || string.IsNullOrWhiteSpace(operation))
             return Result(TvAirExternalLookupResultCode.InvalidRequest, providerId, operation, "ProviderId and Operation are required.");
@@ -147,7 +143,8 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
             return Result(TvAirExternalLookupResultCode.RateLimited, providerId, operation, "Plugin request rate limit exceeded.");
 
         using var timeoutCts = new CancellationTokenSource(operationDefinition.Timeout ?? DefaultTimeout);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(pluginCancellationToken, timeoutCts.Token, state.Stop.Token, _shutdown.Token);
+        using var internetAccess = _internetAccess.CreateLinkedCancellation(id, descriptorPermission, pluginCancellationToken);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(internetAccess.Token, timeoutCts.Token, state.Stop.Token, _shutdown.Token);
         var enteredPlugin = false;
         var enteredGlobal = false;
         var current = uri;
@@ -462,29 +459,6 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
                             var showId = p["showId"].Trim();
                             return new ProviderRequestPlan(HttpsUri(TvMazeApiHost, $"/shows/{showId}/akas"));
                         }
-                    }
-                }
-            },
-            [JikanProviderId] = new ProviderDefinition
-            {
-                ProviderId = JikanProviderId,
-                DisplayName = "Jikan",
-                WebsiteUrl = JikanWebsiteUrl,
-                AllowedHosts = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { JikanApiHost },
-                RequiresCredential = false,
-                RuntimeEnabled = true,
-                Operations = new Dictionary<string, OperationDefinition>(StringComparer.OrdinalIgnoreCase)
-                {
-                    ["SearchAnime"] = new OperationDefinition
-                    {
-                        MaxResponseBytes = 512 * 1024,
-                        ValidateParameters = p => RequireOnly(p, new[] { "query" }, new[] { "query" }, ValidateSearchQuery),
-                        BuildRequest = (p, _) => new ProviderRequestPlan(
-                            HttpsUri(JikanApiHost, "/v4/anime", new Dictionary<string, string>
-                            {
-                                ["q"] = p["query"].Trim(),
-                                ["limit"] = "8"
-                            }))
                     }
                 }
             }

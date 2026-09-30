@@ -5,21 +5,21 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>自動検索予約リスト — TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.1-ui2"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.1-ui2"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.2"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.2"/>
 
-<link href="/tvair-ui-foundation.css?v=1.2.1-ui2" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.1-theme206" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.1-modules251" rel="stylesheet"/>
-<link href="/tvair-list-module.css?v=1.2.1-list206" rel="stylesheet"/>
-<link href="/tvair-program-rules.css?v=1.2.1-owner203" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.1-owner203" rel="stylesheet"/>
-<link href="/tvair-settings-host.css?v=1.2.1" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.2.2" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.2" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.2" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.2.2" rel="stylesheet"/>
+<link href="/tvair-program-rules.css?v=1.2.2" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.2" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.2" rel="stylesheet"/>
 
-<script src="/tvair-theme.js?v=1.2.1-ui2"></script>
-<script src="/tvair-page-view-state.js?v=1.2.1-ui2"></script>
-<script src="/tvair-action-button-state.js?v=1.2.1"></script>
-<script src="/tvair-search-enter.js?v=1.2.1"></script>
+<script src="/tvair-theme.js?v=1.2.2"></script>
+<script src="/tvair-page-view-state.js?v=1.2.2"></script>
+<script src="/tvair-action-button-state.js?v=1.2.2"></script>
+<script src="/tvair-search-enter.js?v=1.2.2"></script>
 
 
 
@@ -110,6 +110,14 @@
 <label class="check"><input checked="" id="enabled" type="checkbox"/> 有効</label>
 </div>
 </div>
+<div class="panel">
+<div class="panel-title">録画オプション</div>
+<div class="row">
+<label class="check"><input checked="" id="record-current-service-only" type="checkbox"/> 現在のサービスのみ保存する</label>
+<label class="check"><input checked="" id="record-subtitles" type="checkbox"/> 字幕データを保存する</label>
+</div>
+<div class="note mt6">TVTestの共通録画設定を変えず、この検索ルールから作る予約だけ録画内容を使い分けられます。</div>
+</div>
 <div class="panel full">
 <div class="panel-title">ジャンル</div>
 <div class="genres" id="genre-wrap"></div>
@@ -197,6 +205,8 @@ function keywordLabel(rule){
 function summarize(rule){
   const badges=[];
   badges.push(`<span class="badge">${rule?.useRegex===false?'通常検索':'正規表現'}</span>`);
+  badges.push(`<span class="badge">${rule?.recordCurrentServiceOnly===false?'全サービス保存':'現在サービスのみ'}</span>`);
+  badges.push(`<span class="badge">${rule?.recordSubtitles===false?'字幕なし':'字幕保存'}</span>`);
 
   if(rule?.useAllChannels){
     badges.push('<span class="badge">全局</span>');
@@ -330,10 +340,10 @@ function getSelectedValues(sel){return [...sel.options].filter(x=>x.selected).ma
 function setSelectedValues(sel, values){const set=new Set((values||[]).map(String)); [...sel.options].forEach(o=>o.selected=set.has(String(o.value))); syncTargetServiceSelectionState(sel)}
 function getCheckedValues(container){return [...container.querySelectorAll('input:checked')].map(x=>x.value)}
 function setCheckedValues(container, values){const set=new Set(values); [...container.querySelectorAll('input')].forEach(x=>x.checked=set.has(x.value)); bindChoiceChipLabels(container)}
-function clearForm(){document.getElementById('rule-id').value=''; document.getElementById('pattern').value=''; document.getElementById('exclude-pattern').value=''; document.getElementById('enabled').checked=true; document.getElementById('use-regex').checked=false; document.getElementById('search-title').checked=true; document.getElementById('search-outline').checked=false; document.getElementById('search-detail').checked=false; document.getElementById('search-cast').checked=false; setSelectedValues(document.getElementById('target-services'), channels.map(channelServiceKey)); setCheckedValues(document.getElementById('genre-wrap'), []); setCheckedValues(document.getElementById('days-wrap'), []); document.getElementById('use-time-range').checked=false; document.getElementById('start-time').value='00:00'; document.getElementById('end-time').value='23:30'; syncTimeEnabled(); syncRegexMode();}
+function clearForm(){document.getElementById('rule-id').value=''; document.getElementById('pattern').value=''; document.getElementById('exclude-pattern').value=''; document.getElementById('enabled').checked=true; document.getElementById('record-current-service-only').checked=true; document.getElementById('record-subtitles').checked=true; document.getElementById('use-regex').checked=false; document.getElementById('search-title').checked=true; document.getElementById('search-outline').checked=false; document.getElementById('search-detail').checked=false; document.getElementById('search-cast').checked=false; setSelectedValues(document.getElementById('target-services'), channels.map(channelServiceKey)); setCheckedValues(document.getElementById('genre-wrap'), []); setCheckedValues(document.getElementById('days-wrap'), []); document.getElementById('use-time-range').checked=false; document.getElementById('start-time').value='00:00'; document.getElementById('end-time').value='23:30'; syncTimeEnabled(); syncRegexMode();}
 function resetPreview(){lastPreviewCount=0; document.getElementById('preview-summary').textContent='右側に保存前検索の結果を表示します。'; document.getElementById('preview-sub').textContent='条件を入力して左下の「検索」を押してください。'; document.getElementById('preview-empty').style.display='block'; document.getElementById('preview-table').style.display='none'; document.getElementById('preview-body').innerHTML=''; document.getElementById('save-button').textContent=document.getElementById('rule-id').value?'更新':'ルール作成';}
 function openCreate(){clearForm(); document.getElementById('modal-title').textContent='自動検索予約ルール追加'; document.getElementById('save-button').textContent='ルール作成'; resetPreview(); document.getElementById('modal-overlay').classList.add('open'); document.getElementById('pattern').focus();}
-function openEdit(id){const r=rules.find(x=>x.id===id); if(!r) return; clearForm(); document.getElementById('modal-title').textContent='自動検索予約ルール編集'; document.getElementById('rule-id').value=r.id; document.getElementById('pattern').value=r.pattern||''; document.getElementById('exclude-pattern').value=r.excludePattern||''; document.getElementById('enabled').checked=!!r.enabled; document.getElementById('use-regex').checked=(r.useRegex!==false); document.getElementById('search-title').checked=!!r.searchTitle; document.getElementById('search-outline').checked=!!r.searchOutline; document.getElementById('search-detail').checked=!!r.searchDetail; document.getElementById('search-cast').checked=!!r.searchCast; setSelectedValues(document.getElementById('target-services'), r.useAllChannels ? channels.map(channelServiceKey) : normalizeRuleServiceValues(r.targetServices)); setCheckedValues(document.getElementById('genre-wrap'), (r.targetGenres||'').split(',').filter(Boolean)); setCheckedValues(document.getElementById('days-wrap'), (r.targetDays||'').split(',').filter(Boolean)); document.getElementById('use-time-range').checked=!!r.useTimeRange; document.getElementById('start-time').value=r.startTime||'00:00'; document.getElementById('end-time').value=r.endTime||'23:30'; syncTimeEnabled(); syncRegexMode(); resetPreview(); document.getElementById('modal-overlay').classList.add('open');}
+function openEdit(id){const r=rules.find(x=>x.id===id); if(!r) return; clearForm(); document.getElementById('modal-title').textContent='自動検索予約ルール編集'; document.getElementById('rule-id').value=r.id; document.getElementById('pattern').value=r.pattern||''; document.getElementById('exclude-pattern').value=r.excludePattern||''; document.getElementById('enabled').checked=!!r.enabled; document.getElementById('record-current-service-only').checked=(r.recordCurrentServiceOnly!==false); document.getElementById('record-subtitles').checked=(r.recordSubtitles!==false); document.getElementById('use-regex').checked=(r.useRegex!==false); document.getElementById('search-title').checked=!!r.searchTitle; document.getElementById('search-outline').checked=!!r.searchOutline; document.getElementById('search-detail').checked=!!r.searchDetail; document.getElementById('search-cast').checked=!!r.searchCast; setSelectedValues(document.getElementById('target-services'), r.useAllChannels ? channels.map(channelServiceKey) : normalizeRuleServiceValues(r.targetServices)); setCheckedValues(document.getElementById('genre-wrap'), (r.targetGenres||'').split(',').filter(Boolean)); setCheckedValues(document.getElementById('days-wrap'), (r.targetDays||'').split(',').filter(Boolean)); document.getElementById('use-time-range').checked=!!r.useTimeRange; document.getElementById('start-time').value=r.startTime||'00:00'; document.getElementById('end-time').value=r.endTime||'23:30'; syncTimeEnabled(); syncRegexMode(); resetPreview(); document.getElementById('modal-overlay').classList.add('open');}
 function closeModal(){document.getElementById('modal-overlay').classList.remove('open');}
 function selectAllChannels(){setSelectedValues(document.getElementById('target-services'), channels.map(channelServiceKey))}
 function clearAllChannels(){setSelectedValues(document.getElementById('target-services'), [])}
@@ -362,6 +372,8 @@ function collectRule(){return {
   pattern:document.getElementById('pattern').value.trim(),
   excludePattern:document.getElementById('exclude-pattern').value.trim(),
   enabled:document.getElementById('enabled').checked,
+  recordCurrentServiceOnly:document.getElementById('record-current-service-only').checked,
+  recordSubtitles:document.getElementById('record-subtitles').checked,
   useRegex:document.getElementById('use-regex').checked,
   searchTitle:document.getElementById('search-title').checked,
   searchOutline:document.getElementById('search-outline').checked,
@@ -428,9 +440,9 @@ Promise.all([loadChannels(), loadRules()])
 
 </script>
 
-<script src="/tvair-notification.js?v=1.2.1-ui2"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.1-ui2"></script>
-<script src="/tvair-settings-host.js?v=1.2.1"></script>
-<script src="/tvair-menu-spine.js?v=1.2.1-ui2"></script>
+<script src="/tvair-notification.js?v=1.2.2"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.2"></script>
+<script src="/tvair-settings-host.js?v=1.2.2"></script>
+<script src="/tvair-menu-spine.js?v=1.2.2"></script>
 </body>
 </html>

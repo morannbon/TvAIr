@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk.Web">
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
     <Platforms>AnyCPU;x86;x64</Platforms>
@@ -146,4 +146,7 @@
     <Error Text="TvAIr icon output contract violation: output TvAIr_Recording.ico was not copied." Condition="!Exists('$(OutDir)TvAIr_Recording.ico')" />
   </Target>
 
+  <ItemGroup>
+    <Compile Include="..\Shared\EitEventGroupContract.cs" Link="Shared\EitEventGroupContract.cs" />
+  </ItemGroup>
 </Project>

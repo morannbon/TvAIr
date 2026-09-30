@@ -28,10 +28,11 @@
   background:var(--tvair-log-action-bg,var(--tvair-reservation-toolbar-bg));
   border:1px solid var(--tvair-log-action-border,var(--tvair-reservation-toolbar-border));
   color:var(--tvair-log-action-fg,var(--tvair-reservation-toolbar-text));
-  padding:2px 10px;
-  border-radius:2px 2px 0 0;
+  min-height:var(--tvair-button-h-row-action);
+  padding:2px var(--tvair-button-pad-x-row-action);
+  border-radius:var(--tvair-button-radius) var(--tvair-button-radius) 0 0;
   cursor:pointer;
-  font-size:11px;
+  font-size:var(--tvair-button-font-compact);
   font-family:'Meiryo','メイリオ',sans-serif;
   margin-bottom:0;
 }
@@ -48,10 +49,11 @@
   background:var(--tvair-reservation-toolbar-bg);
   border:1px solid var(--tvair-reservation-toolbar-border);
   color:var(--tvair-reservation-toolbar-text);
-  padding:2px 10px;
-  border-radius:2px 2px 0 0;
+  min-height:var(--tvair-button-h-row-action);
+  padding:2px var(--tvair-button-pad-x-row-action);
+  border-radius:var(--tvair-button-radius) var(--tvair-button-radius) 0 0;
   cursor:pointer;
-  font-size:11px;
+  font-size:var(--tvair-button-font-compact);
   font-family:'Meiryo','メイリオ',sans-serif;
   margin-bottom:0;
 }

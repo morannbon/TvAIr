@@ -1,10 +1,26 @@
-﻿namespace TvAIr.Epg;
+﻿using TvAIr.Epg.Shared;
+
+namespace TvAIr.Epg;
+
+internal enum EitTransportStreamScope
+{
+    ActualOnly,
+    OtherOnly
+}
 
 internal sealed class EitSectionReader
 {
-    private readonly Dictionary<(ushort Sid, byte TableId, byte VersionNumber), SectionTracker> sections = new();
-    private readonly Dictionary<(ushort Sid, byte TableId), byte> captureSnapshotVersions = new();
+    private readonly EitTransportStreamScope transportStreamScope;
+
+    public EitSectionReader(EitTransportStreamScope transportStreamScope = EitTransportStreamScope.ActualOnly)
+    {
+        this.transportStreamScope = transportStreamScope;
+    }
+    private readonly Dictionary<(ushort Nid, ushort Tsid, ushort Sid, byte TableId, byte VersionNumber), SectionTracker> sections = new();
+    private readonly Dictionary<(ushort Nid, ushort Tsid, ushort Sid, byte TableId), byte> captureSnapshotVersions = new();
+#if TVAIR_DEVELOPER_DIAGNOSTICS
     private readonly List<EpgTitleDecode> titleDecodes = new();
+#endif
     private readonly List<EpgEventObservation> eventObservations = new();
     private readonly List<RawEitSectionSnapshot> rawSections = new();
     private readonly List<EpgRejectedEventHeader> rejectedEventHeaders = new();
@@ -29,8 +45,18 @@ internal sealed class EitSectionReader
     private int ignoredDuplicateEitSectionCount;
     private int ignoredVersionSwitchEitSectionCount;
     private int ignoredBasicScheduleVersionSwitchEitSectionCount;
+    private int invalidSyntaxOrLengthEitSectionCount;
+    private int invalidCrcEitSectionCount;
+    private int invalidHeaderConsistencyEitSectionCount;
+    private int toleratedSameVersionScheduleMetadataDriftCount;
     private bool rawSectionShortResolverApplied;
+    private bool commonResolverApplied;
+    private int commonEventCount;
+    private int commonResolvedCount;
+    private int commonUnresolvedCount;
+#if TVAIR_DEVELOPER_DIAGNOSTICS
     private const int MaxDecodes = 160;
+#endif
     private const int MaxRejectedEventHeaders = 24;
 
     public int EitSectionCount => eitSectionCount;
@@ -41,7 +67,11 @@ internal sealed class EitSectionReader
     public int RawSectionShortResolverCandidates => rawSectionShortResolverCandidates;
     public int RawSectionShortResolverMerged => rawSectionShortResolverMerged;
     public int RawSectionShortResolverUnresolved => rawSectionShortResolverUnresolved;
+#if TVAIR_DEVELOPER_DIAGNOSTICS
     public IReadOnlyList<EpgTitleDecode> TitleDecodes => titleDecodes;
+#else
+    public IReadOnlyList<EpgTitleDecode> TitleDecodes => Array.Empty<EpgTitleDecode>();
+#endif
     public IReadOnlyList<EpgEventObservation> EventObservations => eventObservations;
     public int RejectedEventHeaderCount => rejectedEventHeaderCount;
     public int RejectedBasicScheduleEventHeaderCount => rejectedBasicScheduleEventHeaderCount;
@@ -51,34 +81,64 @@ internal sealed class EitSectionReader
     public int IgnoredDuplicateEitSectionCount => ignoredDuplicateEitSectionCount;
     public int IgnoredVersionSwitchEitSectionCount => ignoredVersionSwitchEitSectionCount;
     public int IgnoredBasicScheduleVersionSwitchEitSectionCount => ignoredBasicScheduleVersionSwitchEitSectionCount;
+    public int InvalidSyntaxOrLengthEitSectionCount => invalidSyntaxOrLengthEitSectionCount;
+    public int InvalidCrcEitSectionCount => invalidCrcEitSectionCount;
+    public int InvalidHeaderConsistencyEitSectionCount => invalidHeaderConsistencyEitSectionCount;
+    public int ToleratedSameVersionScheduleMetadataDriftCount => toleratedSameVersionScheduleMetadataDriftCount;
     public IReadOnlyList<EpgRejectedEventHeader> RejectedEventHeaders => rejectedEventHeaders;
+    public int CommonEventCount => commonEventCount;
+    public int CommonResolvedCount => commonResolvedCount;
+    public int CommonUnresolvedCount => commonUnresolvedCount;
+
+    internal IReadOnlyList<EitSubtableVersion> GetCaptureSnapshotVersions()
+        => captureSnapshotVersions
+            .Where(static pair => EitTableContract.IsSchedule(pair.Key.TableId))
+            .Select(static pair => new EitSubtableVersion(pair.Key.Nid, pair.Key.Tsid, pair.Key.Sid, pair.Key.TableId, pair.Value))
+            .ToArray();
+
+    internal IReadOnlyList<EitCachedSection> GetAcceptedScheduleSections()
+        => rawSections
+            .Where(static snapshot => EitTableContract.IsSchedule(snapshot.TableId))
+            .Select(static snapshot => new EitCachedSection(
+                snapshot.NetworkId, snapshot.TransportStreamId, snapshot.ServiceId, snapshot.TableId,
+                snapshot.VersionNumber, snapshot.SectionNumber, snapshot.Section))
+            .ToArray();
+
+    internal bool HasAcceptedSection(EitCachedSection section)
+        => sections.TryGetValue((section.NetworkId, section.TransportStreamId, section.ServiceId, section.TableId, section.VersionNumber), out var tracker)
+            && tracker.Seen.Contains(section.SectionNumber);
 
     public bool TryRead(ReadOnlySpan<byte> section)
     {
         if (section.Length < 18) return false;
         var tableId = section[0];
-        if (tableId < 0x4E || tableId > 0x6F) return false;
+        if (!EitTableContract.IsEit(tableId)) return false;
 
-        // 0x4F and 0x60-0x6F are EIT for another transport stream. TvAIr's
-        // capture/import unit is the currently tuned TS, so those sections must
-        // not enter the same accumulator or DB import scope as actual-TS EIT.
-        if (tableId == 0x4F || tableId >= 0x60)
+        var isOtherTransportStream = EitTableContract.IsOtherTransportStream(tableId);
+        if (transportStreamScope == EitTransportStreamScope.ActualOnly && isOtherTransportStream)
         {
+            // The primary actual-TS analyzer remains actual-only. Normal BS/CS capture may
+            // run a separate OtherOnly analyzer for supplement-only schedule import; keeping
+            // the accumulators isolated prevents other-TS data from gaining actual authority.
             ignoredOtherTransportStreamEitSectionCount++;
             return false;
         }
+        if (transportStreamScope == EitTransportStreamScope.OtherOnly && !isOtherTransportStream)
+            return false;
 
         var sectionLength = ((section[1] & 0x0F) << 8) | section[2];
         var sectionEnd = 3 + sectionLength;
         if ((section[1] & 0x80) == 0 || sectionLength < 15 || sectionEnd > section.Length)
         {
             invalidEitSectionCount++;
+            invalidSyntaxOrLengthEitSectionCount++;
             return false;
         }
         var exactSection = section.Slice(0, sectionEnd);
         if (!HasValidMpegSectionCrc(exactSection))
         {
             invalidEitSectionCount++;
+            invalidCrcEitSectionCount++;
             return false;
         }
         section = exactSection;
@@ -104,14 +164,15 @@ internal sealed class EitSectionReader
         if (!IsConsistentSectionHeader(tableId, sectionNumber, lastSectionNumber, segmentLastSectionNumber, lastTableId))
         {
             invalidEitSectionCount++;
+            invalidHeaderConsistencyEitSectionCount++;
             return false;
         }
 
         // A single capture must represent one coherent current-version snapshot per
-        // service/table. If the broadcaster switches version during this capture,
+        // network/transport/service/table. If the broadcaster switches version during this capture,
         // do not merge old/new descriptors into the same event accumulator. The
         // first accepted current version remains authoritative until the next capture.
-        var snapshotKey = (serviceId, tableId);
+        var snapshotKey = (networkId, transportStreamId, serviceId, tableId);
         if (!captureSnapshotVersions.TryGetValue(snapshotKey, out var snapshotVersion))
         {
             captureSnapshotVersions[snapshotKey] = versionNumber;
@@ -119,11 +180,11 @@ internal sealed class EitSectionReader
         else if (snapshotVersion != versionNumber)
         {
             ignoredVersionSwitchEitSectionCount++;
-            if (tableId >= 0x50 && tableId <= 0x57) ignoredBasicScheduleVersionSwitchEitSectionCount++;
+            if (EitTableContract.IsActualBasicSchedule(tableId)) ignoredBasicScheduleVersionSwitchEitSectionCount++;
             return false;
         }
 
-        var trackResult = TrackSection(serviceId, tableId, versionNumber, sectionNumber, lastSectionNumber, segmentLastSectionNumber, lastTableId);
+        var trackResult = TrackSection(networkId, transportStreamId, serviceId, tableId, versionNumber, sectionNumber, lastSectionNumber, segmentLastSectionNumber, lastTableId);
         if (trackResult == SectionTrackResult.Inconsistent)
         {
             invalidEitSectionCount++;
@@ -156,7 +217,7 @@ internal sealed class EitSectionReader
             if (headerRejectReason is not null)
             {
                 rejectedEventHeaderCount++;
-                if (tableId >= 0x50 && tableId <= 0x57) rejectedBasicScheduleEventHeaderCount++;
+                if (EitTableContract.IsActualBasicSchedule(tableId)) rejectedBasicScheduleEventHeaderCount++;
                 if (rejectedEventHeaders.Count < MaxRejectedEventHeaders)
                 {
                     rejectedEventHeaders.Add(new EpgRejectedEventHeader(
@@ -188,6 +249,7 @@ internal sealed class EitSectionReader
             var rawShortEventDescriptorHex = string.Empty;
             var rawExtendedEventDescriptorHex = string.Empty;
             var rawContentDescriptorHex = string.Empty;
+            var commonReferences = new List<EitEventReference>();
             while (descriptorPos + 2 <= descEnd)
             {
                 var tag = section[descriptorPos];
@@ -223,6 +285,12 @@ internal sealed class EitSectionReader
                         EnsureEvent(networkId, transportStreamId, serviceId, eventId, tableId, sectionNumber, versionNumber, start, duration, string.Empty, string.Empty, string.Empty, genreCodes, "none", "not_attempted", "content_descriptor_only", descriptorLoopHex, rawShortEventDescriptorHex, rawExtendedEventDescriptorHex, rawContentDescriptorHex);
                     }
                 }
+                else if (tag == EitEventGroupContract.DescriptorTag
+                    && EitEventGroupContract.TryParse(section.Slice(descriptorPos + 2, len), out var groupInfo)
+                    && groupInfo.IsCommon)
+                {
+                    commonReferences.AddRange(groupInfo.References);
+                }
                 descriptorPos = next;
             }
 
@@ -237,6 +305,11 @@ internal sealed class EitSectionReader
                 if (!string.IsNullOrEmpty(rawExtendedEventDescriptorHex)) extendedWithoutShortCount++;
                 AddNoDescriptorDecode(networkId, transportStreamId, serviceId, eventId, tableId, sectionNumber, lastSectionNumber, descLoopLength, descStart, "no_short_event_descriptor");
                 EnsureEvent(networkId, transportStreamId, serviceId, eventId, tableId, sectionNumber, versionNumber, start, duration, string.Empty, string.Empty, string.Empty, genreCodes, "none", "not_attempted", "no_short_event_descriptor", descriptorLoopHex, rawShortEventDescriptorHex, rawExtendedEventDescriptorHex, rawContentDescriptorHex);
+            }
+            if (commonReferences.Count > 0)
+            {
+                EnsureEvent(networkId, transportStreamId, serviceId, eventId, tableId, sectionNumber, versionNumber, start, duration, string.Empty, string.Empty, string.Empty, genreCodes, "none", "not_attempted", "common_event_group", descriptorLoopHex, rawShortEventDescriptorHex, rawExtendedEventDescriptorHex, rawContentDescriptorHex);
+                AttachCommonReferences(networkId, transportStreamId, serviceId, eventId, start, duration, commonReferences);
             }
 
             pos = descEnd;
@@ -259,8 +332,10 @@ internal sealed class EitSectionReader
     {
         ResolveResidualShortDescriptorsFromRawSections();
 
-        static bool IsScheduleTitleCarrierTable(byte tableId) => tableId >= 0x50 && tableId <= 0x57;
-        static bool IsScheduleBodyTable(byte tableId) => tableId >= 0x58 && tableId <= 0x5F;
+        static bool IsScheduleTitleCarrierTable(byte tableId)
+            => EitTableContract.IsBasicSchedule(tableId);
+        static bool IsScheduleBodyTable(byte tableId)
+            => EitTableContract.IsExtendedSchedule(tableId);
         static string Tables(HashSet<byte> tables) => tables.Count == 0
             ? "-"
             : string.Join('.', tables.OrderBy(x => x).Select(x => $"0x{x:X2}"));
@@ -313,6 +388,7 @@ internal sealed class EitSectionReader
     public IReadOnlyList<ParsedEpgEvent> BuildEvents()
     {
         ResolveResidualShortDescriptorsFromRawSections();
+        ResolveCommonEventDescriptions();
 
         return events.Values
             .Where(e => e.Start != DateTime.MinValue && e.DurationSeconds > 0)
@@ -372,6 +448,7 @@ internal sealed class EitSectionReader
 
     private DecodedShortEvent AddShortDecode(ReadOnlySpan<byte> section, ushort nid, ushort tsid, ushort sid, ushort eid, byte tableId, byte sectionNumber, byte lastSectionNumber, int descriptorLoopLength, int descriptorOffset, int descriptorLength)
     {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
         if (titleDecodes.Count >= MaxDecodes)
         {
             var skipped = ShortEventDescriptorReader.Read(section, descriptorOffset, descriptorLength);
@@ -379,6 +456,7 @@ internal sealed class EitSectionReader
             var skippedText = AribPsiSiDecoder.Decode(skipped.TextBytes);
             return new DecodedShortEvent(skippedTitle.Text, skippedText.Text, skippedTitle.Route, skippedTitle.Status, skipped.BoundaryStatus);
         }
+#endif
         var parsed = ShortEventDescriptorReader.Read(section, descriptorOffset, descriptorLength);
         var title = AribPsiSiDecoder.Decode(parsed.EventNameBytes);
         var text = AribPsiSiDecoder.Decode(parsed.TextBytes);
@@ -392,24 +470,29 @@ internal sealed class EitSectionReader
                     ? title.Status
                     : "none";
 
-        titleDecodes.Add(new EpgTitleDecode(
-            nid, tsid, sid, eid, tableId, sectionNumber, lastSectionNumber,
-            descriptorLoopLength, descriptorOffset, descriptorLength,
-            parsed.BoundaryStatus,
-            parsed.Iso639LanguageCode,
-            parsed.EventNameLength,
-            parsed.EventNameBytes.Length,
-            ShortEventDescriptorReader.Hex(parsed.EventNameBytes, 48),
-            AribEventNameTrace.Build(parsed.EventNameBytes),
-            title.Route,
-            title.Status,
-            title.Text,
-            title.Text.Length,
-            parsed.TextLength,
-            parsed.TextBytes.Length,
-            ShortEventDescriptorReader.Hex(parsed.TextBytes, 32),
-            text.Text.Length > 80 ? text.Text[..80] : text.Text,
-            emptyReason));
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        if (titleDecodes.Count < MaxDecodes)
+        {
+            titleDecodes.Add(new EpgTitleDecode(
+                nid, tsid, sid, eid, tableId, sectionNumber, lastSectionNumber,
+                descriptorLoopLength, descriptorOffset, descriptorLength,
+                parsed.BoundaryStatus,
+                parsed.Iso639LanguageCode,
+                parsed.EventNameLength,
+                parsed.EventNameBytes.Length,
+                ShortEventDescriptorReader.Hex(parsed.EventNameBytes, 48),
+                AribEventNameTrace.Build(parsed.EventNameBytes),
+                title.Route,
+                title.Status,
+                title.Text,
+                title.Text.Length,
+                parsed.TextLength,
+                parsed.TextBytes.Length,
+                ShortEventDescriptorReader.Hex(parsed.TextBytes, 32),
+                text.Text.Length > 80 ? text.Text[..80] : text.Text,
+                emptyReason));
+        }
+#endif
         return new DecodedShortEvent(title.Text, text.Text, title.Route, title.Status, parsed.BoundaryStatus);
     }
 
@@ -524,6 +607,7 @@ internal sealed class EitSectionReader
 
     private void AddNoDescriptorDecode(ushort nid, ushort tsid, ushort sid, ushort eid, byte tableId, byte sectionNumber, byte lastSectionNumber, int descriptorLoopLength, int descriptorOffset, string reason)
     {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
         if (titleDecodes.Count >= MaxDecodes) return;
         titleDecodes.Add(new EpgTitleDecode(
             nid, tsid, sid, eid, tableId, sectionNumber, lastSectionNumber,
@@ -532,13 +616,15 @@ internal sealed class EitSectionReader
             "empty",
             "none", "not_attempted", string.Empty, 0,
             0, 0, string.Empty, string.Empty, reason));
+#endif
     }
 
     private static bool IsConsistentSectionHeader(byte tableId, byte sectionNumber, byte lastSectionNumber, byte segmentLastSectionNumber, byte lastTableId)
     {
         if (sectionNumber > lastSectionNumber) return false;
-        if (tableId == 0x4E) return segmentLastSectionNumber == lastSectionNumber && lastTableId == 0x4E;
-        if (lastTableId < tableId || lastTableId < 0x50 || lastTableId > 0x5F) return false;
+        if (tableId is 0x4E or 0x4F) return segmentLastSectionNumber == lastSectionNumber && lastTableId == tableId;
+        var sameScheduleFamily = EitTableContract.IsSameScheduleFamily(tableId, lastTableId);
+        if (!sameScheduleFamily || lastTableId < tableId) return false;
 
         var firstInSegment = (byte)((sectionNumber >> 3) << 3);
         var maximumInSegment = (byte)Math.Min(lastSectionNumber, firstInSegment + 7);
@@ -547,9 +633,9 @@ internal sealed class EitSectionReader
             && segmentLastSectionNumber <= maximumInSegment;
     }
 
-    private SectionTrackResult TrackSection(ushort sid, byte tableId, byte versionNumber, byte sectionNumber, byte lastSectionNumber, byte segmentLastSectionNumber, byte lastTableId)
+    private SectionTrackResult TrackSection(ushort nid, ushort tsid, ushort sid, byte tableId, byte versionNumber, byte sectionNumber, byte lastSectionNumber, byte segmentLastSectionNumber, byte lastTableId)
     {
-        var key = (sid, tableId, versionNumber);
+        var key = (nid, tsid, sid, tableId, versionNumber);
         if (!sections.TryGetValue(key, out var tracker))
         {
             tracker = new SectionTracker
@@ -561,12 +647,19 @@ internal sealed class EitSectionReader
         }
         else if (tracker.LastSectionNumber != lastSectionNumber || tracker.LastTableId != lastTableId)
         {
-            return SectionTrackResult.Inconsistent;
+            // Some BS/CS broadcasters can expose CRC-valid schedule sections with the same
+            // current version while last_section_number / last_table_id metadata expands during
+            // the capture. Dropping those sections loses real future events. Keep the already
+            // accepted snapshot and widen only the advertised bounds; never shrink them.
+            // Stale retirement is blocked for this capture by the caller when this occurs.
+            tracker.LastSectionNumber = Math.Max(tracker.LastSectionNumber, lastSectionNumber);
+            tracker.LastTableId = Math.Max(tracker.LastTableId, lastTableId);
+            toleratedSameVersionScheduleMetadataDriftCount++;
         }
 
         if (!tracker.Seen.Add(sectionNumber)) return SectionTrackResult.Duplicate;
 
-        if (tableId >= 0x50 && tableId <= 0x6F)
+        if (EitTableContract.IsSchedule(tableId))
         {
             var seg = (byte)(sectionNumber >> 3);
             var firstInSeg = (byte)(seg << 3);
@@ -720,7 +813,7 @@ internal sealed class EitSectionReader
     }
 
     private static bool IsShortCarrierTable(byte tableId)
-        => tableId == 0x4E || (tableId >= 0x50 && tableId <= 0x57);
+        => EitTableContract.IsPresentFollowing(tableId) || EitTableContract.IsBasicSchedule(tableId);
 
     private RawShortSectionHit? TryFindStrictRawShortInSection(RawEitSectionSnapshot snapshot, MutableEvent target)
     {
@@ -765,6 +858,100 @@ internal sealed class EitSectionReader
             pos = descEnd;
         }
         return null;
+    }
+
+    private void AttachCommonReferences(ushort nid, ushort tsid, ushort sid, ushort eid, DateTime start, int durationSeconds, IEnumerable<EitEventReference> references)
+    {
+        if (!events.TryGetValue((nid, tsid, sid, eid, start, durationSeconds), out var ev)) return;
+        foreach (var reference in references)
+        {
+            if (reference.ServiceId == 0 || reference.EventId == 0) continue;
+            ev.CommonReferences.Add(reference);
+        }
+    }
+
+    private void ResolveCommonEventDescriptions()
+    {
+        if (commonResolverApplied) return;
+        commonResolverApplied = true;
+
+        var byIdentity = events.Values
+            .GroupBy(e => (e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId))
+            .ToDictionary(g => g.Key, g => g.ToArray());
+
+        var reverseCommonDonors = new Dictionary<(ushort Nid, ushort Tsid, ushort Sid, ushort Eid), List<MutableEvent>>();
+        foreach (var source in events.Values)
+        {
+            foreach (var reference in source.CommonReferences)
+            {
+                var key = (source.NetworkId, source.TransportStreamId, reference.ServiceId, reference.EventId);
+                if (!reverseCommonDonors.TryGetValue(key, out var list)) reverseCommonDonors[key] = list = new List<MutableEvent>();
+                list.Add(source);
+            }
+        }
+
+        foreach (var target in events.Values)
+        {
+            var reverseKey = (target.NetworkId, target.TransportStreamId, target.ServiceId, target.EventId);
+            var hasReverseCommon = reverseCommonDonors.ContainsKey(reverseKey);
+            if (target.CommonReferences.Count == 0 && !hasReverseCommon) continue;
+
+            commonEventCount++;
+            if (!string.IsNullOrWhiteSpace(target.Title))
+            {
+                commonResolvedCount++;
+                continue;
+            }
+
+            var donorCandidates = new List<MutableEvent>();
+            foreach (var reference in target.CommonReferences)
+            {
+                if (byIdentity.TryGetValue((target.NetworkId, target.TransportStreamId, reference.ServiceId, reference.EventId), out var candidates))
+                    donorCandidates.AddRange(candidates);
+            }
+            if (reverseCommonDonors.TryGetValue(reverseKey, out var reverseDonors)) donorCandidates.AddRange(reverseDonors);
+
+            var titled = donorCandidates
+                .Where(c => !ReferenceEquals(c, target) && !string.IsNullOrWhiteSpace(c.Title))
+                .Distinct()
+                .ToArray();
+
+            MutableEvent? donor = null;
+            if (titled.Length == 1)
+            {
+                donor = titled[0];
+            }
+            else if (titled.Length > 1)
+            {
+                // event_id can be reused. Multiple explicit COMMON donors are accepted only when
+                // their descriptive payload agrees; otherwise do not guess.
+                var first = titled[0];
+                if (titled.All(c => string.Equals(c.Title, first.Title, StringComparison.Ordinal)
+                    && string.Equals(c.Description, first.Description, StringComparison.Ordinal)
+                    && string.Equals(c.GenreCodes, first.GenreCodes, StringComparison.Ordinal)))
+                {
+                    donor = first;
+                }
+            }
+
+            if (donor is null)
+            {
+                commonUnresolvedCount++;
+                continue;
+            }
+
+            // COMMON shares descriptive information only. Keep the target SID/EID/time identity.
+            target.Title = donor.Title;
+            if (string.IsNullOrWhiteSpace(target.Description)) target.Description = donor.Description;
+            target.GenreCodes = MergeGenreCodes(target.GenreCodes, donor.GenreCodes);
+            target.TitleDecodeRoute = "event_group_common:" + donor.TitleDecodeRoute;
+            target.TitleDecodeStatus = donor.TitleDecodeStatus;
+            target.BoundaryStatus = "common_resolved";
+            target.RawShortEventDescriptorHex = MergeRawHex(target.RawShortEventDescriptorHex, donor.RawShortEventDescriptorHex);
+            target.RawExtendedEventDescriptorHex = MergeRawHex(target.RawExtendedEventDescriptorHex, donor.RawExtendedEventDescriptorHex);
+            target.RawContentDescriptorHex = MergeRawHex(target.RawContentDescriptorHex, donor.RawContentDescriptorHex);
+            commonResolvedCount++;
+        }
     }
 
     private static void UpdateAccumulatorMetadata(MutableEvent ev, byte tableId, string? rawShortEventDescriptorHex, string? rawExtendedEventDescriptorHex)
@@ -929,6 +1116,10 @@ internal sealed class EitSectionReader
 
     private static ushort U16(ReadOnlySpan<byte> data, int offset) => (ushort)((data[offset] << 8) | data[offset + 1]);
 
+    internal sealed record EitSubtableVersion(ushort NetworkId, ushort TransportStreamId, ushort ServiceId, byte TableId, byte VersionNumber);
+
+    internal sealed record EitCachedSection(ushort NetworkId, ushort TransportStreamId, ushort ServiceId, byte TableId, byte VersionNumber, byte SectionNumber, byte[] Section);
+
     private sealed record RawEitSectionSnapshot(ushort NetworkId, ushort TransportStreamId, ushort ServiceId, byte TableId, byte SectionNumber, byte LastSectionNumber, byte VersionNumber, byte[] Section);
 
     private sealed record RawShortSectionHit(byte TableId, byte SectionNumber, byte VersionNumber, string RawDescriptorLoopHex, string RawShortEventDescriptorHex, string DecodedTitle, string DecodedText, string DecodeRoute, string DecodeStatus, string BoundaryStatus);
@@ -974,6 +1165,7 @@ internal sealed class EitSectionReader
         public readonly HashSet<byte> SourceTables = new();
         public readonly HashSet<byte> ShortSourceTables = new();
         public readonly HashSet<byte> ExtendedSourceTables = new();
+        public readonly HashSet<EitEventReference> CommonReferences = new();
         public int ObservationCount;
         public int ShortDescriptorObservationCount;
         public int ExtendedDescriptorObservationCount;

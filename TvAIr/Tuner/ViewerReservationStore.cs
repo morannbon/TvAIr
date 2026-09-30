@@ -17,7 +17,6 @@ public enum ViewerReservationState
 public sealed class ViewerReservationStore
 {
     public static readonly TimeSpan MaxFutureHorizon = TimeSpan.FromHours(6);
-    private static readonly TimeSpan TerminalRetention = TimeSpan.FromMinutes(10);
     private readonly object _gate = new();
     private readonly string _filePath;
     private readonly LogRepository _log;
@@ -67,7 +66,7 @@ public sealed class ViewerReservationStore
         lock (_gate)
         {
             PruneTerminalUnsafe(now, saveWhenChanged: false);
-            var conflict = _rows.Values.FirstOrDefault(x => ConflictsExecutionSlot(x, profile, canonicalStart));
+            var conflict = _rows.Values.FirstOrDefault(x => ViewerReservationContract.ConflictsExecutionSlot(x, profile, canonicalStart));
             if (conflict is not null)
                 return Fail("viewerReservationConflict", "Another viewer reservation already targets this ViewerProfile at the same scheduled start time.");
 
@@ -164,7 +163,7 @@ public sealed class ViewerReservationStore
 
             var conflict = _rows.Values.FirstOrDefault(x =>
                 !string.Equals(x.ReservationId, row.ReservationId, StringComparison.OrdinalIgnoreCase) &&
-                ConflictsExecutionSlot(x, row.ViewerProfileId, projectedStart));
+                ViewerReservationContract.ConflictsExecutionSlot(x, row.ViewerProfileId, projectedStart));
             if (conflict is not null)
             {
                 row.ScheduledStart = projectedStart;
@@ -223,11 +222,11 @@ public sealed class ViewerReservationStore
 
     private void PruneTerminalUnsafe(DateTimeOffset now, bool saveWhenChanged)
     {
-        var removed = _rows.Where(x => x.Value.State != ViewerReservationState.Scheduled && now - x.Value.UpdatedAt >= TerminalRetention).Select(x => x.Key).ToArray();
+        var removed = _rows.Where(x => x.Value.State != ViewerReservationState.Scheduled && now - x.Value.UpdatedAt >= ViewerReservationContract.TerminalRetention).Select(x => x.Key).ToArray();
         if (removed.Length == 0) return;
         foreach (var id in removed) _rows.Remove(id);
         if (saveWhenChanged) SaveUnsafe();
-        _log.Add("VIEWER_RESERVATION_STORE", "Host", $"result=PRUNED terminal={removed.Length} retentionMinutes={TerminalRetention.TotalMinutes:0} rule=viewer_reservation_contract");
+        _log.Add("VIEWER_RESERVATION_STORE", "Host", $"result=PRUNED terminal={removed.Length} retentionMinutes={ViewerReservationContract.TerminalRetention.TotalMinutes:0} rule=viewer_reservation_contract");
     }
 
     private Dictionary<string, ViewerReservationRecord> Load()
@@ -254,12 +253,6 @@ public sealed class ViewerReservationStore
         File.Move(temp, _filePath, true);
     }
 
-    // Viewer Reservation is a future one-shot Viewer Operation, not a programme-duration resource lease.
-    // ScheduledEnd remains programme metadata; only ViewerProfile + ScheduledStart owns an execution slot.
-    private static bool ConflictsExecutionSlot(ViewerReservationRecord row, string viewerProfileId, DateTimeOffset scheduledStart)
-        => (row.State is ViewerReservationState.Scheduled or ViewerReservationState.Completed)
-           && string.Equals(row.ViewerProfileId, viewerProfileId, StringComparison.OrdinalIgnoreCase)
-           && row.ScheduledStart == scheduledStart;
     private static TvAirViewerReservationMutationResultDto Ok(ViewerReservationRecord row) => new() { Success = true, Reservation = ToDto(row) };
     private static TvAirViewerReservationMutationResultDto Fail(string code, string message) => new() { Success = false, ErrorCode = code, Message = message };
     private static string NormalizeId(string? value) => string.IsNullOrWhiteSpace(value) ? string.Empty : value.Trim();

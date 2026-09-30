@@ -1,12 +1,12 @@
-﻿namespace TvAIr.Core;
+namespace TvAIr.Core;
 
 /// <summary>
 /// ユーザー明示チェーンの成立条件正本。
 /// UI/Pluginの候補投影とAPI/Storeの再検証はこの判定を共有し、
 /// Store Transactionだけがroot/cycle/successor一意性など保存トポロジーを追加検証する。
 ///
-/// CHAIN_DEVELOPER_APPROVAL_REQUIRED — 変更禁止:
-/// 判定条件または結果の意味を変更する場合はTvAIr開発者の明示承認を必須とする。
+/// INVARIANT:
+/// 候補表示と保存前再検証はこの判定を共有し、別の成立条件を追加しない。
 /// </summary>
 public static class ChainReservationEligibilityContract
 {
@@ -61,6 +61,32 @@ public static class ChainReservationEligibilityContract
     public static bool IsSameServiceAndAdjacent(Reservation predecessor, Reservation successor)
         => IsSameService(predecessor, successor.NetworkId, successor.TransportStreamId, successor.ServiceId)
             && ChainReservationContract.IsAdjacent(predecessor.EndTime, successor.StartTime);
+
+    /// <summary>
+    /// Persisted explicit-chain runtime pair contract. New chain creation still requires normal
+    /// adjacency; after persistence, a temporary negative gap caused by predecessor-only
+    /// time-follow does not sever the explicit same-service topology. Positive gaps outside the
+    /// normal adjacency window remain invalid.
+    /// </summary>
+    public static bool IsPersistedExplicitRuntimePair(Reservation predecessor, Reservation successor)
+    {
+        if (!IsSameService(predecessor, successor.NetworkId, successor.TransportStreamId, successor.ServiceId))
+            return false;
+
+        if (ChainReservationContract.IsAdjacent(predecessor.EndTime, successor.StartTime))
+            return true;
+
+        var gapSeconds = (successor.StartTime - predecessor.EndTime).TotalSeconds;
+        if (gapSeconds >= ChainReservationContract.AdjacentMinGapSeconds)
+            return false;
+
+        if (!successor.IsUserChain || successor.UserChainPreviousId != predecessor.Id)
+            return false;
+
+        var predecessorRoot = predecessor.UserChainRootId ?? predecessor.Id;
+        return successor.UserChainRootId.HasValue
+            && successor.UserChainRootId.Value == predecessorRoot;
+    }
 
     public static Result EvaluatePair(
         Reservation? predecessor,

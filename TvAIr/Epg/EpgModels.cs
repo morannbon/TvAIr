@@ -1,8 +1,15 @@
-﻿namespace TvAIr.Epg;
+namespace TvAIr.Epg;
 
 internal sealed record EpgAnalyzeResult(
     int PacketCount,
     int SyncErrors,
+    int TransportErrorPacketCount,
+    int ContinuityDiscontinuityCount,
+    int DiscontinuityIndicatorResetCount,
+    int DuplicatePayloadPacketCount,
+    int ResyncWaitDropPacketCount,
+    int InvalidSectionLengthResetCount,
+    int InvalidPointerResetCount,
     int SectionCount,
     int EitSectionCount,
     int ShortEventDescriptorCount,
@@ -12,6 +19,9 @@ internal sealed record EpgAnalyzeResult(
     int RawSectionShortResolverCandidates,
     int RawSectionShortResolverMerged,
     int RawSectionShortResolverUnresolved,
+    int CommonEventCount,
+    int CommonResolvedCount,
+    int CommonUnresolvedCount,
     int RejectedEventHeaderCount,
     int RejectedBasicScheduleEventHeaderCount,
     int IgnoredOtherTransportStreamEitSectionCount,
@@ -20,6 +30,21 @@ internal sealed record EpgAnalyzeResult(
     int IgnoredDuplicateEitSectionCount,
     int IgnoredVersionSwitchEitSectionCount,
     int IgnoredBasicScheduleVersionSwitchEitSectionCount,
+    int InvalidSyntaxOrLengthEitSectionCount,
+    int InvalidCrcEitSectionCount,
+    int InvalidHeaderConsistencyEitSectionCount,
+    int ToleratedSameVersionScheduleMetadataDriftCount,
+    int PersistentCacheLoadedSections,
+    int PersistentCacheReplayAcceptedSections,
+    int PersistentCacheCurrentSubtables,
+    IReadOnlyList<EpgCaptureSubtableVersion> CurrentCaptureSubtables,
+    IReadOnlyList<EpgPersistentCacheSubtable> PersistentCacheSubtables,
+    IReadOnlyList<EpgSectionEventInventory> CurrentCaptureSectionInventories,
+    IReadOnlyList<EpgSectionEventInventory> PersistentCacheSectionInventories,
+    IReadOnlyList<EpgEventObservation> CurrentCaptureEventObservations,
+    IReadOnlyList<EpgEventObservation> PersistentCacheEventObservations,
+    IReadOnlyList<EpgPreviousVersionCacheSubtable> PreviousVersionCacheSubtables,
+    IReadOnlyList<EpgEventObservation> PreviousVersionCacheEventObservations,
     IReadOnlyList<EpgRejectedEventHeader> RejectedEventHeaders,
     IReadOnlyList<EpgTitleDecode> TitleDecodes,
     IReadOnlyList<EpgSectionStatus> SectionStatuses,
@@ -28,8 +53,22 @@ internal sealed record EpgAnalyzeResult(
     IReadOnlyList<ParsedEpgEvent> Events)
 {
     public string StatsLine =>
-        $"packets={PacketCount} syncErrors={SyncErrors} sections={SectionCount} eitSections={EitSectionCount} shortEventDescriptors={ShortEventDescriptorCount} decodeAttempts={DecodeAttemptCount} extendedWithoutShort={ExtendedWithoutShortCount} descriptorRecovery={DescriptorRecoveryCount} rawSectionShortResolverCandidates={RawSectionShortResolverCandidates} rawSectionShortResolverMerged={RawSectionShortResolverMerged} rawSectionShortResolverUnresolved={RawSectionShortResolverUnresolved} rejectedEventHeaders={RejectedEventHeaderCount} rejectedBasicScheduleEventHeaders={RejectedBasicScheduleEventHeaderCount} rejectedEventHeaderSamples={RejectedEventHeaders.Count} ignoredOtherTsEitSections={IgnoredOtherTransportStreamEitSectionCount} invalidEitSections={InvalidEitSectionCount} ignoredNonCurrentEitSections={IgnoredNonCurrentEitSectionCount} ignoredDuplicateEitSections={IgnoredDuplicateEitSectionCount} ignoredVersionSwitchEitSections={IgnoredVersionSwitchEitSectionCount} ignoredBasicScheduleVersionSwitchEitSections={IgnoredBasicScheduleVersionSwitchEitSectionCount} titleDecodes={TitleDecodes.Count} sectionStatus={SectionStatuses.Count} observations={EventObservations.Count} accumulators={EventAccumulatorAudits.Count} events={Events.Count}";
+        $"packets={PacketCount} syncErrors={SyncErrors} transportErrorPackets={TransportErrorPacketCount} continuityDiscontinuities={ContinuityDiscontinuityCount} discontinuityIndicatorResets={DiscontinuityIndicatorResetCount} exactDuplicatePayloadPackets={DuplicatePayloadPacketCount} resyncWaitDropPackets={ResyncWaitDropPacketCount} invalidSectionLengthResets={InvalidSectionLengthResetCount} invalidPointerResets={InvalidPointerResetCount} sections={SectionCount} eitSections={EitSectionCount} shortEventDescriptors={ShortEventDescriptorCount} decodeAttempts={DecodeAttemptCount} extendedWithoutShort={ExtendedWithoutShortCount} descriptorRecovery={DescriptorRecoveryCount} rawSectionShortResolverCandidates={RawSectionShortResolverCandidates} rawSectionShortResolverMerged={RawSectionShortResolverMerged} rawSectionShortResolverUnresolved={RawSectionShortResolverUnresolved} commonEvents={CommonEventCount} commonResolved={CommonResolvedCount} commonUnresolved={CommonUnresolvedCount} rejectedEventHeaders={RejectedEventHeaderCount} rejectedBasicScheduleEventHeaders={RejectedBasicScheduleEventHeaderCount} rejectedEventHeaderSamples={RejectedEventHeaders.Count} ignoredOtherTsEitSections={IgnoredOtherTransportStreamEitSectionCount} invalidEitSections={InvalidEitSectionCount} ignoredNonCurrentEitSections={IgnoredNonCurrentEitSectionCount} ignoredDuplicateEitSections={IgnoredDuplicateEitSectionCount} ignoredVersionSwitchEitSections={IgnoredVersionSwitchEitSectionCount} ignoredBasicScheduleVersionSwitchEitSections={IgnoredBasicScheduleVersionSwitchEitSectionCount} invalidSyntaxOrLengthEitSections={InvalidSyntaxOrLengthEitSectionCount} invalidCrcEitSections={InvalidCrcEitSectionCount} invalidHeaderConsistencyEitSections={InvalidHeaderConsistencyEitSectionCount} toleratedSameVersionScheduleMetadataDrift={ToleratedSameVersionScheduleMetadataDriftCount} persistentCacheLoadedSections={PersistentCacheLoadedSections} persistentCacheReplayAcceptedSections={PersistentCacheReplayAcceptedSections} persistentCacheCurrentSubtables={PersistentCacheCurrentSubtables} currentCaptureObservations={CurrentCaptureEventObservations.Count} persistentCacheObservations={PersistentCacheEventObservations.Count} titleDecodes={TitleDecodes.Count} sectionStatus={SectionStatuses.Count} observations={EventObservations.Count} accumulators={EventAccumulatorAudits.Count} events={Events.Count}";
 }
+
+internal sealed record EpgCaptureSubtableVersion(
+    ushort NetworkId, ushort TransportStreamId, ushort ServiceId, byte TableId, byte VersionNumber);
+
+internal sealed record EpgPersistentCacheSubtable(
+    ushort NetworkId, ushort TransportStreamId, ushort ServiceId, byte TableId, byte VersionNumber, int SectionCount);
+
+internal sealed record EpgPreviousVersionCacheSubtable(
+    ushort NetworkId, ushort TransportStreamId, ushort ServiceId, byte TableId,
+    byte CurrentVersionNumber, byte PreviousVersionNumber, int SectionCount);
+
+internal sealed record EpgSectionEventInventory(
+    ushort NetworkId, ushort TransportStreamId, ushort ServiceId, byte TableId, byte VersionNumber, byte SectionNumber,
+    IReadOnlyList<ushort> EventIds);
 
 internal sealed record EpgRejectedEventHeader(
     ushort NetworkId,

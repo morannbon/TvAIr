@@ -43,7 +43,7 @@ internal sealed class PluginExternalLookupGateway : IPluginExternalLookupGateway
         using var networkCancellation = _networkUsage.CreateLinkedCancellation(cancellationToken);
 
         using var message = new HttpRequestMessage(request.Method, request.Uri);
-        message.Headers.UserAgent.ParseAdd("TvAIr/1.2.1 PluginManagedExternalLookup");
+        message.Headers.UserAgent.ParseAdd($"TvAIr/{TvAIr.Core.TvAIrVersionContract.ProductVersion} PluginManagedExternalLookup");
         message.Headers.AcceptEncoding.Clear();
         message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         if (!string.IsNullOrWhiteSpace(request.BearerToken))

@@ -1,4 +1,4 @@
-﻿/* release_contract gr-cdt-data-module-logo-save-bscs-no-deep: Wakeタスク起動時は --wake-task を単一インスタンス合流シグナルとして扱い、既存TvAIrがいる場合は本体二重起動せず signal ファイルを書いて終了する。 */
+/* release_contract gr-cdt-data-module-logo-save-bscs-no-deep: Wakeタスク起動時は --wake-task を単一インスタンス合流シグナルとして扱い、既存TvAIrがいる場合は本体二重起動せず signal ファイルを書いて終了する。 */
 /* TvAIrEpgRecの表示ON/OFFを含む起動ポリシーは共通ヘルパーで管理する。 */
 /* release_contract wake-plan-hash-trigger-limit: limit Wake task rebuild triggers by in-process plan hash and periodic validation. */
 /* release_contract wake-task-nochange-skip: skip full Wake task delete/register when the desired plan is unchanged and existing managed tasks match. */
@@ -23,9 +23,9 @@ using TvAIr.Plugin.RuntimeHost;
 using TvAIr.Schedule;
 using TvAIr.Tuner;
 using TvAIrPlugin;
+using TvAIrPlugin.Assets;
 using TvAIrPlugin.Runtime;
 using TvAIrPlugin.Windows;
-using Microsoft.Win32;
 
 // ─── エンコーディング登録（ARIB文字コード用）───────────────────
 System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
@@ -188,19 +188,9 @@ static void WriteStartupSignalForExistingInstance(string reason)
         var portText = SettingsDefaults.Port.ToString(System.Globalization.CultureInfo.InvariantCulture);
         try
         {
-            var ini = Path.Combine(AppContext.BaseDirectory, "TvAIr.ini");
-            if (File.Exists(ini))
-            {
-                foreach (var line in File.ReadLines(ini))
-                {
-                    var t = line.Trim();
-                    if (t.StartsWith("Port", StringComparison.OrdinalIgnoreCase) && t.Contains('='))
-                    {
-                        var v = t[(t.IndexOf('=') + 1)..].Trim();
-                        if (int.TryParse(v, out _)) { portText = v; break; }
-                    }
-                }
-            }
+            portText = IniSettingsService
+                .ResolvePersistedPort(AppContext.BaseDirectory, SettingsDefaults.Port)
+                .ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
         catch { }
         Process.Start(new ProcessStartInfo { FileName = $"http://localhost:{portText}/", UseShellExecute = true });
@@ -247,6 +237,7 @@ var iniSettings = new IniSettingsService(
 builder.Services.AddSingleton(iniSettings);
 builder.Services.AddSingleton<NetworkAccessSecurity>();
 builder.Services.AddSingleton<PluginInternetAccessPermissionStore>();
+builder.Services.AddSingleton<PluginInternetAccessGate>();
 builder.Services.AddSingleton<PluginExternalLookupCredentialStore>();
 builder.Services.AddSingleton<IPluginExternalLookupGateway, PluginExternalLookupGateway>();
 builder.Services.AddSingleton<PluginManagedExternalLookupHost>();
@@ -354,6 +345,7 @@ builder.Services.AddSingleton<IReadOnlyList<TunerProfile>>(tunerProfiles.AsReadO
 // ─── コアサービス ────────────────────────────────────────────────
 builder.Services.AddSingleton<LogRepository>();
 builder.Services.AddSingleton<SettingsRuntimeState>();
+builder.Services.AddSingleton<SettingsUiCommitHub>();
 builder.Services.AddSingleton<ApplicationOperationGate>();
 builder.Services.AddSingleton<SettingsChangeApplicationService>();
 builder.Services.AddSingleton<UserEventLogService>();
@@ -386,7 +378,7 @@ builder.Services.AddSingleton<ViewerOperationPreemptionHub>();
 builder.Services.AddSingleton<ViewerReservationStore>();
 
 // ─── 予約 ────────────────────────────────────────────────────────
-builder.Services.AddSingleton<ChainDirectRecorderSessionRegistry>();
+builder.Services.AddSingleton<ChainRuntimeSnapshotRegistry>();
 builder.Services.AddSingleton<ReservationMutationJournal>();
 builder.Services.AddSingleton<ReservationMutationSideEffectProjection>();
 builder.Services.AddSingleton<PluginTypedEventHub>();
@@ -398,11 +390,16 @@ builder.Services.AddSingleton<ReservationProjectionMetadataStore>();
 builder.Services.AddSingleton<ReservationProjectionPromotionService>();
 builder.Services.AddSingleton<ProgramProjectionReservationSyncService>();
 builder.Services.AddSingleton<ReservationAllocationRouteService>();
+builder.Services.AddSingleton<ChainLifecycleCoordinator>();
 builder.Services.AddSingleton<SystemEpgResponsibilityPlanService>();
 builder.Services.AddSingleton<ReservationPresentationService>();
 
 // ─── EPG ────────────────────────────────────────────────────────
 builder.Services.AddSingleton<EpgStore>();
+builder.Services.AddSingleton<BroadcastTimeReference>();
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+builder.Services.AddSingleton<EpgCoverageAttributionDiagnosticStore>();
+#endif
 builder.Services.AddSingleton<DbProgramEventSource>();
 builder.Services.AddSingleton<ExternalEpgSourceStore>();
 builder.Services.AddSingleton<IProgramEventSource, ProgramGuideProjectionService>();
@@ -428,7 +425,12 @@ builder.Services.AddSingleton<EpgCapture>(sp =>
         sp.GetRequiredService<ServiceLogoStore>(),
         sp.GetRequiredService<EpgLogoExtractor>(),
         sp.GetRequiredService<ReservationProjectionPromotionService>(),
-        sp.GetRequiredService<KeywordMatcher>()));
+        sp.GetRequiredService<KeywordMatcher>(),
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        sp.GetRequiredService<EpgCoverageAttributionDiagnosticStore>(),
+        sp.GetRequiredService<DbProgramEventSource>(),
+#endif
+        sp.GetRequiredService<BroadcastTimeReference>()));
 builder.Services.AddSingleton<KeywordMatcher>();
 // EpgScheduler: AddSingleton で登録しつつ AddHostedService でバックグラウンド実行
 builder.Services.AddSingleton<EpgScheduler>(sp =>
@@ -450,7 +452,8 @@ builder.Services.AddSingleton<EpgScheduler>(sp =>
         sp.GetRequiredService<SystemSleepInhibitionService>(),
         sp.GetRequiredService<SystemEpgResponsibilityPlanService>(),
         sp.GetRequiredService<NormalEpgWaveOccupation>(),
-        sp.GetRequiredService<PowerResumeSignalHub>()));
+        sp.GetRequiredService<PowerResumeSignalHub>(),
+        sp.GetRequiredService<BroadcastTimeReference>()));
 builder.Services.AddHostedService(sp => sp.GetRequiredService<EpgScheduler>());
 
 // Wakeタスク合流シグナル監視: 既存TvAIrがいる状態で --wake-task 起動された子プロセスが残す signal を拾い、常駐TvAIr側へ処理を合流させる。
@@ -466,9 +469,9 @@ builder.Services.AddSingleton<TaskSchedulerService>(sp =>
         sp.GetRequiredService<UserEventLogService>(),
         sp.GetRequiredService<EpgScheduler>()));
 
-// ─── スタートアップ（レジストリRunキー） ─────────────────────────
-builder.Services.AddSingleton<StartupRegistryService>(sp =>
-    new StartupRegistryService(
+// ─── スタートアップ（Windows標準ログオンタスク） ─────────────────
+builder.Services.AddSingleton<WindowsAutoStartService>(sp =>
+    new WindowsAutoStartService(
         sp.GetRequiredService<LogRepository>()));
 
 // ─── 予約スケジューラー ─────────────────────────────────────────
@@ -486,15 +489,17 @@ builder.Services.AddSingleton<ReservationScheduler>(sp =>
         sp.GetRequiredService<ChannelFileLoader>(),
         sp.GetRequiredService<IProgramEventSource>(),
         sp.GetRequiredService<EpgCapture>(),
+        sp.GetRequiredService<EpgStore>(),
         sp.GetRequiredService<TvTestActivityKeeper>(),
-        sp.GetRequiredService<ChainDirectRecorderSessionRegistry>(),
+        sp.GetRequiredService<ChainRuntimeSnapshotRegistry>(),
         sp.GetRequiredService<ServiceLogoStore>(),
         sp.GetRequiredService<UserEventLogService>(),
         sp.GetRequiredService<PluginTypedEventHub>(),
         sp.GetRequiredService<RecordingResultStore>(),
         sp.GetRequiredService<NormalEpgWaveOccupation>(),
         sp.GetRequiredService<ExternalTunerLeaseService>(),
-        sp.GetRequiredService<ApplicationOperationGate>()));
+        sp.GetRequiredService<ApplicationOperationGate>(),
+        sp.GetRequiredService<BroadcastTimeReference>()));
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ReservationScheduler>());
 // 録画due監視と同じ正本時刻でPower Requestを先取りし、EPG等の先行owner解放との隙間を作らない。
 builder.Services.AddHostedService<RecordingPowerResponsibilityGuardService>();
@@ -821,7 +826,7 @@ app.MapGet("/network-login", (HttpContext context) =>
     context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'self'; base-uri 'none'";
     var html = $$$"""
 <!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>TvAIr 接続</title><link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.1-css-final199"></head><body class="tvair-generated-login"><main><h1>TvAIrへ接続</h1><form id="login"><label for="password">接続用パスワード</label><input id="password" type="password" autocomplete="current-password" required minlength="12"><button type="submit">接続</button><div id="message" class="message" role="status"></div></form></main>
+<title>TvAIr 接続</title><link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.2"></head><body class="tvair-generated-login"><main><h1>TvAIrへ接続</h1><form id="login"><label for="password">接続用パスワード</label><input id="password" type="password" autocomplete="current-password" required minlength="12"><button type="submit">接続</button><div id="message" class="message" role="status"></div></form></main>
 <script>
 const form=document.getElementById('login'),password=document.getElementById('password'),message=document.getElementById('message');
 form.addEventListener('submit',async e=>{e.preventDefault();message.textContent='確認しています…';try{const r=await fetch('/api/network-auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:password.value}),credentials:'same-origin'});const j=await r.json().catch(()=>({}));if(!r.ok){message.textContent=j.message||'接続できませんでした。';return;}location.replace({{{returnUrlJson}}});}catch{message.textContent='接続できませんでした。';}});
@@ -884,8 +889,16 @@ app.UseStaticFiles(new StaticFileOptions
 {
     OnPrepareResponse = ctx =>
     {
-        // HTMLはキャッシュさせない（JS変更が即反映されるように）
-        if (ctx.File.Name.EndsWith(".html", StringComparison.OrdinalIgnoreCase))
+        // HOST_RUNTIME_CONTROL_ASSET_CACHE_SINGLE_SOURCE_CONTRACT
+        // HTMLに加え、HostのTheme/Page lifecycleとSettings commit通知を所有するruntime control JSは
+        // ブラウザキャッシュを正本にしない。これらが旧世代のまま残ると、Host本体だけ更新されても
+        // ThemeRevision / page refresh契約が旧コードで実行され、番組表とPlugin Pageが同時に追従不能になる。
+        // query文字列は既存キャッシュを一度破る配布世代識別に留め、以後の鮮度保証はこのserver policyを正本とする。
+        var isHtml = ctx.File.Name.EndsWith(".html", StringComparison.OrdinalIgnoreCase);
+        var isRuntimeControlAsset =
+            ctx.File.Name.Equals("tvair-theme.js", StringComparison.OrdinalIgnoreCase) ||
+            ctx.File.Name.Equals("tvair-settings-host.js", StringComparison.OrdinalIgnoreCase);
+        if (isHtml || isRuntimeControlAsset)
         {
             ctx.Context.Response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
             ctx.Context.Response.Headers["Pragma"] = "no-cache";
@@ -906,6 +919,16 @@ app.MapGet("/plugin-assets/{routeSegment}/{assetName}", (string routeSegment, st
     ResolvePluginAssetResult(routeSegment, assetName, registry, boundaryGate, log, http.Path.Value ?? string.Empty, "route"));
 app.MapGet("/api/plugins/{pluginId}/assets/{assetName}", (string pluginId, string assetName, HttpRequest http, PluginRegistry registry, PluginBoundaryGate boundaryGate, LogRepository log) =>
     ResolvePluginAssetResult(pluginId, assetName, registry, boundaryGate, log, http.Path.Value ?? string.Empty, "pluginId"));
+// Theme HotApply用scriptは任意Plugin HTMLの<script>を通さず、RuntimeUiDefinitionで明示宣言された
+// 1 assetだけをHost shellから読み込む。これがPlugin JS実行の唯一のTheme例外であり、
+// PluginHtmlSanitizerの一般script禁止境界は維持する。
+app.MapGet("/plugin-runtime-theme/{routeSegment}/{**assetPath}", (string routeSegment, string assetPath, HttpResponse response, PluginRegistry registry, LogRepository log) =>
+{
+    response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
+    response.Headers["Pragma"] = "no-cache";
+    response.Headers["Expires"] = "0";
+    return ResolvePluginThemeHotApplyScriptResult(routeSegment, assetPath, registry, log);
+});
 
 // ─── プラグインUI/API ──────────────────────────────────────────
 // プラグインが本体非依存で利用できるUIルート・Manifest・権限宣言・Context APIの正式入口。
@@ -1670,6 +1693,30 @@ static string NormalizePluginAssetName(string? value)
     return name;
 }
 
+static string NormalizePluginAssetLogicalPath(string? value)
+{
+    if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+    var normalized = value.Trim().Replace('\\', '/').TrimStart('/');
+    while (normalized.Contains("//", StringComparison.Ordinal))
+        normalized = normalized.Replace("//", "/", StringComparison.Ordinal);
+    var segments = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries);
+    if (segments.Length == 0 || segments.Any(segment => segment is "." or "..")) return string.Empty;
+    foreach (var segment in segments)
+    {
+        if (segment.Length == 0 || segment.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return string.Empty;
+    }
+    return string.Join('/', segments);
+}
+
+static string BuildPluginRuntimeThemeScriptUrl(string routeSegment, string logicalPath)
+{
+    var route = Uri.EscapeDataString(NormalizePluginRouteSegment(routeSegment));
+    var path = NormalizePluginAssetLogicalPath(logicalPath);
+    if (string.IsNullOrWhiteSpace(route) || string.IsNullOrWhiteSpace(path)) return string.Empty;
+    var escapedPath = string.Join('/', path.Split('/').Select(Uri.EscapeDataString));
+    return $"/plugin-runtime-theme/{route}/{escapedPath}";
+}
+
 static string ResolvePluginAssetRouteSegment(string pluginOrRoute, PluginRegistry registry)
 {
     var normalizedRoute = NormalizePluginRouteSegment(pluginOrRoute);
@@ -1735,6 +1782,74 @@ static PluginToolWindowIconSpec ResolveDefaultToolWindowIcon(string manifestIcon
         catch { }
     }
     return new PluginToolWindowIconSpec(manifestIcon, source, diagnostics + ";system_default", null, null);
+}
+
+static IResult ResolvePluginThemeHotApplyScriptResult(string pluginOrRoute, string assetPath, PluginRegistry registry, LogRepository log)
+{
+    var route = ResolvePluginAssetRouteSegment(pluginOrRoute, registry);
+    var logicalPath = NormalizePluginAssetLogicalPath(assetPath);
+    if (string.IsNullOrWhiteSpace(route) || string.IsNullOrWhiteSpace(logicalPath))
+    {
+        log.Add("PLUGIN_THEME_HANDLER_ASSET", "DENY", $"result=BAD_REQUEST pluginOrRoute={SafePluginActionValue(pluginOrRoute)} asset={SafePluginActionValue(assetPath)} reason=invalid_route_or_asset rule=plugin_theme_handler_asset_contract");
+        return Results.BadRequest("Invalid Plugin Theme handler asset request.");
+    }
+
+    var runtimePlugin = registry.FindRuntimePlugin(pluginOrRoute) ?? registry.FindRuntimePlugin(route);
+    if (runtimePlugin is null)
+    {
+        log.Add("PLUGIN_THEME_HANDLER_ASSET", route, $"result=DENIED asset={SafePluginActionValue(logicalPath)} reason=plugin_not_found rule=plugin_theme_handler_asset_contract");
+        return Results.NotFound();
+    }
+
+    var matchingUi = (runtimePlugin.Descriptor.UiDefinitions ?? Array.Empty<RuntimeUiDefinition>())
+        .FirstOrDefault(ui => ui.ThemeUpdateMode == RuntimeUiThemeUpdateMode.HotApply
+            && string.Equals(NormalizePluginRouteSegment(ui.Route), route, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(NormalizePluginAssetLogicalPath(ui.ThemeHotApplyScriptPath), logicalPath, StringComparison.OrdinalIgnoreCase));
+    if (matchingUi is null)
+    {
+        log.Add("PLUGIN_THEME_HANDLER_ASSET", runtimePlugin.Descriptor.DisplayName, $"result=DENIED route={SafePluginActionValue(route)} asset={SafePluginActionValue(logicalPath)} reason=not_declared_for_hot_apply_ui rule=plugin_theme_handler_asset_contract");
+        return Results.NotFound();
+    }
+
+
+    var asset = (runtimePlugin.Descriptor.Assets ?? Array.Empty<PluginAssetDefinition>())
+        .FirstOrDefault(candidate => string.Equals(NormalizePluginAssetLogicalPath(candidate.LogicalPath), logicalPath, StringComparison.OrdinalIgnoreCase));
+    if (asset is null)
+    {
+        log.Add("PLUGIN_THEME_HANDLER_ASSET", runtimePlugin.Descriptor.DisplayName, $"result=NOT_FOUND route={SafePluginActionValue(route)} asset={SafePluginActionValue(logicalPath)} reason=descriptor_asset_missing rule=plugin_theme_handler_asset_contract");
+        return Results.NotFound();
+    }
+
+    var extension = Path.GetExtension(logicalPath);
+    var contentType = string.IsNullOrWhiteSpace(asset.ContentType) ? "text/javascript; charset=utf-8" : asset.ContentType.Trim();
+    if (!(extension.Equals(".js", StringComparison.OrdinalIgnoreCase) || extension.Equals(".mjs", StringComparison.OrdinalIgnoreCase))
+        || !(contentType.StartsWith("text/javascript", StringComparison.OrdinalIgnoreCase) || contentType.StartsWith("application/javascript", StringComparison.OrdinalIgnoreCase)))
+    {
+        log.Add("PLUGIN_THEME_HANDLER_ASSET", runtimePlugin.Descriptor.DisplayName, $"result=DENIED route={SafePluginActionValue(route)} asset={SafePluginActionValue(logicalPath)} contentType={SafePluginActionValue(contentType)} reason=not_javascript rule=plugin_theme_handler_asset_contract");
+        return Results.NotFound();
+    }
+
+    try
+    {
+        var assembly = runtimePlugin.GetType().Assembly;
+        var resourceName = asset.ResourceName;
+        using var stream = assembly.GetManifestResourceStream(resourceName);
+        if (stream is null)
+        {
+            log.Add("PLUGIN_THEME_HANDLER_ASSET", runtimePlugin.Descriptor.DisplayName, $"result=NOT_FOUND route={SafePluginActionValue(route)} asset={SafePluginActionValue(logicalPath)} reason=embedded_resource_missing rule=plugin_theme_handler_asset_contract");
+            return Results.NotFound();
+        }
+        using var ms = new MemoryStream();
+        stream.CopyTo(ms);
+        var bytes = ms.ToArray();
+        log.Add("PLUGIN_THEME_HANDLER_ASSET", runtimePlugin.Descriptor.DisplayName, $"result=OK route={SafePluginActionValue(route)} uiDefinitionId={SafePluginActionValue(matchingUi.UiDefinitionId)} asset={SafePluginActionValue(logicalPath)} bytes={bytes.Length} source=declared_embedded_asset cache=no-store rule=plugin_theme_handler_asset_contract");
+        return Results.File(bytes, contentType, enableRangeProcessing: false);
+    }
+    catch (Exception ex)
+    {
+        log.Add("PLUGIN_THEME_HANDLER_ASSET", runtimePlugin.Descriptor.DisplayName, $"result=ERROR route={SafePluginActionValue(route)} asset={SafePluginActionValue(logicalPath)} error={SafePluginActionValue(ex.GetType().Name)} rule=plugin_theme_handler_asset_contract");
+        return Results.StatusCode(StatusCodes.Status500InternalServerError);
+    }
 }
 
 static IResult ResolvePluginAssetResult(string pluginOrRoute, string assetName, PluginRegistry registry, PluginBoundaryGate boundaryGate, LogRepository log, string endpoint, string source)
@@ -1822,7 +1937,7 @@ static IResult RenderPluginWindowHost(string windowId, HttpRequest http, PluginW
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{title}}</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.1-css-final199">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.2">
 </head>
 <body class="tvair-plugin-window-page">
 <div class="{{hostClass}}" data-window-id="{{encodedWindowId}}" data-window-revision="{{initialRevision}}" data-tool-host="{{toolHost.ToString().ToLowerInvariant()}}">
@@ -2219,10 +2334,10 @@ static IResult RenderPluginVersionInfoPage(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-notification.css?v=1.2.1-owner203">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.2.2">
 </head>
 <body>
-<script src="/tvair-notification.js?v=1.2.1"></script>
+<script src="/tvair-notification.js?v=1.2.2"></script>
 <script>
 document.addEventListener('DOMContentLoaded',function(){
   if(window.TvAIrNotify){ TvAIrNotify({ title:'{{safeTitle}}', message:'{{safeVersion}}', onOk:function(){ location.replace('{{safeReturn}}'); } }); }
@@ -2276,7 +2391,7 @@ static IResult RenderPluginDefaultMenuInfo(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeName}} 情報</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.1-css-final199">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.2">
 </head>
 <body class="tvair-plugin-info-page"><div class="card"><h1>{{safeName}} 情報</h1><div class="row"><div class="k">Version</div><div class="v">{{safeVersion}}</div></div><div class="row"><div class="k">Route</div><div class="v">{{safeRoute}}</div></div><div class="row"><div class="k">Action</div><div class="v">{{safeKind}}</div></div><p>{{safeDescription}}</p><a class="button" href="/">番組表へ戻る</a></div></body>
 </html>
@@ -2297,7 +2412,7 @@ static IResult PluginHtmlMessage(string title, string message, int statusCode, s
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.1-css-final199">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.2">
 </head>
 <body class="tvair-message-page"><div class="card"><h1>{{safeTitle}}</h1><p>{{safeMessage}}</p><a class="button" href="{{safeHref}}">{{safeLinkText}}</a></div></body>
 </html>
@@ -2357,7 +2472,7 @@ static string BuildPluginFloatingButtonsHtml(RuntimeUiRenderContext context, str
     if (normalized.Length == 0) return string.Empty;
 
     var sb = new System.Text.StringBuilder();
-    sb.Append("<link rel=\"stylesheet\" href=\"/tvair-generated-surfaces.css?v=1.2.1-css-final199\">");
+    sb.Append("<link rel=\"stylesheet\" href=\"/tvair-generated-surfaces.css?v=1.2.2\">");
 
     foreach (var group in normalized.GroupBy(x => x.Item.Position))
     {
@@ -3272,24 +3387,6 @@ static string ExtractPluginBodyFragment(string html)
     return html[(bodyOpenEnd + 1)..bodyEnd];
 }
 
-static string ResolveEffectiveHostTheme(string? selectedTheme)
-{
-    var selected = IniSettingsService.NormalizeSystemTheme(selectedTheme);
-    if (string.Equals(selected, "dark", StringComparison.OrdinalIgnoreCase)) return "dark";
-    if (string.Equals(selected, "light", StringComparison.OrdinalIgnoreCase)) return "light";
-    try
-    {
-        using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
-        var value = key?.GetValue("AppsUseLightTheme");
-        var light = value is int i ? i != 0 : value?.ToString() != "0";
-        return light ? "light" : "dark";
-    }
-    catch
-    {
-        return "light";
-    }
-}
-
 static IReadOnlyDictionary<string, string> BuildPluginThemeContract(string selectedTheme, string effectiveTheme)
 {
     var dark = string.Equals(effectiveTheme, "dark", StringComparison.OrdinalIgnoreCase);
@@ -3360,43 +3457,63 @@ static IReadOnlyDictionary<string, string> BuildPluginThemeContract(string selec
 }
 
 
-static string BuildPluginShellHtml(string title, string route, string pluginBody, bool toolWindowContentOnly = false, string selectedTheme = "current", string effectiveTheme = "light")
+static string BuildPluginShellHtml(string title, string route, string pluginBody, bool toolWindowContentOnly = false, string selectedTheme = "current", string effectiveTheme = "light", string themeGeneration = "", long themeRevision = 0, RuntimeUiThemeUpdateMode themeUpdateMode = RuntimeUiThemeUpdateMode.HostRerender, string themeHotApplyScriptUrl = "")
 {
     if (toolWindowContentOnly)
     {
-        return BuildPluginToolWindowContentHtml(title, route, pluginBody, selectedTheme, effectiveTheme);
+        return BuildPluginToolWindowContentHtml(title, route, pluginBody, selectedTheme, effectiveTheme, themeGeneration, themeRevision, themeUpdateMode);
     }
 
     var safeTitle = System.Net.WebUtility.HtmlEncode(title);
     var safeRoute = System.Net.WebUtility.HtmlEncode(route);
     var safeSelectedTheme = System.Net.WebUtility.HtmlEncode(IniSettingsService.NormalizeSystemTheme(selectedTheme));
     var safeEffectiveTheme = System.Net.WebUtility.HtmlEncode(string.Equals(effectiveTheme, "dark", StringComparison.OrdinalIgnoreCase) ? "dark" : "light");
+    var safeThemeGeneration = System.Net.WebUtility.HtmlEncode(themeGeneration ?? string.Empty);
     var themeClass = string.Equals(safeEffectiveTheme, "dark", StringComparison.OrdinalIgnoreCase) ? "tvair-theme-dark theme-dark" : "tvair-theme-light theme-light";
+    var themeUpdateModeToken = themeUpdateMode == RuntimeUiThemeUpdateMode.HotApply ? "hot-apply" : "host-rerender";
     var contentOnlyClass = string.Empty;
+    var safeThemeHotApplyScriptUrl = System.Net.WebUtility.HtmlEncode(themeHotApplyScriptUrl ?? string.Empty);
+    var themeHotApplyScriptTag = themeUpdateMode == RuntimeUiThemeUpdateMode.HotApply && !string.IsNullOrWhiteSpace(safeThemeHotApplyScriptUrl)
+        ? $"<script src=\"{safeThemeHotApplyScriptUrl}\" data-tvair-runtime-theme-handler=\"1\"></script>"
+        : string.Empty;
 #if TVAIR_DEVELOPER_DIAGNOSTICS
-    var developerBeaconBody = """try{var img=new Image();var url='/api/plugins/safe-event/client-log?phase='+encodeURIComponent(phase||'')+'&event='+encodeURIComponent(eventName||'')+'&action='+encodeURIComponent(action||'')+'&interactionId='+encodeURIComponent(tvairGetAttr(el,'data-tvair-debug-interaction-id')||'')+'&pluginId='+encodeURIComponent(tvairGetAttr(el,'data-tvair-plugin-id')||'')+'&routeSegment='+encodeURIComponent(tvairGetAttr(el,'data-tvair-route-segment')||document.body.getAttribute('data-plugin-route')||'')+'&windowId='+encodeURIComponent(tvairGetAttr(el,'data-tvair-window-id')||tvairCurrentWindowId()||'')+'&hostKind='+encodeURIComponent('winforms_webbrowser_fallback_direct_content')+'&tag='+encodeURIComponent(tvairTagName(el))+'&type='+encodeURIComponent(tvairGetAttr(el,'type')||'')+'&hasToken='+encodeURIComponent((tvairGetAttr(el,'data-tvair-action-token')||tvairGetAttr(el,'data-tvair-token'))?'true':'false')+'&payloadCount='+encodeURIComponent(tvairGetAttr(el,'data-tvair-debug-payload-count')||'')+'&payloadKeys='+encodeURIComponent(tvairGetAttr(el,'data-tvair-debug-payload-keys')||'')+'&endpoint='+encodeURIComponent(tvairGetAttr(el,'data-tvair-debug-endpoint')||tvairGetAttr(el,'data-tvair-endpoint')||'')+'&status='+encodeURIComponent(tvairGetAttr(el,'data-tvair-debug-status')||'')+'&reason='+encodeURIComponent(tvairGetAttr(el,'data-tvair-debug-reason')||'')+'&readyState='+encodeURIComponent(document.readyState||'')+'&candidates='+encodeURIComponent(tvairCountSafeEventCandidates())+'&_='+String(new Date().getTime());img.src=url;}catch(_){}""";
+    var developerThemeDiagnosticScript = """<script>window.__tvairThemeDeveloperDiagnostic=function(kind,p){try{p=p||{};var phase=(String(kind||'')==='theme_update'?'theme_update_':'theme_refresh_')+String(p.result||'').toLowerCase();var q=['phase='+encodeURIComponent(phase)];for(var k in p){if(!Object.prototype.hasOwnProperty.call(p,k)||k==='result')continue;q.push(encodeURIComponent(k)+'='+encodeURIComponent(String(p[k]==null?'':p[k])));}q.push('_='+String(Date.now()));var url='/api/plugins/safe-event/client-log?'+q.join('&');if(window.fetch){try{fetch(url,{method:'GET',cache:'no-store',credentials:'same-origin',keepalive:true}).catch(function(){});return;}catch(_){}}var bag=window.__tvairThemeDeveloperDiagnosticBeacons||(window.__tvairThemeDeveloperDiagnosticBeacons=[]);var img=new Image();var release=function(){var i=bag.indexOf(img);if(i>=0)bag.splice(i,1);};img.onload=release;img.onerror=release;bag.push(img);img.src=url;}catch(_){}};</script>""";
+#else
+    var developerThemeDiagnosticScript = string.Empty;
+#endif
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+    var developerDebugSetBody = "if(el&&el.setAttribute)el.setAttribute(name,String(value==null?'':value));";
+    var developerDebugGetBody = "return tvairGetAttr(el,name);";
+#else
+    var developerDebugSetBody = "return;";
+    var developerDebugGetBody = "return '';";
+#endif
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+    var developerBeaconBody = """try{var img=new Image();var url='/api/plugins/safe-event/client-log?phase='+encodeURIComponent(phase||'')+'&event='+encodeURIComponent(eventName||'')+'&action='+encodeURIComponent(action||'')+'&interactionId='+encodeURIComponent(tvairDebugGet(el,'data-tvair-debug-interaction-id')||'')+'&pluginId='+encodeURIComponent(tvairGetAttr(el,'data-tvair-plugin-id')||'')+'&routeSegment='+encodeURIComponent(tvairGetAttr(el,'data-tvair-route-segment')||document.body.getAttribute('data-plugin-route')||'')+'&windowId='+encodeURIComponent(tvairGetAttr(el,'data-tvair-window-id')||tvairCurrentWindowId()||'')+'&hostKind='+encodeURIComponent('winforms_webbrowser_fallback_direct_content')+'&tag='+encodeURIComponent(tvairTagName(el))+'&type='+encodeURIComponent(tvairGetAttr(el,'type')||'')+'&hasToken='+encodeURIComponent((tvairGetAttr(el,'data-tvair-action-token')||tvairGetAttr(el,'data-tvair-token'))?'true':'false')+'&payloadCount='+encodeURIComponent(tvairDebugGet(el,'data-tvair-debug-payload-count')||'')+'&payloadKeys='+encodeURIComponent(tvairDebugGet(el,'data-tvair-debug-payload-keys')||'')+'&endpoint='+encodeURIComponent(tvairDebugGet(el,'data-tvair-debug-endpoint')||tvairGetAttr(el,'data-tvair-endpoint')||'')+'&status='+encodeURIComponent(tvairDebugGet(el,'data-tvair-debug-status')||'')+'&reason='+encodeURIComponent(tvairDebugGet(el,'data-tvair-debug-reason')||'')+'&readyState='+encodeURIComponent(document.readyState||'')+'&candidates='+encodeURIComponent(tvairCountSafeEventCandidates())+'&_='+String(new Date().getTime());img.src=url;}catch(_){}""";
 #else
     var developerBeaconBody = "return;";
 #endif
     return $$$$"""
 <!doctype html>
-<html lang="ja" class="{{{{themeClass}}}}" data-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme="{{{{safeSelectedTheme}}}}" data-tvair-selected-theme="{{{{safeSelectedTheme}}}}" data-tvair-effective-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme-scope="all">
+<html lang="ja" class="{{{{themeClass}}}}" data-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme="{{{{safeSelectedTheme}}}}" data-tvair-selected-theme="{{{{safeSelectedTheme}}}}" data-tvair-effective-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme-generation="{{{{safeThemeGeneration}}}}" data-tvair-theme-revision="{{{{themeRevision}}}}" data-tvair-theme-scope="all" data-tvair-theme-update-mode="{{{{themeUpdateModeToken}}}}">
 <head>
 <meta charset="utf-8">
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; media-src 'self' data:">
 <title>{{{{safeTitle}}}} - TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.1">
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.1">
-<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.2.1">
-<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.1-theme204">
-<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.2.1-modules205">
-<link rel="stylesheet" href="/tvair-notification.css?v=1.2.1-owner203">
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.1-css-final199">
-<script src="/tvair-theme.js?v=1.2.1"></script>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.2">
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.2">
+<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.2.2">
+<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.2">
+<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.2.2">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.2.2">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.2">
+<link rel="stylesheet" href="/tvair-settings-host.css?v=1.2.2">
+{{{{developerThemeDiagnosticScript}}}}
+<script src="/tvair-theme.js?v=1.2.2"></script>
 </head>
-<body class="tvair-non-program-page tvair-plugin-shell-page {{{{themeClass}}}}{{{{contentOnlyClass}}}}" data-plugin-route="{{{{safeRoute}}}}" data-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme="{{{{safeSelectedTheme}}}}" data-tvair-selected-theme="{{{{safeSelectedTheme}}}}" data-tvair-effective-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme-scope="all">
+<body class="tvair-non-program-page tvair-plugin-shell-page {{{{themeClass}}}}{{{{contentOnlyClass}}}}" data-plugin-route="{{{{safeRoute}}}}" data-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme="{{{{safeSelectedTheme}}}}" data-tvair-selected-theme="{{{{safeSelectedTheme}}}}" data-tvair-effective-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme-generation="{{{{safeThemeGeneration}}}}" data-tvair-theme-revision="{{{{themeRevision}}}}" data-tvair-theme-scope="all" data-tvair-theme-update-mode="{{{{themeUpdateModeToken}}}}">
 <div id="nav">
   <a class="nav-btn" href="/" title="番組表">番組表</a>
   <a class="nav-btn" href="/reservations.html" title="予約リスト">予約リスト</a>
@@ -3415,10 +3532,12 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
 {{{{pluginBody}}}}
   </main>
 </div>
-<script src="/tvair-notification.js?v=1.2.1"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.1"></script>
-<script src="/tvair-safe-event-host.js?v=1.2.1"></script>
-<script src="/tvair-menu-spine.js?v=1.2.1"></script>
+{{{{themeHotApplyScriptTag}}}}
+<script src="/tvair-notification.js?v=1.2.2"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.2"></script>
+<script src="/tvair-safe-event-host.js?v=1.2.2"></script>
+<script src="/tvair-menu-spine.js?v=1.2.2"></script>
+<script src="/tvair-settings-host.js?v=1.2.2"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -3434,6 +3553,8 @@ function tvairIsReservedPayloadKey(name){var n=String(name||'').toLowerCase();re
 function tvairCollectFormValues(el,form){var mode=tvairGetAttr(el,'data-tvair-form-capture');if(!mode)return;var scope=null;if(mode==='closestForm'){var n=el;while(n&&n!==document){if(tvairTagName(n)==='form'){scope=n;break;}n=n.parentNode;}}else if(mode.charAt(0)==='#'){scope=document.getElementById(mode.substring(1));}if(!scope||!scope.elements)return;for(var i=0;i<scope.elements.length;i++){var item=scope.elements[i];if(!item||!item.name||item.disabled||tvairIsReservedPayloadKey(item.name))continue;var type=String(item.type||'').toLowerCase();if((type==='checkbox'||type==='radio')&&!item.checked)continue;tvairAppendHidden(form,item.name,item.value);}}
 function tvairCountSafeEventCandidates(){try{var all=document.getElementsByTagName('*');var count=0;for(var i=0;i<all.length;i++){if(tvairGetAttr(all[i],'data-tvair-action'))count++;}return count;}catch(_){return -1;}}
 function tvairNewInteractionId(){return 'ix-'+String((new Date()).getTime())+'-'+String(Math.floor(Math.random()*1000000000));}
+function tvairDebugSet(el,name,value){ {{{{developerDebugSetBody}}}} }
+function tvairDebugGet(el,name){ {{{{developerDebugGetBody}}}} }
 function tvairClientBeacon(phase,eventName,action,el){ {{{{developerBeaconBody}}}} }
 function tvairFindSafeEventTarget(start,eventName){
   var n=start;
@@ -3577,7 +3698,7 @@ function tvairApplyUiPatches(patches){if(!patches||typeof patches.length==='unde
 function tvairApplyUiPatchesJson(json){try{var patches=JSON.parse(String(json||'[]'));tvairApplyUiPatches(patches);var applied=0;if(patches&&typeof patches.length!=='undefined'){for(var i=0;i<patches.length&&i<64;i++){var p=patches[i]||{};var id=p.elementId||p.ElementId||'';if(id&&document.getElementById(id))applied++;}}return applied;}catch(_){return -1;}}
 function tvairPageRefreshStateKey(){try{var search=String(location.search||'');search=search.replace(/([?&])_tvairPageRefresh=[^&]*&?/ig,function(_,sep){return sep==='?'?'?':'';});search=search.replace(/\?&/g,'?').replace(/[?&]$/,'');return 'tvair-page-refresh:'+location.pathname+search;}catch(_){return '';}}function tvairCapturePageRefreshState(){try{var key=tvairPageRefreshStateKey();if(!key)return;var state={x:window.pageXOffset||document.documentElement.scrollLeft||0,y:window.pageYOffset||document.documentElement.scrollTop||0};sessionStorage.setItem(key,JSON.stringify(state));}catch(_){}}function tvairRestorePageRefreshState(){try{var key=tvairPageRefreshStateKey();if(!key)return;var raw=sessionStorage.getItem(key);if(!raw)return;sessionStorage.removeItem(key);var state=JSON.parse(raw);window.scrollTo(Number(state.x)||0,Number(state.y)||0);}catch(_){}}function tvairInteractionStateKey(){var id=tvairCurrentWindowId();return id?'tvair-interaction-state:'+id:'';}function tvairCaptureInteractionState(){try{var key=tvairInteractionStateKey();if(!key)return;var a=document.activeElement;var state={x:window.pageXOffset||document.documentElement.scrollLeft||0,y:window.pageYOffset||document.documentElement.scrollTop||0,id:a&&a.id?a.id:'',start:(a&&typeof a.selectionStart==='number')?a.selectionStart:null,end:(a&&typeof a.selectionEnd==='number')?a.selectionEnd:null};sessionStorage.setItem(key,JSON.stringify(state));}catch(_){}}function tvairRestoreInteractionState(){try{var key=tvairInteractionStateKey();if(!key)return;var raw=sessionStorage.getItem(key);if(!raw)return;sessionStorage.removeItem(key);var state=JSON.parse(raw);window.scrollTo(Number(state.x)||0,Number(state.y)||0);if(state.id){var a=document.getElementById(state.id);if(a&&a.focus){a.focus();if(typeof a.setSelectionRange==='function'&&state.start!==null)a.setSelectionRange(state.start,state.end===null?state.start:state.end);}}}catch(_){}}function tvairRestoreRefreshState(){tvairRestoreInteractionState();tvairRestorePageRefreshState();}if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',tvairRestoreRefreshState);else setTimeout(tvairRestoreRefreshState,0);function tvairSubmitSafeAction(el,eventName){
   var action=tvairGetAttr(el,'data-tvair-action');
-  var interactionId=tvairNewInteractionId();el.setAttribute('data-tvair-debug-interaction-id',interactionId);
+  var interactionId=tvairNewInteractionId();tvairDebugSet(el,'data-tvair-debug-interaction-id',interactionId);
   tvairClientBeacon('click_captured',eventName,action,el);tvairClientBeacon('received_before_validate',eventName,action,el);
   if(!action){tvairClientBeacon('denied_missing_action',eventName,action,el);return;}
   var confirmMessage=tvairGetAttr(el,'data-tvair-confirm-message');
@@ -3610,15 +3731,15 @@ function tvairPageRefreshStateKey(){try{var search=String(location.search||'');s
       if(a&&a.name&&a.name.indexOf('data-tvair-payload-')===0){var pk=a.name.substring('data-tvair-payload-'.length);if(!tvairIsReservedPayloadKey(pk))tvairAppendHidden(form,pk,a.value);}
     }
   }
-  el.setAttribute('data-tvair-debug-payload-count',String(form.elements.length));tvairClientBeacon('payload_built',eventName,action,el);document.body.appendChild(form);
+  tvairDebugSet(el,'data-tvair-debug-payload-count',String(form.elements.length));tvairClientBeacon('payload_built',eventName,action,el);document.body.appendChild(form);
   tvairClientBeacon('post_started',eventName,action,el);tvairClientBeacon('posting_form',eventName,action,el);
   var submitResponseMode=tvairGetAttr(el,'data-tvair-response-mode')||'hostHandled';if(submitResponseMode==='hostHandled'||submitResponseMode==='noContent'||submitResponseMode==='patchWindow'){
     try{
       var pairs=[];
       for(var j=0;j<form.elements.length;j++){var it=form.elements[j];if(it&&it.name)pairs.push(encodeURIComponent(it.name)+'='+encodeURIComponent(it.value||''));}
-      var endpoint=isWindowAction?'/api/plugins/window':'/api/plugins/action';var resolvedEndpoint=location.protocol+'//'+location.host+endpoint;el.setAttribute('data-tvair-debug-endpoint',resolvedEndpoint);var xhr=new XMLHttpRequest();
+      var endpoint=isWindowAction?'/api/plugins/window':'/api/plugins/action';var resolvedEndpoint=location.protocol+'//'+location.host+endpoint;tvairDebugSet(el,'data-tvair-debug-endpoint',resolvedEndpoint);var xhr=new XMLHttpRequest();
       xhr.open('POST',resolvedEndpoint,true);
-      xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded; charset=UTF-8');var requestInteractionId=interactionId;xhr.onreadystatechange=function(){if(xhr.readyState===4){var previousInteractionId=tvairGetAttr(el,'data-tvair-debug-interaction-id');el.setAttribute('data-tvair-debug-interaction-id',requestInteractionId);el.setAttribute('data-tvair-debug-status',String(xhr.status||0));var body={};try{body=JSON.parse(xhr.responseText||'{}');}catch(_){if(submitResponseMode==='patchWindow'||tvairFeedbackEnabled(el))el.setAttribute('data-tvair-debug-reason','response_parse_failed');}if(xhr.status>=200&&xhr.status<400&&submitResponseMode==='patchWindow')tvairApplyUiPatches(body&&body.uiPatches?body.uiPatches:[]);var requestSucceeded=xhr.status>=200&&xhr.status<400;tvairCompleteActionFeedback(el,eventName,action,body,requestSucceeded);tvairClientBeacon(requestSucceeded?'post_completed':'post_failed',eventName,action,el);el.setAttribute('data-tvair-debug-interaction-id',previousInteractionId);var refreshSurface='';var preservePageScroll=false;var pageRefreshLocation='';try{refreshSurface=String(xhr.getResponseHeader('X-TvAIr-Refresh-Surface')||'').toLowerCase();preservePageScroll=String(xhr.getResponseHeader('X-TvAIr-Preserve-Scroll')||'').toLowerCase()==='true';pageRefreshLocation=String(xhr.getResponseHeader('X-TvAIr-Refresh-Location')||'');}catch(_){}if(requestSucceeded&&refreshSurface==='page'){if(preservePageScroll)tvairCapturePageRefreshState();tvairClientBeacon('page_refresh_issued',eventName,action,el);if(pageRefreshLocation){location.href=pageRefreshLocation;}else{location.href=location.pathname+location.search;}return;}}};xhr.onerror=function(){var previousInteractionId=tvairGetAttr(el,'data-tvair-debug-interaction-id');el.setAttribute('data-tvair-debug-interaction-id',requestInteractionId);el.setAttribute('data-tvair-debug-reason','xhr_error');tvairCompleteActionFeedback(el,eventName,action,{},false);tvairClientBeacon('post_failed',eventName,action,el);el.setAttribute('data-tvair-debug-interaction-id',previousInteractionId);};
+      xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded; charset=UTF-8');var requestInteractionId=interactionId;xhr.onreadystatechange=function(){if(xhr.readyState===4){var previousInteractionId=tvairDebugGet(el,'data-tvair-debug-interaction-id');tvairDebugSet(el,'data-tvair-debug-interaction-id',requestInteractionId);tvairDebugSet(el,'data-tvair-debug-status',String(xhr.status||0));var body={};try{body=JSON.parse(xhr.responseText||'{}');}catch(_){if(submitResponseMode==='patchWindow'||tvairFeedbackEnabled(el))tvairDebugSet(el,'data-tvair-debug-reason','response_parse_failed');}if(xhr.status>=200&&xhr.status<400&&submitResponseMode==='patchWindow')tvairApplyUiPatches(body&&body.uiPatches?body.uiPatches:[]);var requestSucceeded=xhr.status>=200&&xhr.status<400;tvairCompleteActionFeedback(el,eventName,action,body,requestSucceeded);tvairClientBeacon(requestSucceeded?'post_completed':'post_failed',eventName,action,el);tvairDebugSet(el,'data-tvair-debug-interaction-id',previousInteractionId);var refreshSurface='';var preservePageScroll=false;var pageRefreshLocation='';try{refreshSurface=String(xhr.getResponseHeader('X-TvAIr-Refresh-Surface')||'').toLowerCase();preservePageScroll=String(xhr.getResponseHeader('X-TvAIr-Preserve-Scroll')||'').toLowerCase()==='true';pageRefreshLocation=String(xhr.getResponseHeader('X-TvAIr-Refresh-Location')||'');}catch(_){}if(requestSucceeded&&refreshSurface==='page'){if(preservePageScroll)tvairCapturePageRefreshState();tvairClientBeacon('page_refresh_issued',eventName,action,el);if(pageRefreshLocation){location.href=pageRefreshLocation;}else{location.href=location.pathname+location.search;}return;}}};xhr.onerror=function(){var previousInteractionId=tvairDebugGet(el,'data-tvair-debug-interaction-id');tvairDebugSet(el,'data-tvair-debug-interaction-id',requestInteractionId);tvairDebugSet(el,'data-tvair-debug-reason','xhr_error');tvairCompleteActionFeedback(el,eventName,action,{},false);tvairClientBeacon('post_failed',eventName,action,el);tvairDebugSet(el,'data-tvair-debug-interaction-id',previousInteractionId);};
       xhr.send(pairs.join('&'));
       return;
     }catch(_){ }
@@ -3631,6 +3752,7 @@ function tvairHandleSafeEvent(e,eventName){
   var el=tvairFindSafeEventTarget(target,eventName);
   if(!el)return true;
   try{if(e.preventDefault)e.preventDefault();e.returnValue=false;}catch(_){ }
+  if(window.__tvairPageTokenRecoveryInFlight){tvairClientBeacon('token_recovery_action_suppressed',eventName,tvairGetAttr(el,'data-tvair-action'),el);return false;}
   tvairSubmitSafeAction(el,eventName);
   return false;
 }
@@ -3665,8 +3787,8 @@ function tvairBindSafeEvents(){
 }
 function tvairFindActionTokenElement(){try{return document.querySelector?document.querySelector('[data-tvair-action-token],[data-tvair-token]'):null;}catch(_){return null;}}
 function tvairActionTokenIdentity(){try{var el=tvairFindActionTokenElement();if(!el)return null;var token=tvairGetAttr(el,'data-tvair-action-token')||tvairGetAttr(el,'data-tvair-token');var pluginId=tvairGetAttr(el,'data-tvair-plugin-id');var route=tvairGetAttr(el,'data-tvair-route-segment')||document.body.getAttribute('data-plugin-route')||'';if(!token||!pluginId||!route)return null;return{token:token,pluginId:pluginId,route:route};}catch(_){return null;}}
-function tvairRenewActionToken(){try{var id=tvairActionTokenIdentity();if(!id)return;var xhr=new XMLHttpRequest();xhr.open('POST','/api/plugins/action-token/renew',true);xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded; charset=UTF-8');xhr.send('actionToken='+encodeURIComponent(id.token)+'&pluginId='+encodeURIComponent(id.pluginId)+'&routeSegment='+encodeURIComponent(id.route));}catch(_){}}
-function tvairRecoverExpiredPageToken(){try{if(window.__tvairPageTokenRecoveryInFlight)return;var id=tvairActionTokenIdentity();if(!id)return;window.__tvairPageTokenRecoveryInFlight=true;var xhr=new XMLHttpRequest();xhr.open('POST','/api/plugins/action-token/validate',true);xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded; charset=UTF-8');xhr.onreadystatechange=function(){if(xhr.readyState!==4)return;window.__tvairPageTokenRecoveryInFlight=false;if(xhr.status>=200&&xhr.status<300)return;var path='/plugin/'+encodeURIComponent(id.route);var query=window.location&&window.location.search?window.location.search:'';window.location.replace(path+query);};xhr.onerror=function(){window.__tvairPageTokenRecoveryInFlight=false;};xhr.send('actionToken='+encodeURIComponent(id.token)+'&pluginId='+encodeURIComponent(id.pluginId)+'&routeSegment='+encodeURIComponent(id.route));}catch(_){window.__tvairPageTokenRecoveryInFlight=false;}}
+function tvairRenewActionToken(){try{var id=tvairActionTokenIdentity();if(!id||window.__tvairPageTokenRecoveryInFlight)return;var xhr=new XMLHttpRequest();xhr.open('POST','/api/plugins/action-token/renew',true);xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded; charset=UTF-8');xhr.onreadystatechange=function(){if(xhr.readyState!==4)return;if(xhr.status>=200&&xhr.status<300)return;tvairRecoverExpiredPageToken();};xhr.send('actionToken='+encodeURIComponent(id.token)+'&pluginId='+encodeURIComponent(id.pluginId)+'&routeSegment='+encodeURIComponent(id.route));}catch(_){}}
+function tvairRecoverExpiredPageToken(){try{if(window.__tvairPageTokenRecoveryInFlight)return;var id=tvairActionTokenIdentity();if(!id)return;window.__tvairPageTokenRecoveryInFlight=true;var xhr=new XMLHttpRequest();xhr.open('POST','/api/plugins/action-token/validate',true);xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded; charset=UTF-8');xhr.onreadystatechange=function(){if(xhr.readyState!==4)return;if(xhr.status>=200&&xhr.status<300){window.__tvairPageTokenRecoveryInFlight=false;return;}if(window.__tvairHostPageNavigationInFlight){window.__tvairPageTokenRecoveryInFlight=false;return;}window.__tvairHostPageNavigationInFlight='action_token_recovery';var path='/plugin/'+encodeURIComponent(id.route);var query=window.location&&window.location.search?window.location.search:'';window.location.replace(path+query);};xhr.onerror=function(){window.__tvairPageTokenRecoveryInFlight=false;};xhr.send('actionToken='+encodeURIComponent(id.token)+'&pluginId='+encodeURIComponent(id.pluginId)+'&routeSegment='+encodeURIComponent(id.route));}catch(_){window.__tvairPageTokenRecoveryInFlight=false;}}
 function tvairStartActionTokenKeepalive(){try{if(window.__tvairActionTokenKeepaliveStarted)return;window.__tvairActionTokenKeepaliveStarted=true;tvairRenewActionToken();window.setInterval(tvairRenewActionToken,300000);if(document.addEventListener)document.addEventListener('visibilitychange',function(){if(!document.hidden)tvairRecoverExpiredPageToken();},false);if(window.addEventListener){window.addEventListener('focus',tvairRecoverExpiredPageToken,false);window.addEventListener('pageshow',tvairRecoverExpiredPageToken,false);}else if(window.attachEvent)window.attachEvent('onfocus',tvairRecoverExpiredPageToken);}catch(_){}}
 function tvairBootSafeEvents(){try{tvairBindSafeEvents();tvairStartActionTokenKeepalive();}catch(_){tvairClientBeacon('bind_failed','','',document.body);}}if(document.readyState==='complete'||document.readyState==='interactive'){tvairBootSafeEvents();}else if(window.attachEvent){window.attachEvent('onload',tvairBootSafeEvents);}else if(window.addEventListener){window.addEventListener('load',tvairBootSafeEvents,false);}else{window.onload=tvairBootSafeEvents;}</script>
 
@@ -3675,40 +3797,55 @@ function tvairBootSafeEvents(){try{tvairBindSafeEvents();tvairStartActionTokenKe
 """;
 }
 
-static string BuildPluginToolWindowContentHtml(string title, string route, string pluginBody, string selectedTheme, string effectiveTheme)
+static string BuildPluginToolWindowContentHtml(string title, string route, string pluginBody, string selectedTheme, string effectiveTheme, string themeGeneration, long themeRevision, RuntimeUiThemeUpdateMode themeUpdateMode)
 {
     var safeTitle = System.Net.WebUtility.HtmlEncode(title);
     var safeRoute = System.Net.WebUtility.HtmlEncode(route);
     var safeSelectedTheme = System.Net.WebUtility.HtmlEncode(IniSettingsService.NormalizeSystemTheme(selectedTheme));
     var safeEffectiveTheme = System.Net.WebUtility.HtmlEncode(string.Equals(effectiveTheme, "dark", StringComparison.OrdinalIgnoreCase) ? "dark" : "light");
+    var safeThemeGeneration = System.Net.WebUtility.HtmlEncode(themeGeneration ?? string.Empty);
     var themeClass = string.Equals(safeEffectiveTheme, "dark", StringComparison.OrdinalIgnoreCase) ? "tvair-theme-dark theme-dark" : "tvair-theme-light theme-light";
+    var themeUpdateModeToken = themeUpdateMode == RuntimeUiThemeUpdateMode.HotApply ? "hot-apply" : "host-rerender";
     var normalized = NormalizePluginToolWindowContent(pluginBody, route);
     var pluginHead = normalized.Head;
     var pluginContent = normalized.Body;
 #if TVAIR_DEVELOPER_DIAGNOSTICS
-    var developerBeaconBody = """try{var img=new Image();var networkId=tvairGetAttr(el,'data-tvair-payload-networkId')||tvairGetAttr(el,'data-tvair-payload-nid');var tsid=tvairGetAttr(el,'data-tvair-payload-transportStreamId')||tvairGetAttr(el,'data-tvair-payload-tsid');var sid=tvairGetAttr(el,'data-tvair-payload-serviceId')||tvairGetAttr(el,'data-tvair-payload-sid');var url='/api/plugins/safe-event/client-log?phase='+encodeURIComponent(phase||'')+'&event='+encodeURIComponent(eventName||'')+'&action='+encodeURIComponent(action||'')+'&interactionId='+encodeURIComponent(tvairGetAttr(el,'data-tvair-debug-interaction-id')||'')+'&pluginId='+encodeURIComponent(tvairGetAttr(el,'data-tvair-plugin-id')||'')+'&routeSegment='+encodeURIComponent(tvairGetAttr(el,'data-tvair-route-segment')||document.body.getAttribute('data-plugin-route')||'')+'&windowId='+encodeURIComponent(tvairGetAttr(el,'data-tvair-window-id')||tvairCurrentWindowId()||'')+'&mode='+encodeURIComponent('directContent')+'&hostKind='+encodeURIComponent('winforms_webbrowser_fallback_direct_content')+'&tag='+encodeURIComponent(tvairTagName(el))+'&hasAction='+encodeURIComponent(action?'true':'false')+'&hasToken='+encodeURIComponent((tvairGetAttr(el,'data-tvair-action-token')||tvairGetAttr(el,'data-tvair-token'))?'true':'false')+'&hasTriplet='+encodeURIComponent((networkId&&tsid&&sid)?'true':'false')+'&_='+String(new Date().getTime());img.src=url;}catch(_){ }""";
+    var developerThemeDiagnosticScript = """<script>window.__tvairThemeDeveloperDiagnostic=function(kind,p){try{p=p||{};var phase=(String(kind||'')==='theme_update'?'theme_update_':'theme_refresh_')+String(p.result||'').toLowerCase();var q=['phase='+encodeURIComponent(phase)];for(var k in p){if(!Object.prototype.hasOwnProperty.call(p,k)||k==='result')continue;q.push(encodeURIComponent(k)+'='+encodeURIComponent(String(p[k]==null?'':p[k])));}q.push('_='+String(Date.now()));var url='/api/plugins/safe-event/client-log?'+q.join('&');if(window.fetch){try{fetch(url,{method:'GET',cache:'no-store',credentials:'same-origin',keepalive:true}).catch(function(){});return;}catch(_){}}var bag=window.__tvairThemeDeveloperDiagnosticBeacons||(window.__tvairThemeDeveloperDiagnosticBeacons=[]);var img=new Image();var release=function(){var i=bag.indexOf(img);if(i>=0)bag.splice(i,1);};img.onload=release;img.onerror=release;bag.push(img);img.src=url;}catch(_){}};</script>""";
+#else
+    var developerThemeDiagnosticScript = string.Empty;
+#endif
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+    var developerDebugSetBody = "if(el&&el.setAttribute)el.setAttribute(name,String(value==null?'':value));";
+    var developerDebugGetBody = "return tvairGetAttr(el,name);";
+#else
+    var developerDebugSetBody = "return;";
+    var developerDebugGetBody = "return '';";
+#endif
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+    var developerBeaconBody = """try{var img=new Image();var networkId=tvairGetAttr(el,'data-tvair-payload-networkId')||tvairGetAttr(el,'data-tvair-payload-nid');var tsid=tvairGetAttr(el,'data-tvair-payload-transportStreamId')||tvairGetAttr(el,'data-tvair-payload-tsid');var sid=tvairGetAttr(el,'data-tvair-payload-serviceId')||tvairGetAttr(el,'data-tvair-payload-sid');var url='/api/plugins/safe-event/client-log?phase='+encodeURIComponent(phase||'')+'&event='+encodeURIComponent(eventName||'')+'&action='+encodeURIComponent(action||'')+'&interactionId='+encodeURIComponent(tvairDebugGet(el,'data-tvair-debug-interaction-id')||'')+'&pluginId='+encodeURIComponent(tvairGetAttr(el,'data-tvair-plugin-id')||'')+'&routeSegment='+encodeURIComponent(tvairGetAttr(el,'data-tvair-route-segment')||document.body.getAttribute('data-plugin-route')||'')+'&windowId='+encodeURIComponent(tvairGetAttr(el,'data-tvair-window-id')||tvairCurrentWindowId()||'')+'&mode='+encodeURIComponent('directContent')+'&hostKind='+encodeURIComponent('winforms_webbrowser_fallback_direct_content')+'&tag='+encodeURIComponent(tvairTagName(el))+'&hasAction='+encodeURIComponent(action?'true':'false')+'&hasToken='+encodeURIComponent((tvairGetAttr(el,'data-tvair-action-token')||tvairGetAttr(el,'data-tvair-token'))?'true':'false')+'&hasTriplet='+encodeURIComponent((networkId&&tsid&&sid)?'true':'false')+'&_='+String(new Date().getTime());img.src=url;}catch(_){ }""";
 #else
     var developerBeaconBody = "return;";
 #endif
     var template = """
 <!doctype html>
-<html lang="ja" class="{{themeClass}}" data-theme="{{safeEffectiveTheme}}" data-tvair-theme="{{safeSelectedTheme}}" data-tvair-selected-theme="{{safeSelectedTheme}}" data-tvair-effective-theme="{{safeEffectiveTheme}}" data-tvair-theme-scope="all">
+<html lang="ja" class="{{themeClass}}" data-theme="{{safeEffectiveTheme}}" data-tvair-theme="{{safeSelectedTheme}}" data-tvair-selected-theme="{{safeSelectedTheme}}" data-tvair-effective-theme="{{safeEffectiveTheme}}" data-tvair-theme-generation="{{safeThemeGeneration}}" data-tvair-theme-revision="{{themeRevision}}" data-tvair-theme-scope="all" data-tvair-theme-update-mode="{{themeUpdateModeToken}}">
 <head>
 <meta charset="utf-8">
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; media-src 'self' data:">
 <title>{{safeTitle}} - TvAIr Tool Window</title>
-<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.1-theme204">
-<script src="/tvair-theme.js?v=1.2.1"></script>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.1-css-final199">
+<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.2">
+{{developerThemeDiagnosticScript}}
+<script src="/tvair-theme.js?v=1.2.2"></script>
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.2">
 {{pluginHead}}
 </head>
-<body class="tvair-plugin-toolwindow-content-only {{themeClass}}" data-plugin-route="{{safeRoute}}" data-theme="{{safeEffectiveTheme}}" data-tvair-theme="{{safeSelectedTheme}}" data-tvair-selected-theme="{{safeSelectedTheme}}" data-tvair-effective-theme="{{safeEffectiveTheme}}" data-tvair-theme-scope="all" data-tvair-host-kind="winforms_webbrowser_fallback_direct_content" data-tvair-toolwindow-contract="release_contract">
+<body class="tvair-plugin-toolwindow-content-only {{themeClass}}" data-plugin-route="{{safeRoute}}" data-theme="{{safeEffectiveTheme}}" data-tvair-theme="{{safeSelectedTheme}}" data-tvair-selected-theme="{{safeSelectedTheme}}" data-tvair-effective-theme="{{safeEffectiveTheme}}" data-tvair-theme-generation="{{safeThemeGeneration}}" data-tvair-theme-revision="{{themeRevision}}" data-tvair-theme-scope="all" data-tvair-theme-update-mode="{{themeUpdateModeToken}}" data-tvair-host-kind="winforms_webbrowser_fallback_direct_content" data-tvair-toolwindow-contract="release_contract">
 <div class="tvair-toolwindow-content-root">
 {{pluginContent}}
 </div>
-<script src="/tvair-safe-event-host.js?v=1.2.1"></script>
+<script src="/tvair-safe-event-host.js?v=1.2.2"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -3718,7 +3855,7 @@ function tvairCurrentWindowId(){var q=location.search||'';var m=q.match(/[?&]__t
 function tvairCurrentRevision(){var q=location.search||'';var m=q.match(/[?&]_tvairWindowRevision=([^&]+)/);return m?decodeURIComponent(m[1].replace(/\+/g,' ')):'';}
 function tvairIsReservedPayloadKey(name){var n=String(name||'').toLowerCase();return n==='action'||n==='pluginid'||n==='routesegment'||n==='route'||n==='token'||n==='actiontoken'||n==='responsemode'||n==='windowid';}
 function tvairCollectFormValues(el,form){var mode=tvairGetAttr(el,'data-tvair-form-capture');if(!mode)return;var scope=null;if(mode==='closestForm'){var n=el;while(n&&n!==document){if(tvairTagName(n)==='form'){scope=n;break;}n=n.parentNode;}}else if(mode.charAt(0)==='#'){scope=document.getElementById(mode.substring(1));}if(!scope||!scope.elements)return;for(var i=0;i<scope.elements.length;i++){var item=scope.elements[i];if(!item||!item.name||item.disabled||tvairIsReservedPayloadKey(item.name))continue;var type=String(item.type||'').toLowerCase();if((type==='checkbox'||type==='radio')&&!item.checked)continue;tvairAppendHidden(form,item.name,item.value);}}
-function tvairNewInteractionId(){return 'ix-'+String((new Date()).getTime())+'-'+String(Math.floor(Math.random()*1000000000));}function tvairClientBeacon(phase,eventName,action,el){ {{developerBeaconBody}} }
+function tvairNewInteractionId(){return 'ix-'+String((new Date()).getTime())+'-'+String(Math.floor(Math.random()*1000000000));}function tvairDebugSet(el,name,value){ {{developerDebugSetBody}} }function tvairDebugGet(el,name){ {{developerDebugGetBody}} }function tvairClientBeacon(phase,eventName,action,el){ {{developerBeaconBody}} }
 function tvairFindSafeEventTarget(start,eventName){var n=start;while(n&&n!==document){if(n.getAttribute&&tvairGetAttr(n,'data-tvair-action')){var events=tvairGetAttr(n,'data-tvair-event');if(tvairHasToken(events,eventName))return n;if(eventName==='click'&&tvairHasToken(events,'dblclick')&&tvairGetAttr(n,'data-tvair-click-fallback')==='true')return n;}n=n.parentNode;}return null;}
 function tvairFindHoverTarget(start){
   var n=start;
@@ -3761,7 +3898,7 @@ function tvairApplyAcceptedButtonState(el,action,eventName){if(!el||tvairTagName
 function tvairFeedbackEnabled(el){return String(tvairGetAttr(el,'data-tvair-feedback')||'').toLowerCase()==='true';}function tvairFeedbackSetLabel(el,label){if(!el||!label)return;el.setAttribute('aria-label',label);try{el.innerText=label;}catch(_){try{el.textContent=label;}catch(__){} } }function tvairBeginActionFeedback(el,eventName,action,correlationId){if(!tvairFeedbackEnabled(el))return true;if(el.__tvairFeedbackInFlight){tvairClientBeacon('feedback_duplicate_suppressed',eventName,action,el);return false;}el.__tvairFeedbackInFlight=correlationId||'pending';if(!el.__tvairFeedbackOriginal)el.__tvairFeedbackOriginal={label:(el.innerText||el.textContent||''),aria:tvairGetAttr(el,'aria-label'),disabled:!!el.disabled};if(String(tvairGetAttr(el,'data-tvair-feedback-disable-running')||'').toLowerCase()==='true'){el.disabled=true;el.setAttribute('disabled','disabled');}tvairFeedbackSetLabel(el,tvairGetAttr(el,'data-tvair-feedback-pending-label'));el.setAttribute('aria-busy','true');tvairClientBeacon('feedback_running',eventName,action,el);return true;}function tvairFloatingLabelKind(value){var kind=String(value||'Information').toLowerCase();return kind==='success'||kind==='warning'||kind==='error'?kind:'information';}function tvairShowFloatingLabel(body,el,eventName,action){var feedback=body&&(body.feedback||body.Feedback)||{};var label=body&&(body.floatingLabel||body.FloatingLabel)||null;if(!label&&feedback&&(feedback.showFloatingLabel===false||feedback.ShowFloatingLabel===false))return;var message=label?(label.message||label.Message||''):(feedback.message||feedback.Message||'');if(!message)return;var correlation=String((label&&(label.correlationId||label.CorrelationId))||(feedback.correlationId||feedback.CorrelationId)||'');var kind=tvairFloatingLabelKind((label&&(label.kind||label.Kind))||(feedback.kind||feedback.Kind));var duration=parseInt((label&&(label.durationMilliseconds||label.DurationMilliseconds))||0,10)||0;if(duration<=0)duration=kind==='error'?3000:(kind==='warning'?2500:1800);if(duration<1000)duration=1000;if(duration>5000)duration=5000;var node=document.getElementById('tvair-host-floating-label');if(!node){node=document.createElement('div');node.id='tvair-host-floating-label';node.setAttribute('role',kind==='error'?'alert':'status');node.setAttribute('aria-live',kind==='error'?'assertive':'polite');node.setAttribute('aria-atomic','true');node.className='tvair-host-floating-label';document.body.appendChild(node);}node.setAttribute('data-tvair-feedback-kind',kind);node.setAttribute('data-tvair-correlation-id',correlation);node.innerText=String(message);node.classList.add('is-visible');if(node.__tvairHideTimer)clearTimeout(node.__tvairHideTimer);node.__tvairHideTimer=setTimeout(function(){if(node&&node.parentNode)node.parentNode.removeChild(node);},duration);tvairClientBeacon('floating_label_shown',eventName,action,el);} function tvairCompleteActionFeedback(el,eventName,action,body,httpOk){if(!tvairFeedbackEnabled(el))return;var feedback=body&&(body.feedback||body.Feedback)||{};var phase=String(feedback.phase||feedback.Phase||(httpOk?'Succeeded':'Failed')).toLowerCase();var success=phase==='succeeded'||phase==='success';var nochange=phase==='nochange'||phase==='no_change';var cancelled=phase==='cancelled'||phase==='canceled';var label=feedback.buttonLabel||feedback.ButtonLabel||'';if(!label){if(success)label=tvairGetAttr(el,'data-tvair-feedback-success-label');else if(nochange)label=tvairGetAttr(el,'data-tvair-feedback-nochange-label');else if(!cancelled)label=tvairGetAttr(el,'data-tvair-feedback-failure-label');}var original=el.__tvairFeedbackOriginal||{};if(label)tvairFeedbackSetLabel(el,label);var keepDisabled=(typeof feedback.keepDisabled!=='undefined')?!!feedback.keepDisabled:((typeof feedback.KeepDisabled!=='undefined')?!!feedback.KeepDisabled:false);if(success&&String(tvairGetAttr(el,'data-tvair-feedback-keep-disabled-success')||'').toLowerCase()==='true')keepDisabled=true;if(!success&&!nochange&&String(tvairGetAttr(el,'data-tvair-feedback-restore-failure')||'').toLowerCase()==='true'){tvairFeedbackSetLabel(el,original.label||'');if(original.aria)el.setAttribute('aria-label',original.aria);else el.removeAttribute('aria-label');}if(keepDisabled){el.disabled=true;el.setAttribute('disabled','disabled');}else{el.disabled=!!original.disabled;if(original.disabled)el.setAttribute('disabled','disabled');else el.removeAttribute('disabled');}el.removeAttribute('aria-busy');delete el.__tvairFeedbackInFlight;tvairShowFloatingLabel(body,el,eventName,action);tvairClientBeacon(success?'feedback_succeeded':(nochange?'feedback_nochange':(cancelled?'feedback_cancelled':'feedback_failed')),eventName,action,el);}
 function tvairApplyUiPatches(patches){if(!patches||typeof patches.length==='undefined')return;for(var i=0;i<patches.length&&i<64;i++){var p=patches[i]||{};var id=p.elementId||p.ElementId||'';if(!id)continue;var target=document.getElementById(id);if(!target)continue;var text=(typeof p.textContent!=='undefined')?p.textContent:p.TextContent;if(text!==null&&typeof text!=='undefined'){try{target.textContent=String(text);}catch(_){target.innerText=String(text);}}var cls=(typeof p.className!=='undefined')?p.className:p.ClassName;if(cls!==null&&typeof cls!=='undefined')target.className=String(cls);var remove=p.removeClasses||p.RemoveClasses||[];for(var r=0;r<remove.length;r++){var rc=String(remove[r]||'');if(!rc)continue;if(target.classList)target.classList.remove(rc);else target.className=(' '+target.className+' ').replace(' '+rc+' ',' ').replace(/^\s+|\s+$/g,'');}var add=p.addClasses||p.AddClasses||[];for(var a=0;a<add.length;a++){var ac=String(add[a]||'');if(!ac)continue;if(target.classList)target.classList.add(ac);else if((' '+target.className+' ').indexOf(' '+ac+' ')<0)target.className=(target.className?target.className+' ':'')+ac;}var disabled=(typeof p.disabled!=='undefined')?p.disabled:p.Disabled;if(disabled!==null&&typeof disabled!=='undefined'){target.disabled=!!disabled;if(disabled)target.setAttribute('disabled','disabled');else target.removeAttribute('disabled');}var hidden=(typeof p.hidden!=='undefined')?p.hidden:p.Hidden;if(hidden!==null&&typeof hidden!=='undefined'){target.hidden=!!hidden;if(hidden)target.setAttribute('hidden','hidden');else target.removeAttribute('hidden');}var checked=(typeof p.checked!=='undefined')?p.checked:p.Checked;if(checked!==null&&typeof checked!=='undefined'){target.checked=!!checked;if(checked)target.setAttribute('checked','checked');else target.removeAttribute('checked');}var value=(typeof p.value!=='undefined')?p.value:p.Value;if(value!==null&&typeof value!=='undefined')target.value=String(value);var attrs=p.attributes||p.Attributes||{};for(var name in attrs){if(!Object.prototype.hasOwnProperty.call(attrs,name))continue;var lower=String(name).toLowerCase();if(!(lower==='title'||lower.indexOf('aria-')===0||lower.indexOf('data-')===0))continue;var attrValue=attrs[name];if(attrValue===null||typeof attrValue==='undefined')target.removeAttribute(name);else target.setAttribute(name,String(attrValue));} } }
 function tvairApplyUiPatchesJson(json){try{var patches=JSON.parse(String(json||'[]'));tvairApplyUiPatches(patches);var applied=0;if(patches&&typeof patches.length!=='undefined'){for(var i=0;i<patches.length&&i<64;i++){var p=patches[i]||{};var id=p.elementId||p.ElementId||'';if(id&&document.getElementById(id))applied++;}}return applied;}catch(_){return -1;}}
-function tvairPageRefreshStateKey(){try{return 'tvair-page-refresh:'+location.pathname+location.search;}catch(_){return '';}}function tvairCapturePageRefreshState(){try{var key=tvairPageRefreshStateKey();if(!key)return;var state={x:window.pageXOffset||document.documentElement.scrollLeft||0,y:window.pageYOffset||document.documentElement.scrollTop||0};sessionStorage.setItem(key,JSON.stringify(state));}catch(_){}}function tvairRestorePageRefreshState(){try{var key=tvairPageRefreshStateKey();if(!key)return;var raw=sessionStorage.getItem(key);if(!raw)return;sessionStorage.removeItem(key);var state=JSON.parse(raw);window.scrollTo(Number(state.x)||0,Number(state.y)||0);}catch(_){}}function tvairInteractionStateKey(){var id=tvairCurrentWindowId();return id?'tvair-interaction-state:'+id:'';}function tvairCaptureInteractionState(){try{var key=tvairInteractionStateKey();if(!key)return;var a=document.activeElement;var state={x:window.pageXOffset||document.documentElement.scrollLeft||0,y:window.pageYOffset||document.documentElement.scrollTop||0,id:a&&a.id?a.id:'',start:(a&&typeof a.selectionStart==='number')?a.selectionStart:null,end:(a&&typeof a.selectionEnd==='number')?a.selectionEnd:null};sessionStorage.setItem(key,JSON.stringify(state));}catch(_){}}function tvairRestoreInteractionState(){try{var key=tvairInteractionStateKey();if(!key)return;var raw=sessionStorage.getItem(key);if(!raw)return;sessionStorage.removeItem(key);var state=JSON.parse(raw);window.scrollTo(Number(state.x)||0,Number(state.y)||0);if(state.id){var a=document.getElementById(state.id);if(a&&a.focus){a.focus();if(typeof a.setSelectionRange==='function'&&state.start!==null)a.setSelectionRange(state.start,state.end===null?state.start:state.end);}}}catch(_){}}function tvairRestoreRefreshState(){tvairRestoreInteractionState();tvairRestorePageRefreshState();}if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',tvairRestoreRefreshState);else setTimeout(tvairRestoreRefreshState,0);function tvairSubmitSafeAction(el,eventName){var action=tvairGetAttr(el,'data-tvair-action');var interactionId=tvairNewInteractionId();el.setAttribute('data-tvair-debug-interaction-id',interactionId);tvairClientBeacon('click_captured',eventName,action,el);tvairClientBeacon('received_before_validate',eventName,action,el);if(!action){tvairClientBeacon('denied_missing_action',eventName,action,el);return;}var confirmMessage=tvairGetAttr(el,'data-tvair-confirm-message');if(confirmMessage){var confirmed=false;try{confirmed=window.confirm(String(confirmMessage));}catch(_){confirmed=false;}if(!confirmed){tvairClientBeacon('action_cancelled_by_user',eventName,action,el);return;}}if(!tvairTryBeginRepeatPolicy(el,eventName,action))return;if(!tvairBeginActionFeedback(el,eventName,action,interactionId))return;if(!tvairFeedbackEnabled(el))tvairApplyAcceptedButtonState(el,action,eventName);var isWindowAction=(action==='refreshWindow'||action==='updateWindow'||action==='closeWindow'||action==='rerenderWindow'||action==='openWindow');var form=document.createElement('form');form.method='post';form.action=isWindowAction?'/api/plugins/window':'/api/plugins/action';tvairAppendHidden(form,'action',action);tvairAppendHidden(form,'pluginId',tvairGetAttr(el,'data-tvair-plugin-id'));tvairAppendHidden(form,'routeSegment',tvairGetAttr(el,'data-tvair-route-segment')||document.body.getAttribute('data-plugin-route')||'');tvairAppendHidden(form,'token',tvairGetAttr(el,'data-tvair-token')||tvairGetAttr(el,'data-tvair-action-token'));tvairAppendHidden(form,'actionToken',tvairGetAttr(el,'data-tvair-action-token')||tvairGetAttr(el,'data-tvair-token'));tvairAppendHidden(form,'responseMode',tvairGetAttr(el,'data-tvair-response-mode')||'hostHandled');tvairAppendHidden(form,'windowId',tvairGetAttr(el,'data-tvair-window-id')||tvairCurrentWindowId());tvairAppendHidden(form,'target',tvairGetAttr(el,'data-tvair-target')||'content');tvairAppendHidden(form,'refreshTarget',tvairGetAttr(el,'data-tvair-refresh-target')||'content');tvairAppendHidden(form,'preserveScroll',tvairGetAttr(el,'data-tvair-preserve-scroll')||'true');tvairAppendHidden(form,'safeEvent',eventName||'unknown');tvairAppendHidden(form,'safeEventAction',action);tvairAppendHidden(form,'safeEventSource','host-script-no-plugin-js');tvairAppendHidden(form,'safeEventInteractionId',interactionId);tvairAppendHidden(form,'safeEventWindowId',tvairGetAttr(el,'data-tvair-window-id')||tvairCurrentWindowId());tvairAppendHidden(form,'feedbackRequested',tvairFeedbackEnabled(el)?'true':'false');tvairCollectFormValues(el,form);if(el.attributes){for(var i=0;i<el.attributes.length;i++){var a=el.attributes[i];if(a&&a.name&&a.name.indexOf('data-tvair-payload-')===0){var pk=a.name.substring('data-tvair-payload-'.length);if(!tvairIsReservedPayloadKey(pk))tvairAppendHidden(form,pk,a.value);} } }el.setAttribute('data-tvair-debug-payload-count',String(form.elements.length));tvairClientBeacon('payload_built',eventName,action,el);document.body.appendChild(form);tvairClientBeacon('post_started',eventName,action,el);tvairClientBeacon('posting_form',eventName,action,el);var submitResponseMode=tvairGetAttr(el,'data-tvair-response-mode')||'hostHandled';if(submitResponseMode==='hostHandled'||submitResponseMode==='noContent'||submitResponseMode==='patchWindow'){try{var pairs=[];for(var j=0;j<form.elements.length;j++){var it=form.elements[j];if(it&&it.name)pairs.push(encodeURIComponent(it.name)+'='+encodeURIComponent(it.value||''));}var endpoint=isWindowAction?'/api/plugins/window':'/api/plugins/action';var resolvedEndpoint=location.protocol+'//'+location.host+endpoint;el.setAttribute('data-tvair-debug-endpoint',resolvedEndpoint);var xhr=new XMLHttpRequest();xhr.open('POST',resolvedEndpoint,true);xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded; charset=UTF-8');xhr.setRequestHeader('Accept','application/json, text/plain, */*');var requestInteractionId=interactionId;xhr.onreadystatechange=function(){if(xhr.readyState===4){var previousInteractionId=tvairGetAttr(el,'data-tvair-debug-interaction-id');el.setAttribute('data-tvair-debug-interaction-id',requestInteractionId);el.setAttribute('data-tvair-debug-status',String(xhr.status||0));var body={};try{body=JSON.parse(xhr.responseText||'{}');}catch(_){if(submitResponseMode==='patchWindow'||tvairFeedbackEnabled(el))el.setAttribute('data-tvair-debug-reason','response_parse_failed');}if(xhr.status>=200&&xhr.status<400&&submitResponseMode==='patchWindow')tvairApplyUiPatches(body&&body.uiPatches?body.uiPatches:[]);var requestSucceeded=xhr.status>=200&&xhr.status<400;tvairCompleteActionFeedback(el,eventName,action,body,requestSucceeded);tvairClientBeacon(requestSucceeded?'post_completed':'post_failed',eventName,action,el);el.setAttribute('data-tvair-debug-interaction-id',previousInteractionId);var refreshSurface='';var preservePageScroll=false;var pageRefreshLocation='';try{refreshSurface=String(xhr.getResponseHeader('X-TvAIr-Refresh-Surface')||'').toLowerCase();preservePageScroll=String(xhr.getResponseHeader('X-TvAIr-Preserve-Scroll')||'').toLowerCase()==='true';pageRefreshLocation=String(xhr.getResponseHeader('X-TvAIr-Refresh-Location')||'');}catch(_){}if(requestSucceeded&&refreshSurface==='page'){if(preservePageScroll)tvairCapturePageRefreshState();tvairClientBeacon('page_refresh_issued',eventName,action,el);if(pageRefreshLocation){location.href=pageRefreshLocation;}else{location.href=location.pathname+location.search;}return;}}};xhr.onerror=function(){var previousInteractionId=tvairGetAttr(el,'data-tvair-debug-interaction-id');el.setAttribute('data-tvair-debug-interaction-id',requestInteractionId);el.setAttribute('data-tvair-debug-reason','xhr_error');tvairCompleteActionFeedback(el,eventName,action,{},false);tvairClientBeacon('post_failed',eventName,action,el);el.setAttribute('data-tvair-debug-interaction-id',previousInteractionId);};xhr.send(pairs.join('&'));return;}catch(_){}}tvairCaptureInteractionState();form.submit();}
+function tvairPageRefreshStateKey(){try{return 'tvair-page-refresh:'+location.pathname+location.search;}catch(_){return '';}}function tvairCapturePageRefreshState(){try{var key=tvairPageRefreshStateKey();if(!key)return;var state={x:window.pageXOffset||document.documentElement.scrollLeft||0,y:window.pageYOffset||document.documentElement.scrollTop||0};sessionStorage.setItem(key,JSON.stringify(state));}catch(_){}}function tvairRestorePageRefreshState(){try{var key=tvairPageRefreshStateKey();if(!key)return;var raw=sessionStorage.getItem(key);if(!raw)return;sessionStorage.removeItem(key);var state=JSON.parse(raw);window.scrollTo(Number(state.x)||0,Number(state.y)||0);}catch(_){}}function tvairInteractionStateKey(){var id=tvairCurrentWindowId();return id?'tvair-interaction-state:'+id:'';}function tvairCaptureInteractionState(){try{var key=tvairInteractionStateKey();if(!key)return;var a=document.activeElement;var state={x:window.pageXOffset||document.documentElement.scrollLeft||0,y:window.pageYOffset||document.documentElement.scrollTop||0,id:a&&a.id?a.id:'',start:(a&&typeof a.selectionStart==='number')?a.selectionStart:null,end:(a&&typeof a.selectionEnd==='number')?a.selectionEnd:null};sessionStorage.setItem(key,JSON.stringify(state));}catch(_){}}function tvairRestoreInteractionState(){try{var key=tvairInteractionStateKey();if(!key)return;var raw=sessionStorage.getItem(key);if(!raw)return;sessionStorage.removeItem(key);var state=JSON.parse(raw);window.scrollTo(Number(state.x)||0,Number(state.y)||0);if(state.id){var a=document.getElementById(state.id);if(a&&a.focus){a.focus();if(typeof a.setSelectionRange==='function'&&state.start!==null)a.setSelectionRange(state.start,state.end===null?state.start:state.end);}}}catch(_){}}function tvairRestoreRefreshState(){tvairRestoreInteractionState();tvairRestorePageRefreshState();}if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',tvairRestoreRefreshState);else setTimeout(tvairRestoreRefreshState,0);function tvairSubmitSafeAction(el,eventName){var action=tvairGetAttr(el,'data-tvair-action');var interactionId=tvairNewInteractionId();tvairDebugSet(el,'data-tvair-debug-interaction-id',interactionId);tvairClientBeacon('click_captured',eventName,action,el);tvairClientBeacon('received_before_validate',eventName,action,el);if(!action){tvairClientBeacon('denied_missing_action',eventName,action,el);return;}var confirmMessage=tvairGetAttr(el,'data-tvair-confirm-message');if(confirmMessage){var confirmed=false;try{confirmed=window.confirm(String(confirmMessage));}catch(_){confirmed=false;}if(!confirmed){tvairClientBeacon('action_cancelled_by_user',eventName,action,el);return;}}if(!tvairTryBeginRepeatPolicy(el,eventName,action))return;if(!tvairBeginActionFeedback(el,eventName,action,interactionId))return;if(!tvairFeedbackEnabled(el))tvairApplyAcceptedButtonState(el,action,eventName);var isWindowAction=(action==='refreshWindow'||action==='updateWindow'||action==='closeWindow'||action==='rerenderWindow'||action==='openWindow');var form=document.createElement('form');form.method='post';form.action=isWindowAction?'/api/plugins/window':'/api/plugins/action';tvairAppendHidden(form,'action',action);tvairAppendHidden(form,'pluginId',tvairGetAttr(el,'data-tvair-plugin-id'));tvairAppendHidden(form,'routeSegment',tvairGetAttr(el,'data-tvair-route-segment')||document.body.getAttribute('data-plugin-route')||'');tvairAppendHidden(form,'token',tvairGetAttr(el,'data-tvair-token')||tvairGetAttr(el,'data-tvair-action-token'));tvairAppendHidden(form,'actionToken',tvairGetAttr(el,'data-tvair-action-token')||tvairGetAttr(el,'data-tvair-token'));tvairAppendHidden(form,'responseMode',tvairGetAttr(el,'data-tvair-response-mode')||'hostHandled');tvairAppendHidden(form,'windowId',tvairGetAttr(el,'data-tvair-window-id')||tvairCurrentWindowId());tvairAppendHidden(form,'target',tvairGetAttr(el,'data-tvair-target')||'content');tvairAppendHidden(form,'refreshTarget',tvairGetAttr(el,'data-tvair-refresh-target')||'content');tvairAppendHidden(form,'preserveScroll',tvairGetAttr(el,'data-tvair-preserve-scroll')||'true');tvairAppendHidden(form,'safeEvent',eventName||'unknown');tvairAppendHidden(form,'safeEventAction',action);tvairAppendHidden(form,'safeEventSource','host-script-no-plugin-js');tvairAppendHidden(form,'safeEventInteractionId',interactionId);tvairAppendHidden(form,'safeEventWindowId',tvairGetAttr(el,'data-tvair-window-id')||tvairCurrentWindowId());tvairAppendHidden(form,'feedbackRequested',tvairFeedbackEnabled(el)?'true':'false');tvairCollectFormValues(el,form);if(el.attributes){for(var i=0;i<el.attributes.length;i++){var a=el.attributes[i];if(a&&a.name&&a.name.indexOf('data-tvair-payload-')===0){var pk=a.name.substring('data-tvair-payload-'.length);if(!tvairIsReservedPayloadKey(pk))tvairAppendHidden(form,pk,a.value);} } }tvairDebugSet(el,'data-tvair-debug-payload-count',String(form.elements.length));tvairClientBeacon('payload_built',eventName,action,el);document.body.appendChild(form);tvairClientBeacon('post_started',eventName,action,el);tvairClientBeacon('posting_form',eventName,action,el);var submitResponseMode=tvairGetAttr(el,'data-tvair-response-mode')||'hostHandled';if(submitResponseMode==='hostHandled'||submitResponseMode==='noContent'||submitResponseMode==='patchWindow'){try{var pairs=[];for(var j=0;j<form.elements.length;j++){var it=form.elements[j];if(it&&it.name)pairs.push(encodeURIComponent(it.name)+'='+encodeURIComponent(it.value||''));}var endpoint=isWindowAction?'/api/plugins/window':'/api/plugins/action';var resolvedEndpoint=location.protocol+'//'+location.host+endpoint;tvairDebugSet(el,'data-tvair-debug-endpoint',resolvedEndpoint);var xhr=new XMLHttpRequest();xhr.open('POST',resolvedEndpoint,true);xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded; charset=UTF-8');xhr.setRequestHeader('Accept','application/json, text/plain, */*');var requestInteractionId=interactionId;xhr.onreadystatechange=function(){if(xhr.readyState===4){var previousInteractionId=tvairDebugGet(el,'data-tvair-debug-interaction-id');tvairDebugSet(el,'data-tvair-debug-interaction-id',requestInteractionId);tvairDebugSet(el,'data-tvair-debug-status',String(xhr.status||0));var body={};try{body=JSON.parse(xhr.responseText||'{}');}catch(_){if(submitResponseMode==='patchWindow'||tvairFeedbackEnabled(el))tvairDebugSet(el,'data-tvair-debug-reason','response_parse_failed');}if(xhr.status>=200&&xhr.status<400&&submitResponseMode==='patchWindow')tvairApplyUiPatches(body&&body.uiPatches?body.uiPatches:[]);var requestSucceeded=xhr.status>=200&&xhr.status<400;tvairCompleteActionFeedback(el,eventName,action,body,requestSucceeded);tvairClientBeacon(requestSucceeded?'post_completed':'post_failed',eventName,action,el);tvairDebugSet(el,'data-tvair-debug-interaction-id',previousInteractionId);var refreshSurface='';var preservePageScroll=false;var pageRefreshLocation='';try{refreshSurface=String(xhr.getResponseHeader('X-TvAIr-Refresh-Surface')||'').toLowerCase();preservePageScroll=String(xhr.getResponseHeader('X-TvAIr-Preserve-Scroll')||'').toLowerCase()==='true';pageRefreshLocation=String(xhr.getResponseHeader('X-TvAIr-Refresh-Location')||'');}catch(_){}if(requestSucceeded&&refreshSurface==='page'){if(preservePageScroll)tvairCapturePageRefreshState();tvairClientBeacon('page_refresh_issued',eventName,action,el);if(pageRefreshLocation){location.href=pageRefreshLocation;}else{location.href=location.pathname+location.search;}return;}}};xhr.onerror=function(){var previousInteractionId=tvairDebugGet(el,'data-tvair-debug-interaction-id');tvairDebugSet(el,'data-tvair-debug-interaction-id',requestInteractionId);tvairDebugSet(el,'data-tvair-debug-reason','xhr_error');tvairCompleteActionFeedback(el,eventName,action,{},false);tvairClientBeacon('post_failed',eventName,action,el);tvairDebugSet(el,'data-tvair-debug-interaction-id',previousInteractionId);};xhr.send(pairs.join('&'));return;}catch(_){}}tvairCaptureInteractionState();form.submit();}
 function tvairHandleSafeEvent(e,eventName){e=e||window.event;var target=e.target||e.srcElement;var el=tvairFindSafeEventTarget(target,eventName);if(!el)return true;try{if(e.preventDefault)e.preventDefault();e.returnValue=false;}catch(_){ }tvairSubmitSafeAction(el,eventName);return false;}
 function tvairBindSafeEvents(){if(window.__tvairSafeEventBound){tvairClientBeacon('bind_skip_already_bound','','',document.body);return;}window.__tvairSafeEventBound=true;tvairClientBeacon('bind_start','','',document.body);if(document.addEventListener){document.addEventListener('dblclick',function(e){return tvairHandleSafeEvent(e,'dblclick');},false);document.addEventListener('mouseover',function(e){tvairHandleRuntimeHover(e,'enter');},false);document.addEventListener('mouseout',function(e){tvairHandleRuntimeHover(e,'leave');},false);document.addEventListener('click',function(e){if(tvairHandleSafeEvent(e,'click')===false)return false;var a=e.target;while(a&&a!==document&&!(a.tagName&&String(a.tagName).toLowerCase()==='a'))a=a.parentNode;if(a&&a.href){var next=tvairPreserveToolWindowLink(a.getAttribute('href')||'');if(next&&(next!==a.getAttribute('href'))){if(e.preventDefault)e.preventDefault();location.href=next;} } },false);}else if(document.attachEvent){document.attachEvent('ondblclick',function(){return tvairHandleSafeEvent(window.event,'dblclick');});document.attachEvent('onmouseover',function(){tvairHandleRuntimeHover(window.event,'enter');});document.attachEvent('onmouseout',function(){tvairHandleRuntimeHover(window.event,'leave');});document.attachEvent('onclick',function(){return tvairHandleSafeEvent(window.event,'click');});}else{var oldDbl=document.ondblclick;document.ondblclick=function(e){if(tvairHandleSafeEvent(e||window.event,'dblclick')===false)return false;return oldDbl?oldDbl(e):true;};var oldOver=document.onmouseover;document.onmouseover=function(e){tvairHandleRuntimeHover(e||window.event,'enter');return oldOver?oldOver(e):true;};var oldOut=document.onmouseout;document.onmouseout=function(e){tvairHandleRuntimeHover(e||window.event,'leave');return oldOut?oldOut(e):true;};var oldClick=document.onclick;document.onclick=function(e){if(tvairHandleSafeEvent(e||window.event,'click')===false)return false;return oldClick?oldClick(e):true;};}tvairClientBeacon('bind_complete','','',document.body);}
 function tvairFindActionTokenElement(){try{return document.querySelector?document.querySelector('[data-tvair-action-token],[data-tvair-token]'):null;}catch(_){return null;}}
@@ -3777,9 +3914,14 @@ function tvairBootSafeEvents(){try{tvairBindSafeEvents();tvairStartActionTokenKe
         .Replace("{{safeRoute}}", safeRoute, StringComparison.Ordinal)
         .Replace("{{safeSelectedTheme}}", safeSelectedTheme, StringComparison.Ordinal)
         .Replace("{{safeEffectiveTheme}}", safeEffectiveTheme, StringComparison.Ordinal)
+        .Replace("{{safeThemeGeneration}}", safeThemeGeneration, StringComparison.Ordinal)
         .Replace("{{themeClass}}", themeClass, StringComparison.Ordinal)
+        .Replace("{{themeUpdateModeToken}}", themeUpdateModeToken, StringComparison.Ordinal)
         .Replace("{{pluginHead}}", pluginHead, StringComparison.Ordinal)
         .Replace("{{pluginContent}}", pluginContent, StringComparison.Ordinal)
+        .Replace("{{developerThemeDiagnosticScript}}", developerThemeDiagnosticScript, StringComparison.Ordinal)
+        .Replace("{{developerDebugSetBody}}", developerDebugSetBody, StringComparison.Ordinal)
+        .Replace("{{developerDebugGetBody}}", developerDebugGetBody, StringComparison.Ordinal)
         .Replace("{{developerBeaconBody}}", developerBeaconBody, StringComparison.Ordinal);
 }
 
@@ -3877,7 +4019,7 @@ static bool LooksLikeFullHtmlDocument(string? html)
         || html.IndexOf("<head", StringComparison.OrdinalIgnoreCase) >= 0;
 }
 
-static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry registry, PluginActionTokenStore actionTokens, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, ExternalTunerLeaseService externalTuners, ViewerSessionRegistry viewerSessions, IOptions<TvTestSettings> tvTestOptions, IniSettingsService ini, IReadOnlyList<TunerProfile> tunerProfiles, PluginBoundaryGate boundaryGate, LogPresentationStore logPresentationStore, LogRepository log)
+static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry registry, PluginActionTokenStore actionTokens, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, ExternalTunerLeaseService externalTuners, ViewerSessionRegistry viewerSessions, IOptions<TvTestSettings> tvTestOptions, IniSettingsService ini, SettingsRuntimeState runtimeState, IReadOnlyList<TunerProfile> tunerProfiles, PluginBoundaryGate boundaryGate, LogPresentationStore logPresentationStore, LogRepository log)
 {
     var requestedRoute = string.Join("", route.Where(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_' or '.'));
     if (string.IsNullOrWhiteSpace(requestedRoute))
@@ -3905,6 +4047,18 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
         || IsTruthy(http.Query["__tvairToolHostContent"].FirstOrDefault())
         || IsTruthy(http.Query["__tvairToolHost"].FirstOrDefault())
         || (IsTruthy(http.Query["__tvairHostWindow"].FirstOrDefault()) && !string.IsNullOrWhiteSpace(currentWindowId));
+    var declaredThemeUpdateMode = nativeUiDefinition?.ThemeUpdateMode ?? RuntimeUiThemeUpdateMode.HostRerender;
+    // HotApply is initially a normal Plugin Page contract. ToolWindow remains on the
+    // existing Host-owned rerender path until its browser host has an equivalent push/ack channel.
+    var effectiveThemeUpdateMode = !toolWindowContentOnly && declaredThemeUpdateMode == RuntimeUiThemeUpdateMode.HotApply
+        ? RuntimeUiThemeUpdateMode.HotApply
+        : RuntimeUiThemeUpdateMode.HostRerender;
+    var themeHotApplyScriptPath = effectiveThemeUpdateMode == RuntimeUiThemeUpdateMode.HotApply
+        ? NormalizePluginAssetLogicalPath(nativeUiDefinition?.ThemeHotApplyScriptPath)
+        : string.Empty;
+    var themeHotApplyScriptUrl = effectiveThemeUpdateMode == RuntimeUiThemeUpdateMode.HotApply
+        ? BuildPluginRuntimeThemeScriptUrl(publicRoute, themeHotApplyScriptPath)
+        : string.Empty;
     var currentRequestPath = http.Path.Value ?? string.Empty;
     var currentRequestQueryString = http.QueryString.HasValue ? http.QueryString.Value ?? string.Empty : string.Empty;
     var currentRequestPathAndQuery = string.Concat(currentRequestPath, currentRequestQueryString);
@@ -3916,7 +4070,6 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
             StringComparer.OrdinalIgnoreCase);
     var currentRequestWave = currentRequestQuery.TryGetValue("wave", out var requestWave) ? requestWave : string.Empty;
     var currentRequestQueryKeys = string.Join(",", currentRequestQuery.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase));
-
     // release_contract: Window state absolute URL contract must be derived before RuntimeUiRenderContext construction.
     // Keep this outside the plugin-specific block so WindowContract and diagnostics can share one authoritative value.
     var currentWindowStateEndpoint = isHostManagedWindowContent && !string.IsNullOrWhiteSpace(currentWindowId)
@@ -3945,9 +4098,12 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
     {
         windows.UpdateContentRouteFromRender(currentWindowId, expectedWindowPluginId, currentRequestPathAndQuery);
     }
-    var hostSelectedTheme = IniSettingsService.NormalizeSystemTheme(ini.SystemTheme);
-    var hostEffectiveTheme = ResolveEffectiveHostTheme(hostSelectedTheme);
-    log.Add("PLUGIN_RENDER_ENTER", plugin?.Descriptor.DisplayName ?? publicRoute, $"routeSegment={SafePluginActionValue(publicRoute)} requestedRoute={SafePluginActionValue(requestedRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} requestPath={SafePluginActionValue(currentRequestPath)} query={SafePluginActionValue(currentRequestQueryString)} hostSelectedTheme={SafePluginActionValue(hostSelectedTheme)} hostEffectiveTheme={SafePluginActionValue(hostEffectiveTheme)} rule=release_contract");
+    var hostThemeSnapshot = runtimeState.ObserveTheme(ini.SystemTheme);
+    var hostSelectedTheme = hostThemeSnapshot.SelectedTheme;
+    var hostEffectiveTheme = hostThemeSnapshot.EffectiveTheme;
+    var hostThemeGeneration = hostThemeSnapshot.Generation;
+    var hostThemeRevision = hostThemeSnapshot.Revision;
+    log.Add("PLUGIN_RENDER_ENTER", plugin?.Descriptor.DisplayName ?? publicRoute, $"routeSegment={SafePluginActionValue(publicRoute)} requestedRoute={SafePluginActionValue(requestedRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} requestPath={SafePluginActionValue(currentRequestPath)} query={SafePluginActionValue(currentRequestQueryString)} hostThemeGeneration={SafePluginActionValue(hostThemeGeneration)} hostThemeRevision={hostThemeRevision} hostSelectedTheme={SafePluginActionValue(hostSelectedTheme)} hostEffectiveTheme={SafePluginActionValue(hostEffectiveTheme)} themeUpdateMode={effectiveThemeUpdateMode} declaredThemeUpdateMode={declaredThemeUpdateMode} themeHotApplyScript={SafePluginActionValue(themeHotApplyScriptPath)} handlerTransport={(string.IsNullOrWhiteSpace(themeHotApplyScriptUrl) ? "none" : "host_shell_declared_asset")} rule=release_contract");
 
     if (plugin is not null)
     {
@@ -3993,6 +4149,48 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
                 IsClosedNetwork = true,
                 HostSelectedTheme = hostSelectedTheme,
                 HostEffectiveTheme = hostEffectiveTheme,
+                HostThemeGeneration = hostThemeGeneration,
+                HostThemeRevision = hostThemeRevision,
+                ThemeRefreshContract = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["owner"] = "host",
+                    ["scope"] = "page_and_toolwindow",
+                    ["trigger"] = "host_theme_commit_revision",
+                    ["pageMode"] = effectiveThemeUpdateMode == RuntimeUiThemeUpdateMode.HotApply
+                        ? "host_runtime_theme_hot_apply"
+                        : "host_settings_commit_direct_rerender",
+                    ["toolWindowMode"] = "host_window_content_rerender",
+                    ["fallback"] = "host_full_rerender",
+                    ["preserveScroll"] = "true",
+                    ["preserveActivation"] = "true",
+                    ["preserveFocus"] = "best_effort_same_element",
+                    ["dedupe"] = "HostThemeRevision",
+                    ["pluginPollingRequired"] = "false",
+                    ["pluginThemeEventRequired"] = (effectiveThemeUpdateMode == RuntimeUiThemeUpdateMode.HotApply).ToString().ToLowerInvariant(),
+                    ["pluginReloadRequired"] = "false"
+                },
+                ThemeUpdateMode = effectiveThemeUpdateMode,
+                ThemeUpdateContract = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["owner"] = "host",
+                    ["mode"] = effectiveThemeUpdateMode.ToString(),
+                    ["eventName"] = RuntimeUiRenderContext.RuntimeThemeEventName,
+                    ["payload"] = "generation,revision,selectedTheme,effectiveTheme,themeContract",
+                    ["clientReadyFunction"] = RuntimeUiRenderContext.RuntimeThemeClientReadyFunction,
+                    ["clientReadyTiming"] = "handler_asset_loaded_by_host_shell_then_call_after_runtime_theme_listener_registration",
+                    ["handlerScriptPath"] = themeHotApplyScriptPath,
+                    ["handlerScriptUrl"] = themeHotApplyScriptUrl,
+                    ["handlerTransport"] = "host_shell_declared_embedded_asset_only",
+                    ["pluginHtmlScriptPolicy"] = "strip_all_plugin_html_scripts",
+                    ["preReady"] = "latest_pending_no_dispatch_no_fallback",
+                    ["ack"] = "after_client_ready: detail.acknowledge(true[,reason]) synchronously before event dispatch returns",
+                    ["staleRevision"] = "same_generation: plugin_ignore_incoming_revision_less_than_or_equal_applied; generation_change: reset_applied_revision",
+                    ["renderInFlight"] = "client_ready_is_explicit_browser_lifecycle_not_server_render_completion",
+                    ["failure"] = "host_full_rerender_only_after_client_ready_actual_dispatch_failure",
+                    ["pluginPollingRequired"] = "false",
+                    ["pluginThemeInferenceRequired"] = "false",
+                    ["pluginReloadRequired"] = "false"
+                },
                 ThemeContract = BuildPluginThemeContract(hostSelectedTheme, hostEffectiveTheme),
                 ActionEndpoint = "/api/plugins/action",
                 ActionMethod = "POST",
@@ -4009,7 +4207,12 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
                     ["routeSegment"] = publicRoute,
                     ["hostSelectedTheme"] = hostSelectedTheme,
                     ["hostEffectiveTheme"] = hostEffectiveTheme,
+                    ["hostThemeGeneration"] = hostThemeGeneration,
+                    ["hostThemeRevision"] = hostThemeRevision.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    ["themeUpdateMode"] = effectiveThemeUpdateMode.ToString(),
                     ["themeContract"] = "RuntimeUiRenderContext.ThemeContract",
+                    ["themeRefreshContract"] = "RuntimeUiRenderContext.ThemeRefreshContract",
+                    ["themeUpdateContract"] = "RuntimeUiRenderContext.ThemeUpdateContract",
                     ["responseMode"] = "json|refreshWindow|patchWindow|hostHandled|noContent",
                     ["pageResponseMode"] = "hostHandled",
                     ["browserTransport"] = "application/x-www-form-urlencoded",
@@ -4162,7 +4365,7 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
             log.Add("PLUGIN_RUNTIME_UI_CONTEXT_WINDOW_CONTRACT", plugin.Descriptor.DisplayName, $"result=ISSUED route={SafePluginActionValue(runtimeUiContext.WindowRoute)} endpoint={SafePluginActionValue(runtimeUiContext.WindowEndpoint)} method={SafePluginActionValue(runtimeUiContext.WindowMethod)} actions={SafePluginActionValue(string.Join(",", runtimeUiContext.SupportedWindowActions))} tokenPresent={!string.IsNullOrWhiteSpace(runtimeUiContext.WindowToken)} pluginId={SafePluginActionValue(pluginId)} routeSegment={SafePluginActionValue(publicRoute)} hostManaged=True currentWindowId={SafePluginActionValue(currentWindowId)} isHostManagedWindowContent={isHostManagedWindowContent} refreshTarget=content toolWindowSupported={toolWindowCaps.ToolWindowSupported} webView2Runtime={toolWindowCaps.WebView2RuntimeAvailable} hostKind={SafePluginActionValue(toolWindowCaps.HostKind)} reuseKey={SafePluginActionValue(toolWindowCaps.ReuseKey)} positionPersistence={toolWindowCaps.SupportsPositionPersistence} statePersistence={toolWindowCaps.SupportsStatePersistence} closeSync=closeWindow_and_host_x_button rule=release_contract");
             log.Add("WINDOW_STATE_ENDPOINT_CONTRACT", plugin.Descriptor.DisplayName, $"result=ISSUED currentWindowId={SafePluginActionValue(currentWindowId)} endpoint={SafePluginActionValue(currentWindowStateEndpoint)} absoluteUrl={SafePluginActionValue(currentWindowStateUrl)} currentWindowAlwaysOnTop={currentWindowAlwaysOnTop} currentWindowRevision={currentWindowRevision} currentWindowHostAlive={currentWindowHostAlive} csharpReadable={(!string.IsNullOrWhiteSpace(currentWindowStateUrl)).ToString()} stateDirectValues=RuntimeUiRenderContext source=RuntimeUiRenderContext.WindowContract rule=release_contract");
             log.Add("PLUGIN_RUNTIME_UI_CONTEXT_REQUEST_CONTRACT", plugin.Descriptor.DisplayName, $"result=ISSUED routeSegment={SafePluginActionValue(publicRoute)} requestPath={SafePluginActionValue(currentRequestPath)} requestQuery={SafePluginActionValue(currentRequestQueryString)} pathAndQuery={SafePluginActionValue(runtimeUiContext.RequestPathAndQuery)} queryKeys={SafePluginActionValue(currentRequestQueryKeys)} wave={SafePluginActionValue(currentRequestWave)} toolWindow={isHostManagedWindowContent} directContent={toolWindowContentOnly} currentWindowId={SafePluginActionValue(currentWindowId)} rule=release_contract");
-            log.Add("PLUGIN_RUNTIME_UI_CONTEXT_ASSET_CONTRACT", plugin.Descriptor.DisplayName, $"result=ISSUED routeSegment={SafePluginActionValue(publicRoute)} pluginId={SafePluginActionValue(pluginId)} assetBaseUrl={SafePluginActionValue(pluginAssetBaseUrl)} apiBaseUrl={SafePluginActionValue(pluginAssetApiBaseUrl)} allowedExtensions=png imgTagAllowed=True externalUrlAllowed=False dataUriRecommended=False formIconAllowedExtensions=ico formIconSourcePriority=EmbeddedResource>plugin_file>default_TvAIr_icon rule=release_contract");
+            log.Add("PLUGIN_RUNTIME_UI_CONTEXT_ASSET_CONTRACT", plugin.Descriptor.DisplayName, $"result=ISSUED routeSegment={SafePluginActionValue(publicRoute)} pluginId={SafePluginActionValue(pluginId)} assetBaseUrl={SafePluginActionValue(pluginAssetBaseUrl)} apiBaseUrl={SafePluginActionValue(pluginAssetApiBaseUrl)} allowedExtensions=png imgTagAllowed=True externalUrlAllowed=False dataUriRecommended=False themeHandlerPath={SafePluginActionValue(themeHotApplyScriptPath)} themeHandlerUrl={SafePluginActionValue(themeHotApplyScriptUrl)} themeHandlerTransport={(string.IsNullOrWhiteSpace(themeHotApplyScriptUrl) ? "none" : "host_shell_declared_embedded_asset_only")} pluginHtmlScriptAllowed=False formIconAllowedExtensions=ico formIconSourcePriority=EmbeddedResource>plugin_file>default_TvAIr_icon rule=release_contract");
             if (nativeUi is null || nativeUiDefinition is null)
                 return Results.NotFound("Runtime Plugin UI not found.");
             var renderHtml = nativeUi.RenderHtml(runtimeUiContext);
@@ -4182,7 +4385,16 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
         }
 
         log.Add("PLUGIN_SAFE_EVENT_INJECT", plugin?.Descriptor.DisplayName ?? publicRoute, $"action=render result=INJECTED routeSegment={SafePluginActionValue(publicRoute)} toolWindowContentOnly={toolWindowContentOnly} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} script=external_and_inline_guarded hostKind={SafePluginActionValue(toolWindows.GetCapabilities().HostKind)} rule=release_contract");
-        return Results.Content(BuildPluginShellHtml(title, publicRoute, body, toolWindowContentOnly, hostSelectedTheme, hostEffectiveTheme), "text/html; charset=utf-8");
+        var shellHtml = BuildPluginShellHtml(title, publicRoute, body, toolWindowContentOnly, hostSelectedTheme, hostEffectiveTheme, hostThemeGeneration, hostThemeRevision, effectiveThemeUpdateMode, themeHotApplyScriptUrl);
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        if (!toolWindowContentOnly
+            && runtimeState.TryCompletePluginThemeRefresh(publicRoute, hostThemeRevision, out var completedTargetRevision, out var completedPreviousRevision))
+        {
+            log.Add("PLUGIN_PAGE_THEME_REFRESH", plugin?.Descriptor.DisplayName ?? publicRoute,
+                $"result=COMPLETED route={SafePluginActionValue(publicRoute)} revision={hostThemeRevision} previousRenderedRevision={(completedPreviousRevision?.ToString(CultureInfo.InvariantCulture) ?? "-")} targetRevision={completedTargetRevision} visible=server_render preserveScroll=true activation=false focusPreserve=true dedupe=false reason=host_render_context_revision_applied source=host_theme_refresh_contract rule=plugin_page_theme_refresh_revision_contract");
+        }
+#endif
+        return Results.Content(shellHtml, "text/html; charset=utf-8");
     }
     catch (Exception ex)
     {
@@ -4191,7 +4403,7 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
         if (stackSummary.Length > 500) stackSummary = stackSummary[..500];
         log.Add("PLUGIN_RENDER_EXCEPTION", plugin?.Descriptor.DisplayName ?? publicRoute, $"routeSegment={SafePluginActionValue(publicRoute)} toolWindow={isHostManagedWindowContent} currentWindowId={SafePluginActionValue(currentWindowId)} directContent={toolWindowContentOnly} exceptionType={SafePluginActionValue(ex.GetType().Name)} message={SafePluginActionValue(ex.Message)} stack={SafePluginActionValue(stackSummary)} rule=release_contract");
         var errorBody = BuildPluginRenderErrorBody(plugin?.Descriptor.DisplayName ?? publicRoute, publicRoute, exMessage);
-        return Results.Content(BuildPluginShellHtml(title, publicRoute, errorBody, toolWindowContentOnly, hostSelectedTheme, hostEffectiveTheme), "text/html; charset=utf-8");
+        return Results.Content(BuildPluginShellHtml(title, publicRoute, errorBody, toolWindowContentOnly, hostSelectedTheme, hostEffectiveTheme, hostThemeGeneration, hostThemeRevision, effectiveThemeUpdateMode, string.Empty), "text/html; charset=utf-8");
     }
 }
 
@@ -4322,19 +4534,45 @@ static PluginPresentationLifecycleHint ReadPluginPresentationLifecycleHint(IRead
 // release_contract: 既存プラグインToolWindow/Actionのホスト管理入口。
 // Capability API整理後も、既存ToolWindow経路は本体標準ルートとして維持する。
 #if TVAIR_DEVELOPER_DIAGNOSTICS
-app.MapGet("/api/plugins/safe-event/client-log", (HttpRequest http, LogRepository log) =>
+app.MapGet("/api/plugins/safe-event/client-log", (HttpRequest http, LogRepository log, SettingsRuntimeState runtimeState) =>
 {
     var q = http.Query;
     static string Q(IQueryCollection values, string key) => values.TryGetValue(key, out var value) ? value.ToString() : string.Empty;
     var phase = Q(q, "phase");
     var pluginId = Q(q, "pluginId");
     var route = Q(q, "routeSegment");
-    var eventType = phase.StartsWith("bind_", StringComparison.OrdinalIgnoreCase) ? "PLUGIN_SAFE_EVENT_CLIENT_INIT"
+    var eventType = phase.StartsWith("theme_update_", StringComparison.OrdinalIgnoreCase) ? "PLUGIN_THEME_UPDATE"
+        : phase.StartsWith("theme_refresh_", StringComparison.OrdinalIgnoreCase) ? "PLUGIN_PAGE_THEME_REFRESH"
+        : phase.StartsWith("bind_", StringComparison.OrdinalIgnoreCase) ? "PLUGIN_SAFE_EVENT_CLIENT_INIT"
         : phase.StartsWith("payload_", StringComparison.OrdinalIgnoreCase) ? "PLUGIN_SAFE_EVENT_PAYLOAD"
         : phase.StartsWith("post_", StringComparison.OrdinalIgnoreCase) ? "PLUGIN_SAFE_EVENT_POST"
         : "PLUGIN_SAFE_EVENT_CLIENT";
-    log.Add(eventType, string.IsNullOrWhiteSpace(pluginId) ? route : pluginId,
-        $"phase={SafePluginActionValue(phase)} interactionId={SafePluginActionValue(Q(q, "interactionId"))} event={SafePluginActionValue(Q(q, "event"))} action={SafePluginActionValue(Q(q, "action"))} pluginId={SafePluginActionValue(pluginId)} route={SafePluginActionValue(route)} tag={SafePluginActionValue(Q(q, "tag"))} type={SafePluginActionValue(Q(q, "type"))} tokenPresent={SafePluginActionValue(Q(q, "hasToken"))} payloadCount={SafePluginActionValue(Q(q, "payloadCount"))} payloadKeys={SafePluginActionValue(Q(q, "payloadKeys"))} endpoint={SafePluginActionValue(Q(q, "endpoint"))} status={SafePluginActionValue(Q(q, "status"))} reason={SafePluginActionValue(Q(q, "reason"))} readyState={SafePluginActionValue(Q(q, "readyState"))} candidates={SafePluginActionValue(Q(q, "candidates"))} hostKind={SafePluginActionValue(Q(q, "hostKind"))} rule=safe_event_host_capture_contract");
+    if (eventType == "PLUGIN_THEME_UPDATE")
+    {
+        var result = phase.Length > "theme_update_".Length ? phase["theme_update_".Length..].ToUpperInvariant() : "OBSERVED";
+        log.Add(eventType, string.IsNullOrWhiteSpace(pluginId) ? route : pluginId,
+            $"result={SafePluginActionValue(result)} route={SafePluginActionValue(route)} generation={SafePluginActionValue(Q(q, "generation"))} revision={SafePluginActionValue(Q(q, "revision"))} previousRenderedRevision={SafePluginActionValue(Q(q, "previousRevision"))} latestRevision={SafePluginActionValue(Q(q, "latestRevision"))} mode={SafePluginActionValue(Q(q, "mode"))} selected={SafePluginActionValue(Q(q, "selected"))} effective={SafePluginActionValue(Q(q, "effective"))} visible={SafePluginActionValue(Q(q, "visible"))} hidden={SafePluginActionValue(Q(q, "hidden"))} clientPhase={SafePluginActionValue(Q(q, "clientPhase"))} clientInstanceId={SafePluginActionValue(Q(q, "clientInstanceId"))} fullRender={SafePluginActionValue(Q(q, "fullRender"))} reason={SafePluginActionValue(Q(q, "reason"))} source=host_runtime_theme_contract rule=plugin_theme_hot_apply_client_lifecycle_contract");
+    }
+    else if (eventType == "PLUGIN_PAGE_THEME_REFRESH")
+    {
+        var result = phase.Length > "theme_refresh_".Length ? phase["theme_refresh_".Length..].ToUpperInvariant() : "OBSERVED";
+        if (string.Equals(result, "QUEUED", StringComparison.OrdinalIgnoreCase)
+            && long.TryParse(Q(q, "targetRevision"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var queuedRevision))
+        {
+            long parsedPreviousRevision = -1;
+            var queuedPreviousRevision = long.TryParse(Q(q, "previousRevision"), NumberStyles.Integer, CultureInfo.InvariantCulture, out parsedPreviousRevision)
+                ? parsedPreviousRevision
+                : (long?)null;
+            runtimeState.RegisterPluginThemeRefresh(route, queuedRevision, queuedPreviousRevision);
+        }
+        log.Add(eventType, string.IsNullOrWhiteSpace(pluginId) ? route : pluginId,
+            $"result={SafePluginActionValue(result)} route={SafePluginActionValue(route)} revision={SafePluginActionValue(Q(q, "revision"))} previousRenderedRevision={SafePluginActionValue(Q(q, "previousRevision"))} targetRevision={SafePluginActionValue(Q(q, "targetRevision"))} visible={SafePluginActionValue(Q(q, "visible"))} preserveScroll={SafePluginActionValue(Q(q, "preserveScroll"))} activation={SafePluginActionValue(Q(q, "activation"))} focusPreserve={SafePluginActionValue(Q(q, "focusPreserve"))} dedupe={SafePluginActionValue(Q(q, "dedupe"))} reason={SafePluginActionValue(Q(q, "reason"))} source=host_theme_refresh_contract rule=plugin_page_theme_refresh_revision_contract");
+    }
+    else
+    {
+        log.Add(eventType, string.IsNullOrWhiteSpace(pluginId) ? route : pluginId,
+            $"phase={SafePluginActionValue(phase)} interactionId={SafePluginActionValue(Q(q, "interactionId"))} event={SafePluginActionValue(Q(q, "event"))} action={SafePluginActionValue(Q(q, "action"))} pluginId={SafePluginActionValue(pluginId)} route={SafePluginActionValue(route)} tag={SafePluginActionValue(Q(q, "tag"))} type={SafePluginActionValue(Q(q, "type"))} tokenPresent={SafePluginActionValue(Q(q, "hasToken"))} payloadCount={SafePluginActionValue(Q(q, "payloadCount"))} payloadKeys={SafePluginActionValue(Q(q, "payloadKeys"))} endpoint={SafePluginActionValue(Q(q, "endpoint"))} status={SafePluginActionValue(Q(q, "status"))} reason={SafePluginActionValue(Q(q, "reason"))} readyState={SafePluginActionValue(Q(q, "readyState"))} candidates={SafePluginActionValue(Q(q, "candidates"))} hostKind={SafePluginActionValue(Q(q, "hostKind"))} rule=safe_event_host_capture_contract");
+    }
     return Results.NoContent();
 });
 #endif
@@ -4430,7 +4668,7 @@ app.MapGet("/plugin-window/{windowId}/state", (string windowId, PluginWindowSess
 app.MapGet("/api/plugins/window/capabilities", (PluginToolWindowHostService toolWindows, LogRepository log) =>
     RenderPluginWindowHostCapabilities(toolWindows, log));
 
-app.MapGet("/plugin/{route}", (string route, HttpRequest http, PluginRegistry registry, PluginActionTokenStore actionTokens, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, ExternalTunerLeaseService externalTuners, ViewerSessionRegistry viewerSessions, IOptions<TvTestSettings> tvTestOptions, IniSettingsService ini, IReadOnlyList<TunerProfile> tunerProfiles, PluginBoundaryGate boundaryGate, LogPresentationStore logPresentationStore, LogRepository log) => RenderPluginHtml(route, http, registry, actionTokens, windows, toolWindows, externalTuners, viewerSessions, tvTestOptions, ini, tunerProfiles, boundaryGate, logPresentationStore, log));
+app.MapGet("/plugin/{route}", (string route, HttpRequest http, PluginRegistry registry, PluginActionTokenStore actionTokens, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, ExternalTunerLeaseService externalTuners, ViewerSessionRegistry viewerSessions, IOptions<TvTestSettings> tvTestOptions, IniSettingsService ini, SettingsRuntimeState runtimeState, IReadOnlyList<TunerProfile> tunerProfiles, PluginBoundaryGate boundaryGate, LogPresentationStore logPresentationStore, LogRepository log) => RenderPluginHtml(route, http, registry, actionTokens, windows, toolWindows, externalTuners, viewerSessions, tvTestOptions, ini, runtimeState, tunerProfiles, boundaryGate, logPresentationStore, log));
 
 // 1.0.0互換URL。今後は /plugin/{route} を正式入口とする。
 
@@ -4449,7 +4687,7 @@ app.MapPost("/api/chain-reservation-candidates", (ChainCandidatePreviewRequest r
     var reservations = store.GetAll()
         .Where(r => r.Source != ReservationSource.Epg)
         .ToList();
-    var featureEnabled = request.LaterProgramPriorityEnabled && request.PseudoContinuousRecordingEnabled;
+    var featureEnabled = ChainReservationContract.IsFeatureEnabled(request.LaterProgramPriorityEnabled, request.PseudoContinuousRecordingEnabled);
     var now = DateTime.Now;
     var candidates = new List<object>();
     var checkedCount = 0;
@@ -4721,18 +4959,19 @@ static string CleanupRuntimeReleaseMarkerFiles(string baseDir)
 }
 
 #if TVAIR_DEVELOPER_DIAGNOSTICS
-static string BuildReleaseNotesAudit(string baseDir)
+static string BuildReleaseHistoryAudit(string baseDir)
 {
     try
     {
-        var notesPath = Path.Combine(baseDir, "RELEASE_NOTES.txt");
+        var readmeMdPath = Path.Combine(baseDir, "README.md");
+        var readmeTxtPath = Path.Combine(baseDir, "README.txt");
         var markerResidueCleanup = CleanupRuntimeReleaseMarkerFiles(baseDir);
         var remainingMarkers = EnumerateRuntimeReleaseMarkerFiles(baseDir).Count();
-        return $"releaseNotes=RELEASE_NOTES.txt releaseNotesExists={File.Exists(notesPath)} releaseMarkerFiles=disabled markerResidueCleanup={markerResidueCleanup} remainingReleaseMarkers={remainingMarkers} releaseHistory=single_file";
+        return $"releaseHistory=README readmeMdExists={File.Exists(readmeMdPath)} readmeTxtExists={File.Exists(readmeTxtPath)} releaseMarkerFiles=disabled markerResidueCleanup={markerResidueCleanup} remainingReleaseMarkers={remainingMarkers}";
     }
     catch (Exception ex)
     {
-        return $"releaseNotes=RELEASE_NOTES.txt releaseNotesAuditError={ex.GetType().Name}:{SafePathForLog(ex.Message)} releaseMarkerFiles=disabled releaseHistory=single_file";
+        return $"releaseHistory=README releaseHistoryAuditError={ex.GetType().Name}:{SafePathForLog(ex.Message)} releaseMarkerFiles=disabled";
     }
 }
 #endif
@@ -4764,7 +5003,7 @@ static void EmitTvAIrRuntimeIdentityAudit(LogRepository log)
         var asm = System.Reflection.Assembly.GetExecutingAssembly();
         var tvairExe = Environment.ProcessPath ?? asm.Location;
         var workerPath = Path.Combine(AppContext.BaseDirectory, "TvAIrEpgRec.exe");
-        var releaseNotesAudit = BuildReleaseNotesAudit(AppContext.BaseDirectory);
+        var releaseHistoryAudit = BuildReleaseHistoryAudit(AppContext.BaseDirectory);
         var buildConfiguration = asm
             .GetCustomAttributes(typeof(System.Reflection.AssemblyConfigurationAttribute), false)
             .OfType<System.Reflection.AssemblyConfigurationAttribute>()
@@ -4785,8 +5024,8 @@ static void EmitTvAIrRuntimeIdentityAudit(LogRepository log)
                 $"tvairVersion={GetTvAIrAppVersion()} buildConfiguration={buildConfiguration} targetFramework=net8.0-windows " +
                 $"runtime={framework} processArch={processArch} osArch={osArch} pluginSdk={TvAIrVersionContract.PluginSdkVersion} hostContract={TvAIrVersionContract.PluginHostContractVersion} " +
                 $"tvairExe={Path.GetFileName(tvairExe)} tvairFile={Stamp(tvairExe)} " +
-                $"workerFileName={Path.GetFileName(workerPath)} workerFile={Stamp(workerPath)} {releaseNotesAudit} " +
-                $"baseDir=app_base rule=developer_log_header_contract rollbackPoint=True rollbackBase=release_contract ntp=removed recordFileName=tvtest_ini_template pluginUiAction=host_action_dispatch_value_contract logPolicy=release_noise_reduce",
+                $"workerFileName={Path.GetFileName(workerPath)} workerFile={Stamp(workerPath)} {releaseHistoryAudit} " +
+                $"baseDir=app_base rule=developer_log_header_contract ntp=removed recordFileName=tvtest_ini_template pluginUiAction=host_action_dispatch_value_contract logPolicy=release_noise_reduce",
             CreatedAt = DateTime.Now
         });
     }
@@ -4840,6 +5079,7 @@ app.MapPost("/api/app/exit", (string? source, LogRepository log, IHostApplicatio
 {
     var safeSource = string.IsNullOrWhiteSpace(source) ? "WebMenu" : source.Trim().Replace("\r", " ").Replace("\n", " ");
     try { log.Add("APP_EXIT_REQUEST", "Menu", $"source={safeSource} action=StopApplication commonRoute=/api/app/exit rule=release_contract"); } catch { }
+    TvAIr.Core.ApplicationExitWatchdog.Arm(log, safeSource);
     _ = Task.Run(async () =>
     {
         await Task.Delay(150).ConfigureAwait(false);
@@ -4933,10 +5173,14 @@ app.MapPost("/api/epg/cancel", (HttpRequest request, EpgScheduler scheduler) =>
 });
 
 // 番組表データ取得（日付指定）
-app.MapGet("/api/epg/events", (string? date, EpgStore store, ReservationStore reservations, ChannelFileLoader channelLoader, LogRepository log, IProgramEventSource programEvents) =>
+app.MapGet("/api/epg/events", (string? date, EpgStore store, ReservationStore reservations, ChannelFileLoader channelLoader, LogRepository log, IProgramEventSource programEvents, HttpResponse response) =>
 {
 #if TVAIR_DEVELOPER_DIAGNOSTICS
     var requestStopwatch = System.Diagnostics.Stopwatch.StartNew();
+    // Developer-only browser timing handshake. Public builds do not emit this header,
+    // so the static ProgramGuide client keeps uiTrace as a true no-op without probing
+    // a diagnostic endpoint that does not exist in the public configuration.
+    response.Headers["X-TvAIr-ProgramGuide-UiTrace"] = "1";
 #endif
     var baseDate = DateOnly.TryParse(date, out var parsed)
         ? parsed
@@ -5225,6 +5469,43 @@ app.MapGet("/api/epg/tagged", (
 // Developer Diagnostics public-release boundary:
 // 一般公開版では診断APIをルーティングせず、開発者ログ/診断スナップショットを外部公開しない。
 #if TVAIR_DEVELOPER_DIAGNOSTICS
+// ProgramGuide browser performance trace. This route exists only in Developer Diagnostics builds.
+// The payload is observational only; it never mutates ProgramGuide/EPG/reservation state.
+app.MapPost("/api/debug/program-guide-ui-trace", async (HttpRequest http, LogRepository log) =>
+{
+    try
+    {
+        using var reader = new StreamReader(http.Body, System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: false);
+        var raw = await reader.ReadToEndAsync();
+        if (raw.Length > 8192) raw = raw[..8192];
+
+        using var doc = System.Text.Json.JsonDocument.Parse(string.IsNullOrWhiteSpace(raw) ? "{}" : raw);
+        var root = doc.RootElement;
+        static string Field(System.Text.Json.JsonElement element, string name, int maxLength)
+        {
+            if (!element.TryGetProperty(name, out var value)) return string.Empty;
+            var text = value.ValueKind == System.Text.Json.JsonValueKind.String ? value.GetString() ?? string.Empty : value.ToString();
+            text = text.Replace("\r", " ").Replace("\n", " ").Trim();
+            return text.Length <= maxLength ? text : text[..maxLength];
+        }
+
+        var action = Field(root, "action", 96);
+        var reason = Field(root, "reason", 96);
+        var detail = Field(root, "detail", 4096);
+        var pageDate = Field(root, "pageDate", 32);
+        var hrefPath = Field(root, "hrefPath", 128);
+        log.Add("PROGRAM_GUIDE_UI_TRACE", string.IsNullOrWhiteSpace(action) ? "unknown" : action,
+            $"reason={SafePluginActionValue(reason)} pageDate={SafePluginActionValue(pageDate)} path={SafePluginActionValue(hrefPath)} detail={SafePluginActionValue(detail)} source=browser_developer_diagnostics mutation=none rule=programguide_ui_trace_contract");
+        return Results.NoContent();
+    }
+    catch (Exception ex)
+    {
+        log.Add("PROGRAM_GUIDE_UI_TRACE", "parse-error",
+            $"result=IGNORED error={SafePluginActionValue(ex.GetType().Name)} mutation=none rule=programguide_ui_trace_contract");
+        return Results.NoContent();
+    }
+});
+
 // ログ
 app.MapGet("/api/debug/tuner-allocation", (ReservationStore store) =>
 {
@@ -5993,7 +6274,7 @@ app.MapPost("/api/reservations/chain", (HttpRequest request, Reservation r, Rese
         // ユーザーが番組表のチェーンボタンで明示指定した場合だけ成立する予約契約。
         // 自動救済ではなく、共通ChainReservationEligibilityContractをAPI入口とStore Transactionで再検証する。
         log.Add("RESERVE_ENTRY", "UserChainPolicy",
-            $"later={ini.LaterProgramPriority} chain={ini.PseudoContinuousRecording} explicitButton=True title=[{ReservationUserTitleLogValue(r.Title)}] service=[{r.ServiceName}] rule=release_contract");
+            $"later={ini.LaterProgramPriority} chainFeature={ini.UserChainRecordingEnabled} explicitButton=True title=[{ReservationUserTitleLogValue(r.Title)}] service=[{r.ServiceName}] rule=release_contract");
 
         var projectedEventId = ReadProjectedEventIdFromRequest(request);
         var forceProjectedFallback = ReadForceProjectedFallbackFromRequest(request);
@@ -6040,7 +6321,7 @@ app.MapPost("/api/reservations/chain", (HttpRequest request, Reservation r, Rese
             r.TransportStreamId,
             r.ServiceId,
             r.StartTime,
-            ini.LaterProgramPriority && ini.PseudoContinuousRecording);
+            ini.UserChainRecordingEnabled);
         if (!chainEligibility.IsEligible)
         {
             log.Add("RESERVE_ENTRY", "UserChainRejected",
@@ -6087,17 +6368,17 @@ app.MapPost("/api/reservations/chain", (HttpRequest request, Reservation r, Rese
                 r.ServiceName = ch.Name;
         }
 
-        var chainExecutionMode = "ChainDirectRecorder";
+        var chainExecutionMode = "ContinuousChainCapture";
 
         log.Add("RESERVE_ENTRY", "UserChain", $"共通入口要求 source=UserChain service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] predecessor=R{predecessor.Id} root=R{r.UserChainRootId} inheritTuner=[{(string.IsNullOrWhiteSpace(predecessorTuner) ? "pending-final-plan" : predecessorTuner)}] nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} start={r.StartTime:MM/dd HH:mm} end={r.EndTime:MM/dd HH:mm} executionMode={chainExecutionMode} commonRoute=ALLOC_ROUTE rule=release_contract");
         log.Add("CHAIN_COMMON_ENTRY", $"R{predecessor.Id}->pending",
             $"button=Chain route=ALLOC_ROUTE executionMode={chainExecutionMode} normalRecordingRouteTouched=False prevService=[{predecessor.ServiceName}] prevTitle=[{ReservationUserTitleLogValue(predecessor.Title)}] nextService=[{r.ServiceName}] nextTitle=[{ReservationUserTitleLogValue(r.Title)}] prevTuner={(string.IsNullOrWhiteSpace(predecessorTuner) ? "pending-final-plan" : predecessorTuner)} prevActualTuner={(string.IsNullOrWhiteSpace(predecessor.ActualTunerName) ? "-" : predecessor.ActualTunerName)} root=R{r.UserChainRootId} rule=release_contract");
         log.Add("CHAIN_PAIR_EVAL", $"R{predecessor.Id}->pending",
-            $"result=READY_FOR_COMMON_ALLOC_ROUTE sameNetwork={chainSameNetwork} sameTransport={chainSameTransport} sameService={chainSameService} sameChannel={chainSameChannel} adjacent={chainAdjacent} gapSec={chainGapSeconds} userChain=True executionMode={chainExecutionMode} contract=same_sid_adjacent_explicit_button executionOwner=ReservationScheduler.StopRestartHandoff prevStart={predecessor.StartTime:MM/dd HH:mm:ss} prevEnd={predecessor.EndTime:MM/dd HH:mm:ss} nextStart={r.StartTime:MM/dd HH:mm:ss} nextEnd={r.EndTime:MM/dd HH:mm:ss} rule=release_contract");
+            $"result=READY_FOR_COMMON_ALLOC_ROUTE sameNetwork={chainSameNetwork} sameTransport={chainSameTransport} sameService={chainSameService} sameChannel={chainSameChannel} adjacent={chainAdjacent} gapSec={chainGapSeconds} userChain=True executionMode={chainExecutionMode} contract=same_sid_adjacent_explicit_button executionOwner=ReservationScheduler.ContinuousChainBoundary prevStart={predecessor.StartTime:MM/dd HH:mm:ss} prevEnd={predecessor.EndTime:MM/dd HH:mm:ss} nextStart={r.StartTime:MM/dd HH:mm:ss} nextEnd={r.EndTime:MM/dd HH:mm:ss} rule=release_contract");
         log.Add("CHAIN_CONTRACT_WARNING", $"R{predecessor.Id}->pending",
-            $"accepted=True frontSegmentMayBeCut=True successorCompletenessPriority=True sameSidOnly=True userExplicitButton=True message=チェーン予約では前番組の後半がカットされる可能性があります rule=release_contract");
+            $"accepted=True continuousCaptureRequired=True overlapMarginsPreserved=True boundaryWorkerRestart=False boundaryBonDriverClose=False boundaryPhysicalRetune=False separateTsFiles=True sameSidOnly=True userExplicitButton=True message=チェーン予約は同一受信を継続し、前後マージンを重ねた別ファイルとして録画します rule=release_contract");
 
-        var chainMutation = store.AddOrPromoteUserChain(r, predecessor.Id, r.UserChainRootId.Value, ini.LaterProgramPriority && ini.PseudoContinuousRecording);
+        var chainMutation = store.AddOrPromoteUserChain(r, predecessor.Id, r.UserChainRootId.Value, ini.UserChainRecordingEnabled);
         if (!chainMutation.Applied)
         {
             log.Add("CHAIN_MUTATION", $"R{predecessor.Id}->pending",
@@ -6109,7 +6390,6 @@ app.MapPost("/api/reservations/chain", (HttpRequest request, Reservation r, Rese
                     "predecessor_already_has_successor" => "チェーン元予約には既に別の後続予約があります。",
                     "successor_already_has_predecessor" => "対象予約は既に別のチェーンに属しています。",
                     "chain_cycle_detected" => "循環するチェーン予約は作成できません。",
-                    "chain_depth_exceeded" => "チェーン予約の長さが上限を超えています。",
                     "chain_broken_predecessor" => "既存チェーンの参照が壊れているため追加できません。",
                     "chain_root_mismatch" => "既存チェーンのルートが一致しません。",
                     "compare_and_set_failed" => "予約が同時に更新されたため、再読み込みしてください。",
@@ -6131,13 +6411,13 @@ app.MapPost("/api/reservations/chain", (HttpRequest request, Reservation r, Rese
         if (chainMutation.Added)
         {
             log.Add("Reservation", "ChainAdd", $"チェーン予約追加: service=[{r.ServiceName}] title=[{ReservationUserTitleLogValue(r.Title)}] id=R{id} predecessor=R{predecessor.Id} tuner=[{(string.IsNullOrWhiteSpace(predecessorTuner) ? "pending-final-plan" : predecessorTuner)}] executionMode={chainExecutionMode} {r.StartTime:HH:mm}〜{r.EndTime:HH:mm} rule=release_contract");
-            log.Add("CHAIN_EXECUTION_MODE", $"R{id}", $"mode={chainExecutionMode} stage=new_chain_reservation_added commonRoute=ALLOC_ROUTE normalExecutorFrozen=True handoffMode=stop_restart handoffImplemented=True predecessor=R{predecessor.Id} rule=release_contract");
+            log.Add("CHAIN_EXECUTION_MODE", $"R{id}", $"mode={chainExecutionMode} stage=new_chain_reservation_added commonRoute=ALLOC_ROUTE normalExecutorFrozen=True boundaryMode=continuous_capture_multi_sink recoveryMode=none boundaryWorkerRestart=False sameWorkerBoundaryImplemented=True predecessor=R{predecessor.Id} rule=release_contract");
         }
         else
         {
             var promoted = chainMutation.Reservation ?? existingReservation;
             log.Add("Reservation", "ChainConvert", $"既存予約をチェーン予約へ昇格: service=[{promoted?.ServiceName}] title=[{ReservationUserTitleLogValue(promoted?.Title ?? string.Empty)}] id=R{id} predecessor=R{predecessor.Id} tuner=[{(string.IsNullOrWhiteSpace(predecessorTuner) ? "pending-final-plan" : predecessorTuner)}] executionMode={chainExecutionMode} wasConflicted={promoted?.IsConflicted} {(promoted?.StartTime.ToString("HH:mm") ?? "-")}〜{(promoted?.EndTime.ToString("HH:mm") ?? "-")} rule=release_contract");
-            log.Add("CHAIN_EXECUTION_MODE", $"R{id}", $"mode={chainExecutionMode} stage=existing_reservation_converted commonRoute=ALLOC_ROUTE normalExecutorFrozen=True handoffMode=stop_restart handoffImplemented=True predecessor=R{predecessor.Id} rule=release_contract");
+            log.Add("CHAIN_EXECUTION_MODE", $"R{id}", $"mode={chainExecutionMode} stage=existing_reservation_converted commonRoute=ALLOC_ROUTE normalExecutorFrozen=True boundaryMode=continuous_capture_multi_sink recoveryMode=none boundaryWorkerRestart=False sameWorkerBoundaryImplemented=True predecessor=R{predecessor.Id} rule=release_contract");
         }
 
         allocationRoute.Run(new ReservationAllocationRouteRequest(
@@ -6172,7 +6452,7 @@ app.MapPost("/api/reservations/chain", (HttpRequest request, Reservation r, Rese
 // ユーザー明示チェーンは GetUserChainCancelTargets で対象範囲を決定し、
 // 単独／チェーン範囲とも同じ原子的取消・確定ID応答・共通割り当て出口へ通す。
 // 番組表／予約一覧など呼出画面を処理所有者にせず、解除後は必ず共通割り当てルートで再評価する。
-app.MapDelete("/api/reservations/{id}", (int id, ReservationStore store, ReservationProjectionMetadataStore projectionMetadataStore, ReservationAllocationRouteService allocationRoute, PluginTypedEventHub typedEvents, LogRepository log, UserEventLogService userEvents) =>
+app.MapDelete("/api/reservations/{id}", (int id, ReservationStore store, ReservationProjectionMetadataStore projectionMetadataStore, ReservationAllocationRouteService allocationRoute, ReservationScheduler scheduler, PluginTypedEventHub typedEvents, LogRepository log, UserEventLogService userEvents) =>
 {
     using var eventScope = typedEvents.BeginOutboxScope(out var commitEvents);
     var r = store.GetById(id);
@@ -6273,6 +6553,13 @@ app.MapDelete("/api/reservations/{id}", (int id, ReservationStore store, Reserva
     {
         log.Add("Reservation", "Cancel", $"予約キャンセル: [{ReservationUserTitleLogValue(r.Title)}] {r.StartTime:HH:mm}〜{r.EndTime:HH:mm} policy=single_reservation_cancel rule=release_contract");
     }
+
+    // CHAIN_CANONICAL_SEAM_INVARIANT:
+    // 予約topologyの取消commitを先に確定し、その同じcanonical状態をactive captureの
+    // ChainControl/lease/session/worker deadlineへ即時反映してから共通Allocationへ渡す。
+    // 500ms boundary scan待ちを正本間の暗黙の継ぎ目にしない。
+    if (isChainCancel)
+        scheduler.ReconcileActiveContinuousChainTopology($"ReservationCancel:R{id}");
 
     allocationRoute.Run(new ReservationAllocationRouteRequest(
         Source: "ReservationMutation",
@@ -6377,7 +6664,7 @@ app.MapPost("/api/reservations/{id}/stop", (int id, ReservationStore store, Rese
 });
 
 // 録画ON/OFF切り替え（ユーザーによる能動的な有効/無効化）
-app.MapPatch("/api/reservations/{id}/enabled", (int id, EnabledRequest req, ReservationStore store, ReservationPresentationService presenter, ReservationAllocationRouteService allocationRoute, PluginTypedEventHub typedEvents, LogRepository log) =>
+app.MapPatch("/api/reservations/{id}/enabled", (int id, EnabledRequest req, ReservationStore store, ReservationPresentationService presenter, ReservationAllocationRouteService allocationRoute, ReservationScheduler scheduler, PluginTypedEventHub typedEvents, LogRepository log) =>
 {
     using var eventScope = typedEvents.BeginOutboxScope(out var commitEvents);
     var r = store.GetById(id);
@@ -6431,6 +6718,13 @@ app.MapPatch("/api/reservations/{id}/enabled", (int id, EnabledRequest req, Rese
         log.Add("PRE_REC_EPG_PARENT_CLEANUP", $"R{id}",
             $"result={(deletedPreRec > 0 ? "DELETED" : "NONE")} parent=R{id} reason=parent_disabled deleted={deletedPreRec} trigger=enabled_toggle action=release_prerec_epg_before_reallocation rule=release_contract");
     }
+
+    // CHAIN_CANONICAL_SEAM_INVARIANT:
+    // enabled/disabled は保存topologyを消さないが、active physical lifetimeを変え得る。
+    // 対象予約がroot側で自身にchain flagを持たない過去データでも継ぎ目を取りこぼさないよう、
+    // commit後はactive chain正本を一律再収束させてから共通Allocationへ渡す。
+    scheduler.ReconcileActiveContinuousChainTopology($"ReservationEnabledChanged:R{id}:{req.IsEnabled}");
+
     allocationRoute.Run(new ReservationAllocationRouteRequest(
         Source: "ReservationList",
         Action: "EnabledToggle",
@@ -6484,6 +6778,8 @@ app.MapGet("/api/keyword-rules", (ReservationStore store, KeywordMatcher matcher
         r.UseTimeRange,
         r.StartTime,
         r.EndTime,
+        r.RecordCurrentServiceOnly,
+        r.RecordSubtitles,
         r.Enabled,
         r.SortOrder,
         r.ExpiresOn,
@@ -6517,6 +6813,8 @@ app.MapGet("/api/keyword-rules/export", (ReservationStore store) =>
             UseTimeRange = r.UseTimeRange,
             StartTime = r.StartTime,
             EndTime = r.EndTime,
+            RecordCurrentServiceOnly = r.RecordCurrentServiceOnly,
+            RecordSubtitles = r.RecordSubtitles,
             ExpiresOn = r.ExpiresOn,
             SortOrder = r.SortOrder,
             Enabled = r.Enabled,
@@ -6593,11 +6891,13 @@ app.MapPost("/api/keyword-rules/import", async (HttpRequest request, Reservation
 
     var preserved = 0;
     var removed = 0;
+    var recordingOptionsUpdated = 0;
     foreach (var rule in ordered)
     {
         var reconcile = matcher.ReconcileScheduledReservationsForRule(rule);
         preserved += reconcile.Preserved;
         removed += reconcile.Removed;
+        recordingOptionsUpdated += reconcile.RecordingOptionsUpdated;
     }
 
     foreach (var removedRuleId in previousRuleIds.Except(importedRuleIds))
@@ -6616,12 +6916,13 @@ app.MapPost("/api/keyword-rules/import", async (HttpRequest request, Reservation
         ConflictLogTitle: "Conflict",
         WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce));
     log.Add("KEYWORD_RULE", "Import",
-        $"自動検索予約ルールをインポート: {ordered.Count}件 / preservedScheduled={preserved} removedScheduled={removed} / file={file.FileName}");
+        $"自動検索予約ルールをインポート: {ordered.Count}件 / preservedScheduled={preserved} recordingOptionsUpdated={recordingOptionsUpdated} removedScheduled={removed} / file={file.FileName}");
 
     return Results.Ok(new
     {
         importedCount = ordered.Count,
         preservedReservations = preserved,
+        recordingOptionsUpdated,
         removedReservations = removed,
         message = $"{ordered.Count}件のルールをインポートしました。"
     });
@@ -6705,7 +7006,7 @@ app.MapPut("/api/keyword-rules/{id}", (int id, KeywordRule r, ReservationStore s
     store.UpdateKeywordRule(r);
     var reconcile = matcher.ReconcileScheduledReservationsForRule(r);
     log.Add("KEYWORD_RULE", $"Rule{id}",
-        $"ルール更新: enabled={r.Enabled} name=[{r.Name}] pattern=[{r.Pattern}] preservedScheduled={reconcile.Preserved} preservedSourceMissing={reconcile.PreservedSourceMissing} removedScheduled={reconcile.Removed}");
+        $"ルール更新: enabled={r.Enabled} name=[{r.Name}] pattern=[{r.Pattern}] preservedScheduled={reconcile.Preserved} preservedSourceMissing={reconcile.PreservedSourceMissing} recordingOptionsUpdated={reconcile.RecordingOptionsUpdated} removedScheduled={reconcile.Removed}");
 
     allocationRoute.Run(new ReservationAllocationRouteRequest(
         Source: "KeywordRule",
@@ -6728,6 +7029,7 @@ app.MapPut("/api/keyword-rules/{id}", (int id, KeywordRule r, ReservationStore s
     {
         message = "更新しました。",
         preservedReservations = reconcile.Preserved,
+        recordingOptionsUpdated = reconcile.RecordingOptionsUpdated,
         removedReservations = reconcile.Removed,
         rule = updatedRule is null ? null : new
         {
@@ -6968,15 +7270,16 @@ static bool FixedTimePasswordEquals(string left, string right)
 // 設定取得。保存値の投影はIniSettingsService.ToDtoだけを正本とする。
 // 初回Host値も構築時にRuntime/Persisted snapshotへ取り込まれているため、API側で再補完しない。
 app.MapGet("/api/settings", (IniSettingsService ini) => Results.Ok(ini.ToWebDto()));
-app.MapGet("/api/plugin-internet-access", (PluginRegistry registry, PluginInternetAccessPermissionStore permissions, PluginManagedExternalLookupHost externalLookup, NetworkUsageGate networkUsage) =>
+app.MapGet("/api/plugin-internet-access", (PluginRegistry registry, PluginInternetAccessPermissionStore permissions, PluginInternetAccessGate internetAccess, PluginManagedExternalLookupHost externalLookup, NetworkUsageGate networkUsage) =>
 {
-    var providers = externalLookup.GetProviders();
-    var providerStatus = externalLookup.GetProviderHostStatus();
     var items = registry.GetRuntimePlugins()
         .Select(plugin =>
         {
             var id = PluginIdentity.Normalize(plugin.Descriptor.PluginId);
-            var declared = PluginPermissionResolver.Resolve(plugin.Descriptor.RequiredPermissions).Contains(PluginPermission.UseExternalLookup);
+            var resolvedPermissions = PluginPermissionResolver.Resolve(plugin.Descriptor.RequiredPermissions);
+            var externalLookupDeclared = PluginPermissionResolver.DeclaresExternalLookup(resolvedPermissions);
+            var directInternetDeclared = PluginPermissionResolver.DeclaresDirectInternet(resolvedPermissions);
+            var declared = PluginPermissionResolver.DeclaresAnyInternet(resolvedPermissions);
             return new
             {
                 pluginId = id,
@@ -6984,11 +7287,16 @@ app.MapGet("/api/plugin-internet-access", (PluginRegistry registry, PluginIntern
                 version = plugin.Descriptor.Version,
                 declaredPermission = declared,
                 allowed = permissions.IsAllowed(id),
-                effective = externalLookup.IsPluginAccessEffective(id, declared)
+                effective = internetAccess.IsEffective(id, declared),
+                externalLookup = externalLookupDeclared,
+                pluginTransport = directInternetDeclared
             };
         })
         .OrderBy(x => x.displayName, StringComparer.OrdinalIgnoreCase)
         .ToArray();
+    var hasExternalLookupPlugin = items.Any(x => x.externalLookup);
+    var providers = hasExternalLookupPlugin ? externalLookup.GetProviders() : Array.Empty<TvAirExternalLookupProviderDto>();
+    var providerStatus = hasExternalLookupPlugin ? externalLookup.GetProviderHostStatus() : Array.Empty<PluginExternalLookupProviderHostStatusDto>();
     return Results.Ok(new
     {
         defaultAllowed = false,
@@ -6999,15 +7307,27 @@ app.MapGet("/api/plugin-internet-access", (PluginRegistry registry, PluginIntern
         plugins = items,
         policy = new
         {
-            hostManaged = true,
-            rawUrlAllowed = false,
-            schemes = new[] { "https" },
-            methods = new[] { "GET", "HEAD" },
-            cookies = false,
-            pluginSuppliedCredentials = false,
-            hostManagedProviderCredentials = true,
-            uploads = false,
-            websockets = false
+            permissionSingleSource = "plugin-internet-access",
+            masterGate = "network-usage",
+            defaultAllowed = false,
+            hostManagedExternalLookup = new
+            {
+                rawUrlAllowed = false,
+                schemes = new[] { "https" },
+                methods = new[] { "GET", "HEAD" },
+                cookies = false,
+                pluginSuppliedCredentials = false,
+                hostManagedProviderCredentials = true,
+                uploads = false,
+                websockets = false
+            },
+            pluginOwnedTransport = new
+            {
+                declaration = "UseInternetAccess",
+                cancellationRequired = true,
+                masterOffCancels = true,
+                pluginOffCancels = true
+            }
         }
     });
 });
@@ -7042,35 +7362,37 @@ app.MapPut("/api/plugin-external-lookup-credentials", (PluginExternalLookupCrede
     }
 });
 
-app.MapPut("/api/plugin-internet-access", (PluginInternetAccessUpdateDto dto, PluginRegistry registry, PluginInternetAccessPermissionStore permissions, PluginManagedExternalLookupHost externalLookup, NetworkUsageGate networkUsage, PluginTypedEventHub typedEvents, LogRepository log) =>
+app.MapPut("/api/plugin-internet-access", (PluginInternetAccessUpdateDto dto, PluginRegistry registry, PluginInternetAccessPermissionStore permissions, PluginInternetAccessGate internetAccess, PluginManagedExternalLookupHost externalLookup, NetworkUsageGate networkUsage, PluginTypedEventHub typedEvents, LogRepository log) =>
 {
     if (!networkUsage.Enabled)
         return Results.Json(new { message = "ネットワーク利用OFF中は変更できません。" }, statusCode: StatusCodes.Status409Conflict);
     var id = PluginIdentity.Normalize(dto.PluginId);
     var plugin = registry.GetRuntimePlugins().FirstOrDefault(x => string.Equals(PluginIdentity.Normalize(x.Descriptor.PluginId), id, StringComparison.OrdinalIgnoreCase));
     if (plugin is null) return Results.NotFound(new { message = "Pluginが見つかりません。" });
-    var declared = PluginPermissionResolver.Resolve(plugin.Descriptor.RequiredPermissions).Contains(PluginPermission.UseExternalLookup);
+    var resolvedPermissions = PluginPermissionResolver.Resolve(plugin.Descriptor.RequiredPermissions);
+    var declared = PluginPermissionResolver.DeclaresAnyInternet(resolvedPermissions);
     if (dto.Allowed && !declared)
         return Results.BadRequest(new { message = "このプラグインはインターネット接続に対応していません。プラグインの更新が必要です。" });
 
     var changed = permissions.SetAllowed(id, dto.Allowed);
     if (changed)
     {
+        internetAccess.OnPermissionChanged(id, dto.Allowed);
         externalLookup.OnPermissionChanged(id, dto.Allowed);
         typedEvents.Publish(new TvAirEventDto
         {
             EventType = TvAirEventType.PluginPermissionChanged,
-            EntityId = $"plugin-permission:{id}:external-lookup",
+            EntityId = $"plugin-permission:{id}:internet-access",
             ChangeKind = dto.Allowed ? "Enabled" : "Disabled",
             Details = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 ["pluginId"] = id,
-                ["permission"] = "ExternalLookup",
+                ["permission"] = "InternetAccess",
                 ["allowed"] = dto.Allowed ? "true" : "false"
             }
         });
-        log.Add("PLUGIN_EXTERNAL_LOOKUP_PERMISSION", plugin.Descriptor.DisplayName,
-            $"result=CHANGED pluginId={id} allowed={dto.Allowed} default=deny inFlightAction={(dto.Allowed ? "none" : "cancel")} rule=plugin_managed_external_lookup_contract");
+        log.Add("PLUGIN_INTERNET_ACCESS_PERMISSION", plugin.Descriptor.DisplayName,
+            $"result=CHANGED pluginId={id} allowed={dto.Allowed} default=deny inFlightAction={(dto.Allowed ? "none" : "cancel")} rule=plugin_internet_access_single_source_contract");
     }
     return Results.Ok(new { pluginId = id, allowed = permissions.IsAllowed(id), changed });
 });
@@ -7133,16 +7455,77 @@ app.MapGet("/api/settings-selection-contract", () => Results.Ok(new
     }
 }));
 
-app.MapGet("/api/settings-theme-state", (IniSettingsService ini, SettingsRuntimeState runtimeState) =>
+
+app.MapGet("/api/settings-theme-state", (IniSettingsService ini, SettingsRuntimeState runtimeState, PluginToolWindowHostService toolWindows, LogRepository log) =>
 {
-    var theme = IniSettingsService.NormalizeSystemTheme(ini.SystemTheme);
+    var snapshot = runtimeState.ObserveTheme(ini.SystemTheme);
+    if (snapshot.Changed)
+    {
+        try
+        {
+            var refreshed = toolWindows.RefreshAllForThemeChange(snapshot.Revision, snapshot.SelectedTheme);
+            log.Add("HOST_THEME_STATE_CHANGED", "Theme",
+                $"revision={snapshot.Revision} selected={snapshot.SelectedTheme} effective={snapshot.EffectiveTheme} source=theme_state_observation toolWindows={refreshed} rule=host_theme_state_contract");
+        }
+        catch (Exception ex)
+        {
+            log.Add("HOST_THEME_STATE_CHANGED", "Theme",
+                $"revision={snapshot.Revision} selected={snapshot.SelectedTheme} effective={snapshot.EffectiveTheme} source=theme_state_observation toolWindowRefresh=FAILED exception={ex.GetType().Name} rule=host_theme_state_contract");
+        }
+    }
     return Results.Ok(new
     {
-        systemTheme = theme,
-        selectedTheme = theme,
-        revision = runtimeState.ThemeRevision,
+        systemTheme = snapshot.SelectedTheme,
+        selectedTheme = snapshot.SelectedTheme,
+        effectiveTheme = snapshot.EffectiveTheme,
+        windowsEffectiveTheme = HostThemeStateContract.ResolveWindowsEffectiveTheme(),
+        generation = snapshot.Generation,
+        revision = snapshot.Revision,
+        themeContract = BuildPluginThemeContract(snapshot.SelectedTheme, snapshot.EffectiveTheme),
+        owner = "host_theme_state_contract",
         rule = "release_contract"
     });
+});
+
+// 設定commitの既存Browser Surface向けpush通知。
+// 保存入口（Web hamburger/context/tray）ではなくSettingsChangeApplicationServiceのcommitを唯一の発火源とする。
+app.MapGet("/api/settings/commit-stream", async (HttpContext context, SettingsUiCommitHub commits) =>
+{
+    context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
+    context.Response.Headers.Pragma = "no-cache";
+    context.Response.Headers["X-Accel-Buffering"] = "no";
+    context.Response.ContentType = "text/event-stream; charset=utf-8";
+
+    var subscription = commits.Subscribe();
+    try
+    {
+        await context.Response.WriteAsync(": tvair-settings-commit-stream\n\n", context.RequestAborted);
+        await context.Response.Body.FlushAsync(context.RequestAborted);
+        await foreach (var evt in subscription.Reader.ReadAllAsync(context.RequestAborted))
+        {
+            var json = JsonSerializer.Serialize(new
+            {
+                sequence = evt.Sequence,
+                persistedChanged = evt.PersistedChanged,
+                themeChanged = evt.ThemeChanged,
+                themeRevision = evt.ThemeRevision,
+                reservationActionUiHotReloaded = evt.ReservationActionUiHotReloaded,
+                requiresRestart = evt.RequiresRestart,
+                tunerTopologyRestartRequired = evt.TunerTopologyRestartRequired,
+                committedAt = evt.CommittedAt
+            });
+            await context.Response.WriteAsync($"event: settings-committed\ndata: {json}\n\n", context.RequestAborted);
+            await context.Response.Body.FlushAsync(context.RequestAborted);
+        }
+    }
+    catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+    {
+        // Browser navigation/close owns cancellation.
+    }
+    finally
+    {
+        commits.Remove(subscription.Id);
+    }
 });
 
 // 設定保存。Web/WinFormsを問わずSettingsChangeApplicationServiceを単一出口とする。
@@ -7252,6 +7635,9 @@ app.MapGet("/api/settings/browse", (string filter) =>
         }
     });
     thread.SetApartmentState(ApartmentState.STA);
+    // A native picker must never become the last foreground thread that keeps TvAIr.exe alive
+    // after an explicit application shutdown. The HTTP request still joins it during normal use.
+    thread.IsBackground = true;
     thread.Start();
     thread.Join();
 
@@ -7264,10 +7650,10 @@ app.MapGet("/api/settings/browse", (string filter) =>
 TvAIr.Core.TrayIconService? trayIconService = null;
 app.Lifetime.ApplicationStarted.Register(() =>
 {
-    // 起動時にスタートアップ登録（HKCU\...\Run）とWakeタスクの状態を同期する
+    // 起動時にWindowsログオン自動起動タスクと保存済みStartupEnabledを同期する
     try
     {
-        var startupSvc = app.Services.GetRequiredService<StartupRegistryService>();
+        var startupSvc = app.Services.GetRequiredService<WindowsAutoStartService>();
         var iniSvc     = app.Services.GetRequiredService<IniSettingsService>();
         startupSvc.Set(iniSvc.StartupEnabled);
         // Wake同期はEpgScheduler StartupFinalizeが、起動時予約Mutation確定後に一度だけ所有する。
@@ -7297,7 +7683,8 @@ app.Lifetime.ApplicationStarted.Register(() =>
             app.Services.GetRequiredService<EpgScheduler>(),
             app.Services.GetRequiredService<LogRepository>(),
             app.Services.GetRequiredService<PluginDefaultMenuActionService>(),
-            app.Services.GetRequiredService<IniSettingsService>());
+            app.Services.GetRequiredService<IniSettingsService>(),
+            app.Lifetime);
         trayIconService.Start();
     }
     catch { /* トレイアイコン起動失敗は無視 */ }
@@ -7314,33 +7701,17 @@ app.Lifetime.ApplicationStopped.Register(() =>
 });
 
 
-// release_contract: Windows アプリテーマ取得。current 選択時のフロントテーマ決定に使う。
-// AppsUseLightTheme: 0=dark, 1=light
+// Compatibility endpoint. Windows/current effective-theme resolution is owned by HostThemeStateContract.
 app.MapGet("/api/system-theme", () =>
 {
-    try
+    var effective = HostThemeStateContract.ResolveWindowsEffectiveTheme();
+    return Results.Json(new
     {
-        using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
-        var value = key?.GetValue("AppsUseLightTheme");
-        var light = value is int i ? i != 0 : value?.ToString() != "0";
-        return Results.Json(new
-        {
-            success = true,
-            source = "HKCU\\\\Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Themes\\\\Personalize\\\\AppsUseLightTheme",
-            theme = light ? "light" : "dark",
-            appsUseLightTheme = light
-        });
-    }
-    catch (Exception ex)
-    {
-        return Results.Json(new
-        {
-            success = false,
-            source = "fallback",
-            theme = "light",
-            error = ex.GetType().Name
-        });
-    }
+        success = true,
+        source = "host_theme_state_contract",
+        theme = effective,
+        appsUseLightTheme = string.Equals(effective, "light", StringComparison.OrdinalIgnoreCase)
+    });
 });
 
 
@@ -7624,12 +7995,50 @@ static IReadOnlyList<ProjectedProgramEvent> ProjectedProgramGuideNormalizeServic
         .ThenBy(e => e.SourceKind, StringComparer.OrdinalIgnoreCase)
         .ToList();
 
+    // PROGRAM_GUIDE_TIMELINE_NO_HOLE_INVARIANT:
+    // A long stale schedule row may coexist temporarily with the newer rows that replaced it.
+    // The old count-based rule ("contains two or more events") was unsafe: a valid long event
+    // can legitimately contain several short rows from another schedule generation, and dropping
+    // the long row then creates a visible ProgramGuide hole.  Suppress a containing row only when
+    // the other rows cover its complete interval.  This preserves stale-wrapper cleanup without
+    // ever manufacturing an uncovered interval in the display projection.
+    static bool IsFullyCoveredByOtherEvents(
+        ProjectedProgramEvent candidate,
+        IReadOnlyList<ProjectedProgramEvent> all)
+    {
+        var contained = all
+            .Where(other =>
+                !ReferenceEquals(other, candidate) &&
+                other.EventId != candidate.EventId &&
+                other.Start >= candidate.Start &&
+                other.End <= candidate.End &&
+                other.End > other.Start)
+            .OrderBy(other => other.Start)
+            .ThenBy(other => other.End)
+            .ToList();
+
+        // Preserve the historical stale-wrapper contract: one alternate row by itself is not
+        // enough evidence that the containing event was replaced.
+        if (contained.Count < 2) return false;
+
+        var coveredUntil = candidate.Start;
+        foreach (var other in contained)
+        {
+            if (other.Start > coveredUntil)
+                return false;
+
+            if (other.End > coveredUntil)
+                coveredUntil = other.End;
+
+            if (coveredUntil >= candidate.End)
+                return true;
+        }
+
+        return false;
+    }
+
     var filtered = candidates
-        .Where(e => candidates.Count(other =>
-            other.EventId != e.EventId &&
-            other.Start >= e.Start &&
-            other.End <= e.End &&
-            other.End > other.Start) < 2)
+        .Where(e => !IsFullyCoveredByOtherEvents(e, candidates))
         .ToList();
 
     return filtered.Count > 0 ? filtered : candidates;

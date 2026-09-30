@@ -1,22 +1,9 @@
 ﻿/*
- * ============================================================================
- * 【開発者の明示承認なしに変更禁止】共通割り当てルート保護契約
- *
- * 共通割り当てルート、割り当て順序、single-flight、commit、Mutation／Wake投影を
- * 変更する場合は、理由や規模を問わず、着手前に必ず開発者の明示承認を得ること。
- * 不具合修正・整理・最適化・リファクタリング名目での無断変更も禁止する。
- * この保護コメント自体も、開発者の明示承認なしに改変・削除・弱体化してはならない。
- *
- * 録画実行の正本はTvAIrEpgRec／DirectRecorder系とし、割当経路から別の録画起動・待機・補正経路を持たない。
- *
- * タイマー、固定wait、sleep、delay、cooldown、settle、quiet window等を
- * 安易に挟んではならない。完了待ちは現行の状態、物理解放、worker終了などの
- * 証拠で判定し、時間経過で不整合を隠さないこと。
- *
- * DBに余計な小細工を一切してはならない。テーブル、カラム、Trigger、Index、
- * PRAGMA、別DB、一時DB、shadow table、補正値、隠し状態、二重保存、移行処理を
- * 追加・変更する場合は、内容の大小を問わず、着手前に必ず開発者の明示承認を得ること。
- * ============================================================================
+ * 共通割り当てルートの不変条件:
+ * - 割り当て順序、single-flight、authoritative commit、Mutation/Wake投影はこの経路へ集約する。
+ * - 録画実行はTvAIrEpgRec共通TS runtimeへ渡し、別の録画起動・待機・補正経路を作らない。
+ * - 完了待ちは状態、物理解放、worker終了の証拠で判定し、固定wait/sleep/cooldownで不整合を隠さない。
+ * - DBへ割り当て専用の隠し状態や二重保存経路を追加せず、既存の正本commitを維持する。
  */
 /* release_contract STOP_PHASE_ALLOC_ROUTE_GUARD: 録画停止フェーズ中のALLOC_ROUTEはStopPhaseGateで遅延扱いにする。 */
 using TvAIr.Core;
@@ -373,12 +360,14 @@ public sealed class ReservationAllocationRouteService
 
             var userChainPairs = _store.GetChainPredecessors();
             var effectiveLater = _ini.LaterProgramPriority;
-            var effectiveChain = effectiveLater && (_ini.PseudoContinuousRecording || userChainPairs.Count > 0);
+            var configuredChainFeature = _ini.UserChainRecordingEnabled;
+            var continuousChainPlanning = ChainReservationContract.ShouldPlanContinuousCapture(
+                configuredChainFeature, userChainPairs.Count);
 
             _log.Add("ALLOC_POLICY", "Effective",
-                $"source={request.Source} action={request.Action} executionMode={request.ExecutionMode} later={effectiveLater} iniChain={_ini.PseudoContinuousRecording} userChainPairs={userChainPairs.Count} effectiveChain={effectiveChain} rule=common_allocation_route_contract");
+                $"source={request.Source} action={request.Action} executionMode={request.ExecutionMode} later={effectiveLater} configuredChainFeature={configuredChainFeature} legacyChainSetting={_ini.PseudoContinuousRecording} storedChainPairs={userChainPairs.Count} continuousChainPlanning={continuousChainPlanning} rule=common_allocation_route_contract");
 
-            var evaluation = EvaluateWithSingleRetry(effectiveLater, effectiveChain, request);
+            var evaluation = EvaluateWithSingleRetry(effectiveLater, continuousChainPlanning, configuredChainFeature, request);
             changes = evaluation.Changes.ToList();
             rowChanges = evaluation.RowChanges.ToList();
             allocationGeneration = evaluation.AllocationGeneration;
@@ -393,9 +382,11 @@ public sealed class ReservationAllocationRouteService
             {
                 var userChainPairs = _store.GetChainPredecessors();
                 var effectiveLater = _ini.LaterProgramPriority;
-                var effectiveChain = effectiveLater && (_ini.PseudoContinuousRecording || userChainPairs.Count > 0);
+                var configuredChainFeature = _ini.UserChainRecordingEnabled;
+                var continuousChainPlanning = ChainReservationContract.ShouldPlanContinuousCapture(
+                    configuredChainFeature, userChainPairs.Count);
 
-                var finalEvaluation = EvaluateWithSingleRetry(effectiveLater, effectiveChain, request);
+                var finalEvaluation = EvaluateWithSingleRetry(effectiveLater, continuousChainPlanning, configuredChainFeature, request);
                 changes = finalEvaluation.Changes.ToList();
                 rowChanges = finalEvaluation.RowChanges.ToList();
                 allocationGeneration = finalEvaluation.AllocationGeneration;
@@ -716,13 +707,15 @@ public sealed class ReservationAllocationRouteService
 
     private ReservationAllocationEvaluationResult EvaluateWithSingleRetry(
         bool effectiveLater,
-        bool effectiveChain,
+        bool continuousChainPlanning,
+        bool configuredChainFeatureEnabled,
         ReservationAllocationRouteRequest request)
     {
         var first = _store.ReevaluateConflicts(
             _tunerProfiles,
             effectiveLater,
-            effectiveChain,
+            continuousChainPlanning,
+            configuredChainFeatureEnabled,
             _ini.PostEndMarginSeconds,
             _tunerPool,
             _ini.PreStartMarginSeconds);
@@ -735,7 +728,8 @@ public sealed class ReservationAllocationRouteService
         return _store.ReevaluateConflicts(
             _tunerProfiles,
             effectiveLater,
-            effectiveChain,
+            continuousChainPlanning,
+            configuredChainFeatureEnabled,
             _ini.PostEndMarginSeconds,
             _tunerPool,
             _ini.PreStartMarginSeconds);

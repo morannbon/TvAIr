@@ -44,6 +44,7 @@ public sealed class KeywordRuleReconcileResult
     public int Preserved { get; set; }
     public int PreservedSourceMissing { get; set; }
     public int Removed { get; set; }
+    public int RecordingOptionsUpdated { get; set; }
 }
 
 public sealed class KeywordMatcher
@@ -58,14 +59,16 @@ public sealed class KeywordMatcher
     private readonly ReservationStore _rsvStore;
     private readonly ReservationProjectionMetadataStore _projectionMetadataStore;
     private readonly ChannelFileLoader _channelLoader;
+    private readonly IniSettingsService _ini;
     private readonly LogRepository _log;
 
-    public KeywordMatcher(IProgramEventSource programEvents, ReservationStore rsvStore, ReservationProjectionMetadataStore projectionMetadataStore, ChannelFileLoader channelLoader, LogRepository log)
+    public KeywordMatcher(IProgramEventSource programEvents, ReservationStore rsvStore, ReservationProjectionMetadataStore projectionMetadataStore, ChannelFileLoader channelLoader, IniSettingsService ini, LogRepository log)
     {
         _programEvents = programEvents;
         _rsvStore = rsvStore;
         _projectionMetadataStore = projectionMetadataStore;
         _channelLoader = channelLoader;
+        _ini = ini;
         _log = log;
     }
 
@@ -73,7 +76,9 @@ public sealed class KeywordMatcher
     {
         var result = new KeywordRulePreviewResult();
         var now = DateTime.Now;
-        var events = GetFutureSafeEvents(now)
+        var channelMap = _channelLoader.Load();
+        var channelTargets = channelMap.Targets.ToList();
+        var events = GetFutureAutoReservationEvents(now, channelMap)
             .OrderBy(e => e.Start)
             .ThenBy(e => e.ServiceName)
             .ThenBy(e => e.Title);
@@ -87,7 +92,6 @@ public sealed class KeywordMatcher
             return result;
 
         var targetCache = new Dictionary<(string EventKey, long StartTicks, long EndTicks, byte Mask), MatchText>();
-        var channelTargets = _channelLoader.Load().Targets.ToList();
         var serviceNameMap = BuildServiceNameMap(channelTargets);
 
         foreach (var ev in events)
@@ -127,8 +131,8 @@ public sealed class KeywordMatcher
     public Dictionary<int, int> GetRuleHitCounts(IEnumerable<KeywordRule> rules)
     {
         var now = DateTime.Now;
-        var events = GetFutureSafeEvents(now)
-            .ToList();
+        var channelMap = _channelLoader.Load();
+        var events = GetFutureAutoReservationEvents(now, channelMap).ToList();
         var compiled = rules
             .Select(r => (Rule: r, Compiled: CompileRule(r)))
             .Where(x => x.Compiled is not null)
@@ -166,6 +170,17 @@ public sealed class KeywordMatcher
         if (existing.Count == 0)
             return result;
 
+        // KEYWORD_RULE_RECORDING_OPTIONS_HANDOFF_INVARIANT:
+        // KeywordRule is the authoring source for automatic-reservation recording options, while
+        // reservation_recording_options is the immutable-at-launch reservation snapshot consumed
+        // by ReservationScheduler/TvAIrEpgRec.  Rule edits must therefore update every still-Scheduled
+        // reservation owned by that rule before matching/removal decisions continue.  Starting,
+        // Recording, Stopping and terminal rows are intentionally excluded by ReservationStore.
+        // This is the single handoff boundary; UI, scheduler and worker must not re-derive the policy.
+        result.RecordingOptionsUpdated = _rsvStore.SyncScheduledKeywordReservationRecordingOptions(
+            rule.Id,
+            new ReservationRecordingOptions(rule.RecordCurrentServiceOnly, rule.RecordSubtitles));
+
         var desiredKeys = new HashSet<string>(StringComparer.Ordinal);
         var availableKeys = new HashSet<string>(StringComparer.Ordinal);
         CompiledKeywordRule? compiledRule = null;
@@ -178,13 +193,15 @@ public sealed class KeywordMatcher
             if (compiledRule is not null)
             {
                 var now = DateTime.Now;
+                var channelMap = _channelLoader.Load();
                 var targetCache = new Dictionary<(string EventKey, long StartTicks, long EndTicks, byte Mask), MatchText>();
                 foreach (var ev in GetFutureSafeEvents(now))
                 {
-                    var occurrenceKey = KeywordOccurrenceKey(ev);
-                    availableKeys.Add(occurrenceKey);
-                    if (IsMatch(ev, compiledRule, targetCache))
-                        desiredKeys.Add(occurrenceKey);
+                    var eligibility = channelMap.GetServiceEligibility(ev.NetworkId, ev.TransportStreamId, ev.ServiceId);
+                    if (eligibility is ChannelServiceEligibility.Active or ChannelServiceEligibility.Disabled)
+                        availableKeys.Add(KeywordOccurrenceKey(ev));
+                    if (eligibility == ChannelServiceEligibility.Active && IsMatch(ev, compiledRule, targetCache))
+                        desiredKeys.Add(KeywordOccurrenceKey(ev));
                 }
             }
         }
@@ -271,6 +288,15 @@ public sealed class KeywordMatcher
     {
         var rules = _rsvStore.GetKeywordRules().Where(r => r.Enabled).OrderBy(r => r.SortOrder).ThenBy(r => r.Id).ToList();
         if (rules.Count == 0) return 0;
+
+        // Upgrade/self-heal convergence for Scheduled Keyword reservations created before the
+        // recording-options handoff invariant existed.  This does not touch active/terminal recordings.
+        var repairedRecordingOptions = _rsvStore.SyncScheduledKeywordReservationRecordingOptionsFromRules();
+        if (repairedRecordingOptions > 0)
+        {
+            _log.Add("KEYWORD_RECORDING_OPTIONS_SYNC", "KeywordMatcher",
+                $"result=UPDATED reservations={repairedRecordingOptions} source=current_keyword_rules target=scheduled_keyword_reservation_snapshot rule=keyword_rule_recording_options_handoff_contract");
+        }
 #if TVAIR_DEVELOPER_DIAGNOSTICS
         var matcherAllocatedAtEntry = GC.GetAllocatedBytesForCurrentThread();
 #endif
@@ -291,14 +317,36 @@ public sealed class KeywordMatcher
         var matchScope = committedEvents is null
             ? "all_future_programmes_x_all_enabled_rules"
             : "committed_ts_future_programmes_x_all_enabled_rules";
-        var events = GetFutureSafeEvents(futureEvents, now)
+
+        // EPGは受信TS上の全サービスを保持する。一方、自動検索・予約・録画対象は
+        // TVTest .ch2 の有効状態(state!=0)を正本とし、さらに現在のChSet経路へ解決できる
+        // サービスだけに限定する。録画ファイルの「現在サービスのみ保存」とは独立した契約。
+        var channelMap = _channelLoader.Load();
+        var channelTargets = channelMap.Targets.ToList();
+        var safeFutureEvents = GetFutureSafeEvents(futureEvents, now);
+        var events = safeFutureEvents
+            .Where(e => channelMap.IsSearchAndRecordingEnabled(e.NetworkId, e.TransportStreamId, e.ServiceId))
             .ToList();
+        var disabledFutureCount = safeFutureEvents.Count(e => channelMap.GetServiceEligibility(e.NetworkId, e.TransportStreamId, e.ServiceId) == ChannelServiceEligibility.Disabled);
+        var routeUnavailableFutureCount = safeFutureEvents.Count(e => channelMap.GetServiceEligibility(e.NetworkId, e.TransportStreamId, e.ServiceId) == ChannelServiceEligibility.ActiveRouteUnavailable);
+        var unknownFutureCount = safeFutureEvents.Count(e => channelMap.GetServiceEligibility(e.NetworkId, e.TransportStreamId, e.ServiceId) == ChannelServiceEligibility.Unknown);
+
+        // Keyword予約の責務も同じTVTest .ch2有効状態へ収束させる。
+        // state=0 だけでなく .ch2 に存在しないサービスも「ユーザーが有効化していない」ため、
+        // 過去の全サービスEPG経路で作られたScheduled Keyword予約を残してTuner競合へ参加させない。
+        // 一方、.ch2では有効だがChSet経路だけ一時的に解決できないActiveRouteUnavailableは削除しない。
+        var removedInactiveScheduled = ReconcileInactiveScheduledKeywordReservations(channelMap);
+        if (disabledFutureCount > 0 || routeUnavailableFutureCount > 0 || unknownFutureCount > 0 || removedInactiveScheduled > 0)
+        {
+            _log.Add("KEYWORD_MATCH_SERVICE_ELIGIBILITY", "KeywordMatcher",
+                $"result=FILTERED safeFuture={safeFutureEvents.Count} activeFuture={events.Count} disabledFuture={disabledFutureCount} activeRouteUnavailableFuture={routeUnavailableFutureCount} unknownFuture={unknownFutureCount} removedInactiveScheduled={removedInactiveScheduled} identity=nid_tsid_sid activationSource=tvtest_ch2_state routeSource=chset action=keep_epg_filter_auto_search_reservation_recording rule=keyword_service_activation_contract");
+        }
+
         // ServiceId単独をキーにすると地上波とBS/CSでServiceIdが衝突した際に
         // ToDictionaryが重複キー例外を投げる(Key: 161等で発生確認済み)。
         // また ChannelArgument は (NetworkId, TSID, ServiceId) で一意に決まる設計上、
         // ServiceId だけで引くのは本来不正確。EpgEventのキー(NetworkId,TSID,ServiceId)と
         // 対応するタプルキーに変更し、同時に重複安全化する(同一3キーで複数あれば初出採用)。
-        var channelTargets = _channelLoader.Load().Targets.ToList();
         var chArgMap = channelTargets
             .GroupBy(t => (t.OriginalNetworkId, t.TransportStreamId, t.ServiceId))
             .ToDictionary(g => g.Key, g => g.First().ChannelArgument);
@@ -449,6 +497,7 @@ public sealed class KeywordMatcher
         var suppressedByExistingScheduleCount = 0;
         var suppressedByKeywordCancelOnceCount = 0;
         var suppressedByManualStopAutomaticRerecordCount = 0;
+        var suppressedByPastStartAdmissionCount = 0;
         var existingSuppressionSamples = new List<string>();
         var titlePositiveRejectedCounts = new Dictionary<(int RuleId, MatchRejectReason Reason), int>();
         var titlePositiveRejectedSamples = new List<string>();
@@ -464,6 +513,7 @@ public sealed class KeywordMatcher
         var crosscheckExistingSchedule = 0;
         var crosscheckKeywordCancel = 0;
         var crosscheckManualStop = 0;
+        var crosscheckPastStartAdmission = 0;
         var crosscheckUnaccounted = 0;
         var crosscheckMultipleRuleMatches = 0;
         var crosscheckSourceExpected = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -544,6 +594,11 @@ public sealed class KeywordMatcher
                 crosscheckManualStop++;
                 continue;
             }
+            if (IsPastNewKeywordAdmissionBoundary(ev, now))
+            {
+                crosscheckPastStartAdmission++;
+                continue;
+            }
 
             crosscheckUnaccounted++;
             crosscheckPending.Add((ev, matchingRules[0], source));
@@ -568,7 +623,7 @@ public sealed class KeywordMatcher
         // bounded evidence, but reserve KEYWORD_MATCH_GLOBAL_CROSSCHECK for the post-commit
         // authoritative result emitted after Add/suppression processing completes.
         _log.Add("KEYWORD_MATCH_GLOBAL_PRECOMMIT", "KeywordMatcher",
-            $"result={(crosscheckUnaccounted == 0 ? "SETTLED" : "PENDING_ADD")} scope={matchScope} events={events.Count} rules={compiled.Count} pairs={crosscheckPairs} expectedOccurrences={crosscheckExpected} existingEvent={crosscheckExistingEvent} existingSchedule={crosscheckExistingSchedule} keywordCancel={crosscheckKeywordCancel} manualStop={crosscheckManualStop} pendingAdd={crosscheckUnaccounted} sourceExpected=[{FormatSourceCounts(crosscheckSourceExpected)}] rule=keyword_match_global_precommit");
+            $"result={(crosscheckUnaccounted == 0 ? "SETTLED" : "PENDING_ADD")} scope={matchScope} events={events.Count} rules={compiled.Count} pairs={crosscheckPairs} expectedOccurrences={crosscheckExpected} existingEvent={crosscheckExistingEvent} existingSchedule={crosscheckExistingSchedule} keywordCancel={crosscheckKeywordCancel} manualStop={crosscheckManualStop} pastStartAdmission={crosscheckPastStartAdmission} pendingAdd={crosscheckUnaccounted} sourceExpected=[{FormatSourceCounts(crosscheckSourceExpected)}] rule=keyword_match_global_precommit");
         if (crosscheckUnaccounted > 0)
         {
             _log.Add("KEYWORD_MATCH_GLOBAL_PENDING_ADD", "KeywordMatcher",
@@ -677,7 +732,29 @@ public sealed class KeywordMatcher
                 continue;
             }
 
-                chArgMap.TryGetValue((ev.NetworkId, ev.TransportStreamId, ev.ServiceId), out var chArg);
+            // KEYWORD_NEW_RESERVATION_ADMISSION_BOUNDARY:
+            // Automatic search must not create a brand-new Scheduled reservation after the
+            // canonical recording due boundary has already arrived. Existing reservations were
+            // handled above and remain untouched. User/manual/record-now/chain/recovery paths do
+            // not enter this branch. Reuse the runtime recording timing SSOT rather than deriving
+            // another start boundary inside KeywordMatcher.
+            var admissionNow = DateTime.Now;
+            if (IsPastNewKeywordAdmissionBoundary(ev, admissionNow))
+            {
+                suppressedByPastStartAdmissionCount++;
+                var dueAt = GetKeywordAdmissionBoundary(ev);
+                _log.Add("KEYWORD_MATCH_GLOBAL_PENDING_SKIP", "KeywordMatcher",
+                    $"result=SKIPPED reason=past_start_admission_boundary ruleId={rule.Id} title={SafeProjectedLogValue(ev.Title)} service={SafeProjectedLogValue(ev.ServiceName)} nid={ev.NetworkId} tsid={ev.TransportStreamId} sid={ev.ServiceId} eid={ev.EventId} start={ev.Start:MM/dd HH:mm:ss} end={ev.End:MM/dd HH:mm:ss} dueAt={dueAt:MM/dd HH:mm:ss} now={admissionNow:MM/dd HH:mm:ss.fff} preStart={Math.Max(0, _ini.PreStartMarginSeconds)}s action=skip_new_keyword_reservation existingReservationMutation=none rule=keyword_new_reservation_admission_contract");
+                continue;
+            }
+
+                if (!chArgMap.TryGetValue((ev.NetworkId, ev.TransportStreamId, ev.ServiceId), out var chArg)
+                    || string.IsNullOrWhiteSpace(chArg))
+                {
+                    _log.Add("KEYWORD_MATCH_SERVICE_ELIGIBILITY", SafeKeywordEventTitle(ev),
+                        $"result=INVARIANT_MISS reason=active_service_missing_channel_argument nid={ev.NetworkId} tsid={ev.TransportStreamId} sid={ev.ServiceId} eid={ev.EventId} action=skip_auto_reservation rule=keyword_service_activation_contract");
+                    continue;
+                }
                 var canonicalServiceName = ResolveCanonicalServiceName(ev, serviceNameMap);
                 var safeTitle = SafeKeywordEventTitle(ev);
                 var rsv = new Reservation
@@ -705,7 +782,9 @@ public sealed class KeywordMatcher
                     // BROADCAST_SLOT_EVENT_REBIND_INVARIANT:
                     // 自動検索も番組表/Pluginと同じatomic parent入口を通す。EventId差替えで同一放送枠の
                     // 旧予約が残っていても別ReservationIdを生成せず、既存予約へ収束させる。
-                    var addResult = _rsvStore.AddOrGetActiveParent(rsv);
+                    var addResult = _rsvStore.AddOrGetActiveParent(
+                        rsv,
+                        new ReservationRecordingOptions(rule.RecordCurrentServiceOnly, rule.RecordSubtitles));
                     var reservationId = addResult.ReservationId;
                     _projectionMetadataStore.UpsertFromProjectedEvent(reservationId, ev);
                     if (string.Equals(ev.ProjectionState, ProjectedEventStates.OverlayOnly, StringComparison.OrdinalIgnoreCase)
@@ -742,6 +821,7 @@ public sealed class KeywordMatcher
         var postExistingSchedule = crosscheckExistingSchedule;
         var postKeywordCancel = crosscheckKeywordCancel;
         var postManualStop = crosscheckManualStop;
+        var postPastStartAdmission = crosscheckPastStartAdmission;
         var postUnaccounted = 0;
         var postSourceUnaccounted = new Dictionary<string, int>(StringComparer.Ordinal);
         var postRuleUnaccounted = new Dictionary<int, int>();
@@ -772,6 +852,11 @@ public sealed class KeywordMatcher
                 postManualStop++;
                 continue;
             }
+            if (IsPastNewKeywordAdmissionBoundary(ev, DateTime.Now))
+            {
+                postPastStartAdmission++;
+                continue;
+            }
 
             postUnaccounted++;
             IncrementSourceCount(postSourceUnaccounted, pending.Source);
@@ -781,7 +866,7 @@ public sealed class KeywordMatcher
         }
 
         _log.Add("KEYWORD_MATCH_GLOBAL_CROSSCHECK", "KeywordMatcher",
-            $"result={(postUnaccounted == 0 ? "OK" : "UNACCOUNTED")} phase=post_commit scope={matchScope} events={events.Count} rules={compiled.Count} pairs={crosscheckPairs} expectedOccurrences={crosscheckExpected} existingEvent={postExistingEvent} existingSchedule={postExistingSchedule} keywordCancel={postKeywordCancel} manualStop={postManualStop} unaccounted={postUnaccounted} conservation={crosscheckExpected}={postExistingEvent}+{postExistingSchedule}+{postKeywordCancel}+{postManualStop}+{postUnaccounted} sourceExpected=[{FormatSourceCounts(crosscheckSourceExpected)}] addedThisRun={totalAdded} rule=keyword_match_global_crosscheck");
+            $"result={(postUnaccounted == 0 ? "OK" : "UNACCOUNTED")} phase=post_commit scope={matchScope} events={events.Count} rules={compiled.Count} pairs={crosscheckPairs} expectedOccurrences={crosscheckExpected} existingEvent={postExistingEvent} existingSchedule={postExistingSchedule} keywordCancel={postKeywordCancel} manualStop={postManualStop} pastStartAdmission={postPastStartAdmission} unaccounted={postUnaccounted} conservation={crosscheckExpected}={postExistingEvent}+{postExistingSchedule}+{postKeywordCancel}+{postManualStop}+{postPastStartAdmission}+{postUnaccounted} sourceExpected=[{FormatSourceCounts(crosscheckSourceExpected)}] addedThisRun={totalAdded} rule=keyword_match_global_crosscheck");
         if (postUnaccounted > 0)
         {
             var postRuleSummary = string.Join(",", postRuleUnaccounted.OrderBy(x => x.Key).Select(x => $"rule{x.Key}={x.Value}"));
@@ -789,9 +874,9 @@ public sealed class KeywordMatcher
                 $"result=UNACCOUNTED phase=post_commit sourceUnaccounted=[{FormatSourceCounts(postSourceUnaccounted)}] ruleUnaccounted=[{postRuleSummary}] samples=[{string.Join("/", postUnaccountedSamples)}] rule=keyword_match_global_crosscheck");
         }
 
-        if (suppressedByKeywordCancelOnceCount > 0 || suppressedByManualStopAutomaticRerecordCount > 0)
+        if (suppressedByKeywordCancelOnceCount > 0 || suppressedByManualStopAutomaticRerecordCount > 0 || suppressedByPastStartAdmissionCount > 0)
             _log.Add("KEYWORD_MATCH", "SuppressedSummary",
-                $"result=OK keywordCancelOnce={suppressedByKeywordCancelOnceCount} manualStopAutomaticRerecord={suppressedByManualStopAutomaticRerecordCount} rule=release_contract");
+                $"result=OK keywordCancelOnce={suppressedByKeywordCancelOnceCount} manualStopAutomaticRerecord={suppressedByManualStopAutomaticRerecordCount} pastStartAdmission={suppressedByPastStartAdmissionCount} rule=release_contract");
 
         var titlePositiveRejectedSummary = titlePositiveRejectedCounts.Count == 0
             ? "-"
@@ -832,7 +917,7 @@ public sealed class KeywordMatcher
         }
 
         _log.Add("KEYWORD_MATCH_DONE", "KeywordMatcher",
-            $"自動検索予約完了: {totalAdded}件追加 suppressedExistingEvent={suppressedByExistingEventCount} suppressedExistingSchedule={suppressedByExistingScheduleCount} suppressedKeywordCancelOnce={suppressedByKeywordCancelOnceCount} suppressedManualStop={suppressedByManualStopAutomaticRerecordCount} rule=release_contract");
+            $"自動検索予約完了: {totalAdded}件追加 suppressedExistingEvent={suppressedByExistingEventCount} suppressedExistingSchedule={suppressedByExistingScheduleCount} suppressedKeywordCancelOnce={suppressedByKeywordCancelOnceCount} suppressedManualStop={suppressedByManualStopAutomaticRerecordCount} suppressedPastStartAdmission={suppressedByPastStartAdmissionCount} rule=release_contract");
 #if TVAIR_DEVELOPER_DIAGNOSTICS
         var matcherAllocatedAtExit = GC.GetAllocatedBytesForCurrentThread();
         _log.Add("KEYWORD_MATCH_ALLOCATION", "KeywordMatcher",
@@ -841,6 +926,12 @@ public sealed class KeywordMatcher
         return totalAdded;
     }
 
+
+    private DateTime GetKeywordAdmissionBoundary(ProjectedProgramEvent ev)
+        => ReservationRuntimeResponsibilityPolicy.GetDueAt(ev.Start, _ini.PreStartMarginSeconds);
+
+    private bool IsPastNewKeywordAdmissionBoundary(ProjectedProgramEvent ev, DateTime now)
+        => now >= GetKeywordAdmissionBoundary(ev);
 
     private static bool IsRuleExpired(KeywordRule rule, DateTime now)
         => !string.IsNullOrWhiteSpace(rule.ExpiresOn)
@@ -979,6 +1070,27 @@ public sealed class KeywordMatcher
         => string.IsNullOrWhiteSpace(text)
             ? string.Empty
             : text.Trim().Normalize(NormalizationForm.FormKC);
+
+    private IReadOnlyList<ProjectedProgramEvent> GetFutureAutoReservationEvents(DateTime now, ChannelLoadResult channelMap)
+        => GetFutureSafeEvents(now)
+            .Where(e => channelMap.IsSearchAndRecordingEnabled(e.NetworkId, e.TransportStreamId, e.ServiceId))
+            .ToList();
+
+    private int ReconcileInactiveScheduledKeywordReservations(ChannelLoadResult channelMap)
+    {
+        var inactive = _rsvStore.GetAll()
+            .Where(r => r.Source == ReservationSource.Keyword
+                        && r.Status == ReservationStatus.Scheduled
+                        && r.SourceRuleId.HasValue
+                        && !channelMap.IsTvTestServiceEnabled(r.NetworkId, r.TransportStreamId, r.ServiceId))
+            .GroupBy(r => r.SourceRuleId!.Value)
+            .ToList();
+
+        var removed = 0;
+        foreach (var group in inactive)
+            removed += _rsvStore.DeleteScheduledKeywordReservationsByIds(group.Key, group.Select(r => r.Id).ToArray());
+        return removed;
+    }
 
     private static Dictionary<(ushort Nid, ushort Tsid, ushort Sid), string> BuildServiceNameMap(IEnumerable<ChannelTarget> targets)
     {

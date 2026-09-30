@@ -300,11 +300,50 @@ public sealed class ChannelFileLoader
             if (string.IsNullOrWhiteSpace(line) || line[0] is ';' or '#' or '[') continue;
             var cols = line.Split(',', StringSplitOptions.TrimEntries);
             if (cols.Length < 9) continue;
-            if (TryParse(cols, fileGroup, Path.GetFileName(path), entry.LineNumber, grChSet, bscsChSet, serviceCountByTs, out var t))
-                result.Targets.Add(t);
-            else
+            if (!TryReadServiceState(cols, fileGroup, Path.GetFileName(path), entry.LineNumber, out var serviceState))
+            {
                 result.RawSkippedCount++;
+                continue;
+            }
+
+            result.ServiceStates.Add(serviceState);
+            if (TryParse(cols, fileGroup, Path.GetFileName(path), entry.LineNumber, grChSet, bscsChSet, serviceCountByTs, out var t))
+            {
+                result.Targets.Add(t);
+                serviceState.IsRoutable = true;
+            }
+            else
+            {
+                result.RawSkippedCount++;
+            }
         }
+    }
+
+    private static bool TryReadServiceState(string[] cols, string fileGroup, string ch2FileName, int ch2LineNumber,
+        out ChannelServiceState serviceState)
+    {
+        serviceState = new ChannelServiceState();
+        var name = cols[0];
+        if (string.IsNullOrWhiteSpace(name) || name is "－" or "-") return false;
+        if (!int.TryParse(cols[4], out var svcType) || svcType is not (1 or 161 or 162 or 173)) return false;
+        if (!ushort.TryParse(cols[5], out var sid) || sid == 0) return false;
+        if (!ushort.TryParse(cols[6], out var onid) || onid == 0) return false;
+        if (!ushort.TryParse(cols[7], out var tsid) || tsid == 0) return false;
+        _ = int.TryParse(cols[8], out var state);
+
+        serviceState = new ChannelServiceState
+        {
+            Group = ResolveGroup(fileGroup, onid),
+            OriginalNetworkId = onid,
+            TransportStreamId = tsid,
+            ServiceId = sid,
+            Name = name,
+            IsEnabled = state != 0,
+            IsRoutable = false,
+            Ch2FileName = ch2FileName,
+            Ch2LineNumber = ch2LineNumber
+        };
+        return true;
     }
 
     private static bool TryParse(string[] cols, string fileGroup, string ch2FileName, int ch2LineNumber,
@@ -434,11 +473,73 @@ public sealed record ChSetChannelEntry(
     string Line,
     string Path);
 
+public enum ChannelServiceEligibility
+{
+    Unknown,
+    Disabled,
+    ActiveRouteUnavailable,
+    Active
+}
+
+/// <summary>
+/// TVTest .ch2 上のサービス有効状態。EPG収集範囲とは独立し、検索・予約・録画対象の正本に使う。
+/// </summary>
+public sealed class ChannelServiceState
+{
+    public string Group { get; set; } = "";
+    public ushort OriginalNetworkId { get; set; }
+    public ushort TransportStreamId { get; set; }
+    public ushort ServiceId { get; set; }
+    public string Name { get; set; } = "";
+    public bool IsEnabled { get; set; }
+    public bool IsRoutable { get; set; }
+    public string Ch2FileName { get; set; } = "";
+    public int Ch2LineNumber { get; set; }
+}
+
 public sealed class ChannelLoadResult
 {
     public List<ChannelTarget> Targets { get; set; } = new();
+    public List<ChannelServiceState> ServiceStates { get; } = new();
     public List<string> Files    { get; init; } = new();
     public List<string> Warnings { get; init; } = new();
     public int RawSkippedCount   { get; set; }
     public string Message        { get; set; } = "";
+
+    /// <summary>
+    /// TVTest .ch2 の state と、同一サービスを実際の録画経路へ解決できるかを一つの契約として返す。
+    /// EPGに存在するだけのサービスは Unknown であり、自動検索候補にはしない。
+    /// </summary>
+    public ChannelServiceEligibility GetServiceEligibility(ushort networkId, ushort transportStreamId, ushort serviceId)
+    {
+        var states = ServiceStates
+            .Where(x => x.OriginalNetworkId == networkId
+                        && x.TransportStreamId == transportStreamId
+                        && x.ServiceId == serviceId)
+            .ToList();
+        if (states.Count == 0) return ChannelServiceEligibility.Unknown;
+        if (states.All(x => !x.IsEnabled)) return ChannelServiceEligibility.Disabled;
+        return states.Any(x => x.IsEnabled && x.IsRoutable)
+            ? ChannelServiceEligibility.Active
+            : ChannelServiceEligibility.ActiveRouteUnavailable;
+    }
+
+    /// <summary>
+    /// TVTest .ch2 でユーザーが有効化しているサービスか。ChSet経路の一時的な解決可否とは分離する。
+    /// .ch2 に存在しないサービスと state=0 のサービスはいずれも false。
+    /// </summary>
+    public bool IsTvTestServiceEnabled(ushort networkId, ushort transportStreamId, ushort serviceId)
+        => ServiceStates.Any(x => x.OriginalNetworkId == networkId
+                                  && x.TransportStreamId == transportStreamId
+                                  && x.ServiceId == serviceId
+                                  && x.IsEnabled);
+
+    public bool IsSearchAndRecordingEnabled(ushort networkId, ushort transportStreamId, ushort serviceId)
+        => IsTvTestServiceEnabled(networkId, transportStreamId, serviceId)
+           && ResolveActiveTarget(networkId, transportStreamId, serviceId) is not null;
+
+    public ChannelTarget? ResolveActiveTarget(ushort networkId, ushort transportStreamId, ushort serviceId)
+        => Targets.FirstOrDefault(x => x.OriginalNetworkId == networkId
+                                       && x.TransportStreamId == transportStreamId
+                                       && x.ServiceId == serviceId);
 }

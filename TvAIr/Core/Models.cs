@@ -206,10 +206,19 @@ public sealed class KeywordRule
     /// <summary>表示順兼評価順。</summary>
     public int SortOrder { get; set; } = 0;
 
+    /// <summary>自動検索予約で生成する録画を現在サービスだけに絞る。既定ON。</summary>
+    public bool RecordCurrentServiceOnly { get; set; } = true;
+
+    /// <summary>自動検索予約で生成する録画に字幕データを保存する。既定ON。</summary>
+    public bool RecordSubtitles { get; set; } = true;
+
     public bool Enabled { get; set; } = true;
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 }
+
+/// <summary>予約生成時に固定する録画出力オプション。未保存予約は従来動作(両方ON)として扱う。</summary>
+public sealed record ReservationRecordingOptions(bool CurrentServiceOnly = true, bool SaveSubtitles = true);
 
 // ─── プログラム予約ルール ─────────────────────────────────────────
 

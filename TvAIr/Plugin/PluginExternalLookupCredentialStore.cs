@@ -12,7 +12,7 @@ namespace TvAIr.Plugin;
 public sealed class PluginExternalLookupCredentialStore
 {
     private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("TvAIr.PluginExternalLookup.v1");
-    // The currently registered ExternalLookup providers (TVmaze/Jikan) do not use Host credentials.
+    // The currently registered ExternalLookup provider (TVmaze) does not use Host credentials.
     // Keep the store/API boundary for future credentialed providers, but legacy TMDB/NHK values are ignored.
     private static readonly HashSet<string> SupportedProviders = new(StringComparer.OrdinalIgnoreCase);
 

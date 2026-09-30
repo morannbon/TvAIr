@@ -1,4 +1,4 @@
-﻿using System.Reflection;
+using System.Reflection;
 using System.Runtime.Loader;
 using Microsoft.Extensions.Options;
 using TvAIr.Channel;
@@ -59,6 +59,7 @@ internal sealed class PluginLoader : IHostedService
     private readonly PlaybackProgressStore _playbackProgress;
     private readonly ReservationScheduler _reservationScheduler;
     private readonly PluginManagedExternalLookupHost _externalLookupHost;
+    private readonly PluginInternetAccessGate _internetAccessGate;
     private readonly List<(ITvAirRuntimeCapabilityPlugin Plugin, string PluginId)> _loadedRuntimeCapabilities = new();
     private readonly List<PluginRuntimeContext> _runtimeContexts = new();
 
@@ -100,7 +101,8 @@ internal sealed class PluginLoader : IHostedService
         RecordingResultStore recordingResults,
         PlaybackProgressStore playbackProgress,
         ReservationScheduler reservationScheduler,
-        PluginManagedExternalLookupHost externalLookupHost)
+        PluginManagedExternalLookupHost externalLookupHost,
+        PluginInternetAccessGate internetAccessGate)
     {
         EnsurePluginSdkResolver();
         _log = log;
@@ -137,6 +139,7 @@ internal sealed class PluginLoader : IHostedService
         _playbackProgress = playbackProgress;
         _reservationScheduler = reservationScheduler;
         _externalLookupHost = externalLookupHost;
+        _internetAccessGate = internetAccessGate;
     }
 
     /// <summary>
@@ -302,6 +305,7 @@ internal sealed class PluginLoader : IHostedService
                 _playbackProgress,
                 _reservationScheduler,
                 _externalLookupHost,
+                _internetAccessGate,
                 pluginId,
                 descriptor.DisplayName,
                 PluginsDirectory,
@@ -321,8 +325,13 @@ internal sealed class PluginLoader : IHostedService
             _runtimeContexts.Add(context);
             _loadedRuntimeCapabilities.Add((plugin, pluginId));
             _registry.RegisterRuntime(plugin);
+            var themeModes = string.Join(",", (descriptor.UiDefinitions ?? Array.Empty<RuntimeUiDefinition>())
+                .Select(ui => $"{ui.UiDefinitionId}:{ui.ThemeUpdateMode}"));
+            var themeHandlers = string.Join(",", (descriptor.UiDefinitions ?? Array.Empty<RuntimeUiDefinition>())
+                .Where(ui => ui.ThemeUpdateMode == RuntimeUiThemeUpdateMode.HotApply)
+                .Select(ui => $"{ui.UiDefinitionId}:{ui.ThemeHotApplyScriptPath}"));
             _log.Add("PLUGIN_RUNTIME_DESCRIPTOR_REGISTRATION", pluginId,
-                $"result=REGISTERED permissions={descriptor.RequiredPermissions?.Count ?? 0} assets={descriptor.Assets?.Count ?? 0} windows={descriptor.Windows?.Count ?? 0} surfaces={descriptor.Surfaces?.Count ?? 0} menuActions={descriptor.MenuActions?.Count ?? 0} uiDefinitions={descriptor.UiDefinitions?.Count ?? 0} rule=runtime_descriptor_single_source");
+                $"result=REGISTERED permissions={descriptor.RequiredPermissions?.Count ?? 0} assets={descriptor.Assets?.Count ?? 0} windows={descriptor.Windows?.Count ?? 0} surfaces={descriptor.Surfaces?.Count ?? 0} menuActions={descriptor.MenuActions?.Count ?? 0} uiDefinitions={descriptor.UiDefinitions?.Count ?? 0} themeModes=[{themeModes}] themeHandlers=[{themeHandlers}] rule=runtime_descriptor_single_source");
             _log.Add("Plugin", pluginId, $"[Plugin] Loaded runtime capability: {descriptor.DisplayName} v{descriptor.Version} contract={descriptor.SdkContractVersion}");
         }
         catch (Exception ex)
@@ -379,6 +388,30 @@ internal sealed class PluginLoader : IHostedService
             {
                 if (!assetIds.Contains(assetPath))
                     throw new InvalidOperationException($"Runtime UI '{ui.UiDefinitionId}' references unknown asset '{assetPath}'.");
+            }
+
+            var themeScriptPath = (ui.ThemeHotApplyScriptPath ?? string.Empty).Trim().Replace('\\', '/').TrimStart('/');
+            if (ui.ThemeUpdateMode == RuntimeUiThemeUpdateMode.HotApply)
+            {
+                if (string.IsNullOrWhiteSpace(themeScriptPath))
+                    throw new InvalidOperationException($"Runtime UI '{ui.UiDefinitionId}' declares ThemeUpdateMode.HotApply but ThemeHotApplyScriptPath is empty.");
+                if (!assetIds.Contains(themeScriptPath))
+                    throw new InvalidOperationException($"Runtime UI '{ui.UiDefinitionId}' references unknown Theme HotApply script asset '{themeScriptPath}'.");
+
+                var themeAsset = (descriptor.Assets ?? Array.Empty<PluginAssetDefinition>())
+                    .First(asset => string.Equals(asset.LogicalPath, themeScriptPath, StringComparison.OrdinalIgnoreCase));
+                var extension = Path.GetExtension(themeScriptPath);
+                var contentType = (themeAsset.ContentType ?? string.Empty).Trim();
+                var isJavaScript = extension.Equals(".js", StringComparison.OrdinalIgnoreCase)
+                    || extension.Equals(".mjs", StringComparison.OrdinalIgnoreCase)
+                    || contentType.StartsWith("text/javascript", StringComparison.OrdinalIgnoreCase)
+                    || contentType.StartsWith("application/javascript", StringComparison.OrdinalIgnoreCase);
+                if (!isJavaScript)
+                    throw new InvalidOperationException($"Runtime UI '{ui.UiDefinitionId}' ThemeHotApplyScriptPath must reference a JavaScript asset.");
+            }
+            else if (!string.IsNullOrWhiteSpace(themeScriptPath))
+            {
+                throw new InvalidOperationException($"Runtime UI '{ui.UiDefinitionId}' declares ThemeHotApplyScriptPath but ThemeUpdateMode is not HotApply.");
             }
         }
     }

@@ -2,26 +2,26 @@
 
 <html lang="ja">
 <head>
-<!-- TvAIr-UI-Version: 1.2.1 -->
+<!-- TvAIr-UI-Version: 1.2.2 -->
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.1"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.1"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.2"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.2"/>
 
-<link href="/tvair-ui-foundation.css?v=1.2.1" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.1-theme207" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.1-modules251" rel="stylesheet"/>
-<link href="/tvair-epg-panel.css?v=1.2.1" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.1-owner203" rel="stylesheet"/>
-<link href="/tvair-settings-host.css?v=1.2.1" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.2.2" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.2" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.2" rel="stylesheet"/>
+<link href="/tvair-epg-panel.css?v=1.2.2" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.2" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.2" rel="stylesheet"/>
 
-<script src="/tvair-theme.js?v=1.2.1"></script>
-<script src="/tvair-page-view-state.js?v=1.2.1"></script>
-<script src="/tvair-action-button-state.js?v=1.2.1"></script>
-<script src="/tvair-reservation-action-state.js?v=1.2.1"></script>
-<script>var TVA_IR_UI_VERSION="1.2.1";</script>
-<script src="/genre-shared.js?v=1.2.1"></script>
+<script src="/tvair-theme.js?v=1.2.2"></script>
+<script src="/tvair-page-view-state.js?v=1.2.2"></script>
+<script src="/tvair-action-button-state.js?v=1.2.2"></script>
+<script src="/tvair-reservation-action-state.js?v=1.2.2"></script>
+<script>var TVA_IR_UI_VERSION="1.2.2";</script>
+<script src="/genre-shared.js?v=1.2.2"></script>
 
 
 
@@ -102,10 +102,10 @@
 <div class="cfg-section">
 <div class="cfg-section-title">EPG取得</div>
 <div class="cfg-row">
-<label class="ui-checkbox-inline"><input class="ui-check-inline" id="cfg-epg-enabled" type="checkbox"/> 定期取得を有効にする</label>
+<label class="ui-checkbox-inline"><input class="ui-check-inline" id="cfg-epg-enabled" type="checkbox"/> 定時EPG取得を有効にする</label>
 </div>
 <div class="cfg-row">
-<label>定期取得時刻</label>
+<label>定時EPG取得時刻</label>
 <div class="cfg-inline">
 <select class="ui-input-w70" id="cfg-epg-hour"></select><span>時</span>
 <select class="ui-input-w70" id="cfg-epg-minute"></select><span>分</span>
@@ -121,10 +121,10 @@
 <div class="cfg-note" id="cfg-epg-depth-lock-note" style="display:none">EPG取得中は変更できません。完了後に変更できます。</div>
 </div>
 <div class="cfg-row">
-<label class="ui-checkbox-inline"><input class="ui-check-inline" id="cfg-epg-prerecord-enabled" type="checkbox"/> 放送前EPG確認を有効にする</label>
+<label class="ui-checkbox-inline"><input class="ui-check-inline" id="cfg-epg-prerecord-enabled" type="checkbox"/> 録画前EPG確認を有効にする</label>
 </div>
 <div class="cfg-row">
-<label>放送前EPG確認（時間追従）</label>
+<label>録画前EPG確認（時間追従）</label>
 <div class="cfg-slider-wrap">
 <input class="cfg-slider" id="cfg-epg-prerecord" oninput="updateCfgSliderLabels()" type="range"/>
 <span class="cfg-slider-value" id="cfg-epg-prerecord-label">-</span>
@@ -142,7 +142,7 @@
 <button class="cfg-browse" onclick="browseFile('folder','cfg-data-dir',this)">参照...</button>
 </div>
 <div class="cfg-note" id="cfg-data-dir-currentview"></div>
-<div class="cfg-note">EPGデータの保存場所を変更する場合に指定します。</div>
+<div class="cfg-note">番組情報や予約など、TvAIrのデータ保存場所を変更する場合に指定します。通常は変更する必要はありません。</div>
 </div>
 <div class="cfg-row">
 <label class="ui-checkbox-inline"><input class="ui-check-inline" id="cfg-startup-enabled" type="checkbox"/> Windows起動時にTvAIrを自動起動する</label>
@@ -167,6 +167,7 @@
 <div class="cfg-panel" id="cfg-panel-network">
 <div class="cfg-section">
 <div class="cfg-section-title cfg-network-master-title"><span>ネットワーク</span><label class="cfg-network-master-toggle"><span id="cfg-network-usage-label">ネットワーク利用OFF</span><input id="cfg-network-usage-enabled" type="checkbox"/><span class="cfg-network-master-switch" aria-hidden="true"></span></label></div>
+<div class="cfg-note">ネットワーク利用OFFの間は、インターネット・LAN通信を行わず、LANからの接続も受け付けません。進行中の通信も停止します。</div>
 </div>
 <div id="cfg-network-dependent">
 <div class="cfg-section">
@@ -198,7 +199,7 @@
 <div class="cfg-panel" id="cfg-panel-tvtest">
 <div class="cfg-section">
 <div class="cfg-section-title">TVTest</div>
-<div class="cfg-note">ch2はEPG取得対象の解決に使用します。ChSet.txtは番組表と予約対象の識別に使用します。</div>
+<div class="cfg-note">TVTestで使用しているチャンネル設定ファイルを指定します。</div>
 <div class="cfg-row">
 <label>TVTest.exe のフルパス</label>
 <div class="cfg-input-wrap">
@@ -273,7 +274,7 @@
 </colgroup>
 <thead>
 <tr>
-<th class="cfg-tuner-name-col">仮想枠</th>
+<th class="cfg-tuner-name-col">チューナー名</th>
 <th class="cfg-tuner-bon-col">BonDriver</th>
 <th class="cfg-tuner-wave-col">放送波</th>
 <th class="cfg-tuner-role-col">用途</th>
@@ -293,7 +294,7 @@
 <div class="cfg-row cfg-recording-option-row">
 <label>録画オプション</label>
 <div class="cfg-checkbox-stack">
-<label class="ui-checkbox-inline"><input class="ui-check-inline" id="cfg-show-tvairepgrec-taskbar-icon" type="checkbox"/> TvAIrEpgRecのタスクバーアイコンを表示する</label>
+<label class="ui-checkbox-inline"><input class="ui-check-inline" id="cfg-show-tvairepgrec-taskbar-icon" type="checkbox"/> 録画・EPG処理のタスクバーアイコンを表示する</label>
 </div>
 </div>
 <div class="cfg-row">
@@ -331,7 +332,7 @@
 <div class="cfg-row" id="cfg-chain-row">
 <label>チェーン予約</label>
 <label class="ui-checkbox-inline"><input class="ui-check-inline" id="cfg-pseudo-continuous" type="checkbox"/> チェーン予約を実行する</label>
-<div class="cfg-note">有効にすると番組表にチェーンボタンを表示します。前後の録画マージンが重なる場合は後番組を優先し、対象となる前番組名には「(C)」を表示します。</div>
+<div class="cfg-note">「後番組を優先する」を選ぶと設定できます。同じ放送局で連続する番組を前後とも欠損なく録画し各番組をマージンを確保した別のTSファイルとして保存します。番組表のチェーンボタンから追加でき予約リストでは「(C)」を表示します。無効にしても未開始の予約は削除せず通常予約として残します。</div>
 </div>
 
 </div>
@@ -448,18 +449,19 @@
 </div>
 </div>
 </div>
-<script src="/tvair-notification.js?v=1.2.1"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.1"></script>
-<script src="/tvair-epg-widget.js?v=1.2.1-ui7"></script>
+<script src="/tvair-notification.js?v=1.2.2"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.2"></script>
+<script src="/tvair-epg-widget.js?v=1.2.2"></script>
 <script>
 const PROGRAM_GUIDE_GEOMETRY=Object.freeze({
   dayStartHour:4,
   hourPx:720,
-  minCellHeight:90,
-  minEventSegmentHeight:140,
-  minGapCellMinutes:5
+  frameMinHeight:90,
+  timelineEventMinSpanHeight:140,
+  gapMinCellMinutes:5
 });
 const HOUR_PX=PROGRAM_GUIDE_GEOMETRY.hourPx,MIN_PX=HOUR_PX/60,DAY_SH=PROGRAM_GUIDE_GEOMETRY.dayStartHour;
+document.documentElement.style.setProperty('--tvair-program-guide-frame-min-height', PROGRAM_GUIDE_GEOMETRY.frameMinHeight+'px');
 
 // ProgramGuide cell action labels are intentionally short because the cell width/height is fixed.
 // Keep semantic names/log messages separate from in-cell labels.
@@ -474,11 +476,21 @@ const PROGRAM_CELL_ACTION_DEFINITIONS=Object.freeze({
   conflict:Object.freeze({label:'競合', className:'conflicted', presentation:'label'})
 });
 const PROGRAM_CELL_ACTIONS=new Set(Object.keys(PROGRAM_CELL_ACTION_DEFINITIONS));
+const PROGRAM_CELL_ACTION_MATRIX=Object.freeze({
+  recording:Object.freeze(['stop']),
+  none:Object.freeze([]),
+  conflicted:Object.freeze(['conflict']),
+  'reserved-enabled':Object.freeze(['cancel','disable']),
+  'reserved-disabled':Object.freeze(['cancel','enable']),
+  'reserved-fixed':Object.freeze(['cancel']),
+  'onair-unreserved':Object.freeze(['record-now']),
+  'future-unreserved':Object.freeze(['reserve'])
+});
 const PROGRAM_CELL_TRANSIENT_ACTION='pending';
 function getProgramCellActionDefinition(actionName){
   return PROGRAM_CELL_ACTION_DEFINITIONS[String(actionName||'')] || null;
 }
-let currentDate=guideTodayStr(),dayStartMs=0;
+let currentDate=guideTodayStr();
 
 // ProgramGuideDateState is the single owner of the visible broadcast-day range.
 // The guide exposes today through six days ahead, with each day starting at 04:00.
@@ -583,10 +595,61 @@ function hideHelpModal(){
   document.getElementById('help-overlay').classList.remove('open');
 }
 
-// 縦スクロール意図の記憶（日付変更後の縦位置復元に使用）
-// type: 'now'=現在時刻, 'hour'=時間帯指定, 'scroll'=手動スクロール
-let lastScrollIntent={type:'now'};
-let _suppressScrollIntent=false;
+// ProgramGuide vertical geometry is owned as one runtime projection.
+// The variable layout algorithm stays unchanged; all consumers read the same day's
+// day range and px<->time converters from this object instead of parallel globals.
+let currentProgramGuideTimelineGeometry=null;
+function setCurrentProgramGuideTimelineGeometry(dayStartMs, layout){
+  const start=Number(dayStartMs);
+  if(!Number.isFinite(start) || !layout || typeof layout.msToPx!=='function' || typeof layout.pxToMs!=='function'){
+    currentProgramGuideTimelineGeometry=null;
+    return null;
+  }
+  currentProgramGuideTimelineGeometry=Object.freeze({
+    dayStartMs:start,
+    dayEndMs:start+24*60*60000,
+    totalPx:Number(layout.totalPx)||0,
+    msToPx:layout.msToPx,
+    pxToMs:layout.pxToMs
+  });
+  return currentProgramGuideTimelineGeometry;
+}
+function getCurrentProgramGuideTimelineGeometry(){
+  return currentProgramGuideTimelineGeometry;
+}
+
+// ProgramGuide縦位置の正本。
+// 生のscrollTop(px)は描画結果であり、日付/EPG内容ごとにtimeline geometryが変わるため永続正本にしない。
+// 04:00起点の表示時刻（分）だけを保持し、各描画時にその日のtimelineへ一方向に投影する。
+// 正本更新はユーザー縦スクロール、時刻ジャンプ、初期復元など明示的な表示位置決定だけに限定し、
+// render/load/refresh/restore後のpxを逆変換して正本へ書き戻してはならない。
+let programGuideVerticalMinute=null;
+let programGuideAlignNowAfterNextRender=false;
+function clampProgramGuideVerticalMinute(value){
+  const n=Number(value);
+  return Number.isFinite(n)?Math.max(0,Math.min(24*60,n)):0;
+}
+function programGuideVerticalMinuteFromScrollTop(scrollTop){
+  const geometry=getCurrentProgramGuideTimelineGeometry();
+  if(!geometry) return programGuideVerticalMinute;
+  return clampProgramGuideVerticalMinute((geometry.pxToMs(Number(scrollTop)||0)-geometry.dayStartMs)/60000);
+}
+function commitProgramGuideVerticalPositionFromUserScroll(gs){
+  if(!gs) return programGuideVerticalMinute;
+  const minute=programGuideVerticalMinuteFromScrollTop(gs.scrollTop);
+  if(Number.isFinite(Number(minute))) programGuideVerticalMinute=clampProgramGuideVerticalMinute(minute);
+  return programGuideVerticalMinute;
+}
+function programGuideScrollTopFromVerticalMinute(minute){
+  const geometry=getCurrentProgramGuideTimelineGeometry();
+  if(!geometry) return 0;
+  const targetMs=geometry.dayStartMs+clampProgramGuideVerticalMinute(minute)*60000;
+  return Math.max(0,Math.round(geometry.msToPx(targetMs)));
+}
+function setProgramGuideVerticalMinute(minute){
+  programGuideVerticalMinute=clampProgramGuideVerticalMinute(minute);
+  return programGuideVerticalMinute;
+}
 
 // ProgramGuideFloatingActionController.
 //
@@ -594,6 +657,7 @@ let _suppressScrollIntent=false;
 // ・「▼翌日へ」は guide-scroll の下端到達を示す補助アクション。
 // ・表示ONは「ユーザー入力を伴う縦スクロール」だけに限定する。
 // ・現在時刻復元、日付切替、renderGuide、refreshGuide、restoreScroll、横スクロールでは絶対に表示ONしない。
+// ・プログラム操作のscroll ownershipは時間で解除せず、次の実ユーザー入力まで保持する。
 // ・style.display の直書き分散は禁止。hidden / aria-hidden / is-visible のみで制御する。
 const ProgramGuideFloatingActionController=(()=>{
   const state={
@@ -601,13 +665,11 @@ const ProgramGuideFloatingActionController=(()=>{
     btn:null,
     lastTop:0,
     lastLeft:0,
-    userInputUntil:0,
     pointerDown:false,
-    suppressUntil:0,
+    userScrollActive:false,
+    programmaticScrollOwner:null,
     initialized:false
   };
-
-  function now(){ return Date.now(); }
 
   function metrics(){
     const gs=state.gs;
@@ -647,25 +709,23 @@ const ProgramGuideFloatingActionController=(()=>{
   }
 
   function markUserInput(){
-    state.userInputUntil=now()+900;
+    // User input is the only event that can release programmatic scroll ownership.
+    // No timeout is used: render/layout induced scroll events remain non-authoritative
+    // until an actual user gesture starts.
+    state.programmaticScrollOwner=null;
+    state.userScrollActive=true;
   }
 
-  function suppress(reason){
-    state.suppressUntil=now()+250;
-    hide(reason||"programmatic");
+  function beginProgrammaticScrollOwnership(reason){
+    state.programmaticScrollOwner=String(reason||"programmatic");
+    state.userScrollActive=false;
+    hide(state.programmaticScrollOwner);
   }
 
   function syncHeader(){
     const gs=state.gs;
     const header=document.getElementById("ch-header");
     if(gs && header) header.style.transform="translateX(-"+gs.scrollLeft+"px)";
-  }
-
-  function isUserVerticalScroll(topChanged){
-    if(!topChanged) return false;
-    if(_suppressScrollIntent) return false;
-    if(now() < state.suppressUntil) return false;
-    return state.pointerDown || now() < state.userInputUntil;
   }
 
   function onScroll(){
@@ -675,21 +735,29 @@ const ProgramGuideFloatingActionController=(()=>{
 
     const topChanged=Math.abs(gs.scrollTop - state.lastTop) > 1;
     const leftChanged=Math.abs(gs.scrollLeft - state.lastLeft) > 1;
-    const userVertical=isUserVerticalScroll(topChanged);
+    const programmaticOwner=state.programmaticScrollOwner;
+    const userVertical=topChanged && !programmaticOwner && (state.pointerDown || state.userScrollActive);
 
     state.lastTop=gs.scrollTop;
     state.lastLeft=gs.scrollLeft;
 
+    // Vertical-position ownership contract:
+    // while a render/restore owner exists, every scroll event (including delayed
+    // browser layout/scroll-anchoring events) is projection-only and must never
+    // flow back into the canonical minute.  Only an actual user gesture releases
+    // that owner; from then on vertical movement is authoritative user input.
+    if(topChanged && !programmaticOwner){
+      commitProgramGuideVerticalPositionFromUserScroll(gs);
+    }
+
     if(userVertical){
-      lastScrollIntent={type:'scroll'};
       if(metrics().atBottom) show("userVerticalBottom");
       else hide("userVerticalNotBottom");
       return;
     }
 
-    // 横スクロールだけ、またはプログラム復元/再描画起因のスクロールは表示ONしない。
-    if(leftChanged || topChanged || now() < state.suppressUntil || _suppressScrollIntent){
-      hide("nonUserVerticalScroll");
+    if(leftChanged || topChanged || programmaticOwner){
+      hide(programmaticOwner ? "programmaticScrollOwner" : "nonUserVerticalScroll");
     }
   }
 
@@ -729,11 +797,14 @@ const ProgramGuideFloatingActionController=(()=>{
       state.lastTop=gs.scrollTop;
       state.lastLeft=gs.scrollLeft;
     }
-    suppress(reason||"programmatic");
+    // Ownership intentionally remains active after assignment. Scroll events can be
+    // delivered later, or be caused by subsequent DOM/layout changes.  The next real
+    // user gesture, not elapsed time, releases the owner.
+    beginProgrammaticScrollOwnership(reason||"programmatic");
   }
 
   function beforeProgrammaticScroll(reason){
-    suppress(reason||"beforeProgrammatic");
+    beginProgrammaticScrollOwnership(reason||"beforeProgrammatic");
   }
 
   function afterRender(reason){
@@ -743,7 +814,7 @@ const ProgramGuideFloatingActionController=(()=>{
       state.lastTop=gs.scrollTop;
       state.lastLeft=gs.scrollLeft;
     }
-    suppress(reason||"render");
+    beginProgrammaticScrollOwnership(reason||"render");
   }
 
   return {bind, hide, beforeProgrammaticScroll, afterProgrammaticScroll, afterRender, syncHeader};
@@ -785,19 +856,23 @@ function buildDateNav(){
 }
 
 function scrollToNow(){
-  lastScrollIntent={type:'now'};
   const todayDs=guideTodayStr();
   if(currentDate!==todayDs){
-    // 日付が違う場合: 今日に切り替え（loadGuide内でleft=0を渡して左端リセット）
+    // 日付が違う場合: 今日の現在時刻位置を新しいtimelineで正本化する。
+    programGuideVerticalMinute=null;
+    programGuideAlignNowAfterNextRender=true;
     loadGuide(todayDs, null, 0, 'scrollToNow-date-change');
   } else {
     // 同日の場合: 縦を現在時刻・横を左端にリセット
-    if(!window._msToPx) return;
+    const geometry=getCurrentProgramGuideTimelineGeometry();
+    if(!geometry) return;
     const currentNowMs=Date.now();
-    const nowPx=Math.round(window._msToPx(currentNowMs));
+    const nowPx=Math.round(geometry.msToPx(currentNowMs));
     if(nowPx>0){
       const gs=document.getElementById("guide-scroll");
-      restoreScroll(gs, Math.max(0,nowPx-150), 0);
+      const targetTop=Math.max(0,nowPx-150);
+      setProgramGuideVerticalMinute(programGuideVerticalMinuteFromScrollTop(targetTop));
+      restoreScroll(gs, targetTop, 0);
     }
   }
 }
@@ -835,12 +910,16 @@ const GENRE_DEFS=(window.TvAirGenre && window.TvAirGenre.DEFS) || [];
 const LIGHT_GENRE_COLORS=(window.TvAirGenre && window.TvAirGenre.LIGHT_COLORS) || {};
 const DARK_GENRE_COLORS=(window.TvAirGenre && window.TvAirGenre.DARK_COLORS) || {};
 function resolveEffectiveThemeName(theme){
-  const t=String(theme || window._cfgSelectedSystemTheme || window._cfgServerSystemTheme || '').toLowerCase();
-  if(t==='dark' || t==='light') return t;
-  const attr=(document.documentElement.getAttribute('data-tvair-effective-theme') || document.body.getAttribute('data-tvair-effective-theme') || document.documentElement.getAttribute('data-theme') || document.body.getAttribute('data-theme') || '').toLowerCase();
-  if(attr==='dark' || document.body.classList.contains('theme-dark')) return 'dark';
-  return 'light';
+  const explicit=String(theme||'').toLowerCase();
+  if(explicit==='light'||explicit==='dark') return explicit;
+  if(window.TvAIrTheme && typeof window.TvAIrTheme.getEffective==='function'){
+    const applied=String(window.TvAIrTheme.getEffective()||'').toLowerCase();
+    if(applied==='light'||applied==='dark') return applied;
+  }
+  const attr=(document.documentElement.getAttribute('data-tvair-effective-theme') || document.body.getAttribute('data-tvair-effective-theme') || '').toLowerCase();
+  return attr==='dark'?'dark':'light';
 }
+
 function genreCssVarName(cls){ return '--genre-'+String(cls||'g-other').replace(/^g-/,''); }
 function normalizeHexColor(v, fallback){ return /^#[0-9a-fA-F]{6}$/.test(String(v||'').trim()) ? String(v).trim().toLowerCase() : fallback; }
 function normalizeGenreColorMap(map, fallbackMap){
@@ -859,6 +938,7 @@ function normalizeThemeGenrePalettes(settings){
     dark: normalizeGenreColorMap((tp && (tp.dark || tp.Dark)) || DARK_GENRE_COLORS, DARK_GENRE_COLORS)
   };
 }
+
 function currentGenreTheme(){
   return resolveEffectiveThemeName(window._cfgSelectedSystemTheme || window._cfgServerSystemTheme || getSystemThemeSetting());
 }
@@ -894,6 +974,7 @@ async function loadGenreColorSettings(){
     if(!r.ok) return applyThemeLinkedGenrePalette(normalizeThemeGenrePalettes({}), currentGenreTheme());
     const d=await r.json();
     await hydrateThemeFromServerSettings(d, 'loadGenreColorSettings');
+    if(window.TvAirGenre && typeof window.TvAirGenre.normalizeThemePalettes==='function') window.TvAirGenre.normalizeThemePalettes(d);
     window._cfgThemeGenrePalettes=normalizeThemeGenrePalettes(d);
     window._cfgOriginalThemeGenrePalettes=JSON.parse(JSON.stringify(window._cfgThemeGenrePalettes));
     return applyThemeLinkedGenrePalette(window._cfgThemeGenrePalettes, currentGenreTheme());
@@ -965,6 +1046,23 @@ function closeGenrePalette(){
   if(pop) pop.classList.remove('open');
   _genrePaletteTarget=null;
 }
+function publishGenrePalettePreviewToHost(palettes, effectiveTheme){
+  // SETTINGS_GENRE_PALETTE_PREVIEW_SINGLE_SOURCE_CONTRACT
+  // The settings iframe never remaps individual genre indices. It sends the complete key-based palette
+  // to the parent host, and the parent applies it through TvAirGenre (the same path used by ProgramGuide).
+  if(!document.body.classList.contains('tvair-settings-frame') || !window.parent || window.parent===window) return;
+  try{
+    window.parent.postMessage({
+      contract:'tvair-settings-host',
+      action:'genre-preview',
+      detail:{
+        effectiveTheme:resolveEffectiveThemeName(effectiveTheme || currentGenreTheme()),
+        themeGenrePalettes:normalizeThemeGenrePalettes({themeGenrePalettes:palettes})
+      }
+    }, location.origin);
+  }catch(_){}
+}
+
 function setGenreColorButtonValue(btn, color, liveApply){
   const theme=btn.dataset.genreTheme || currentGenreTheme();
   const normalized=normalizeHexColor(color, (theme==='dark'?DARK_GENRE_COLORS:LIGHT_GENRE_COLORS)[btn.dataset.genreCls] || LIGHT_GENRE_COLORS['g-other']);
@@ -976,7 +1074,9 @@ function setGenreColorButtonValue(btn, color, liveApply){
   if(liveApply){
     const palettes=collectThemeGenrePalettesFromSettings();
     window._cfgThemeGenrePalettes=palettes;
-    applyThemeLinkedGenrePalette(palettes, currentGenreTheme());
+    const effectiveTheme=currentGenreTheme();
+    applyThemeLinkedGenrePalette(palettes, effectiveTheme);
+    publishGenrePalettePreviewToHost(palettes, effectiveTheme);
   }
   updateGenrePaletteSelection(normalized);
 }
@@ -1084,6 +1184,7 @@ function resetGenreColorsToDefault(){
   window._cfgThemeGenrePalettes=palettes;
   renderGenreColorSettings(palettes);
   applyThemeLinkedGenrePalette(palettes, theme);
+  publishGenrePalettePreviewToHost(palettes, theme);
   closeGenrePalette();
 }
 // 番組表の寸法定数は、読込済みのテーマ／UI CSS変数を正本として一度だけ取得する。
@@ -1115,9 +1216,10 @@ const _cellConst={
 let activeGenreFilter=null; // 現在フィルター中のCSSクラス or null
 let _descMeasureDiv=null;
 let _layoutMeasureDiv=null;
+let _programCellVerticalChromeCache=null;
 const _skeletonMeasureCache=new Map();
 const _descHtmlCache=new Map();
-const _measureCacheLimit={ skeleton:512, desc:2048 };
+const _measureCacheLimit={ skeleton:2048, desc:2048 };
 
 function cacheRemember(cache, key, value, limit){
   if(cache.size >= limit) cache.clear();
@@ -1128,6 +1230,7 @@ function cacheRemember(cache, key, value, limit){
 function clearProgramCellMeasureCaches(){
   _skeletonMeasureCache.clear();
   _descHtmlCache.clear();
+  _programCellVerticalChromeCache=null;
 }
 
 function ensureLayoutMeasureDiv(){
@@ -1213,12 +1316,14 @@ function createProgButtonsWrap(defs, actionLayoutProfile){
   wrap.className='prog-btns';
 
   // ProgramCellActionSlotLayoutContract:
-  // The top action lane is always a two-column grid.  Primary actions occupy the left
-  // slot and enable/disable occupies the right slot; an unused slot is genuinely empty.
+  // Action order comes only from PROGRAM_CELL_ACTION_MATRIX.  The top lane keeps the
+  // primary action followed by enable/disable when present; Chain owns the reserved
+  // second future row. Buttons keep their natural/minimum width and are never stretched
+  // to fill the ProgramCell width.
   // IMPORTANT UI INVARIANT: action buttons belong to the normal content flow immediately
   // after title/outline/detail.  NEVER push .prog-footer to the physical bottom of the cell
   // (for example with margin-top:auto, absolute positioning, bottom:0, or equivalent).
-  // ボタンを最底辺にしたい、ボタンを幅いっぱいに広げたい場合は開発者の承認を得ること
+  // Visible action buttons remain in normal content flow and keep their natural button/slot width.
   // Body-text stability is achieved only by the independent action-lane height reservation;
   // it must never be achieved by bottom-anchoring the visible buttons.
   // Future cells reserve a second action row in the body budget so Chain eligibility does not
@@ -1303,12 +1408,17 @@ function measureProgramSkeleton(measureDiv, startHtml, titleHtml, includeTitle, 
 
 function measureProgramCellVerticalChrome(measureDiv){
   // ProgramCellInnerGeometryContract: padding and borders consume frame height too.
-  // Read the actual ProgramCell CSS rather than relying on a parallel arithmetic copy.
+  // The hidden measure surface has one CSS-owned ProgramCell frame for the current theme.
+  // Re-reading the same computed style for every ~2,000 daily cells forces needless style
+  // resolution during date navigation.  Cache only this invariant frame value; theme/runtime
+  // CSS changes clear the cache through clearProgramCellMeasureCaches().
+  if(Number.isFinite(_programCellVerticalChromeCache)) return _programCellVerticalChromeCache;
   const cs=getComputedStyle(measureDiv);
-  return (parseFloat(cs.paddingTop)||0)
+  _programCellVerticalChromeCache=(parseFloat(cs.paddingTop)||0)
     + (parseFloat(cs.paddingBottom)||0)
     + (parseFloat(cs.borderTopWidth)||0)
     + (parseFloat(cs.borderBottomWidth)||0);
+  return _programCellVerticalChromeCache;
 }
 
 function measureDescCandidateHeight(measureDiv, html){
@@ -1319,11 +1429,6 @@ function measureDescCandidateHeight(measureDiv, html){
   const rectH=desc.getBoundingClientRect().height;
   const scrollH=desc.scrollHeight || 0;
   return Math.max(rectH, scrollH);
-}
-
-function buildDescHtmlByVerifiedLayout(cellText, durMin, textAvail, measureWidth, measureDiv){
-  // Backward-compatible local entry; actual fitting is owned by one DOM-measured contract.
-  return buildDescHtmlFromActualFit(cellText,durMin,textAvail,measureWidth,measureDiv);
 }
 
 function findProgramGuideRecordingId(evKey, ev){
@@ -1472,8 +1577,8 @@ function buildProgramCellChromeContract(ev, frame){
   const endMs=Number(frame && frame.endMs);
   const rawStartMs=Number(frame && frame.rawStartMs);
   const rawEndMs=Number(frame && frame.rawEndMs);
-  const guideEndMs=dayStartMs+24*60*60000;
-  const rawCrossesGuideBoundary=Number.isFinite(rawStartMs) && Number.isFinite(rawEndMs) && (rawStartMs < dayStartMs || rawEndMs > guideEndMs);
+  const geometry=getCurrentProgramGuideTimelineGeometry();
+  const rawCrossesGuideBoundary=!!geometry && Number.isFinite(rawStartMs) && Number.isFinite(rawEndMs) && (rawStartMs < geometry.dayStartMs || rawEndMs > geometry.dayEndMs);
   const isContPrev=!!(frame && frame.isContPrev);
   const isContNext=!!(frame && frame.isContNext);
   const stTime=(isContPrev ? '┆' : '') + fmt(new Date(rawCrossesGuideBoundary ? rawStartMs : startMs));
@@ -1559,8 +1664,8 @@ function buildProgramCellRenderStructureContract(div, ev, source){
   // release_contract ProgramCellRenderStructureContract:
   // initial render and reservation-state diff reflow share one structure builder for
   // frame lanes, time/title chrome, current event-time state, and reservation UI
-  // signature.  Callers may still decide actions, but they must not recalculate
-  // these inputs independently.
+  // signature and the canonical action set.  Callers must not recalculate action
+  // eligibility, ordering, or mode independently.
   const src=source || {};
   const fromDiv=div || null;
   const frame=src.frame || buildProgramCellFrameLayoutContract(ev, {
@@ -1579,58 +1684,65 @@ function buildProgramCellRenderStructureContract(div, ev, source){
   const isEnded=timeState.isEnded;
   const isOnAir=timeState.isOnAir;
   const displayState=src.displayState || getProgramDisplayState(evKey, ev);
-  const actionState=src.actionState || buildProgramCellActionStateStructureContract(ev, evKey, isOnAir, isEnded, displayState, nowMs);
+  const actionState=src.actionState || buildProgramCellActionStateStructureContract(ev, evKey, timeState, displayState, nowMs);
   const reservationSignature=src.nextReservationSignature || programReservationUiSignature(actionState);
   return { frame, chrome, evKey, nowMs, timeState, isEnded, isOnAir, displayState, reservationSignature, actionState };
 }
 
 
-function resolveProgramCellActionSetContract(ev, evKey, isOnAir, isEnded, displayState){
+function resolveProgramCellActionSetContract(ev, evKey, timeState, displayState){
   // release_contract ProgramCellActionResolutionContract:
-  // ProgramCell actions are resolved from the current program, reservation, recording, and conflict projection.
-  // Chain is a future-only optional action beside ordinary reserve.  It never replaces
-  // reserve, never appears on-air, and never owns reservation/recording/conflict states.
+  // This is the single ProgramCell action SSOT. Initial render, reservation/recording
+  // diff refresh, clock-boundary refresh, click validation, and button projection all
+  // consume this exact resolver and PROGRAM_CELL_ACTION_MATRIX. No caller owns a second
+  // action/mode table. Chain is a future-only optional action appended to ordinary Reserve;
+  // it never replaces Reserve and never becomes a cell mode.
   const state=displayState || getProgramDisplayState(evKey, ev);
+  const time=(timeState && typeof timeState==='object') ? timeState : resolveProgramEventTimeState(ev);
+  const isEnded=time.isEnded===true;
+  const isOnAir=time.isOnAir===true;
   const offair=isProgramOffAirEvent(ev);
   const unsafe=!offair && isProgramGuideActionUnsafeEvent(ev);
   const reservedInfo=state.reservedInfo || (window.reservedMap&&window.reservedMap.get(evKey)) || null;
   const isEnabled=!reservedInfo || reservedInfo.isEnabled !== false;
   const canUserChain=!offair && !unsafe && canShowChainButtonForEvent(ev, evKey, state, isEnded, isOnAir, state.isRecording);
-  const actions=[];
-  let stateKind='none';
 
-  // Recording is canonical runtime state and must outrank the EPG end boundary.
-  // A recording that remains active after the scheduled end still needs its stop action;
-  // only non-recording cells become actionless when off-air, unsafe, or ended.
+  let stateKind='none';
+  let matrixKey='none';
   if(state.isRecording){
     stateKind='recording';
-    actions.push('stop');
+    matrixKey='recording';
   }else if(offair || unsafe || isEnded){
     stateKind='none';
+    matrixKey='none';
   }else if(state.isConflicted){
     stateKind='conflicted';
-    actions.push('conflict');
+    matrixKey='conflicted';
   }else if(state.isReserved){
     stateKind='reserved';
-    actions.push('cancel');
-    if(canToggleReservationFromProgram(reservedInfo)) actions.push(isEnabled ? 'disable' : 'enable');
+    matrixKey=canToggleReservationFromProgram(reservedInfo)
+      ? (isEnabled ? 'reserved-enabled' : 'reserved-disabled')
+      : 'reserved-fixed';
   }else if(isOnAir){
     stateKind='onair-unreserved';
-    actions.push('record-now');
+    matrixKey='onair-unreserved';
   }else{
     stateKind='future-unreserved';
-    actions.push('reserve');
-    if(canUserChain) actions.push('chain');
+    matrixKey='future-unreserved';
   }
 
-  return { state, offair, unsafe, stateKind, actions, canUserChain, reservedInfo, isEnabled };
+  const baseActions=PROGRAM_CELL_ACTION_MATRIX[matrixKey] || PROGRAM_CELL_ACTION_MATRIX.none;
+  const actions=baseActions.slice();
+  if(matrixKey==='future-unreserved' && canUserChain) actions.push('chain');
+
+  return { state, timeState:time, isEnded, isOnAir, offair, unsafe, stateKind, matrixKey, actions, canUserChain, reservedInfo, isEnabled };
 }
 
-function buildProgramCellActionStateStructureContract(ev, evKey, isOnAir, isEnded, displayState, nowMs){
+function buildProgramCellActionStateStructureContract(ev, evKey, timeState, displayState, nowMs){
   // release_contract ProgramCellActionStateStructureContract:
-  // Initial render and reservation-diff reflow consume the same explicit action set.
+  // Initial render, reservation diff, and time-boundary refresh consume the same action set.
   // The resolved action set is the only source for rendering and dispatch validation.
-  const resolved=resolveProgramCellActionSetContract(ev, evKey, isOnAir, isEnded, displayState);
+  const resolved=resolveProgramCellActionSetContract(ev, evKey, timeState, displayState);
   const transient=(typeof getProgramGuideActionTransientState === 'function') ? getProgramGuideActionTransientState(ev, resolved.state, nowMs) : null;
   const mode=transient ? 'transient' : resolved.stateKind;
   const actionClasses=[];
@@ -1642,7 +1754,7 @@ function buildProgramCellActionStateStructureContract(ev, evKey, isOnAir, isEnde
   // A normal future programme always reserves two action rows, whether Chain is currently
   // eligible or not.  On-air/recording/conflict terminal projections use one row.  The
   // profile is time/state structure, not a consequence of the current button count.
-  const isFutureActionCell=!resolved.offair && !resolved.unsafe && !isEnded && !isOnAir && !resolved.state.isRecording;
+  const isFutureActionCell=!resolved.offair && !resolved.unsafe && !resolved.isEnded && !resolved.isOnAir && !resolved.state.isRecording;
   const actionLayoutProfile=isFutureActionCell ? 'future-two-row' : (resolved.actions.length>0 || transient ? 'single-row' : 'none');
   return Object.assign({}, resolved, { mode, baseMode:resolved.stateKind, transient, actionClasses, actionLayoutProfile });
 }
@@ -1681,9 +1793,9 @@ function applyProgramCellActionStateDatasetContract(div, actionState){
   (a.actionClasses||[]).forEach(cls=>{ if(cls) div.classList.add(cls); });
 }
 
-function buildProgramButtonDefs(div, ev, evKey, isOnAir, isEnded, displayState, actionState){
+function buildProgramButtonDefs(div, ev, evKey, actionState){
   const defs=[];
-  const action=actionState || buildProgramCellActionStateStructureContract(ev, evKey, isOnAir, isEnded, displayState);
+  const action=actionState || buildProgramCellActionStateStructureContract(ev, evKey, null, null, Date.now());
   applyProgramCellActionStateDatasetContract(div, action);
   if(action.offair || action.unsafe){
     return defs;
@@ -1697,7 +1809,7 @@ function buildProgramButtonDefs(div, ev, evKey, isOnAir, isEnded, displayState, 
     def.expectedIdentity=identity;
     return def;
   };
-  const state = action.state || displayState || getProgramDisplayState(evKey);
+  const state = action.state || getProgramDisplayState(evKey, ev);
   const transient = action.transient || null;
 
   // release_contract ProgramGuideActionTransientOwnershipContract:
@@ -1808,6 +1920,12 @@ function buildDescHtmlFromActualFit(cellText, durMin, textAvail, measureWidth, m
     if(!html) return true;
     return measureDescCandidateHeight(measureDiv,html) <= avail + 0.5;
   };
+  // Most ProgramCells can display all available body text. Measure that exact final
+  // candidate once before entering the priority-by-priority trimming path; this keeps
+  // the rendered result identical while avoiding several forced-layout reads per cell.
+  const fullHtml=renderHtml(outline,detail,items);
+  if(fits(fullHtml)) return remember(fullHtml);
+
   const fitPrefix=function(text, makeHtml){
     const glyphs=Array.from(String(text||''));
     if(glyphs.length===0) return {text:'', complete:true};
@@ -1843,12 +1961,33 @@ function buildDescHtmlFromActualFit(cellText, durMin, textAvail, measureWidth, m
     i=picked.text;
   }
 
-  const html=renderHtml(o,d,i);
-  return remember(fits(html) ? html : '');
+  // fitPrefix() only returns text from a candidate already proven to fit, so the
+  // assembled final HTML does not need another synchronous DOM measurement here.
+  return remember(renderHtml(o,d,i));
 }
 
-// ── UIトレースはリリース運用では送信しない ─────────────────────────
-function uiTrace(action, detail='', reason=''){ }
+// ── ProgramGuide UI trace ─────────────────────────────────────────────
+// The server enables this only by a Developer-Diagnostics-only response header on
+// /api/epg/events. Public builds never emit that header and never route the trace API,
+// so there is no public-build probe, queue, timer, or diagnostic network traffic.
+window.__tvairProgramGuideUiTraceEnabled=false;
+function uiTrace(action, detail='', reason=''){
+  if(window.__tvairProgramGuideUiTraceEnabled!==true) return;
+  try{
+    const payload=JSON.stringify({
+      action:String(action||'').slice(0,96),
+      reason:String(reason||'').slice(0,96),
+      detail:String(detail||'').slice(0,4096),
+      pageDate:String(currentDate||'').slice(0,32),
+      hrefPath:String(location.pathname||'').slice(0,128)
+    });
+    if(navigator.sendBeacon){
+      navigator.sendBeacon('/api/debug/program-guide-ui-trace', new Blob([payload],{type:'application/json'}));
+      return;
+    }
+    fetch('/api/debug/program-guide-ui-trace',{method:'POST',headers:{'Content-Type':'application/json'},body:payload,keepalive:true,cache:'no-store'}).catch(()=>{});
+  }catch(_){}
+}
 
 function guideDomSummary(){
   try{
@@ -1858,6 +1997,7 @@ function guideDomSummary(){
     return 'hidden='+document.hidden
       +' visibility='+document.visibilityState
       +' top='+(gs?gs.scrollTop:-1)
+      +' verticalMinute='+(programGuideVerticalMinute===null?'null':Math.round(programGuideVerticalMinute*100)/100)
       +' left='+(gs?gs.scrollLeft:-1)
       +' headerChildren='+(hdr?hdr.children.length:-1)
       +' colChildren='+(ccols?ccols.children.length:-1)
@@ -1891,14 +2031,13 @@ function toggleWave(group, btn){
   // 放送波ボタンは、該当放送波の番組表列を表示する / 表示しないためのトグル。
   // APIデータが変わっていない場合でも、現在保持している番組表データを必ず再描画する。
   const gs=document.getElementById("guide-scroll");
-  const savedTop=gs ? gs.scrollTop : 0;
+  const savedMinute=programGuideVerticalMinute;
   const savedLeft=gs ? gs.scrollLeft : 0;
   if(lastGuideData){
-    renderGuide(lastGuideData, 'wave-toggle:'+group);
-    if(gs) restoreScroll(gs, savedTop, savedLeft);
+    renderGuide(lastGuideData, 'wave-toggle:'+group, savedMinute, savedLeft);
     uiTrace('wave-toggle-after-render', guideDomSummary(), 'manual');
   }else{
-    loadGuide(currentDate, savedTop, savedLeft, 'wave-toggle:'+group);
+    loadGuide(currentDate, savedMinute, savedLeft, 'wave-toggle:'+group);
   }
 }
 
@@ -2054,11 +2193,12 @@ window.addEventListener('tvair-theme-state-applied', ev=>{
 });
 
 function scrollToHour(hourOffset){
-  if(!window._msToPx) return;
-  const targetMs=dayStartMs+(hourOffset-DAY_SH)*60*60000;
-  const targetPx=Math.round(window._msToPx(targetMs));
+  const geometry=getCurrentProgramGuideTimelineGeometry();
+  if(!geometry) return;
+  const targetMs=geometry.dayStartMs+(hourOffset-DAY_SH)*60*60000;
+  const targetPx=Math.round(geometry.msToPx(targetMs));
   if(targetPx>=0){
-    lastScrollIntent={type:'hour', value:hourOffset};
+    setProgramGuideVerticalMinute(hourOffset-DAY_SH);
     const gs=document.getElementById("guide-scroll");
     restoreScroll(gs, Math.max(0,targetPx), gs.scrollLeft);
   }
@@ -2072,7 +2212,7 @@ function jumpNextDay(){
   const next=ProgramGuideDateState.next(currentDate);
   ProgramGuideFloatingActionController.hide("jumpNextDay");
   // 翌日の04:00（scrollTop=0）へ移動、水平位置は保持
-  lastScrollIntent={type:'hour', value:DAY_SH};
+  setProgramGuideVerticalMinute(0);
   loadGuide(next, 0, null, 'jumpNextDay');
 }
 
@@ -2190,22 +2330,24 @@ function buildReservationMaps(rsvData){
 
 // スクロール位置を復元し、ヘッダーのtransformを同期する（縦横一元管理）
 function restoreScroll(gs, top, left){
-  _suppressScrollIntent=true;
   ProgramGuideFloatingActionController.beforeProgrammaticScroll("restoreScroll");
   gs.scrollTop=top;
   gs.scrollLeft=left;
   ProgramGuideFloatingActionController.syncHeader();
   ProgramGuideFloatingActionController.afterProgrammaticScroll("restoreScroll");
-  requestAnimationFrame(()=>{
-    _suppressScrollIntent=false;
-    ProgramGuideFloatingActionController.afterProgrammaticScroll("restoreScroll-raf");
-  });
 }
 
 // 日付変更時に呼ぶ（全データ再取得→再描画）
-// scrollTopTo: null=intent準拠、数値=その位置へ強制移動
+// verticalMinuteTo: null=現在の時刻位置正本を保持、数値=04:00起点の分位置へ移動
 // scrollLeftTo: null=現在位置を保持、数値=その位置へ強制移動
-async function loadGuide(date, scrollTopTo=null, scrollLeftTo=null, traceReason='loadGuide'){
+async function loadGuide(date, verticalMinuteTo=null, scrollLeftTo=null, traceReason='loadGuide'){
+  // ProgramGuideFullLoadOwnershipContract:
+  // Explicit date navigation is the authoritative full-load owner.  A 60-second background
+  // refresh that started for the previously visible date must not continue competing with it
+  // or later project the old date back into the DOM.
+  if(guideFullRefreshAbortController){
+    try{ guideFullRefreshAbortController.abort(); }catch(_){}
+  }
   const request=ProgramGuideDateState.beginLoad(date);
   const targetDate=request.date;
   updateDateNav();
@@ -2214,15 +2356,34 @@ async function loadGuide(date, scrollTopTo=null, scrollLeftTo=null, traceReason=
   const savedLeft=scrollLeftTo!==null ? scrollLeftTo : gs.scrollLeft;
   const traceStart=performance.now();
   ProgramGuideFloatingActionController.hide("dateLoadStart");
-  uiTrace('loadGuide-start', 'date='+targetDate+' requestedDate='+date+' generation='+request.generation+' scrollTopTo='+scrollTopTo+' scrollLeftTo='+scrollLeftTo+' '+guideDomSummary(), traceReason);
+  const requestedVerticalMinute=verticalMinuteTo!==null
+    ? setProgramGuideVerticalMinute(verticalMinuteTo)
+    : programGuideVerticalMinute;
+  uiTrace('loadGuide-start', 'date='+targetDate+' requestedDate='+date+' generation='+request.generation+' verticalMinute='+requestedVerticalMinute+' scrollLeftTo='+scrollLeftTo+' '+guideDomSummary(), traceReason);
   try{
     const fetchJson=async(url, fallback)=>{
+      const timingEnabled=window.__tvairProgramGuideUiTraceEnabled===true;
+      const started=timingEnabled?performance.now():0;
       const response=await fetch(url,{signal:request.signal,cache:"no-store"});
+      // This header exists only in Developer Diagnostics builds. Once observed,
+      // client timing remains enabled for this page lifetime.
+      if(response.headers.get('X-TvAIr-ProgramGuide-UiTrace')==='1') window.__tvairProgramGuideUiTraceEnabled=true;
+      const afterResponse=window.__tvairProgramGuideUiTraceEnabled===true?performance.now():0;
       if(!response.ok){
         if(fallback!==undefined) return fallback;
         throw new Error('HTTP '+response.status+' '+url);
       }
-      return response.json();
+      const value=await response.json();
+      if(window.__tvairProgramGuideUiTraceEnabled===true){
+        const afterJson=performance.now();
+        uiTrace('loadGuide-fetch-json',
+          'url='+url.split('?')[0]
+          +' responseMs='+Math.round(afterResponse-(started||afterResponse))
+          +' jsonMs='+Math.round(afterJson-afterResponse)
+          +' totalMs='+Math.round(afterJson-(started||afterResponse)),
+          traceReason);
+      }
+      return value;
     };
     const [data, rsvData, chData, settingsData, scheduledDailyWindows] = await Promise.all([
       fetchJson("/api/epg/events?date="+encodeURIComponent(targetDate)),
@@ -2264,29 +2425,23 @@ async function loadGuide(date, scrollTopTo=null, scrollLeftTo=null, traceReason=
     lastReservationSignature = stableGuideSignature(rsvData);
     lastScheduledDailyWindowSignature = stableGuideSignature(scheduledDailyWindows);
     lastGuideRefreshSignature = stableGuideSignature({ data, rsvData, scheduledDailyWindows });
-    uiTrace('loadGuide-before-render', 'events='+(data.events||[]).length+' reservations='+(rsvData||[]).length+' '+guideDomSummary(), traceReason);
-    renderGuide(data, traceReason);
+    uiTrace('loadGuide-before-render', 'elapsedMs='+Math.round(performance.now()-traceStart)+' events='+(data.events||[]).length+' reservations='+(rsvData||[]).length+' '+guideDomSummary(), traceReason);
+    renderGuide(data, traceReason, requestedVerticalMinute, savedLeft);
     updateDateNav();
-
-    // 縦位置をintentに応じて決定
-    let top;
-    if(scrollTopTo!==null){
-      top=scrollTopTo;
-    } else if(lastScrollIntent.type==='now'){
-      if(targetDate===guideTodayStr()){
-        const nowPx=window._msToPx?Math.round(window._msToPx(Date.now())):0;
-        top=Math.max(0,nowPx-150);
-      } else {
-        top=0;
-      }
-    } else if(lastScrollIntent.type==='hour'){
-      const targetMs=dayStartMs+(lastScrollIntent.value-DAY_SH)*60*60000;
-      top=window._msToPx?Math.max(0,Math.round(window._msToPx(targetMs))):0;
-    } else {
-      top=gs.scrollTop;
-    }
-    restoreScroll(gs, top, savedLeft);
+    const top=gs.scrollTop;
+    // The explicit full load is already the freshest complete ProgramGuide snapshot.
+    // Anchor the low-frequency background poll to this success instead of allowing a
+    // setInterval tick that expired during DOM fitting to immediately re-fetch the same day.
+    markProgramGuideFullLoadSuccess(targetDate);
     uiTrace('loadGuide-end', 'elapsedMs='+Math.round(performance.now()-traceStart)+' generation='+request.generation+' restoredTop='+top+' restoredLeft='+savedLeft+' '+guideDomSummary(), traceReason);
+    if(window.__tvairProgramGuideUiTraceEnabled===true){
+      const presentedGeneration=request.generation;
+      requestAnimationFrame(()=>requestAnimationFrame(()=>{
+        if(ProgramGuideDateState.currentPendingDate()==='' && currentDate===targetDate){
+          uiTrace('loadGuide-presented', 'elapsedMs='+Math.round(performance.now()-traceStart)+' generation='+presentedGeneration+' '+guideDomSummary(), traceReason);
+        }
+      }));
+    }
   }catch(e){
     if(e && e.name==='AbortError'){
       uiTrace('loadGuide-abort', 'date='+targetDate+' generation='+request.generation, traceReason);
@@ -2427,7 +2582,7 @@ function validateProgramCellActionIdentity(btn, programAction){
     const isOnAir=t.st<=nowMs && nowMs<t.en;
     const isEnded=t.en<=nowMs;
     const currentState=getProgramDisplayState(currentKey, ev);
-    const currentActionSet=resolveProgramCellActionSetContract(ev, currentKey, isOnAir, isEnded, currentState);
+    const currentActionSet=resolveProgramCellActionSetContract(ev, currentKey, {nowMs,startMs:t.st,endMs:t.en,isOnAir,isEnded,mode:isEnded?'ended':(isOnAir?'onair':'future')}, currentState);
     if(!Array.isArray(currentActionSet.actions) || !currentActionSet.actions.includes(programAction)) return false;
     return true;
   }catch(e){
@@ -2511,7 +2666,7 @@ async function refreshChainHintsForGuideDataAndTrace(data, reason){
   const sig=chainHintSignatureForData(data);
   if(sig===lastChainHintSignature){
     applyCachedChainHintsToData(data);
-    lastChainHintSummary=Object.assign({}, lastChainHintSummary, { cacheHit:true });
+    lastChainHintSummary=Object.assign({}, lastChainHintSummary, { cacheHit:true, changedKeys:[] });
     return lastChainHintSummary;
   }
 
@@ -2535,8 +2690,11 @@ async function refreshChainHintsForGuideDataAndTrace(data, reason){
     if(generation!==chainHintRequestGeneration)
       return Object.assign({}, lastChainHintSummary, { stale:true });
 
+    const previousCandidateMap=lastChainHintCandidateMap instanceof Map
+      ? new Map(lastChainHintCandidateMap)
+      : new Map();
     clearChainHintsForGuideData(data);
-    lastChainHintCandidateMap=new Map();
+    const nextCandidateMap=new Map();
     const byKey=new Map(data.events.map(ev=>[eventKeyFromEvent(ev), ev]));
     const candidates=Array.isArray(result && result.candidates) ? result.candidates : [];
     candidates.forEach(candidate=>{
@@ -2546,8 +2704,18 @@ async function refreshChainHintsForGuideDataAndTrace(data, reason){
       if(!ev || !Number.isFinite(prevId) || prevId<=0) return;
       ev._userChainPreviousReservationId=prevId;
       ev._userChainPreviousUnavailable=false;
-      lastChainHintCandidateMap.set(key, { prevId });
+      nextCandidateMap.set(key, { prevId });
     });
+    const changedKeySet=new Set();
+    previousCandidateMap.forEach((previous,key)=>{
+      const next=nextCandidateMap.get(key);
+      if(!next || Number(next.prevId)!==Number(previous && previous.prevId)) changedKeySet.add(key);
+    });
+    nextCandidateMap.forEach((next,key)=>{
+      const previous=previousCandidateMap.get(key);
+      if(!previous || Number(previous.prevId)!==Number(next && next.prevId)) changedKeySet.add(key);
+    });
+    lastChainHintCandidateMap=nextCandidateMap;
 
     lastChainHintSignature=sig;
     lastChainHintSummary={
@@ -2555,7 +2723,8 @@ async function refreshChainHintsForGuideDataAndTrace(data, reason){
       checked:Number(result && result.checkedCount)||0,
       services:0,
       enabled:result && result.featureEnabled===true,
-      cacheHit:false
+      cacheHit:false,
+      changedKeys:Array.from(changedKeySet)
     };
     chainDiagTrace('CHAIN_HINTS_REBUILT',
       'source=host_contract candidates='+lastChainHintSummary.candidates+
@@ -2578,12 +2747,47 @@ async function refreshChainHintsForGuideDataAndTrace(data, reason){
   }
 }
 
+function applyChainHintDiffToGuide(data, changedKeys, reason){
+  const keySet=new Set(Array.isArray(changedKeys) ? changedKeys.filter(Boolean) : []);
+  const traceStart=performance.now();
+  updateProgramGuideEventStore(data);
+  if(keySet.size===0){
+    uiTrace('CHAIN_HINT_DIFF_UPDATE', 'targets=0 changed=0 unchanged=0 skipped=0 reason='+(reason||'-')+' elapsedMs='+Math.round(performance.now()-traceStart)+' '+guideDomSummary(), 'poll');
+    return;
+  }
+
+  const cells=document.querySelectorAll('.prog[data-stable-event-id]');
+  const nowMs=Date.now();
+  let targeted=0, changed=0, unchanged=0, skipped=0;
+  cells.forEach(div=>{
+    const evKey=div.dataset.evKey || '';
+    if(!keySet.has(evKey)) return;
+    targeted++;
+    try{
+      const ev=getProgramGuideEventFromCell(div);
+      if(!ev){ skipped++; return; }
+      const didUpdate=updateProgramCellReservationState(div, ev, {forceApply:true, nowMs});
+      if(didUpdate) changed++; else unchanged++;
+    }catch(_){ skipped++; }
+  });
+  if(changed>0) reapplyGenreFilter();
+  uiTrace('CHAIN_HINT_DIFF_UPDATE',
+    'targets='+keySet.size+' matchedCells='+targeted+' changed='+changed+' unchanged='+unchanged+' skipped='+skipped+
+    ' reason='+(reason||'-')+' elapsedMs='+Math.round(performance.now()-traceStart)+' '+guideDomSummary(),
+    'poll');
+}
+
 function scheduleChainHintRefresh(data, reason){
   // Do not clear existing Host-confirmed hints before reevaluation.  Reprojection happens
   // only after the replacement result is ready, preventing visible chain-button flicker.
-  refreshChainHintsForGuideDataAndTrace(data, reason||'chain-hints').then(()=>{
-    updateProgramGuideEventStore(data);
-    applyReservationDiffToGuide(data, { forceApply:true, skipChainRefresh:true, reason:'host-chain-hints' });
+  // Only cells whose Host-confirmed optional Chain eligibility changed are re-rendered.
+  // The union of removed and added/changed candidate keys is sufficient: unrelated cells
+  // keep their already-rendered reservation/recording UI and must not be force-applied.
+  refreshChainHintsForGuideDataAndTrace(data, reason||'chain-hints').then((result)=>{
+    const keys=(result && result.cacheHit===true && String(reason||'')==='renderGuide')
+      ? Array.from(lastChainHintCandidateMap.keys())
+      : (result && result.changedKeys);
+    applyChainHintDiffToGuide(data, keys, 'host-chain-hints');
   }).catch(()=>{});
 }
 
@@ -2662,7 +2866,7 @@ function renderProgramCellContentByPriorityContract(div, ev, buttonDefs, layout)
   // Program cells are rendered from the authoritative frame height.  The frame itself remains
   // untouched; only its internal lanes are fitted here.  CSS padding/border and child margins
   // are already included in verticalChromeH/startH/titleH.
-  const safeHeight=Number.isFinite(ht) && ht>0 ? ht : PROGRAM_GUIDE_GEOMETRY.minCellHeight;
+  const safeHeight=Number.isFinite(ht) && ht>0 ? ht : PROGRAM_GUIDE_GEOMETRY.frameMinHeight;
   const maxTitleH=Math.max(0, safeHeight - verticalChromeH - startH - footerReserveH - titleSafePx);
   const titleReserveH=Math.min(titleH, maxTitleH);
   div.style.setProperty('--prog-title-max-height', Math.floor(maxTitleH)+'px');
@@ -2675,7 +2879,7 @@ function renderProgramCellContentByPriorityContract(div, ev, buttonDefs, layout)
   div.style.setProperty('--prog-desc-max-height', Math.max(0,Math.floor(avail))+'px');
   applyProgramCellChromeDatasetContract(div, ev, chrome);
   const cellText=(chrome && chrome.cellText) || getProgramGuideCellText(ev);
-  const descBlockHtml=buildDescHtmlByVerifiedLayout(cellText, durMin, avail, measureWidth, measureDiv);
+  const descBlockHtml=buildDescHtmlFromActualFit(cellText, durMin, avail, measureWidth, measureDiv);
   if(descBlockHtml){
     div.classList.add('has-desc');
     div.dataset.bodyDirectHandoff='true';
@@ -2704,9 +2908,6 @@ function renderProgramCellFromStructureContract(div, ev, structure, options){
     div,
     ev,
     resolved.evKey,
-    resolved.isOnAir,
-    resolved.isEnded,
-    resolved.displayState,
     resolved.actionState
   );
   renderProgramCellContentByPriorityContract(div, ev, buttonDefs, {
@@ -2738,6 +2939,7 @@ function updateProgramCellReservationState(div, ev, options){
 function applyReservationDiffToGuide(data, options){
   const opts=(options && typeof options==='object') ? options : {};
   const forceApply=opts.forceApply===true || opts.force===true;
+  const forceEventKeys=new Set(Array.isArray(opts.forceEventKeys)?opts.forceEventKeys.filter(Boolean).map(String):[]);
   const traceStart=performance.now();
   const chainHintResult=lastChainHintSummary;
   if(!opts.skipChainRefresh) scheduleChainHintRefresh(data, 'reservation-diff');
@@ -2755,7 +2957,7 @@ function applyReservationDiffToGuide(data, options){
       const ev=getProgramGuideEventFromCell(div);
       if(!ev){ skipped++; return; }
       resolvedFromStore++;
-      const didUpdate=updateProgramCellReservationState(div, ev, {forceApply:forceApply, nowMs});
+      const didUpdate=updateProgramCellReservationState(div, ev, {forceApply:(forceApply || forceEventKeys.has(evKey)), nowMs});
       if(didUpdate){
         changed++;
         if(isChainDetailTraceEnabled()){
@@ -2767,7 +2969,7 @@ function applyReservationDiffToGuide(data, options){
   if(changed>0) reapplyGenreFilter();
   const elapsed=Math.round(performance.now()-traceStart);
   if(changed>0 || skipped>0){
-    uiTrace('reservation-badge-diff-update', 'cells='+cells.length+' changed='+changed+' unchanged='+unchanged+' skipped='+skipped+' forceApply='+forceApply+' reason='+(opts.reason||'-')+' elapsedMs='+elapsed+' '+guideDomSummary(), 'poll');
+    uiTrace('reservation-badge-diff-update', 'cells='+cells.length+' changed='+changed+' unchanged='+unchanged+' skipped='+skipped+' forceApply='+forceApply+' forceEventKeys='+forceEventKeys.size+' reason='+(opts.reason||'-')+' elapsedMs='+elapsed+' '+guideDomSummary(), 'poll');
   }
   if(changed>0 || skipped>0){
     uiTrace('CHAIN_BUTTON_DIFF_UPDATE', 'cells='+cells.length+' changed='+changed+' resolvedFromStore='+resolvedFromStore+' rebuiltCandidates='+(chainHintResult?chainHintResult.candidates:'-')+' skipped='+skipped+' elapsedMs='+elapsed+' settings='+chainUiSettingsSignature()+' '+guideDomSummary(), 'poll');
@@ -2775,10 +2977,23 @@ function applyReservationDiffToGuide(data, options){
 }
 
 let guideFullRefreshInFlight = false;
+let guideFullRefreshAbortController = null;
+const PROGRAM_GUIDE_FULL_REFRESH_INTERVAL_MS = 60000;
+let lastProgramGuideFullLoadSuccessAt = 0;
+let lastProgramGuideFullLoadSuccessDate = '';
+function markProgramGuideFullLoadSuccess(date){
+  lastProgramGuideFullLoadSuccessAt = Date.now();
+  lastProgramGuideFullLoadSuccessDate = String(date||'');
+}
+function isProgramGuideFullLoadFresh(date){
+  return lastProgramGuideFullLoadSuccessDate===String(date||'')
+    && (Date.now()-lastProgramGuideFullLoadSuccessAt) < PROGRAM_GUIDE_FULL_REFRESH_INTERVAL_MS;
+}
 let guideFullRefreshCompletionPromise = Promise.resolve();
 let resolveGuideFullRefreshCompletion = null;
 let guideReservationRefreshPromise = null;
 let guideReservationRefreshQueuedForceApply = false;
+let guideReservationRefreshQueuedForceEventKeys = new Set();
 let guideReservationRefreshQueuedReason = '';
 let guideReservationFetchFailureCount = 0;
 let guideReservationFetchLastFailureAt = 0;
@@ -2802,8 +3017,8 @@ async function fetchGuideReservationsForDiffSync(){
 
 // release_contract: 番組表本体の低頻度pollも、起動直後・ページ遷移直後・host境界の
 // 一過性 fetch 失敗を即エラー化しない。構造的な連続失敗だけ refreshGuide-error へ昇格する。
-async function fetchGuideJsonForFullRefresh(url, label){
-  const res = await fetch(url, { cache:'no-store' });
+async function fetchGuideJsonForFullRefresh(url, label, signal){
+  const res = await fetch(url, { cache:'no-store', signal });
   if(!res.ok){
     throw new Error(label+'_http_status_'+res.status);
   }
@@ -2862,6 +3077,14 @@ function clearGuideReservationFetchFailure(){
 
 async function refreshGuide(){
   if(document.hidden){ uiTrace('refreshGuide-skip-hidden', guideDomSummary(), 'poll'); return; }
+  if(ProgramGuideDateState.currentPendingDate()){
+    uiTrace('refreshGuide-skip-date-load', 'pendingDate='+ProgramGuideDateState.currentPendingDate()+' '+guideDomSummary(), 'poll');
+    return;
+  }
+  if(isProgramGuideFullLoadFresh(currentDate)){
+    uiTrace('refreshGuide-skip-fresh-full-load', 'date='+currentDate+' ageMs='+(Date.now()-lastProgramGuideFullLoadSuccessAt)+' '+guideDomSummary(), 'poll');
+    return;
+  }
   if(guideFullRefreshInFlight){
     uiTrace('refreshGuide-skip-inflight', guideDomSummary(), 'poll');
     return guideFullRefreshCompletionPromise;
@@ -2871,18 +3094,25 @@ async function refreshGuide(){
     if(document.hidden) return;
   }
   guideFullRefreshInFlight = true;
+  const refreshDate=currentDate;
+  const refreshAbortController=new AbortController();
+  guideFullRefreshAbortController=refreshAbortController;
   guideFullRefreshCompletionPromise = new Promise(resolve=>{ resolveGuideFullRefreshCompletion=resolve; });
   const gs=document.getElementById("guide-scroll");
-  const savedTop=gs.scrollTop;
+  const savedMinute=programGuideVerticalMinute!==null ? programGuideVerticalMinute : programGuideVerticalMinuteFromScrollTop(gs.scrollTop);
   const savedLeft=gs.scrollLeft;
   const traceStart=performance.now();
   uiTrace('refreshGuide-start', guideDomSummary(), 'poll');
   try{
     const [data, rsvData, scheduledDailyWindows] = await Promise.all([
-      fetchGuideJsonForFullRefresh("/api/epg/events?date="+encodeURIComponent(currentDate), 'epg-events'),
-      fetchGuideJsonForFullRefresh("/api/reservations", 'reservations'),
-      fetchGuideJsonForFullRefresh("/api/epg/scheduled-daily-windows", 'scheduled-daily-windows')
+      fetchGuideJsonForFullRefresh("/api/epg/events?date="+encodeURIComponent(refreshDate), 'epg-events', refreshAbortController.signal),
+      fetchGuideJsonForFullRefresh("/api/reservations", 'reservations', refreshAbortController.signal),
+      fetchGuideJsonForFullRefresh("/api/epg/scheduled-daily-windows", 'scheduled-daily-windows', refreshAbortController.signal)
     ]);
+    if(refreshDate!==currentDate || ProgramGuideDateState.currentPendingDate()){
+      uiTrace('refreshGuide-stale-date', 'requestedDate='+refreshDate+' currentDate='+currentDate+' pendingDate='+ProgramGuideDateState.currentPendingDate()+' '+guideDomSummary(), 'poll');
+      return;
+    }
     clearGuideFullRefreshFetchFailure();
     window.programGuideReservationRows=Array.isArray(rsvData)?rsvData:[];
     window.programGuideScheduledDailyWindows=Array.isArray(scheduledDailyWindows)?scheduledDailyWindows:[];
@@ -2898,12 +3128,14 @@ async function refreshGuide(){
         buildReservationMaps(rsvData);
         applyReservationDiffToGuide(lastGuideData);
         renderProgramGuideTimeRangeOverlays();
-        restoreScroll(gs, savedTop, savedLeft);
+        restoreScroll(gs, programGuideScrollTopFromVerticalMinute(savedMinute), savedLeft);
+        markProgramGuideFullLoadSuccess(refreshDate);
         if(isChainDetailTraceEnabled()){
           chainDiagTrace('CHAIN_WARMUP_STATE', 'pass='+chainHintWarmupPasses+' elapsedMs='+Math.round(performance.now()-traceStart)+' settings='+chainUiSettingsSignature()+' '+guideDomSummary(), 'chain-warmup');
         }
         return;
       }
+      markProgramGuideFullLoadSuccess(refreshDate);
       uiTrace('refreshGuide-nochange', 'elapsedMs='+Math.round(performance.now()-traceStart)+' '+guideDomSummary(), 'poll'); return;
     }
 
@@ -2915,8 +3147,9 @@ async function refreshGuide(){
       lastGuideRefreshSignature = nextSignature;
       applyReservationDiffToGuide(lastGuideData);
       renderProgramGuideTimeRangeOverlays();
-      restoreScroll(gs, savedTop, savedLeft);
-      uiTrace('refreshGuide-diff-end', 'elapsedMs='+Math.round(performance.now()-traceStart)+' restoredTop='+savedTop+' restoredLeft='+savedLeft+' '+guideDomSummary(), 'poll');
+      restoreScroll(gs, programGuideScrollTopFromVerticalMinute(savedMinute), savedLeft);
+      markProgramGuideFullLoadSuccess(refreshDate);
+      uiTrace('refreshGuide-diff-end', 'elapsedMs='+Math.round(performance.now()-traceStart)+' restoredMinute='+savedMinute+' restoredLeft='+savedLeft+' '+guideDomSummary(), 'poll');
       return;
     }
 
@@ -2927,12 +3160,13 @@ async function refreshGuide(){
     lastGuideData = data;
     uiTrace('refreshGuide-before-render', 'events='+(data.events||[]).length+' reservations='+(rsvData||[]).length+' '+guideDomSummary(), 'poll');
     chainHintWarmupPasses=0;
-    renderGuide(data, 'refreshGuide-epg-change');
-    restoreScroll(gs, savedTop, savedLeft);
-    uiTrace('refreshGuide-end', 'elapsedMs='+Math.round(performance.now()-traceStart)+' restoredTop='+savedTop+' restoredLeft='+savedLeft+' '+guideDomSummary(), 'poll');
+    renderGuide(data, 'refreshGuide-epg-change', savedMinute, savedLeft);
+    markProgramGuideFullLoadSuccess(refreshDate);
+    uiTrace('refreshGuide-end', 'elapsedMs='+Math.round(performance.now()-traceStart)+' restoredMinute='+savedMinute+' restoredLeft='+savedLeft+' '+guideDomSummary(), 'poll');
   }catch(e){
-    handleGuideFullRefreshFetchFailure(e, traceStart);
+    if(!(e && e.name==='AbortError')) handleGuideFullRefreshFetchFailure(e, traceStart);
   } finally {
+    if(guideFullRefreshAbortController===refreshAbortController) guideFullRefreshAbortController=null;
     guideFullRefreshInFlight = false;
     const resolveCompletion=resolveGuideFullRefreshCompletion;
     resolveGuideFullRefreshCompletion=null;
@@ -2989,7 +3223,7 @@ function buildEventMinuteRanges(events, dayStartMs){
 }
 
 function buildMissingGapMinuteRanges(events, dayStartMs){
-  const minGap=PROGRAM_GUIDE_GEOMETRY.minGapCellMinutes;
+  const minGap=PROGRAM_GUIDE_GEOMETRY.gapMinCellMinutes;
   const ranges=[];
   const byService=new Map();
   (events||[]).forEach(e=>{
@@ -3043,9 +3277,22 @@ function createMsToPxConverter(minutes, segPx, dayStartMs){
         return timeToPx.get(minutes[i])+t*(timeToPx.get(minutes[i+1])-timeToPx.get(minutes[i]));
       }
     }
-    return m*MIN_PX;
+    return m<=0?0:totalPx;
   };
-  return { totalPx, msToPx };
+  const pxToMs=(px)=>{
+    const target=Math.max(0,Math.min(totalPx,Number(px)||0));
+    for(let i=0;i<minutes.length-1;i++){
+      const px0=timeToPx.get(minutes[i]);
+      const px1=timeToPx.get(minutes[i+1]);
+      if(target>=px0&&target<=px1){
+        const span=px1-px0;
+        const t=span>0?(target-px0)/span:0;
+        return dayStartMs+(minutes[i]+t*(minutes[i+1]-minutes[i]))*60000;
+      }
+    }
+    return dayStartMs+24*60*60000;
+  };
+  return { totalPx, msToPx, pxToMs };
 }
 
 function buildTimelineLayout(events, dayStartMs){
@@ -3053,11 +3300,11 @@ function buildTimelineLayout(events, dayStartMs){
   const segPx=buildNaturalSegmentHeights(minutes);
   const eventSegments=buildSegmentIndicesForMinuteRanges(buildEventMinuteRanges(events, dayStartMs), minutes);
   const gapSegments=buildSegmentIndicesForMinuteRanges(buildMissingGapMinuteRanges(events, dayStartMs), minutes);
-  expandSegmentsForMinimumHeight(eventSegments, segPx, PROGRAM_GUIDE_GEOMETRY.minEventSegmentHeight);
+  expandSegmentsForMinimumHeight(eventSegments, segPx, PROGRAM_GUIDE_GEOMETRY.timelineEventMinSpanHeight);
   // Gap cells are rendered with the same frame minimum height as real cells.
   // Expanding their backing timeline segments prevents jagged/overlapped blank space
   // around the 04:00 day boundary and keeps the next-day jump target stable.
-  expandSegmentsForMinimumHeight(gapSegments, segPx, PROGRAM_GUIDE_GEOMETRY.minCellHeight);
+  expandSegmentsForMinimumHeight(gapSegments, segPx, PROGRAM_GUIDE_GEOMETRY.frameMinHeight);
   return createMsToPxConverter(minutes, segPx, dayStartMs);
 }
 
@@ -3103,10 +3350,6 @@ function renderProgramGuideTimeAxisRows(container, totalPx, msToPx, dayStartMs, 
     row.innerHTML=showLabels ? (hour+'<br>時') : '';
     container.appendChild(row);
   }
-}
-// Compatibility name retained for callers, but implementation is now TimeAxisRole.
-function appendHourRows(container, totalPx, msToPx, dayStartMs, showLabels=true, axisRole='primary'){
-  renderProgramGuideTimeAxisRows(container, totalPx, msToPx, dayStartMs, showLabels, axisRole);
 }
 function createProgramGuideTimeAxisBodyColumn(axisRole,totalPx,msToPx,dayStartMs){
   const role=normalizeProgramGuideTimeAxisRole(axisRole);
@@ -3215,7 +3458,7 @@ function getVisibleEventLayout(stMs, enMs, dayStartMs, dayEndMs, totalPx, msToPx
   const topF=msToPx(visStMs);
   const botF=msToPx(visEnMs);
   const top=Math.max(0, Math.floor(topF));
-  const height=Math.max(Math.ceil(botF)-top, PROGRAM_GUIDE_GEOMETRY.minCellHeight);
+  const height=Math.max(Math.ceil(botF)-top, PROGRAM_GUIDE_GEOMETRY.frameMinHeight);
   if(top+height<0||top>totalPx) return null;
   return {
     visStMs,
@@ -3237,13 +3480,13 @@ function isProgramGuideActiveTimeRangeReservation(r){
   return r && r.isEnabled!==false && (status==='scheduled'||status==='starting'||status==='recording'||status==='stopping');
 }
 function appendProgramGuideTimeRangeOverlay(col,startMs,endMs,kind,label){
-  if(!col || !window._msToPx || !Number.isFinite(dayStartMs)) return;
-  const dayEnd=dayStartMs+24*60*60000;
-  const visStart=Math.max(startMs,dayStartMs);
-  const visEnd=Math.min(endMs,dayEnd);
+  const geometry=getCurrentProgramGuideTimelineGeometry();
+  if(!col || !geometry) return;
+  const visStart=Math.max(startMs,geometry.dayStartMs);
+  const visEnd=Math.min(endMs,geometry.dayEndMs);
   if(!Number.isFinite(visStart)||!Number.isFinite(visEnd)||visEnd<=visStart) return;
-  const top=Math.max(0,Math.floor(window._msToPx(visStart)));
-  const bottom=Math.ceil(window._msToPx(visEnd));
+  const top=Math.max(0,Math.floor(geometry.msToPx(visStart)));
+  const bottom=Math.ceil(geometry.msToPx(visEnd));
   const overlay=document.createElement('div');
   overlay.className='program-guide-time-range-overlay program-guide-time-range-'+kind;
   overlay.dataset.timeRangeKind=kind;
@@ -3255,12 +3498,14 @@ function appendProgramGuideTimeRangeOverlay(col,startMs,endMs,kind,label){
 }
 function renderProgramGuideTimeRangeOverlays(){
   const ccols=document.getElementById('ch-cols');
-  if(!ccols || !window._msToPx || !Number.isFinite(dayStartMs)) return;
+  const geometry=getCurrentProgramGuideTimelineGeometry();
+  if(!ccols || !geometry) return;
   ccols.querySelectorAll('.program-guide-time-range-overlay').forEach(x=>x.remove());
   const serviceCols=[...ccols.querySelectorAll('.program-guide-service-column[data-col-key]')];
   if(serviceCols.length===0) return;
   const byService=new Map(serviceCols.map(col=>[String(col.dataset.colKey||''),col]));
-  const dayEnd=dayStartMs+24*60*60000;
+  const dayStartMs=geometry.dayStartMs;
+  const dayEnd=geometry.dayEndMs;
   const rows=window.programGuideReservationRows||[];
 
   // Program reservation: the canonical row already contains exact station/start/end.
@@ -3294,21 +3539,49 @@ function renderProgramGuideTimeRangeOverlays(){
   });
 }
 
-function renderGuide(data, traceReason='renderGuide'){
+function renderGuide(data, traceReason='renderGuide', verticalMinuteTo=null, scrollLeftTo=null){
   clearChainHintsForGuideData(data);
   rebuildProgramGuideEventStore(data);
   const renderTraceStart=performance.now();
   uiTrace('renderGuide-start', 'events='+((data&&data.events)||[]).length+' before={'+guideDomSummary()+'}', traceReason);
   updateDateNav();
   const dayStart=new Date(data.dayStart);
-  dayStartMs=dayStart.getTime();
-  const dayEndMs=dayStartMs+24*60*60000;
+  const renderedDayStartMs=dayStart.getTime();
   const events=data.events||[];
   const renderNowMs=Date.now();
 
-  const { totalPx, msToPx } = buildTimelineLayout(events, dayStartMs);
-  window._totalPx = totalPx;
-  window._msToPx = msToPx;
+  const geometry=setCurrentProgramGuideTimelineGeometry(renderedDayStartMs, buildTimelineLayout(events, renderedDayStartMs));
+  if(!geometry) return;
+  const { dayStartMs, dayEndMs, totalPx, msToPx }=geometry;
+
+  // Full-render viewport contract:
+  // canonical vertical position is resolved against the NEW day's timeline before
+  // the visible ProgramGuide DOM is rebuilt.  Post-render scroll correction is forbidden;
+  // all full-render owners must enter through this route so users never see the old day's
+  // pixel position followed by a second jump to the canonical time position.
+  const gs=document.getElementById('guide-scroll');
+  const requestedMinute=verticalMinuteTo!==null
+    ? setProgramGuideVerticalMinute(verticalMinuteTo)
+    : programGuideVerticalMinute;
+  if(programGuideAlignNowAfterNextRender){
+    const nowPx=Math.round(msToPx(Date.now()));
+    setProgramGuideVerticalMinute(programGuideVerticalMinuteFromScrollTop(Math.max(0,nowPx-150)));
+    programGuideAlignNowAfterNextRender=false;
+  }else if(requestedMinute===null || programGuideVerticalMinute===null){
+    if(currentDate===guideTodayStr()){
+      const nowPx=Math.round(msToPx(Date.now()));
+      setProgramGuideVerticalMinute(programGuideVerticalMinuteFromScrollTop(Math.max(0,nowPx-150)));
+    }else{
+      setProgramGuideVerticalMinute(0);
+    }
+  }
+  const projectedMinute=clampProgramGuideVerticalMinute(programGuideVerticalMinute);
+  const projectedTop=Math.max(0,Math.round(msToPx(dayStartMs+projectedMinute*60000)));
+  const projectedLeft=scrollLeftTo!==null ? Number(scrollLeftTo)||0 : (gs ? gs.scrollLeft : 0);
+  const ccolsForViewport=document.getElementById('ch-cols');
+  if(ccolsForViewport) ccolsForViewport.style.height=totalPx+'px';
+  if(gs) restoreScroll(gs, projectedTop, projectedLeft);
+  uiTrace('renderGuide-viewport-projected', 'verticalMinute='+projectedMinute+' top='+projectedTop+' left='+projectedLeft+' '+guideDomSummary(), traceReason);
 
   // サービスマップ（出現順）
   const svcs=buildServiceColumns(events);
@@ -3332,7 +3605,7 @@ function renderGuide(data, traceReason='renderGuide'){
   // 時間列（動的高さに対応）
   const tcol=document.getElementById("time-col");
   if(tcol){ tcol.dataset.role="timeAxisPrimary"; tcol.dataset.timeAxis="primary"; tcol.setAttribute('aria-label','左端時間軸'); }
-  appendHourRows(tcol, totalPx, msToPx, dayStartMs, true, 'primary');
+  renderProgramGuideTimeAxisRows(tcol, totalPx, msToPx, dayStartMs, true, 'primary');
 
   // 番組列
   const ccols=document.getElementById("ch-cols");
@@ -3341,6 +3614,9 @@ function renderGuide(data, traceReason='renderGuide'){
 
 
   let visibleColCount=0;
+  const traceCellTiming=window.__tvairProgramGuideUiTraceEnabled===true;
+  let tracedProgramCellCount=0;
+  let tracedProgramCellRenderMs=0;
   guideColumns.forEach(colDef=>{
     const col=createProgramGuideBodyColumn(colDef,totalPx,msToPx,dayStartMs);
     bodyFragment.appendChild(col);
@@ -3413,10 +3689,15 @@ function renderGuide(data, traceReason='renderGuide'){
       // ProgramCell flow contract: buttons follow the rendered title/outline/detail lane
       // in normal flow and must never be pushed to the physical bottom of the cell.
       // Initial render and reservation/time-state refresh share the same unified render entry.
+      const cellTraceStart=traceCellTiming?performance.now():0;
       renderProgramCellFromStructureContract(div, ev, structure, {
         measureDiv:_measureDiv,
         measureWidth:_cellConst.guideColW
       });
+      if(traceCellTiming){
+        tracedProgramCellCount++;
+        tracedProgramCellRenderMs+=performance.now()-cellTraceStart;
+      }
 
       col.appendChild(div);
       if(Number.isFinite(enMs)) lastVisibleEndMs=Math.max(lastVisibleEndMs,enMs);
@@ -3434,12 +3715,12 @@ function renderGuide(data, traceReason='renderGuide'){
     renderProgramGuideTimeRangeOverlays();
   }
 
-  uiTrace('renderGuide-dom-built', 'services='+svcs.length+' visibleCols='+visibleColCount+' events='+events.length+' '+guideDomSummary(), traceReason);
+  uiTrace('renderGuide-dom-built', 'elapsedMs='+Math.round(performance.now()-renderTraceStart)+' services='+svcs.length+' visibleCols='+visibleColCount+' events='+events.length+' programCellCount='+tracedProgramCellCount+' programCellRenderMs='+Math.round(tracedProgramCellRenderMs)+' '+guideDomSummary(), traceReason);
 
   // 測定コンテナは renderGuide 間で再利用する
   _descMeasureDiv=_measureDiv;
 
-  // 現在時刻ライン描画（スクロールはloadGuide/refreshGuide側で制御）
+  // 現在時刻ライン描画（full renderのviewport投影はrenderGuide入口で完了済み）
   drawNowLine(renderNowMs);
   updateProgBars({nowMs:renderNowMs, refreshActions:false});
   // ジャンルボタンが巻き添えで消えていないか確認してから再適用
@@ -3473,9 +3754,10 @@ function renderGuide(data, traceReason='renderGuide'){
 // 画面内追従やtime-axis代用は行わない。
 // 現在時刻ラインを描画する（スクロールはscrollToNow()に一元化）
 function drawNowLine(nowMs){
-  if(!window._msToPx) return;
-  const totalPx = window._totalPx;
-  const nowPx=Math.round(window._msToPx(Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()));
+  const geometry=getCurrentProgramGuideTimelineGeometry();
+  if(!geometry) return;
+  const totalPx=geometry.totalPx;
+  const nowPx=Math.round(geometry.msToPx(Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()));
   document.querySelectorAll(".now-line").forEach(e=>e.remove());
   if(nowPx>0&&nowPx<totalPx){
     const l=document.createElement("div");
@@ -3968,7 +4250,7 @@ async function syncProgramGuideAfterAction(reason, target, actionData){
   // snapshot poll may temporarily use a closer cadence; it only observes canonical
   // state and never changes the recording/Tuner lifecycle or its completion rule.
   if(!lastGuideData) return {failed:true, pending:false};
-  await refreshGuideReservationsOnly({forceApply:true, reason:actionReason+'-committed'});
+  await refreshGuideReservationsOnly({forceEventKeys:t.evKey?[t.evKey]:[], reason:actionReason+'-committed'});
   const committed=evaluateProgramGuideActionTarget(t);
 
   if(committed.satisfied) return {failed:false, pending:false};
@@ -4195,11 +4477,12 @@ async function cancelReservation(rsvId, evKey, btn){
 
 // release_contract: 予約/録画状態は手動更新前提にしない。
 // 番組表全体の再描画は抑え、通常は予約状態だけを短周期で差分同期する。
-// 同時要求は同じ実処理Promiseへ合流し、Action確定用のforceApplyだけを1回の後続取得へ集約する。
+// 同時要求は同じ実処理Promiseへ合流し、Action確定用の対象EventKeyだけを1回の後続取得へ集約する。
 // 通常pollは全体更新中・差分更新中に追加取得を予約せず、既存の正本公開完了を待つ。
 async function executeGuideReservationRefresh(options){
   const syncOptions=(options && typeof options==='object') ? options : {};
   const forceApply=syncOptions.forceApply===true;
+  const forceEventKeys=new Set(Array.isArray(syncOptions.forceEventKeys)?syncOptions.forceEventKeys.filter(Boolean).map(String):[]);
   const [rsvData, scheduledDailyWindows] = await Promise.all([
     fetchGuideReservationsForDiffSync(),
     fetch('/api/epg/scheduled-daily-windows',{cache:'no-store'}).then(r=>r.ok?r.json():[])
@@ -4208,7 +4491,7 @@ async function executeGuideReservationRefresh(options){
   const reservationSignature = stableGuideSignature(rsvData);
   const scheduledDailyWindowSignature = stableGuideSignature(scheduledDailyWindows);
   const hasActionPending=!!document.querySelector('.prog [data-program-guide-action-busy="1"]');
-  if(reservationSignature === lastReservationSignature && scheduledDailyWindowSignature === lastScheduledDailyWindowSignature && !forceApply && !hasActionPending) return;
+  if(reservationSignature === lastReservationSignature && scheduledDailyWindowSignature === lastScheduledDailyWindowSignature && !forceApply && forceEventKeys.size===0 && !hasActionPending) return;
   buildReservationMaps(rsvData);
   window.programGuideReservationRows=Array.isArray(rsvData)?rsvData:[];
   window.programGuideScheduledDailyWindows=Array.isArray(scheduledDailyWindows)?scheduledDailyWindows:[];
@@ -4216,7 +4499,7 @@ async function executeGuideReservationRefresh(options){
   lastScheduledDailyWindowSignature = scheduledDailyWindowSignature;
   lastGuideRefreshSignature = stableGuideSignature({ data:lastGuideData, rsvData, scheduledDailyWindows });
   if(!document.hidden){
-    applyReservationDiffToGuide(lastGuideData, {forceApply:forceApply, reason:syncOptions.reason||'reservation-refresh'});
+    applyReservationDiffToGuide(lastGuideData, {forceApply:forceApply, forceEventKeys:Array.from(forceEventKeys), reason:syncOptions.reason||'reservation-refresh'});
     renderProgramGuideTimeRangeOverlays();
   }
 }
@@ -4229,12 +4512,14 @@ async function drainGuideReservationRefresh(initialOptions){
     }catch(e){
       handleGuideReservationFetchFailure(e);
     }
-    if(!guideReservationRefreshQueuedForceApply) break;
+    if(!guideReservationRefreshQueuedForceApply && guideReservationRefreshQueuedForceEventKeys.size===0) break;
     options={
-      forceApply:true,
+      forceApply:guideReservationRefreshQueuedForceApply,
+      forceEventKeys:Array.from(guideReservationRefreshQueuedForceEventKeys),
       reason:guideReservationRefreshQueuedReason || 'queued-action-confirmation'
     };
     guideReservationRefreshQueuedForceApply=false;
+    guideReservationRefreshQueuedForceEventKeys.clear();
     guideReservationRefreshQueuedReason='';
   }
 }
@@ -4242,20 +4527,22 @@ async function drainGuideReservationRefresh(initialOptions){
 async function refreshGuideReservationsOnly(options){
   const syncOptions=(options && typeof options==='object') ? options : {};
   const forceApply=syncOptions.forceApply===true;
+  const forceEventKeys=Array.isArray(syncOptions.forceEventKeys)?syncOptions.forceEventKeys.filter(Boolean).map(String):[];
   if(!lastGuideData) return;
 
   if(guideFullRefreshInFlight){
     uiTrace('reservation-state-sync-defer', 'reason=full-refresh-inflight forceApply='+forceApply+' '+guideDomSummary(), 'poll');
     await guideFullRefreshCompletionPromise;
-    if(!forceApply || document.hidden || !lastGuideData) return;
+    if((!forceApply && forceEventKeys.length===0) || document.hidden || !lastGuideData) return;
   }
 
   if(guideReservationRefreshPromise){
-    if(forceApply){
-      guideReservationRefreshQueuedForceApply=true;
+    if(forceApply || forceEventKeys.length>0){
+      if(forceApply) guideReservationRefreshQueuedForceApply=true;
+      forceEventKeys.forEach(k=>guideReservationRefreshQueuedForceEventKeys.add(k));
       guideReservationRefreshQueuedReason=syncOptions.reason || 'queued-action-confirmation';
     }
-    uiTrace('reservation-state-sync-join', 'forceApply='+forceApply+' '+guideDomSummary(), 'poll');
+    uiTrace('reservation-state-sync-join', 'forceApply='+forceApply+' forceEventKeys='+forceEventKeys.length+' '+guideDomSummary(), 'poll');
     return guideReservationRefreshPromise;
   }
 
@@ -4265,6 +4552,7 @@ async function refreshGuideReservationsOnly(options){
   }finally{
     guideReservationRefreshPromise=null;
     guideReservationRefreshQueuedForceApply=false;
+    guideReservationRefreshQueuedForceEventKeys.clear();
     guideReservationRefreshQueuedReason='';
   }
 }
@@ -4284,7 +4572,7 @@ function hasPendingProgramGuideRecordingAction(){
 // Tuner割当、Lease、worker、single-flight、Recording commit/stop commitには触れない。
 setInterval(async ()=>{
   if(document.hidden || !hasPendingProgramGuideRecordingAction()) return;
-  try{ await refreshGuideReservationsOnly({forceApply:true, reason:'recording-action-pending-evidence'}); }catch(e){}
+  try{ await refreshGuideReservationsOnly({reason:'recording-action-pending-evidence'}); }catch(e){}
 }, 500);
 
 setInterval(async ()=>{
@@ -4296,7 +4584,7 @@ setInterval(async ()=>{
 setInterval(async ()=>{
   if(document.hidden) return;
   try{ await refreshGuide(); }catch(e){}
-}, 60000);
+}, PROGRAM_GUIDE_FULL_REFRESH_INTERVAL_MS);
 
 // ── 設定モーダル ─────────────────────────────────────────────────
 let _bonDriverList = [];
@@ -4333,22 +4621,8 @@ function getCfgSelectedSystemTheme(){
 }
 async function applySystemTheme(theme){
   const t=['current','light','dark'].includes(theme)?theme:'current';
-  if(window.TvAIrTheme){ await window.TvAIrTheme.apply(t); }
-  else{
-    document.body.classList.remove('tvair-theme-light','tvair-theme-dark','theme-light','theme-dark');
-    document.documentElement.classList.remove('tvair-theme-light','tvair-theme-dark','theme-light','theme-dark');
-    if(t==='light'){
-      document.body.classList.add('tvair-theme-light','theme-light');
-      document.documentElement.classList.add('tvair-theme-light','theme-light');
-      document.body.setAttribute('data-theme','light');
-      document.documentElement.setAttribute('data-theme','light');
-    }
-    if(t==='dark'){
-      document.body.classList.add('tvair-theme-dark','theme-dark');
-      document.documentElement.classList.add('tvair-theme-dark','theme-dark');
-      document.body.setAttribute('data-theme','dark');
-      document.documentElement.setAttribute('data-theme','dark');
-    }
+  if(window.TvAIrTheme && typeof window.TvAIrTheme.apply==='function'){
+    await window.TvAIrTheme.apply(t);
   }
   document.querySelectorAll('input[name="cfg-system-theme"]').forEach(r=>{ r.checked = r.value===t; });
 }
@@ -4465,22 +4739,17 @@ function completeCfgSave(){
     document.getElementById('cfg-overlay').classList.remove('open');
     window._cfgThemeTouched = false;
     closeCfgDialog();
-    const detail=window._cfgLastHostSaveDetail && typeof window._cfgLastHostSaveDetail==='object'
-      ? window._cfgLastHostSaveDetail
-      : {};
-    window._cfgLastHostSaveDetail=null;
     if(window.parent && window.parent !== window){
-      window.parent.postMessage({ contract:'tvair-settings-host', action:'saved', detail }, location.origin);
+      window.parent.postMessage({ contract:'tvair-settings-host', action:'saved' }, location.origin);
     }else{
       try{ window.close(); }catch(_){ }
     }
     return;
   }
-  window._cfgLastHostSaveDetail=null;
   hideCfgModal();
 }
 window.TvAIrSettingsModule = window.TvAIrSettingsModule || {
-  version:'1.2.1',
+  version:'1.2.2',
   open:()=>showCfgModal(),
   close:()=>hideCfgModal(),
   contract:'single-settings-module-web-modal-basis'
@@ -5117,7 +5386,7 @@ function requestPluginInternetAccessChange(box, plugin){
     }
   };
   if(requested){
-    showCfgConfirm(`${plugin.displayName||plugin.pluginId} のインターネット接続を許可します。\n\nTvAIrを通じて、このプラグインが必要な外部情報を取得できるようになります。\n\n許可しますか？`, apply);
+    showCfgConfirm(`${plugin.displayName||plugin.pluginId} のインターネット接続を許可します。\n\nこのプラグインが必要なインターネット通信を利用できるようになります。\n\n許可しますか？`, apply);
   }else{
     apply();
   }
@@ -5140,6 +5409,7 @@ async function loadCfg(){
     window._cfgImmediateNetworkSettingSaved = false;
     window._cfgLoadedRaw = d;
     await hydrateThemeFromServerSettings(d, 'loadCfg');
+    if(window.TvAirGenre && typeof window.TvAirGenre.normalizeThemePalettes==='function') window.TvAirGenre.normalizeThemePalettes(d);
     window._cfgDefaultThemeGenrePalettes = normalizeThemeGenrePalettes({
       defaultThemeGenrePalettes:d.defaultThemeGenrePalettes||{},
       themeGenrePalettes:d.defaultThemeGenrePalettes||{}
@@ -5235,7 +5505,7 @@ async function applyThemeRuntimeAfterSettingsSave(dto, result, selectedTheme, re
 
 async function applyReservationActionUiAfterSettingsSave(dto, reason){
   // release_contract: 設定変更後に再起動なしで番組表・チェーン候補・競合表示を同期する。
-  // 特に LaterProgramPriority / PseudoContinuousRecording の変更はチェーンボタン表示条件に直結するため、
+  // 特に録画優先設定 / チェーン予約設定の変更は予約・チェーン候補表示へ影響するため、
   // UIグローバル値を即時更新し、予約Map再取得→チェーン候補再構築→セル内差分更新を必ず走らせる。
   const oldSig=chainUiSettingsSignature();
   window.laterProgramPriorityEnabled = dto && dto.laterProgramPriority === true;
@@ -5294,7 +5564,6 @@ async function saveCfgCore(){
   }
   const previousTheme=getCfgStoredSystemTheme();
   const selectedTheme=getCfgSelectedSystemTheme();
-  const themeChanged=selectedTheme !== previousTheme || window._cfgThemeTouched === true;
   const tuners=collectTuners();
   const tunerError=validateTuners(tuners);
   if(tunerError){ showCfgDialog(tunerError); return; }
@@ -5351,7 +5620,7 @@ async function saveCfgCore(){
     if(settingsRes.ok){
       const result = await settingsRes.json().catch(()=>({}));
       const savedDto = await fetchLatestCfg();
-      const savedTheme = await applyThemeRuntimeAfterSettingsSave(savedDto, result, selectedTheme, 'settings-save');
+      await applyThemeRuntimeAfterSettingsSave(savedDto, result, selectedTheme, 'settings-save');
       const persistedChanged = result.persistedChanged === true;
       // SETTINGS_RESTART_DECISION_SINGLE_OWNER_CONTRACT
       // 再起動要否はSettingsChangeApplicationServiceのPersisted/Runtime判定を正本とする。
@@ -5361,18 +5630,8 @@ async function saveCfgCore(){
       window._cfgLoadedRaw = { ...savedDto, isFirstRun:false };
       window._cfgThemeGenrePalettes = normalizeThemeGenrePalettes(savedDto);
       applyThemeLinkedGenrePalette(window._cfgThemeGenrePalettes, currentGenreTheme());
-      const isSettingsHostFrame=document.body.classList.contains('tvair-settings-frame') && window.parent && window.parent !== window;
-      if(result.reservationActionUiHotReloaded === true && !isSettingsHostFrame){
-        await applyReservationActionUiAfterSettingsSave(savedDto, 'settings-save');
-      }
-      window._cfgLastHostSaveDetail={
-        themeChanged,
-        selectedTheme:savedTheme,
-        themeRevision:result.themeRevision || null,
-        reservationActionUiHotReloaded:result.reservationActionUiHotReloaded === true,
-        tunerTopologyRestartRequired,
-        requiresRestart:needsRestart
-      };
+      // Existing browser surfaces are synchronized only by the Host settings-commit broadcast.
+      // The saving surface never owns cross-surface refresh, regardless of iframe/tray/top-level entry.
       if(tunerTopologyRestartRequired){
         showCfgDialog(result.message || '設定を保存しました\nチューナー変更はTvAIrの再起動後に反映されます。', ()=>completeCfgSave());
       }else if(needsRestart){
@@ -5427,8 +5686,8 @@ window.addEventListener('tvair-settings-saved', async event=>{
   if(document.body.classList.contains('tvair-settings-frame')) return;
   try{
     const savedDto=await fetchLatestCfg();
-    // Theme synchronization is owned by tvair-settings-host.js before this event is dispatched.
-    // This handler applies only the remaining settings-dependent state to the parent document.
+    // Theme synchronization and event delivery are owned by the Host settings-commit broadcast.
+    // This handler applies the remaining settings-dependent state to this browser surface.
     window._cfgServerSystemTheme=normalizeCfgTheme(savedDto.systemTheme || getSystemThemeSetting());
     window._cfgLoadedRaw={...savedDto,isFirstRun:false};
     window._cfgThemeGenrePalettes=normalizeThemeGenrePalettes(savedDto);
@@ -5448,30 +5707,32 @@ window.addEventListener('tvair-settings-saved', async event=>{
 const tvairSettingsFrameMode = document.body.classList.contains('tvair-settings-frame');
 if(!tvairSettingsFrameMode){
   const savedProgramGuideViewState = window.TvAIrPageViewState ? TvAIrPageViewState.read('program-guide') : null;
-  let initialGuideTop = null;
+  let initialGuideVerticalMinute = null;
   let initialGuideLeft = null;
   if(savedProgramGuideViewState && savedProgramGuideViewState.meta && savedProgramGuideViewState.meta.date){
     const restoredDate = ProgramGuideDateState.clamp(savedProgramGuideViewState.meta.date);
     if(restoredDate){
       currentDate = restoredDate;
-      initialGuideTop = Number.isFinite(Number(savedProgramGuideViewState.top)) ? Math.max(0,Number(savedProgramGuideViewState.top)) : null;
+      programGuideVerticalMinute = Number.isFinite(Number(savedProgramGuideViewState.meta.verticalMinute))
+        ? setProgramGuideVerticalMinute(savedProgramGuideViewState.meta.verticalMinute)
+        : null;
+      initialGuideVerticalMinute = programGuideVerticalMinute;
       initialGuideLeft = Number.isFinite(Number(savedProgramGuideViewState.left)) ? Math.max(0,Number(savedProgramGuideViewState.left)) : null;
-      lastScrollIntent = {type:'scroll'};
     }
   }
   if(window.TvAIrPageViewState){
     TvAIrPageViewState.register({
       key:'program-guide',
       root:()=>document.getElementById('guide-scroll'),
-      meta:()=>({date:currentDate})
+      meta:()=>({date:currentDate,verticalMinute:programGuideVerticalMinute})
     });
   }
   buildDateNav();
   buildTimeNav();
   loadGenreColorSettings().finally(()=>{
     buildGenreNav();
-    // Same-session return restores the prior guide coordinates; first visit keeps the existing now-position contract.
-    loadGuide(currentDate, initialGuideTop, initialGuideLeft, initialGuideTop===null?'initial':'initial-view-state-restore');
+    // Same-session return restores the canonical guide time position; first visit keeps the existing now-position contract.
+    loadGuide(currentDate, initialGuideVerticalMinute, initialGuideLeft, initialGuideVerticalMinute===null?'initial':'initial-view-state-restore');
   });
 }else{
   window.addEventListener('load',()=>showCfgModal(),{once:true});
@@ -5505,8 +5766,8 @@ if(!tvairSettingsFrameMode){
   bindGuideTopOperationUi();
 }
 </script>
-<script src="/tvair-settings-host.js?v=1.2.1"></script>
-<script src="/tvair-menu-spine.js?v=1.2.1"></script>
+<script src="/tvair-settings-host.js?v=1.2.2"></script>
+<script src="/tvair-menu-spine.js?v=1.2.2"></script>
 <script>
 (function(){
   try{

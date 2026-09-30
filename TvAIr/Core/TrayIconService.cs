@@ -1,4 +1,5 @@
-﻿using System.Diagnostics;
+﻿using Microsoft.Extensions.Hosting;
+using System.Diagnostics;
 using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -24,6 +25,7 @@ public sealed class TrayIconService : IDisposable
     private readonly LogRepository _log;
     private readonly PluginDefaultMenuActionService _pluginMenuActions;
     private readonly IniSettingsService _settings;
+    private readonly IHostApplicationLifetime _applicationLifetime;
 
     private Thread? _thread;
     private NotifyIcon? _icon;
@@ -44,17 +46,17 @@ public sealed class TrayIconService : IDisposable
     private TrayPopupRequest? _pendingTrayPopup;
     private long _trayPopupSequence;
     private int _trayPopupShuttingDown;
+#if TVAIR_DEVELOPER_DIAGNOSTICS
     private int _trayTimerTickCount;
     private long _lastTrayHeartbeatTick;
-#if TVAIR_DEVELOPER_DIAGNOSTICS
     private long _lastProcessAllocatedBytes;
-#endif
     private long _lastManagedMouseUpTick;
     private long _lastNativeTrayRightTick;
     private IntPtr _notifyIconSinkHandle;
     private IntPtr _trayNativeSubclassHandle;
     private SubclassProc? _trayNativeSubclassProc;
     private string _notifyIconSinkResolution = "not_attempted";
+#endif
     private Icon? _appliedTrayIcon;
     private string _appliedTrayText = string.Empty;
     private const string MenuLabelHelp = "ヘルプ";
@@ -87,8 +89,9 @@ public sealed class TrayIconService : IDisposable
     private const int WsPopup = unchecked((int)0x80000000);
     private const int WsExToolWindow = 0x00000080;
     private volatile bool _started;
+    private int _exitFallbackRequested;
 
-    public TrayIconService(int port, ReservationStore reservationStore, TunerPool tunerPool, EpgScheduler epgScheduler, LogRepository log, PluginDefaultMenuActionService pluginMenuActions, IniSettingsService settings)
+    public TrayIconService(int port, ReservationStore reservationStore, TunerPool tunerPool, EpgScheduler epgScheduler, LogRepository log, PluginDefaultMenuActionService pluginMenuActions, IniSettingsService settings, IHostApplicationLifetime applicationLifetime)
     {
         _port = port;
         _reservationStore = reservationStore;
@@ -97,6 +100,7 @@ public sealed class TrayIconService : IDisposable
         _log = log;
         _pluginMenuActions = pluginMenuActions;
         _settings = settings;
+        _applicationLifetime = applicationLifetime;
     }
 
     public void Start()
@@ -134,7 +138,9 @@ public sealed class TrayIconService : IDisposable
 
             _icon.MouseUp += (_, e) =>
             {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
                 Interlocked.Exchange(ref _lastManagedMouseUpTick, Environment.TickCount64);
+#endif
                 QueueTrayDiagnostic("TRAY_MOUSE_EVENT", e.Button.ToString(),
                     $"result=RECEIVED button={e.Button} clicks={e.Clicks} x={e.X} y={e.Y} thread={Environment.CurrentManagedThreadId} owner=tray_sta_popup_session_separated rule=tray_popup_session_separation_contract");
 
@@ -145,13 +151,12 @@ public sealed class TrayIconService : IDisposable
             };
             _icon.DoubleClick += (_, _) => OpenBrowser($"http://localhost:{_port}");
 
-            // Diagnostic only: subclass the NotifyIcon native sink with the documented comctl32 subclass chain
-            // so the Shell callback can be observed at the actual sink boundary. The callback always forwards to
-            // DefSubclassProc without consuming, rewriting, retrying, or redispatching the message.
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+            // Developer Diagnostics only: observe the native NotifyIcon sink without affecting message delivery.
             RefreshNotifyIconSinkHandle();
             EnsureTrayNativeWindowObserver();
-
             _log.Add("TRAY_ICON", "VISIBLE", $"result=OK port={_port} thread={Environment.CurrentManagedThreadId} owner=tray_sta_popup_session_separated visualProjection=tray_timer_only nativeSink={FormatHwnd(_notifyIconSinkHandle)} nativeSinkResolution={_notifyIconSinkResolution} rule=release_contract");
+#endif
 
             _timer = new System.Windows.Forms.Timer
             {
@@ -159,7 +164,9 @@ public sealed class TrayIconService : IDisposable
             };
             _timer.Tick += (_, _) =>
             {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
                 _trayTimerTickCount++;
+#endif
                 EnsureVisible();
                 QueueStateRefresh();
                 ApplyCachedVisualState();
@@ -176,7 +183,9 @@ public sealed class TrayIconService : IDisposable
             }
             finally
             {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
                 ReleaseTrayNativeWindowObserver();
+#endif
             }
         });
 
@@ -187,8 +196,9 @@ public sealed class TrayIconService : IDisposable
 
     private void RequestAppExit(string source)
     {
-        // 終了処理はWeb/トレイで分岐させず /api/app/exit を単一出口とする。
-        // トレイ側からプロセス終了を直接行わず、Hostの共通終了契約へ要求する。
+        // 正常系はWeb/トレイで分岐させず /api/app/exit を単一出口とする。
+        // localhost の共通出口が応答不能な場合だけ、同一Hostの StopApplication() へ直接合流する。
+        // Environment.Exit / Process.Kill は使わず、通常の ApplicationStopping/HostedService 停止/Dispose を必ず通す。
         var safeSource = string.IsNullOrWhiteSpace(source) ? "TrayMenu" : source.Trim();
         _ = Task.Run(async () =>
         {
@@ -198,14 +208,68 @@ public sealed class TrayIconService : IDisposable
                 var url = $"http://localhost:{_port}/api/app/exit?source={Uri.EscapeDataString(safeSource)}";
                 using var request = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, url);
                 using var response = await client.SendAsync(request).ConfigureAwait(false);
-                _log.Add("TRAY_APP_EXIT", "Exit",
-                    $"result={(response.IsSuccessStatusCode ? "ACCEPTED" : "FAILED")} source={safeSource} status={(int)response.StatusCode} commonRoute=/api/app/exit rule=tray_menu_command_contract");
+                if (response.IsSuccessStatusCode)
+                {
+                    _log.Add("TRAY_APP_EXIT", "Exit",
+                        $"result=ACCEPTED source={safeSource} status={(int)response.StatusCode} commonRoute=/api/app/exit fallback=none rule=tray_menu_command_contract");
+                    return;
+                }
+
+                try
+                {
+                    _log.Add("TRAY_APP_EXIT", "Exit",
+                        $"result=FAILED source={safeSource} status={(int)response.StatusCode} commonRoute=/api/app/exit fallback=StopApplication rule=tray_menu_command_contract");
+                }
+                catch { }
+                RequestHostStopFallback(safeSource, $"http_status_{(int)response.StatusCode}");
             }
             catch (Exception ex)
             {
-                try { _log.Add("TRAY_APP_EXIT", "Exit", $"result=FAILED source={safeSource} error={ex.GetType().Name} commonRoute=/api/app/exit rule=tray_menu_command_contract"); } catch { }
+                try
+                {
+                    _log.Add("TRAY_APP_EXIT", "Exit",
+                        $"result=FAILED source={safeSource} error={ex.GetType().Name} commonRoute=/api/app/exit fallback=StopApplication rule=tray_menu_command_contract");
+                }
+                catch { }
+                RequestHostStopFallback(safeSource, ex.GetType().Name);
             }
         });
+    }
+
+    private void RequestHostStopFallback(string source, string reason)
+    {
+        if (Interlocked.Exchange(ref _exitFallbackRequested, 1) != 0)
+        {
+            try
+            {
+                _log.Add("TRAY_APP_EXIT", "Fallback",
+                    $"result=SKIPPED source={source} reason=already_requested trigger={reason} action=StopApplication rule=tray_menu_command_contract");
+            }
+            catch { }
+            return;
+        }
+
+        try
+        {
+            _log.Add("TRAY_APP_EXIT", "Fallback",
+                $"result=REQUESTED source={source} trigger={reason} action=StopApplication shutdownRoute=host_lifetime rule=tray_menu_command_contract");
+        }
+        catch { }
+
+        ApplicationExitWatchdog.Arm(_log, source);
+        try
+        {
+            _applicationLifetime.StopApplication();
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                _log.Add("TRAY_APP_EXIT", "Fallback",
+                    $"result=FAILED source={source} trigger={reason} action=StopApplication error={ex.GetType().Name} rule=tray_menu_command_contract");
+            }
+            catch { }
+        }
     }
 
     private void ExecutePluginMenuAction(string route, string kind)
@@ -789,8 +853,10 @@ public sealed class TrayIconService : IDisposable
 
 
 
+    [System.Diagnostics.Conditional("TVAIR_DEVELOPER_DIAGNOSTICS")]
     private void EmitTrayStaHeartbeatIfDue()
     {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
         var now = Environment.TickCount64;
         var previous = Interlocked.Read(ref _lastTrayHeartbeatTick);
         if (previous != 0 && now - previous < 30_000) return;
@@ -818,8 +884,10 @@ public sealed class TrayIconService : IDisposable
         QueueTrayDiagnostic("TRAY_STA_HEARTBEAT", "ALIVE",
             $"result=OK thread={Environment.CurrentManagedThreadId} timerTicks={_trayTimerTickCount} timerEnabled={_timer?.Enabled.ToString() ?? "-"} iconExists={(_icon is not null)} iconVisible={_icon?.Visible.ToString() ?? "-"} menuActive={IsTrayMenuActive()} activePopupSequence={activePopupSequence} pendingPopupSequence={pendingPopupSequence} popupOwner={FormatHwnd(popupOwner)} popupCancelRequested={popupCancelRequested} popupOwnership=dedicated_sta stateRefreshInProgress={Volatile.Read(ref _stateRefreshInProgress)} lastNativeRightAgoMs={(nativeRight == 0 ? -1 : now - nativeRight)} lastManagedMouseUpAgoMs={(managed == 0 ? -1 : now - managed)} nativeSink={FormatHwnd(sink)} nativeSinkAlive={sinkAlive} nativeSinkResolution={_notifyIconSinkResolution} foreground={focus.ToLogFields()} rule=tray_sta_message_pump_contract");
         EmitProcessMemoryDiagnostic();
+    #endif
     }
 
+#if TVAIR_DEVELOPER_DIAGNOSTICS
     private IntPtr RefreshNotifyIconSinkHandle()
     {
         var icon = _icon;
@@ -935,6 +1003,8 @@ public sealed class TrayIconService : IDisposable
     }
 
     private delegate IntPtr SubclassProc(IntPtr hWnd, uint uMsg, UIntPtr wParam, IntPtr lParam, UIntPtr uIdSubclass, UIntPtr dwRefData);
+
+#endif
 
     [System.Diagnostics.Conditional("TVAIR_DEVELOPER_DIAGNOSTICS")]
     private void EmitProcessMemoryDiagnostic()
@@ -1192,6 +1262,7 @@ public sealed class TrayIconService : IDisposable
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
+#if TVAIR_DEVELOPER_DIAGNOSTICS
     [DllImport("comctl32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetWindowSubclass(IntPtr hWnd, SubclassProc pfnSubclass, UIntPtr uIdSubclass, UIntPtr dwRefData);
@@ -1202,6 +1273,7 @@ public sealed class TrayIconService : IDisposable
 
     [DllImport("comctl32.dll")]
     private static extern IntPtr DefSubclassProc(IntPtr hWnd, uint uMsg, UIntPtr wParam, IntPtr lParam);
+#endif
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -1260,7 +1332,9 @@ public sealed class TrayIconService : IDisposable
         }
         catch { }
 
+#if TVAIR_DEVELOPER_DIAGNOSTICS
         ReleaseTrayNativeWindowObserver();
+#endif
 
         try
         {

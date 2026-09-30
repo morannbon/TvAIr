@@ -1,4 +1,4 @@
-﻿namespace TvAIrPlugin;
+namespace TvAIrPlugin;
 
 
 /// <summary>プラグイン種別。TvAIr本体は種別に応じて安全な範囲だけ呼び出す。</summary>
@@ -137,8 +137,12 @@ public enum PluginPermission
     // Runtime UI共通のHost-owned File / Folder Picker。既存enum ordinalを維持するため末尾追加。
     UsePathPicker,
 
-    // Host-managed external lookup. Raw network access is never granted to plugins.
-    UseExternalLookup
+    // Host-managed external lookup. This capability itself never exposes a raw network client.
+    UseExternalLookup,
+
+    // Plugin-owned Internet transport (for example WebSocket). The Host owns the user permission
+    // and cancellation boundary even when the Plugin owns the protocol client.
+    UseInternetAccess
 }
 
 public sealed class PluginChannelQuery

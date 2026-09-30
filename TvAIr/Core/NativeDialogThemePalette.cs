@@ -1,5 +1,4 @@
 using System.Drawing;
-using Microsoft.Win32;
 
 namespace TvAIr.Core;
 
@@ -42,23 +41,5 @@ internal sealed class NativeDialogThemePalette
         => ColorTranslator.FromHtml(UiThemeRoleContract.Get(theme, token));
 
     public static NativeDialogThemePalette Resolve(string? requestedTheme)
-    {
-        var normalized = IniSettingsService.NormalizeSystemTheme(requestedTheme);
-        if (normalized == "dark") return Dark();
-        if (normalized == "light") return Light();
-        return IsWindowsAppThemeDark() ? Dark() : Light();
-    }
-
-    private static bool IsWindowsAppThemeDark()
-    {
-        try
-        {
-            using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
-            return key?.GetValue("AppsUseLightTheme") is int value && value == 0;
-        }
-        catch
-        {
-            return false;
-        }
-    }
+        => HostThemeStateContract.ResolveEffective(requestedTheme) == "dark" ? Dark() : Light();
 }

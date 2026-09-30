@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using TvAIrPlugin;
@@ -278,6 +278,7 @@ internal sealed class VideoOverlayHost : ITvAirVideoOverlayApi, ITvAirVideoOverl
         return entry.State;
     }
 
+    [System.Diagnostics.Conditional("TVAIR_DEVELOPER_DIAGNOSTICS")]
     private void Log(string result, VideoOverlaySceneState state, string extra = "")
         => _log.Add("PLUGIN_VIDEO_OVERLAY_HOST", _pluginId, $"result={result} sceneInstanceId={state.SceneInstanceId} definitionId={state.SceneDefinitionId} viewerSessionId={state.ViewerSessionId} generation={state.Generation} revision={state.Revision} attached={state.Attached} closed={state.IsClosed} layers={state.LayerCount} {extra} render=host_owned pointer=passthrough sound=none rule=plugin_video_overlay_host_contract".Trim());
 

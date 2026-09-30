@@ -1,4 +1,5 @@
-﻿using System.Text.Json.Serialization;
+﻿#if TVAIR_DEVELOPER_DIAGNOSTICS
+using System.Text.Json.Serialization;
 using TvAIr.Core;
 
 namespace TvAIr.Schedule;
@@ -28,14 +29,12 @@ public sealed class TunerAllocationDebugSettings
 {
     public bool LaterProgramPriority { get; set; }
 
-    // Effective chain mode used by the allocator. This remains false when the
-    // setting is enabled but no explicit user-chain pair exists.
-    public bool PseudoContinuousRecording { get; set; }
+    // Allocatorが使用したcontinuous-chain物理計画状態。設定値そのものではなく、
+    // 保存topologyを含むChainReservationContract.ShouldPlanContinuousCaptureの結果。
+    public bool ContinuousChainPlanning { get; set; }
 
-    // release_contract: Keep configured/effective chain state separate in diagnostics.
-    // This is audit-only and must not affect allocation.
-    public bool ConfiguredPseudoContinuousRecording { get; set; }
-    public bool ChainModeEnabled { get; set; }
+    // 新規チェーン作成を許可する現在の設定契約。監査専用でallocationを変更しない。
+    public bool ConfiguredChainFeatureEnabled { get; set; }
     public int UserChainCandidatePairs { get; set; }
 
     public int PreStartMarginSeconds { get; set; }
@@ -92,3 +91,4 @@ public sealed class TunerAllocationDebugEvent
 
     public string SourceRuleName { get; set; } = "";
 }
+#endif

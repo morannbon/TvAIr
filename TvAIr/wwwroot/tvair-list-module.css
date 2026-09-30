@@ -974,6 +974,7 @@ body.tvair-program-reservation-page #program-rules-table .act-wrap{
   text-align:center;
 }
 body.tvair-rule-list-page #rules-table .actions-inline,
+body.tvair-reservation-page .program-cell-action-btn--list-context,
 body.tvair-keyword-page .rsv-btn,
 body.tvair-rule-list-page .order-btn,
 body.tvair-rule-list-page .action-btn,
@@ -983,10 +984,10 @@ body.tvair-program-reservation-page .btn-del{
   display:inline-flex;
   align-items:center;
   justify-content:center;
-  min-height:20px;
-  padding:2px 8px;
-  border-radius:2px;
-  font-size:11px;
+  min-height:var(--tvair-button-h-compact);
+  padding:2px var(--tvair-button-pad-x-compact);
+  border-radius:var(--tvair-button-radius);
+  font-size:var(--tvair-button-font-compact);
   line-height:1.15;
   white-space:nowrap;
   cursor:pointer;
@@ -1018,11 +1019,11 @@ body.tvair-keyword-page #result-table td[data-cell-role="reservation-action"] .r
   display:inline-flex;
   align-items:center;
   justify-content:center;
-  min-width:70px;
-  height:22px;
-  min-height:22px;
+  min-width:var(--tvair-button-list-action-min-width);
+  height:var(--tvair-button-h-row-action);
+  min-height:var(--tvair-button-h-row-action);
   margin:0 auto;
-  padding:0 10px;
+  padding:0 var(--tvair-button-pad-x-row-action);
   line-height:1;
   vertical-align:middle;
   white-space:nowrap;
@@ -1054,11 +1055,11 @@ body.tvair-program-reservation-page .dow-check-all{
   display:inline-flex;
   align-items:center;
   justify-content:center;
-  min-height:22px;
-  padding:3px 10px;
-  border-radius:2px;
+  min-height:var(--tvair-button-h-row-action);
+  padding:3px var(--tvair-button-pad-x-row-action);
+  border-radius:var(--tvair-button-radius);
   cursor:pointer;
-  font-size:11px;
+  font-size:var(--tvair-button-font-compact);
   line-height:1.2;
   white-space:nowrap;
   font-family:'Meiryo','メイリオ',sans-serif;
@@ -1069,10 +1070,10 @@ body.tvair-program-reservation-page .btn-reset{
   display:inline-flex;
   align-items:center;
   justify-content:center;
-  min-height:26px;
-  border-radius:2px;
+  min-height:var(--tvair-button-h-standard);
+  border-radius:var(--tvair-button-radius);
   cursor:pointer;
-  font-size:12px;
+  font-size:var(--tvair-button-font-standard);
   line-height:1.2;
   white-space:nowrap;
   font-family:'Meiryo','メイリオ',sans-serif;
@@ -1460,23 +1461,23 @@ body.tvair-rule-list-page #modal-box .btn-secondary{
   display:inline-flex;
   align-items:center;
   justify-content:center;
-  border-radius:2px;
+  border-radius:var(--tvair-button-radius);
   cursor:pointer;
   font-family:'Meiryo','メイリオ',sans-serif;
   line-height:1.2;
   white-space:nowrap;
 }
 body.tvair-rule-list-page #modal-box .btn-lite{
-  min-height:21px;
-  padding:3px 10px;
-  font-size:11px;
+  min-height:var(--tvair-button-h-row-action);
+  padding:3px var(--tvair-button-pad-x-row-action);
+  font-size:var(--tvair-button-font-compact);
 }
 body.tvair-rule-list-page #modal-box .btn-primary,
 body.tvair-rule-list-page #modal-box .btn-success,
 body.tvair-rule-list-page #modal-box .btn-secondary{
-  min-height:24px;
-  padding:4px 12px;
-  font-size:12px;
+  min-height:var(--tvair-button-h-standard);
+  padding:4px var(--tvair-button-pad-x-standard);
+  font-size:var(--tvair-button-font-standard);
 }
 body.tvair-rule-list-page #modal-box .day,
 body.tvair-rule-list-page #modal-box .genre{
@@ -1521,7 +1522,7 @@ body.tvair-rule-list-page .toolbar-btn{
   display:inline-flex;
   align-items:center;
   justify-content:center;
-  border-radius:2px;
+  border-radius:var(--tvair-button-radius);
   cursor:pointer;
   font-family:'Meiryo','メイリオ',sans-serif;
   line-height:1.2;
@@ -1529,16 +1530,16 @@ body.tvair-rule-list-page .toolbar-btn{
 }
 body.tvair-keyword-page #search-btn{
   width:100%;
-  min-height:28px;
+  min-height:var(--tvair-button-h-large);
   padding:7px;
   font-size:13px;
   font-weight:bold;
   margin-top:4px;
 }
 body.tvair-rule-list-page .toolbar-btn{
-  min-height:24px;
-  padding:4px 12px;
-  font-size:12px;
+  min-height:var(--tvair-button-h-standard);
+  padding:4px var(--tvair-button-pad-x-standard);
+  font-size:var(--tvair-button-font-standard);
 }
 body.tvair-rule-list-page #toolbar-right .toolbar-btn{
   min-height:26px;
@@ -1547,9 +1548,9 @@ body.tvair-rule-list-page #toolbar-right .toolbar-btn{
 }
 body.tvair-keyword-page .kw-channel-bulk-btn{
   flex:1 1 0;
-  min-height:20px;
+  min-height:var(--tvair-button-h-compact);
   padding:2px;
-  font-size:11px;
+  font-size:var(--tvair-button-font-compact);
 }
 body.tvair-keyword-page #search-btn:disabled,
 body.tvair-keyword-page .kw-channel-bulk-btn:disabled,

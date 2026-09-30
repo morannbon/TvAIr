@@ -1,3 +1,4 @@
+﻿#if TVAIR_DEVELOPER_DIAGNOSTICS
 using System.Text;
 
 namespace TvAIr.Epg;
@@ -233,3 +234,4 @@ internal static class AribEventNameTrace
         public CharSize Size { get; set; } = CharSize.Normal;
     }
 }
+#endif

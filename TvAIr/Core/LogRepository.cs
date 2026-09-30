@@ -14,8 +14,10 @@ public sealed class LogRepository
 #if TVAIR_DEVELOPER_DIAGNOSTICS
     private readonly object gate = new();
     private readonly Queue<LogEntry> buffer;
+    private readonly Queue<LogEntry> auditBuffer;
     private readonly Dictionary<string, DateTime> recentFingerprints = new();
     private readonly int maxSize;
+    private readonly int auditMaxSize;
     private readonly bool verboseLogging;
     private LogEntry? pinnedHeader;
     private static readonly TimeSpan DuplicateSuppressWindow = TimeSpan.FromMinutes(10);
@@ -39,11 +41,13 @@ public sealed class LogRepository
     /// </summary>
     public bool DeveloperMaintenanceEnabled => DeveloperDiagnostics.Enabled;
 
-    public LogRepository(int maxSize = 10000)
+    public LogRepository(int maxSize = 10000, int auditMaxSize = 20000)
     {
 #if TVAIR_DEVELOPER_DIAGNOSTICS
-        this.maxSize = maxSize;
-        buffer = new Queue<LogEntry>(maxSize);
+        this.maxSize = Math.Max(1000, maxSize);
+        this.auditMaxSize = Math.Max(2000, auditMaxSize);
+        buffer = new Queue<LogEntry>(this.maxSize);
+        auditBuffer = new Queue<LogEntry>(this.auditMaxSize);
         verboseLogging = string.Equals(Environment.GetEnvironmentVariable("TVAIR_VERBOSE_LOG"), "1", StringComparison.OrdinalIgnoreCase)
             || File.Exists(Path.Combine(AppContext.BaseDirectory, "verbose-log.flag"));
 #endif
@@ -80,9 +84,15 @@ public sealed class LogRepository
                 }
             }
 
-            if (buffer.Count >= maxSize)
-                buffer.Dequeue();
-            buffer.Enqueue(entry);
+            // DIAGNOSTIC_RETENTION_SSOT:
+            // High-value lifecycle evidence is retained in its own bounded lane so periodic/UI noise
+            // cannot evict PreRec/recording/EPG/ownership/terminal evidence before a trouble export.
+            // Ordinary diagnostics remain independently bounded. GetAll/GetRecent merge both lanes by time.
+            var destination = IsAuditEvidence(entry) ? auditBuffer : buffer;
+            var capacity = ReferenceEquals(destination, auditBuffer) ? auditMaxSize : maxSize;
+            if (destination.Count >= capacity)
+                destination.Dequeue();
+            destination.Enqueue(entry);
         }
 
         try { EntryAdded?.Invoke(entry); } catch { }
@@ -203,6 +213,35 @@ public sealed class LogRepository
         return $"{entry.Event}\u001f{entry.Title}\u001f{entry.Message}";
     }
 
+    private static bool IsAuditEvidence(LogEntry entry)
+    {
+        var ev = entry.Event ?? string.Empty;
+        var msg = entry.Message ?? string.Empty;
+        if (ev.StartsWith("PRE_REC", StringComparison.OrdinalIgnoreCase)) return true;
+        if (ev.StartsWith("REC_", StringComparison.OrdinalIgnoreCase)) return true;
+        if (ev.StartsWith("RECORDING_", StringComparison.OrdinalIgnoreCase)) return true;
+        if (ev.StartsWith("EPG_RUN", StringComparison.OrdinalIgnoreCase)) return true;
+        if (ev.StartsWith("EPG_SECTION_COMPLETENESS", StringComparison.OrdinalIgnoreCase)) return true;
+        if (ev.StartsWith("EPG_ACTUAL_COMMIT_CONTINUITY", StringComparison.OrdinalIgnoreCase)) return true;
+        if (ev is "EPG_CAPTURE_START" or "EPG_CAPTURE_END" or "EPG_WORKER_TASK_CONVERGED") return true;
+        if (ev.StartsWith("TUNER_OWNERSHIP", StringComparison.OrdinalIgnoreCase)) return true;
+        if (ev.StartsWith("TUNER_RECONCILE", StringComparison.OrdinalIgnoreCase)) return true;
+        if (ev.StartsWith("Reservation", StringComparison.OrdinalIgnoreCase) || ev.StartsWith("RESERVATION_", StringComparison.OrdinalIgnoreCase)) return true;
+        if (ev.StartsWith("CHAIN_", StringComparison.OrdinalIgnoreCase)) return true;
+        if (ev.StartsWith("FINAL_ALLOCATION", StringComparison.OrdinalIgnoreCase)) return true;
+        if (ev == "PLUGIN_TYPED_EVENT_DISPATCH" && msg.Contains("EpgCompleted", StringComparison.OrdinalIgnoreCase)) return true;
+        return msg.Contains("result=FAILED", StringComparison.OrdinalIgnoreCase)
+            || msg.Contains("result=FALLBACK", StringComparison.OrdinalIgnoreCase)
+            || msg.Contains("failureReason=", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private LogEntry[] SnapshotMergedUnsafe()
+    {
+        return auditBuffer.Concat(buffer)
+            .OrderBy(x => x.CreatedAt)
+            .ToArray();
+    }
+
 
 #endif
 
@@ -226,8 +265,9 @@ public sealed class LogRepository
 #if TVAIR_DEVELOPER_DIAGNOSTICS
         lock (gate)
         {
-            var removed = buffer.Count;
+            var removed = buffer.Count + auditBuffer.Count;
             buffer.Clear();
+            auditBuffer.Clear();
             recentFingerprints.Clear();
             return removed;
         }
@@ -241,8 +281,9 @@ public sealed class LogRepository
 #if TVAIR_DEVELOPER_DIAGNOSTICS
         lock (gate)
         {
-            var body = buffer.ToArray();
+            var body = SnapshotMergedUnsafe();
             buffer.Clear();
+            auditBuffer.Clear();
             recentFingerprints.Clear();
 
             if (pinnedHeader is null) return body;
@@ -261,11 +302,11 @@ public sealed class LogRepository
 #if TVAIR_DEVELOPER_DIAGNOSTICS
         lock (gate)
         {
-            if (pinnedHeader is null) return buffer.ToArray();
-            var rows = new LogEntry[buffer.Count + 1];
+            var body = SnapshotMergedUnsafe();
+            if (pinnedHeader is null) return body;
+            var rows = new LogEntry[body.Length + 1];
             rows[0] = Clone(pinnedHeader);
-            var i = 1;
-            foreach (var entry in buffer) rows[i++] = entry;
+            Array.Copy(body, 0, rows, 1, body.Length);
             return rows;
         }
 #else
@@ -279,10 +320,11 @@ public sealed class LogRepository
         lock (gate)
         {
             if (count <= 0) return Array.Empty<LogEntry>();
-            if (pinnedHeader is null) return buffer.TakeLast(count).ToArray();
+            var merged = SnapshotMergedUnsafe();
+            if (pinnedHeader is null) return merged.TakeLast(count).ToArray();
 
             var bodyCount = Math.Max(0, count - 1);
-            var body = buffer.TakeLast(bodyCount).ToArray();
+            var body = merged.TakeLast(bodyCount).ToArray();
             var rows = new LogEntry[body.Length + 1];
             rows[0] = Clone(pinnedHeader);
             Array.Copy(body, 0, rows, 1, body.Length);

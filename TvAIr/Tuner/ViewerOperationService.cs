@@ -435,6 +435,7 @@ public sealed class ViewerOperationService
             if (stale.ProcessId is > 0)
             {
                 var stalePid = stale.ProcessId.Value;
+#if TVAIR_DEVELOPER_DIAGNOSTICS
                 var delayedDeath = ViewerRetuneDelayedDeathAudit.MarkDetectedDead(stalePid);
                 request.BeforeStaleLeaseRelease?.Invoke(new ViewerOperationEnsureTunedStaleLease(stale, delayedDeath));
                 if (!request.SuppressStaleDiagnosticLog)
@@ -442,6 +443,7 @@ public sealed class ViewerOperationService
                     _log.Add("VIEWER_RETUNE_DELAYED_DEATH_AUDIT", request.PluginId,
                         $"result={Safe(delayedDeath.Result)} stalePid={stalePid} leaseId={Safe(stale.LeaseId)} lastRetuneAt={Safe(delayedDeath.LastRetuneAtText)} detectedDeadAt={Safe(delayedDeath.DetectedDeadAtText)} elapsedSinceRetuneMs={Safe(delayedDeath.ElapsedMsText)} lastRetuneNid={Safe(delayedDeath.NetworkIdText)} lastRetuneTsid={Safe(delayedDeath.TransportStreamIdText)} lastRetuneSid={Safe(delayedDeath.ServiceIdText)} lastRetuneGroup={Safe(delayedDeath.Group)} lastRetuneDid={Safe(delayedDeath.Did)} lastRetuneBonDriver={Safe(delayedDeath.BonDriver)} reason=existing_process_not_alive_before_ensure_tuned rule=release_contract");
                 }
+#endif
                 if (plan.PreserveViewerWindowState &&
                     _pendingWindowStateByProfile.TryGetValue(plan.Profile.Id, out var pendingForStale) &&
                     pendingForStale.SourceProcessId == stalePid &&
@@ -455,7 +457,9 @@ public sealed class ViewerOperationService
                 TvAirManagedProcessRegistry.Unregister(stalePid);
                 var staleReleaseReason = "viewerEnsureTuned_stale_viewer_lease_cleanup";
                 _leases.Release(stale.LeaseId, staleReleaseReason);
+#if TVAIR_DEVELOPER_DIAGNOSTICS
                 request.AfterStaleLeaseRelease?.Invoke(new ViewerOperationEnsureTunedStaleLease(stale, delayedDeath));
+#endif
             }
         }
 

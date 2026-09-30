@@ -20,7 +20,7 @@
 
 /* Reservation subtab geometry and paint are owned exclusively by tvair-list-module.css. */
 #tab-spacer{flex:1}
-.reservation-toolbar-action{background:var(--tvair-reservation-toolbar-bg);border:1px solid var(--tvair-reservation-toolbar-border);color:var(--tvair-reservation-toolbar-text);padding:2px 10px;border-radius:2px 2px 0 0;cursor:pointer;font-size:11px;font-family:'Meiryo','メイリオ',sans-serif;margin-bottom:0;line-height:1.4}
+.reservation-toolbar-action{background:var(--tvair-reservation-toolbar-bg);border:1px solid var(--tvair-reservation-toolbar-border);color:var(--tvair-reservation-toolbar-text);min-height:var(--tvair-button-h-row-action);padding:2px var(--tvair-button-pad-x-row-action);border-radius:var(--tvair-button-radius) var(--tvair-button-radius) 0 0;cursor:pointer;font-size:var(--tvair-button-font-compact);font-family:'Meiryo','メイリオ',sans-serif;margin-bottom:0;line-height:1.4}
 .reservation-toolbar-action:hover{background:var(--tvair-reservation-toolbar-hover-bg)}
 
 /* Table surface, width, scroll and column schema are owned by tvair-list-module.css. */
@@ -52,7 +52,7 @@
 
 /* release_contract ListMetadataColumnParityContract: this page keeps operation button color semantics only. ○/× state-cell geometry remains unchanged and is owned by tvair-list-module.css, not by action button rules. */
 /* 操作ボタン */
-.act-btn{padding:1px 10px;border:none;border-radius:2px;cursor:pointer;font-size:11px;white-space:nowrap;font-family:'Meiryo','メイリオ',sans-serif;color:var(--tvair-content-inverse);display:inline-flex;align-items:center;justify-content:center;min-width:80px;height:20px}
+.act-btn{padding:1px 10px;border:none;border-radius:2px;cursor:pointer;font-size:var(--tvair-button-font-compact);white-space:nowrap;font-family:'Meiryo','メイリオ',sans-serif;color:var(--tvair-content-inverse);display:inline-flex;align-items:center;justify-content:center;min-width:80px;height:20px}
 
 /* チェーン予約グループ表示 */
 .chain-label{display:inline-block;font-size:11px;color:var(--tvair-role-focus);font-weight:bold;white-space:nowrap;line-height:1.2;margin-right:4px}
@@ -102,8 +102,8 @@
   display:inline-flex;
   align-items:center;
   justify-content:center;
-  min-width:var(--tvair-reservation-action-button-min-width);
-  height:20px;
+  min-width:var(--tvair-button-list-action-min-width);
+  height:var(--tvair-button-h-row-action);
   color:var(--tvair-reservation-action-empty-fg);
   font-size:12px;
   line-height:1;
@@ -144,9 +144,9 @@
   display:inline-flex;
   align-items:center;
   justify-content:center;
-  min-width:var(--tvair-reservation-action-button-min-width);
-  height:20px;
-  padding:0 8px;
+  min-width:var(--tvair-button-list-action-min-width);
+  height:var(--tvair-button-h-row-action);
+  padding:0 var(--tvair-button-pad-x-compact);
   box-sizing:border-box;
   font-size:11px;
   font-weight:700;

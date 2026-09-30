@@ -3,6 +3,7 @@ using TvAIr.Channel;
 using TvAIr.Core;
 using TvAIr.Tuner;
 using TvAIr.Schedule;
+using TvAIr.Epg.Projection;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text.Encodings.Web;
@@ -22,7 +23,7 @@ namespace TvAIr.Epg;
 ///   5. 前局TSの解析・DB保存は次局取得と並行して実行
 ///   6. 通常EPGは対象TS/SIDを今回TSから読めた結果だけでDBへUPSERT
 ///      非チェーンの録画前EPG確認は目的EventIdentityの観測snapshotを呼出元へ返し、通常EPG DBへは書き込まない
-///      明示チェーンrootの既存DB-backed追従経路は、開発者承認なしに変更しない
+///      明示チェーンrootのDB-backed追従経路は通常EPG/PreRecとは分離して維持する
 ///
 /// 並列数は TunerPool の空きスロット数で自動決定する（GrConcurrentCaptures/BsCsConcurrentCaptures 廃止）。
 /// </summary>
@@ -50,6 +51,11 @@ public sealed class EpgCapture
     private readonly EpgLogoExtractor logoExtractor;
     private readonly ReservationProjectionPromotionService projectionPromotion;
     private readonly KeywordMatcher keywordMatcher;
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+    private readonly EpgCoverageAttributionDiagnosticStore coverageAttribution;
+    private readonly DbProgramEventSource diagnosticDbProgramEventSource;
+#endif
+    private readonly BroadcastTimeReference broadcastTimeReference;
 
     // キャプチャ状態（UIへの進捗通知用）
     private EpgCaptureStatus status = new();
@@ -100,7 +106,12 @@ public sealed class EpgCapture
         ServiceLogoStore serviceLogoStore,
         EpgLogoExtractor logoExtractor,
         ReservationProjectionPromotionService projectionPromotion,
-        KeywordMatcher keywordMatcher)
+        KeywordMatcher keywordMatcher,
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        EpgCoverageAttributionDiagnosticStore coverageAttribution,
+        DbProgramEventSource diagnosticDbProgramEventSource,
+#endif
+        BroadcastTimeReference broadcastTimeReference)
     {
         this.settingsMonitor = settingsMonitor;
         this.tunerProfiles = tunerProfiles;
@@ -117,6 +128,190 @@ public sealed class EpgCapture
         this.logoExtractor = logoExtractor;
         this.projectionPromotion = projectionPromotion;
         this.keywordMatcher = keywordMatcher;
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        this.coverageAttribution = coverageAttribution;
+        this.diagnosticDbProgramEventSource = diagnosticDbProgramEventSource;
+#endif
+        this.broadcastTimeReference = broadcastTimeReference;
+    }
+
+
+    private sealed class RecordingEpgSupplementState
+    {
+        public long Offset;
+        public PsiSectionAssembler Assembler = new();
+        public EitSectionReader Reader = new(EitTransportStreamScope.ActualOnly);
+        public readonly Dictionary<string, string> CommittedSignatures = new(StringComparer.Ordinal);
+        public readonly SemaphoreSlim Gate = new(1, 1);
+
+        public void ResetParser()
+        {
+            Assembler = new PsiSectionAssembler();
+            Reader = new EitSectionReader(EitTransportStreamScope.ActualOnly);
+        }
+    }
+
+    private readonly ConcurrentDictionary<int, RecordingEpgSupplementState> recordingSupplementStates = new();
+    private const int RecordingSupplementMaxBytesPerPass = 32 * 1024 * 1024;
+
+    /// <summary>
+    /// 録画TSを読み取り専用で追尾し、同一TS上の全サービスEITを通常EPGと同じ解析・canonical merge・EpgStoreへ補完する。
+    /// 録画worker/録画ファイル書込み/Recording Follow/チューナーには一切介入しない。
+    /// 補完源はupsert-onlyでありstale退場権限を持たない。
+    /// </summary>
+    public async Task<int> ObserveRecordingTsSupplementAsync(int reservationId, string groupName, string tsPath, CancellationToken ct = default)
+    {
+        if (reservationId <= 0 || string.IsNullOrWhiteSpace(tsPath) || !File.Exists(tsPath)) return 0;
+        var state = recordingSupplementStates.GetOrAdd(reservationId, _ => new RecordingEpgSupplementState());
+        if (!await state.Gate.WaitAsync(0, ct).ConfigureAwait(false)) return 0;
+        var resetParserAfterPass = false;
+        try
+        {
+            await using var stream = new FileStream(tsPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024, useAsync: true);
+            if (stream.Length < state.Offset)
+            {
+                state.Offset = 0;
+                state.CommittedSignatures.Clear();
+                state.ResetParser();
+            }
+            if (state.Offset >= stream.Length) return 0;
+            stream.Position = state.Offset;
+
+            var packet = new byte[TsPacketReader.PacketSize];
+            var budget = Math.Min((long)RecordingSupplementMaxBytesPerPass, stream.Length - state.Offset);
+            long consumed = 0;
+            var sectionsBefore = state.Reader.EitSectionCount;
+            var versionSwitchBefore = state.Reader.IgnoredVersionSwitchEitSectionCount;
+            while (consumed + packet.Length <= budget)
+            {
+                ct.ThrowIfCancellationRequested();
+                var read = await stream.ReadAsync(packet.AsMemory(0, packet.Length), ct).ConfigureAwait(false);
+                if (read != packet.Length) break;
+                consumed += read;
+                if (packet[0] != 0x47) continue;
+                if (!TsPacketReader.TryRead(packet, out var packetView) || packetView.Pid is not (0x12 or 0x26 or 0x27)) continue;
+                foreach (var section in state.Assembler.Feed(packet)) state.Reader.TryRead(section);
+            }
+            state.Offset += consumed;
+            resetParserAfterPass = state.Reader.IgnoredVersionSwitchEitSectionCount > versionSwitchBefore;
+            if (state.Reader.EitSectionCount <= sectionsBefore) return 0;
+
+            var parsed = state.Reader.BuildEvents();
+            if (parsed.Count == 0) return 0;
+            var eventObservations = state.Reader.BuildEventObservations();
+            var analyze = new EpgAnalyzeResult(
+                0, 0,
+                state.Assembler.TransportErrorPacketCount, state.Assembler.ContinuityDiscontinuityCount,
+                state.Assembler.DiscontinuityIndicatorResetCount, state.Assembler.DuplicatePayloadPacketCount, state.Assembler.ResyncWaitDropPacketCount,
+                state.Assembler.InvalidSectionLengthResetCount, state.Assembler.InvalidPointerResetCount,
+                0, state.Reader.EitSectionCount, state.Reader.ShortEventDescriptorCount,
+                state.Reader.DecodeAttemptCount, state.Reader.ExtendedWithoutShortCount, state.Reader.DescriptorRecoveryCount,
+                state.Reader.RawSectionShortResolverCandidates, state.Reader.RawSectionShortResolverMerged, state.Reader.RawSectionShortResolverUnresolved,
+                state.Reader.CommonEventCount, state.Reader.CommonResolvedCount, state.Reader.CommonUnresolvedCount,
+                state.Reader.RejectedEventHeaderCount, state.Reader.RejectedBasicScheduleEventHeaderCount,
+                state.Reader.IgnoredOtherTransportStreamEitSectionCount, state.Reader.InvalidEitSectionCount,
+                state.Reader.IgnoredNonCurrentEitSectionCount, state.Reader.IgnoredDuplicateEitSectionCount,
+                state.Reader.IgnoredVersionSwitchEitSectionCount, state.Reader.IgnoredBasicScheduleVersionSwitchEitSectionCount,
+                state.Reader.InvalidSyntaxOrLengthEitSectionCount, state.Reader.InvalidCrcEitSectionCount,
+                state.Reader.InvalidHeaderConsistencyEitSectionCount, state.Reader.ToleratedSameVersionScheduleMetadataDriftCount,
+                0, 0, 0,
+                Array.Empty<EpgCaptureSubtableVersion>(), Array.Empty<EpgPersistentCacheSubtable>(),
+                Array.Empty<EpgSectionEventInventory>(), Array.Empty<EpgSectionEventInventory>(),
+                Array.Empty<EpgEventObservation>(), Array.Empty<EpgEventObservation>(),
+                Array.Empty<EpgPreviousVersionCacheSubtable>(), Array.Empty<EpgEventObservation>(),
+                state.Reader.RejectedEventHeaders.ToArray(), state.Reader.TitleDecodes.ToArray(),
+                state.Reader.BuildSectionStatuses(), eventObservations, state.Reader.BuildAccumulatorAudits(), parsed);
+
+            var channels = channelLoader.Load().Targets;
+            var serviceNameByIdentity = channels
+                .GroupBy(c => (c.OriginalNetworkId, c.TransportStreamId, c.ServiceId))
+                .ToDictionary(g => g.Key, g => g.First().Name);
+            var serviceNameBySid = parsed
+                .GroupBy(e => e.ServiceId)
+                .ToDictionary(g => g.Key, g => serviceNameByIdentity.TryGetValue((g.First().NetworkId, g.First().TransportStreamId, g.Key), out var name) ? name : string.Empty);
+            var targetSids = parsed.Select(e => e.ServiceId).Distinct().OrderBy(x => x).ToArray();
+            var tsid = parsed.Select(e => e.TransportStreamId).FirstOrDefault();
+            var targets = channels.Where(c => c.TransportStreamId == tsid).ToArray();
+            var group = new TsGroup($"recording:{reservationId}", groupName ?? string.Empty, tsid, string.Empty, targets);
+            var rawEvents = BuildRawEventsFromAccumulatorProjection(parsed, targetSids.ToHashSet(), serviceNameBySid);
+            rawEvents = FilterCurrentOrFutureImportEvents(rawEvents, DateTime.Now);
+            _ = ApplyStrictTitleBodyCanonicalMerge(group, "recording_ts_supplement", targetSids, analyze, rawEvents);
+
+            static string Signature(EpgEvent e) => $"{e.NetworkId}|{e.TransportStreamId}|{e.ServiceId}|{e.EventId}|{e.Start.Ticks}|{e.DurationSeconds}|{e.TableId}|{e.SectionNumber}|{e.VersionNumber}|{e.RawShortEventDescriptorHex ?? string.Empty}|{e.RawExtendedEventDescriptorHex ?? string.Empty}|{e.RawContentDescriptorHex ?? string.Empty}";
+            static string Identity(EpgEvent e) => $"{e.NetworkId}/{e.TransportStreamId}/{e.ServiceId}/{e.EventId}";
+
+            var changed = new List<EpgEvent>();
+            foreach (var e in rawEvents)
+            {
+                var key = Identity(e);
+                var sig = Signature(e);
+                if (state.CommittedSignatures.TryGetValue(key, out var old) && string.Equals(old, sig, StringComparison.Ordinal)) continue;
+                changed.Add(e);
+                state.CommittedSignatures[key] = sig;
+            }
+            if (changed.Count == 0) return 0;
+
+            await epgImportCommitGate.WaitAsync(ct).ConfigureAwait(false);
+            int committed;
+            int promoted;
+            try
+            {
+                var result = store.CommitCapture(changed, retireEvents: null, preserveEvents: changed);
+                committed = result.Upsert.Count;
+                promoted = projectionPromotion.PromotePending($"RecordingTsSupplement:R{reservationId}", runAllocationRoute: false);
+            }
+            finally
+            {
+                epgImportCommitGate.Release();
+            }
+
+            var keywordAdded = 0;
+            if (committed > 0)
+            {
+                try
+                {
+                    keywordAdded = keywordMatcher.RunMatching(changed);
+                    if (keywordAdded > 0)
+                        projectionPromotion.RunAllocationRoute($"RecordingTsSupplement:R{reservationId}:KeywordMatch", ReservationAllocationWakeRefreshMode.BoundedCoalesce);
+                    else if (promoted > 0)
+                        projectionPromotion.RunAllocationRoute($"RecordingTsSupplement:R{reservationId}:ProjectionPromote", ReservationAllocationWakeRefreshMode.BoundedCoalesce);
+                }
+                catch (Exception ex)
+                {
+                    Log("RECORDING_EPG_SUPPLEMENT", $"R{reservationId}", $"result=POST_COMMIT_ERROR error={SafeLogValue(ex.Message)} committed={committed} action=keep_epg_commit recordingImpact=none rule=recording_ts_epg_supplement_contract");
+                }
+            }
+
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+            Log("RECORDING_EPG_SUPPLEMENT", $"R{reservationId}",
+                $"result=COMMITTED group={SafeLogValue(groupName)} tsid={tsid} bytesRead={consumed} offset={state.Offset} services={targetSids.Length} parsed={rawEvents.Count} changed={changed.Count} committed={committed} promoted={promoted} keywordAdded={keywordAdded} staleRetire=none tunerMutation=none recordingMutation=none followMutation=none rule=recording_ts_epg_supplement_contract");
+#endif
+            return committed;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { return 0; }
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        catch (Exception ex)
+#else
+        catch (Exception)
+#endif
+        {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+            Log("RECORDING_EPG_SUPPLEMENT", $"R{reservationId}", $"result=SKIP_ERROR error={ex.GetType().Name}:{SafeLogValue(ex.Message)} action=ignore_supplement_failure recordingImpact=none rule=recording_ts_epg_supplement_contract");
+#endif
+            return 0;
+        }
+        finally
+        {
+            if (resetParserAfterPass) state.ResetParser();
+            state.Gate.Release();
+        }
+    }
+
+    public void PruneRecordingTsSupplementStates(IReadOnlyCollection<int> activeReservationIds)
+    {
+        var active = activeReservationIds.ToHashSet();
+        foreach (var id in recordingSupplementStates.Keys)
+            if (!active.Contains(id)) recordingSupplementStates.TryRemove(id, out _);
     }
 
     private static EpgWorkerProcessIdentityState GetOwnedWorkerProcessIdentity(ActiveEpgWorkerSnapshot snapshot)
@@ -511,6 +706,11 @@ public sealed class EpgCapture
             : runId.Trim();
         if (manageStatus) currentEpgRunId = runId;
         activeNormalEpgRuns[runId] = 0;
+        var otherSeenReset = store.ResetOtherScheduleSeen();
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        coverageAttribution.BeginRun(runId);
+        Log("EPG_COVERAGE_ATTRIBUTION", "EPG", $"result=RESET runId={runId} otherScheduleSeenResetRows={otherSeenReset} scope=normal_epg_identity_attribution mutation=epg_cache_provenance_marker_reset rule=epg_overlay_gap_attribution_v122");
+#endif
         PruneCompletedEpgWorkerTasksForOldRuns(runId);
         runtimeEpgDepthOverride = normalizedDepth;
         Log("EPG_RUN_START", "EPG", $"EPG取得を開始します。targetScope={normalizedScope} runDepth={normalizedDepth} purpose={runPurpose} uiVisible={showProgress} uiMode={(showProgress ? "Visible" : "Silent")} rule=release_contract");
@@ -538,7 +738,7 @@ public sealed class EpgCapture
                 return EpgCaptureResult.Failed("有効なチャンネルがありません。ch2/ChSetを設定画面で明示してください。");
             }
 
-            var allGroups = BuildGroups(load.Targets);
+            var allGroups = BuildGroups(load.Targets, load.ServiceStates);
             var groups = FilterGroupsByScope(allGroups, normalizedScope);
             if (groups.Count == 0)
             {
@@ -647,6 +847,90 @@ public sealed class EpgCapture
             coverageMonitor = null;
             LogEpgWorkerCoverage(runId, "run_end", force: true);
 
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+            if (string.Equals(runResult, "OK", StringComparison.OrdinalIgnoreCase))
+            {
+                var auditNow = DateTime.Now;
+                var auditBaseDate = auditNow.Date;
+                var audits = new List<EpgCoverageAttributionDiagnosticStore.DailyCoverageAudit>(7);
+                for (var dayOffset = 0; dayOffset < 7; dayOffset++)
+                {
+                    var auditDate = auditBaseDate.AddDays(dayOffset);
+                    var auditFrom = dayOffset == 0 ? auditNow : auditDate;
+                    var auditTo = auditDate.AddDays(1);
+                    var dbEventsForAudit = store.GetByRange(auditFrom, auditTo);
+                    var projectedEventsForAudit = diagnosticDbProgramEventSource.GetByRange(auditFrom, auditTo);
+                    var audit = coverageAttribution.BuildDailyAudit(auditDate, auditFrom, dbEventsForAudit, projectedEventsForAudit);
+                    audits.Add(audit);
+                    var auditResult = audit.Result switch
+                    {
+                        EpgCoverageAttributionDiagnosticStore.DailyCoverageAuditResult.Pass => "PASS",
+                        EpgCoverageAttributionDiagnosticStore.DailyCoverageAuditResult.Fail => "FAIL",
+                        _ => "INCOMPLETE_EVIDENCE",
+                    };
+                    var evidenceReason = audit.TargetServices <= 0
+                        ? "NO_TARGET_SERVICES"
+                        : audit.AuthoritativeEvents <= 0
+                            ? "NO_AUTHORITY"
+                            : "COMPLETE";
+                    Log("EPG_DAILY_COVERAGE_AUDIT", "EPG",
+                        $"result={auditResult} evidence={evidenceReason} runId={audit.RunId} dayOffset=D+{dayOffset} date={audit.Date:yyyy-MM-dd} targetServices={audit.TargetServices} scheduleCompleteServices={audit.ScheduleCompleteServices} scheduleIncompleteServices={audit.ScheduleIncompleteServices} " +
+                        $"authoritativeEvents={audit.AuthoritativeEvents} dbPresent={audit.DbPresent} dbMissing={audit.DbMissing} projectionPresent={audit.ProjectionPresent} projectionMissing={audit.ProjectionMissing} blankTitleCount={audit.BlankTitleCount} defectIdentityCount={audit.DefectIdentityCount} " +
+                        $"incompleteServiceSample=[{SafeLogValue(audit.IncompleteServiceSample)}] dbMissingSample=[{SafeLogValue(audit.DbMissingSample)}] projectionMissingSample=[{SafeLogValue(audit.ProjectionMissingSample)}] blankTitleSample=[{SafeLogValue(audit.BlankTitleSample)}] " +
+                        "coverageBasis=basic_schedule_section_completion_plus_observed_event_identity continuityRule=observed_basic_to_db_to_db_projection offAirPolicy=no_wall_clock_gap_inference mutation=none publicBuild=compiled_out rule=epg_daily_coverage_audit_v122");
+                }
+
+                static double RetentionPercent(IEnumerable<EpgCoverageAttributionDiagnosticStore.DailyCoverageAudit> source)
+                {
+                    var rows = source.ToArray();
+                    var authoritative = rows.Sum(x => x.AuthoritativeEvents);
+                    if (authoritative <= 0)
+                        return 0.0;
+                    var defects = rows.Sum(x => x.DefectIdentityCount);
+                    return Math.Max(0.0, 100.0 * (authoritative - defects) / authoritative);
+                }
+
+                var first72h = audits.Take(3).ToArray();
+                var week = audits.Take(7).ToArray();
+                var retention72h = RetentionPercent(first72h);
+                var retentionWeek = RetentionPercent(week);
+                static string DayResult(EpgCoverageAttributionDiagnosticStore.DailyCoverageAudit x)
+                    => x.Result switch
+                    {
+                        EpgCoverageAttributionDiagnosticStore.DailyCoverageAuditResult.Pass => "PASS",
+                        EpgCoverageAttributionDiagnosticStore.DailyCoverageAuditResult.Fail => "FAIL",
+                        _ => x.TargetServices <= 0 ? "NO_TARGET_SERVICES" : "NO_AUTHORITY",
+                    };
+
+                // Release acceptance contract follows usable EPG identities: D is the strict zero-defect gate;
+                // 72h is D..D+2 at >=99%; week is D..D+6 at 100%. Section-version churn stays
+                // diagnostic evidence and must not by itself become an EPG-missing verdict.
+                static bool HasCompleteEvidence(EpgCoverageAttributionDiagnosticStore.DailyCoverageAudit x)
+                    => x.TargetServices > 0 && x.AuthoritativeEvents > 0;
+
+                var authority72h = first72h.All(HasCompleteEvidence);
+                var authorityWeek = week.All(HasCompleteEvidence);
+                var passD0 = HasCompleteEvidence(audits[0])
+                    && audits[0].Result == EpgCoverageAttributionDiagnosticStore.DailyCoverageAuditResult.Pass;
+                var pass72h = authority72h && passD0 && retention72h >= 99.0;
+                var passWeek = authorityWeek && passD0 && retentionWeek >= 100.0;
+                var d0Result = DayResult(audits[0]);
+                var window72hResult = !authority72h ? "INCOMPLETE_EVIDENCE" : pass72h ? "PASS" : "FAIL";
+                var windowWeekResult = !authorityWeek ? "INCOMPLETE_EVIDENCE" : passWeek ? "PASS" : "FAIL";
+                var retention72hText = authority72h ? retention72h.ToString("F3") : "NA";
+                var retentionWeekText = authorityWeek ? retentionWeek.ToString("F3") : "NA";
+                var overallResult = !authority72h || !authorityWeek ? "INCOMPLETE_EVIDENCE" : pass72h && passWeek ? "PASS" : "FAIL";
+                Log("EPG_COVERAGE_RELEASE_AUDIT", "EPG",
+                    $"result={overallResult} runId={coverageAttribution.CurrentRunId} baseDate={auditBaseDate:yyyy-MM-dd} " +
+                    $"d0={d0Result} d1={DayResult(audits[1])} d2={DayResult(audits[2])} d3={DayResult(audits[3])} d4={DayResult(audits[4])} d5={DayResult(audits[5])} d6={DayResult(audits[6])} " +
+                    $"window72h=D..D+2 windowWeek=D..D+6 passD0={d0Result} " +
+                    $"authority72h={(authority72h ? "COMPLETE" : "INCOMPLETE")} pass72h={window72hResult} retention72h={retention72hText} target72h=99.000 " +
+                    $"authorityWeek={(authorityWeek ? "COMPLETE" : "INCOMPLETE")} passWeek={windowWeekResult} retentionWeek={retentionWeekText} targetWeek=100.000 " +
+                    $"authoritative72h={first72h.Sum(x => x.AuthoritativeEvents)} dbMissing72h={first72h.Sum(x => x.DbMissing)} projectionMissing72h={first72h.Sum(x => x.ProjectionMissing)} blankTitle72h={first72h.Sum(x => x.BlankTitleCount)} defectIdentities72h={first72h.Sum(x => x.DefectIdentityCount)} " +
+                    $"authoritativeWeek={week.Sum(x => x.AuthoritativeEvents)} dbMissingWeek={week.Sum(x => x.DbMissing)} projectionMissingWeek={week.Sum(x => x.ProjectionMissing)} blankTitleWeek={week.Sum(x => x.BlankTitleCount)} defectIdentitiesWeek={week.Sum(x => x.DefectIdentityCount)} " +
+                    "metric=observed_basic_schedule_identity_retention noWallClockGapInference=true noBroadcasterIntentInference=true mutation=none publicBuild=compiled_out rule=epg_release_coverage_audit_v122");
+            }
+#endif
             return new EpgCaptureResult(string.Equals(runResult, "OK", StringComparison.OrdinalIgnoreCase), completedCount, totalGroups, totalImported, runResult, missingGroups, msg, captureResultDetail)
             {
                 MissingScopes = missingScopes,
@@ -673,47 +957,77 @@ public sealed class EpgCapture
     // probe worker/lease and never mutates the normal EPG run/status owner.
     public async Task<EpgCaptureResult> RunIndependentPreRecordProbeAsync(
         CancellationToken ct,
-        string targetScope,
-        ushort? expectedNetworkId,
-        ushort? expectedTransportStreamId,
-        ushort? expectedServiceId,
-        string? expectedServiceName,
-        ushort? expectedEventId,
-        DateTime? expectedStartTime,
-        DateTime? expectedEndTime,
-        int maxCaptureSeconds,
-        string preferredRecordingTunerName,
+        PreRecordProbeExecutionContract executionContract,
+        TunerLease preclaimedPreRecordLease,
         bool preserveUserChainDbSeriesFollow = false)
     {
+        ArgumentNullException.ThrowIfNull(executionContract);
         var started = DateTime.Now;
-        var normalizedScope = NormalizeTargetScope(targetScope);
+        var normalizedScope = NormalizeTargetScope(executionContract.TargetScope);
+        var initialRemainingSeconds = (int)Math.Ceiling((executionContract.HardDeadline - DateTimeOffset.Now).TotalSeconds);
+        if (initialRemainingSeconds <= 0)
+        {
+            try { preclaimedPreRecordLease.Dispose(); } catch { }
+            Log("PRE_REC_EPG_INDEPENDENT_PROBE", "EPG確認",
+                $"result=HARD_DEADLINE_EXPIRED_BEFORE_LAUNCH targetScope={normalizedScope} hardDeadline={executionContract.HardDeadline:O} action=keep_original_recording_time rule=pre_record_epg_execution_lifecycle_contract");
+            return new EpgCaptureResult(false, 0, 1, 0, "FAILED", 1,
+                "録画前EPG確認の実行期限を過ぎました。",
+                "failureStage=execution_contract;failureReason=hard_deadline_expired_before_launch");
+        }
         var runId = $"prerec-{DateTime.UtcNow:yyyyMMddHHmmssfff}-{Interlocked.Increment(ref epgRunSequence)}";
-        var load = channelLoader.Load();
-        if (load.Targets.Count == 0)
-            return EpgCaptureResult.Failed("録画前EPG確認対象チャンネルがありません。");
-
-        var groups = FilterGroupsForExpectedService(
-            FilterGroupsByScope(BuildGroups(load.Targets), normalizedScope),
-            expectedNetworkId,
-            expectedTransportStreamId,
-            expectedServiceId,
-            expectedServiceName);
-        if (groups.Count != 1)
+        if (preclaimedPreRecordLease is null || !preclaimedPreRecordLease.IsCurrent)
         {
             Log("PRE_REC_EPG_INDEPENDENT_PROBE", "EPG確認",
-                $"result=NO_UNIQUE_TARGET runId={runId} targetScope={normalizedScope} matchedGroups={groups.Count} expectedNid={(expectedNetworkId?.ToString() ?? "-")} expectedTsid={(expectedTransportStreamId?.ToString() ?? "-")} expectedSid={(expectedServiceId?.ToString() ?? "-")} expectedEventId={(expectedEventId?.ToString() ?? "-")} action=keep_original_recording_time rule=pre_record_epg_independent_probe_contract");
-            return EpgCaptureResult.Failed("録画前EPG確認対象TSを一意に解決できませんでした。");
+                $"result=ADMISSION_CLAIM_INVALID runId={runId} tuner={SafeLogValue(executionContract.RuntimeTunerName)} failureStage=admission_claim failureReason=admission_claim_not_current action=keep_original_recording_time rule=pre_record_epg_admission_claim_ssot");
+            try { preclaimedPreRecordLease?.Dispose(); } catch { }
+            return new EpgCaptureResult(false, 0, 1, 0, "FAILED", 1,
+                "録画前EPG確認用チューナーの実行権を維持できませんでした。",
+                "failureStage=admission_claim;failureReason=admission_claim_not_current");
+        }
+        var load = channelLoader.Load();
+        if (load.Targets.Count == 0)
+        {
+            try { preclaimedPreRecordLease.Dispose(); } catch { }
+            return new EpgCaptureResult(false, 0, 1, 0, "FAILED", 1,
+                "録画前EPG確認対象チャンネルがありません。",
+                "failureStage=target_resolution;failureReason=no_prerec_channels");
+        }
+
+        // PRE_RECORD_EPG_RECORDING_IDENTITY_SSOT:
+        // The parent recording reservation owns the target service identity. Resolve the physical TS only
+        // from the exact NID/TSID/SID triplet. ServiceName is mutable display metadata and must never
+        // participate in PreRec admission/target resolution.
+        var groups = FilterGroupsForExpectedServiceIdentity(
+            FilterGroupsByScope(BuildGroups(load.Targets), normalizedScope),
+            executionContract.NetworkId,
+            executionContract.TransportStreamId,
+            executionContract.ServiceId);
+        if (groups.Count != 1)
+        {
+            var failureReason = groups.Count == 0
+                ? "target_service_identity_not_found"
+                : "target_service_identity_ambiguous";
+            Log("PRE_REC_EPG_INDEPENDENT_PROBE", "EPG確認",
+                $"result={(groups.Count == 0 ? "TARGET_IDENTITY_NOT_FOUND" : "TARGET_IDENTITY_AMBIGUOUS")} runId={runId} targetScope={normalizedScope} matchedGroups={groups.Count} expectedNid={executionContract.NetworkId} expectedTsid={executionContract.TransportStreamId} expectedSid={executionContract.ServiceId} expectedEventId={(executionContract.EventId?.ToString() ?? "-")} identitySource=parent_recording_reservation serviceNameUsedForIdentity=false action=keep_original_recording_time rule=pre_record_epg_recording_identity_ssot");
+            try { preclaimedPreRecordLease.Dispose(); } catch { }
+            return new EpgCaptureResult(false, 0, 1, 0, "FAILED", 1,
+                groups.Count == 0
+                    ? "録画対象サービスのNID/TSID/SIDに対応する放送TSを解決できませんでした。"
+                    : "録画対象サービスのNID/TSID/SIDに対応する放送TSが複数見つかりました。",
+                $"failureStage=target_resolution;failureReason={failureReason}");
         }
 
         var group = groups[0];
         var snapshotOnly = !preserveUserChainDbSeriesFollow;
         var events = new ConcurrentBag<EpgEvent>();
+        PreRecordProbeResult? probeCompletion = null;
         var workerState = RegisterActiveEpgWorkerTask(group, 1, runId);
         var imported = 0;
+        var admissionLeaseConsumedByWorkerState = false;
         try
         {
             Log("PRE_REC_EPG_INDEPENDENT_PROBE", $"TS{group.TsId}",
-                $"result=START runId={runId} group={group.Group} tuner={SafeLogValue(preferredRecordingTunerName)} safetyCeilingSec={maxCaptureSeconds} expectedEventId={(expectedEventId?.ToString() ?? "-")} chainDbSeriesFollow={preserveUserChainDbSeriesFollow} policy=parallel_by_physical_recording_tuner_no_normal_epg_status_owner rule=pre_record_epg_independent_probe_contract");
+                $"result=START runId={runId} group={group.Group} tuner={SafeLogValue(executionContract.RuntimeTunerName)} hardDeadline={executionContract.HardDeadline:O} remainingSec={Math.Max(0, (int)Math.Ceiling((executionContract.HardDeadline - DateTimeOffset.Now).TotalSeconds))} expectedEventId={(executionContract.EventId?.ToString() ?? "-")} chainDbSeriesFollow={preserveUserChainDbSeriesFollow} lifecycleOwner=EpgCapture deadlineOwner=EpgCapture policy=parallel_by_physical_recording_tuner_no_normal_epg_status_owner rule=pre_record_epg_execution_lifecycle_contract");
 
             imported = await CaptureGroupAsync(
                 group: group,
@@ -721,21 +1035,19 @@ public sealed class EpgCapture
                 ct: ct,
                 isPreRecordCheck: true,
                 workerTaskState: workerState,
-                maxCaptureSeconds: maxCaptureSeconds,
-                expectedNetworkId: expectedNetworkId,
-                expectedTransportStreamId: expectedTransportStreamId,
-                expectedServiceId: expectedServiceId,
-                expectedEventId: expectedEventId,
-                expectedStartTime: expectedStartTime,
-                expectedEndTime: expectedEndTime,
-                preferredRecordingTunerName: preferredRecordingTunerName,
+                maxCaptureSeconds: Math.Max(1, (int)Math.Ceiling((executionContract.HardDeadline - DateTimeOffset.Now).TotalSeconds)),
+                preRecordExecutionContract: executionContract,
+                preferredRecordingTunerName: executionContract.RuntimeTunerName,
                 preTuneChainPosition: null,
                 preTuneAction: null,
                 preTuneKeepWorkerUntilSafetyCeiling: false,
                 preRecordProbeSnapshotOnly: snapshotOnly,
                 preRecordEvents: events,
+                onPreRecordProbeCompleted: probe => probeCompletion = probe,
                 releaseWorkerAdmission: null,
-                reacquireWorkerAdmissionAsync: null).ConfigureAwait(false);
+                reacquireWorkerAdmissionAsync: null,
+                preclaimedPreRecordLease: preclaimedPreRecordLease,
+                onPreclaimedLeaseAttached: () => admissionLeaseConsumedByWorkerState = true).ConfigureAwait(false);
         }
         finally
         {
@@ -743,16 +1055,25 @@ public sealed class EpgCapture
             var ownerSnapshot = workerState.Snapshot();
             if (!TryConvergeExitedEpgWorker(workerState, EpgWorkerTerminalReason.Completed, "independent_prerec_owner_finally", ownerSnapshot.AttemptGeneration))
                 StartResidualEpgWorkerExitMonitor(workerState);
+            if (!admissionLeaseConsumedByWorkerState && preclaimedPreRecordLease.IsIdentityCurrent)
+            {
+                try { preclaimedPreRecordLease.Dispose(); } catch { }
+            }
         }
 
         var snapshot = events.OrderBy(e => e.Start).ThenBy(e => e.EventId).ToArray();
-        var success = preserveUserChainDbSeriesFollow ? imported > 0 : imported > 0 && snapshot.Length > 0;
+        var terminalReason = probeCompletion?.TerminalReason ?? PreRecordProbeTerminalReason.ObservationOnly;
+        var targetObserved = terminalReason == PreRecordProbeTerminalReason.TargetObserved;
+        var success = targetObserved && (preserveUserChainDbSeriesFollow ? imported > 0 : imported > 0 && snapshot.Length > 0);
         var runResult = success ? "OK" : "FAILED";
         Log("PRE_REC_EPG_INDEPENDENT_PROBE", $"TS{group.TsId}",
-            $"result={runResult} runId={runId} group={group.Group} tuner={SafeLogValue(preferredRecordingTunerName)} observedEvents={snapshot.Length} importedEvents={(preserveUserChainDbSeriesFollow ? imported : 0)} elapsedSec={(int)(DateTime.Now - started).TotalSeconds} dbWrite={(preserveUserChainDbSeriesFollow ? "epg_store_user_chain_protected" : "none")} normalEpgStatusOwner=untouched rule=pre_record_epg_independent_probe_contract");
+            $"result={runResult} runId={runId} group={group.Group} tuner={SafeLogValue(executionContract.RuntimeTunerName)} terminalReason={terminalReason} targetObserved={targetObserved} observedEvents={snapshot.Length} importedEvents={(preserveUserChainDbSeriesFollow ? imported : 0)} elapsedSec={(int)(DateTime.Now - started).TotalSeconds} dbWrite={(preserveUserChainDbSeriesFollow ? "epg_store_user_chain_protected" : "none")} lifecycleOwner=EpgCapture normalEpgStatusOwner=untouched rule=pre_record_epg_execution_lifecycle_contract");
+        var failureDetail = success
+            ? $"result={runResult};independentPreRec=true;terminalReason={terminalReason};tuner={SafeLogValue(executionContract.RuntimeTunerName)}"
+            : $"failureStage=probe_lifecycle;failureReason={terminalReason};targetObserved={targetObserved};observedEvents={snapshot.Length};tuner={SafeLogValue(executionContract.RuntimeTunerName)}";
         return new EpgCaptureResult(success, success ? 1 : 0, 1, preserveUserChainDbSeriesFollow ? imported : 0, runResult, success ? 0 : 1,
             "録画前時刻確認を終了しました",
-            $"result={runResult}; independentPreRec=true; tuner={SafeLogValue(preferredRecordingTunerName)}")
+            failureDetail)
         {
             CompletedScopes = success ? normalizedScope : string.Empty,
             MissingScopes = success ? string.Empty : normalizedScope,
@@ -997,12 +1318,7 @@ public sealed class EpgCapture
                         isPreRecordCheck: false,
                         workerTaskState,
                         maxCaptureSeconds: null,
-                        expectedNetworkId: null,
-                        expectedTransportStreamId: null,
-                        expectedServiceId: null,
-                        expectedEventId: null,
-                        expectedStartTime: null,
-                        expectedEndTime: null,
+                        preRecordExecutionContract: null,
                         preferredRecordingTunerName: null,
                         preTuneChainPosition: null,
                         preTuneAction: null,
@@ -1181,9 +1497,7 @@ public sealed class EpgCapture
         string? preTuneChainPosition = null,
         string? preTuneAction = null,
         bool preTuneKeepWorkerUntilSafetyCeiling = false,
-        ushort? expectedEventId = null,
-        DateTime? expectedStartTime = null,
-        DateTime? expectedEndTime = null,
+        PreRecordProbeExecutionContract? preRecordExecutionContract = null,
         Func<EpgWorkerLaunchResult, bool>? bindStartedProcessOwnership = null,
         Func<EpgWorkerLaunchResult, string, Task<bool>>? retireUnreadyStartupAsync = null)
     {
@@ -1236,9 +1550,7 @@ public sealed class EpgCapture
                 preTuneChainPosition,
                 preTuneAction,
                 preTuneKeepWorkerUntilSafetyCeiling,
-                expectedEventId,
-                expectedStartTime,
-                expectedEndTime);
+                preRecordExecutionContract);
 
             Log("EPG_LAUNCH_GATE", $"TS{group.TsId}",
                 $"exit worker={workerName} success={launch.Success} pid={launch.ProcessId} processStartOnly=true route=TvAIrEpgRec mode=epg-ts rule=epg_worker_route_contract");
@@ -1449,9 +1761,7 @@ public sealed class EpgCapture
         string? preTuneChainPosition = null,
         string? preTuneAction = null,
         bool preTuneKeepWorkerUntilSafetyCeiling = false,
-        ushort? expectedEventId = null,
-        DateTime? expectedStartTime = null,
-        DateTime? expectedEndTime = null)
+        PreRecordProbeExecutionContract? preRecordExecutionContract = null)
     {
         var exe = ResolveTvAIrEpgRecPath();
         if (string.IsNullOrWhiteSpace(exe) || !File.Exists(exe))
@@ -1512,6 +1822,19 @@ public sealed class EpgCapture
                 ["channelIndex"] = t.ResolvedChannelIndex,
                 ["channelArgument"] = t.ChannelArgument
             }).ToList(),
+            // PRE_REC_WIRE_CONTRACT_SSOT: this is the exact Scheduler-frozen target contract.
+            // channels[] remains only the physical same-TS observation/tuning scope.
+            ["preRecordProbe"] = preRecordExecutionContract is null ? null : new Dictionary<string, object?>
+            {
+                ["networkId"] = (int)preRecordExecutionContract.NetworkId,
+                ["transportStreamId"] = (int)preRecordExecutionContract.TransportStreamId,
+                ["serviceId"] = (int)preRecordExecutionContract.ServiceId,
+                ["eventId"] = preRecordExecutionContract.EventId.HasValue ? (int)preRecordExecutionContract.EventId.Value : null,
+                ["expectedStartTime"] = preRecordExecutionContract.ExpectedStartTime.ToString("O"),
+                ["expectedEndTime"] = preRecordExecutionContract.ExpectedEndTime.ToString("O"),
+                ["hardDeadlineUtc"] = preRecordExecutionContract.HardDeadline.UtcDateTime.ToString("O"),
+                ["runtimeTunerName"] = preRecordExecutionContract.RuntimeTunerName
+            },
             ["metadata"] = new Dictionary<string, string>
             {
                 ["purpose"] = "normal_epg_capture_ts_file",
@@ -1539,9 +1862,6 @@ public sealed class EpgCapture
                 ["allocationRouteContract"] = isPreRecordCheck ? "pre_record_epg_check_plan" : "epg_entry_transport_stream_plan",
                 ["targetSidCount"] = group.Targets.Count.ToString(),
                 ["targetSids"] = string.Join(",", group.Targets.Select(t => t.ServiceId).OrderBy(x => x)),
-                ["expectedEventId"] = expectedEventId?.ToString() ?? string.Empty,
-                ["expectedEventStart"] = expectedStartTime?.ToString("O") ?? string.Empty,
-                ["expectedEventEnd"] = expectedEndTime?.ToString("O") ?? string.Empty,
                 ["rule"] = "release_contract",
                 // TvAIrEpgRec process icon visibility follows the user setting for active EPG workers.
                 ["taskbarIconVisible"] = ini.ShowTvAIrEpgRecTaskbarIcon ? "true" : "false",
@@ -1577,8 +1897,10 @@ public sealed class EpgCapture
             if (process is null)
                 return new EpgWorkerLaunchResult(false, 0, "TvAIrEpgRec.exe の起動に失敗しました。", stopSignalPath, resultPath, progressPath);
 
+            var routeNid = isPreRecordCheck ? preRecordExecutionContract?.NetworkId : target?.OriginalNetworkId;
+            var routeSid = isPreRecordCheck ? preRecordExecutionContract?.ServiceId : target?.ServiceId;
             Log("TVAIREPGREC_EPG_ROUTE", $"TS{group.TsId}",
-                $"result=SELECTED pid={process.Id} exe={SafeLogValue(exe)} job={SafeLogValue(jobPath)} result={SafeLogValue(resultPath)} progress={SafeLogValue(progressPath)} stopSignal={SafeLogValue(stopSignalPath)} service={SafeLogValue(displayServiceName ?? target?.Name)} nid={(target?.OriginalNetworkId.ToString() ?? "-")} tsid={group.TsId} sid={(target?.ServiceId.ToString() ?? "-")} targetSidCount={group.Targets.Count} targetSids=[{string.Join(",", group.Targets.Select(t => t.ServiceId).OrderBy(x => x))}] scope={(isPreRecordCheck ? "target_event_pre_record_check" : "transport_stream_schedule_epg")} recordServiceScopeShared=false channelArgument={SafeLogValue(channelArgument)} bonDriverSetChannelSpace={(target?.ResolvedSpace.ToString() ?? "-")} bonDriverSetChannelIndex={(target?.ResolvedChannelIndex.ToString() ?? "-")} did={did} seconds={effectiveWait} getStreamVariant={SafeLogValue(getStreamVariant)} logoPolicy={SafeLogValue(logoPolicy)} output={SafeLogValue(tsFile)} route=TvAIrEpgRec mode={(isPreRecordCheck ? "epg-check" : "epg")} launchKind={launchKind} taskbarIconVisible={showWorkerTaskbarIcon} windowPolicy={windowPolicy} preTuneChainPosition={SafeLogValue(preTuneChainPosition)} preTuneAction={SafeLogValue(preTuneAction)} keepWorkerUntilSafetyCeiling={preTuneKeepWorkerUntilSafetyCeiling} titleBarLogoPath={SafeLogValue(displayLogoPath)} centerLogoPath={SafeLogValue(centerLogoPath)} logoTarget=worker_titlebar_center_only rule=epg_worker_display_contract");
+                $"result=SELECTED pid={process.Id} exe={SafeLogValue(exe)} job={SafeLogValue(jobPath)} result={SafeLogValue(resultPath)} progress={SafeLogValue(progressPath)} stopSignal={SafeLogValue(stopSignalPath)} service={SafeLogValue(displayServiceName ?? target?.Name)} nid={(routeNid?.ToString() ?? "-")} tsid={group.TsId} sid={(routeSid?.ToString() ?? "-")} targetSidCount={group.Targets.Count} targetSids=[{string.Join(",", group.Targets.Select(t => t.ServiceId).OrderBy(x => x))}] targetIdentitySource={(isPreRecordCheck ? "pre_record_execution_contract" : "ts_group_first_target")} expectedEventId={(preRecordExecutionContract?.EventId?.ToString() ?? "-")} scope={(isPreRecordCheck ? "target_event_pre_record_check" : "transport_stream_schedule_epg")} recordServiceScopeShared=false channelArgument={SafeLogValue(channelArgument)} bonDriverSetChannelSpace={(target?.ResolvedSpace.ToString() ?? "-")} bonDriverSetChannelIndex={(target?.ResolvedChannelIndex.ToString() ?? "-")} did={did} seconds={effectiveWait} hardDeadline={(preRecordExecutionContract?.HardDeadline.ToString("O") ?? "-")} getStreamVariant={SafeLogValue(getStreamVariant)} logoPolicy={SafeLogValue(logoPolicy)} output={SafeLogValue(tsFile)} route=TvAIrEpgRec mode={(isPreRecordCheck ? "epg-check" : "epg")} launchKind={launchKind} taskbarIconVisible={showWorkerTaskbarIcon} windowPolicy={windowPolicy} preTuneChainPosition={SafeLogValue(preTuneChainPosition)} preTuneAction={SafeLogValue(preTuneAction)} keepWorkerUntilSafetyCeiling={preTuneKeepWorkerUntilSafetyCeiling} titleBarLogoPath={SafeLogValue(displayLogoPath)} centerLogoPath={SafeLogValue(centerLogoPath)} logoTarget=worker_titlebar_center_only rule=epg_worker_display_contract");
 
             return new EpgWorkerLaunchResult(true, process.Id,
                 $"Started PID={process.Id}: {exe} --job \"{jobPath}\" --mode {(isPreRecordCheck ? "epg-check" : "epg")} output={tsFile}",
@@ -1753,7 +2075,7 @@ public sealed class EpgCapture
 
     // ─── 1グループのキャプチャ ────────────────────────────────────
 
-    private async Task<int> CaptureGroupAsync(TsGroup group, int pass, CancellationToken ct, bool isPreRecordCheck, ActiveEpgWorkerTask workerTaskState, int? maxCaptureSeconds, ushort? expectedNetworkId, ushort? expectedTransportStreamId, ushort? expectedServiceId, ushort? expectedEventId, DateTime? expectedStartTime, DateTime? expectedEndTime, string? preferredRecordingTunerName = null, string? preTuneChainPosition = null, string? preTuneAction = null, bool preTuneKeepWorkerUntilSafetyCeiling = false, bool preRecordProbeSnapshotOnly = false, ConcurrentBag<EpgEvent>? preRecordEvents = null, Action? releaseWorkerAdmission = null, Func<CancellationToken, Task>? reacquireWorkerAdmissionAsync = null)
+    private async Task<int> CaptureGroupAsync(TsGroup group, int pass, CancellationToken ct, bool isPreRecordCheck, ActiveEpgWorkerTask workerTaskState, int? maxCaptureSeconds, PreRecordProbeExecutionContract? preRecordExecutionContract = null, string? preferredRecordingTunerName = null, string? preTuneChainPosition = null, string? preTuneAction = null, bool preTuneKeepWorkerUntilSafetyCeiling = false, bool preRecordProbeSnapshotOnly = false, ConcurrentBag<EpgEvent>? preRecordEvents = null, Action<PreRecordProbeResult>? onPreRecordProbeCompleted = null, Action? releaseWorkerAdmission = null, Func<CancellationToken, Task>? reacquireWorkerAdmissionAsync = null, TunerLease? preclaimedPreRecordLease = null, Action? onPreclaimedLeaseAttached = null)
     {
         var workerName  = $"{group.Group}-{group.TsId}";
         var tsFile      = BuildTsFilePath(group);
@@ -1791,7 +2113,7 @@ public sealed class EpgCapture
                 $"{workerName} 開始: TS={group.TsId} pass={pass} services={serviceCount}" +
                 $" [{string.Join(",", group.Targets.Select(t => t.ServiceId))}]" +
                 $" safetyCeilingSeconds={waitSec} normalEpgSeconds={normalWaitSec}" +
-                $" expectedNid={(expectedNetworkId?.ToString() ?? "-")} expectedTsid={(expectedTransportStreamId?.ToString() ?? "-")} expectedSid={(expectedServiceId?.ToString() ?? "-")} expectedEventId={(expectedEventId?.ToString() ?? "-")} expectedStart={(expectedStartTime?.ToString("MM/dd HH:mm:ss") ?? "-")} runtimeTuner={SafeLogValue(preferredRecordingTunerName)} policy=stop_as_soon_as_target_event_seen_runtime_tuner rule=pre_record_epg_runtime_tuner_contract");
+                $" expectedNid={(preRecordExecutionContract?.NetworkId.ToString() ?? "-")} expectedTsid={(preRecordExecutionContract?.TransportStreamId.ToString() ?? "-")} expectedSid={(preRecordExecutionContract?.ServiceId.ToString() ?? "-")} expectedEventId={(preRecordExecutionContract?.EventId?.ToString() ?? "-")} expectedStart={(preRecordExecutionContract is null ? "-" : preRecordExecutionContract.ExpectedStartTime.ToString("MM/dd HH:mm:ss"))} runtimeTuner={SafeLogValue(preferredRecordingTunerName)} lifecycleOwner=EpgCapture terminalOwner=EpgCapture workerRole=transport_observer targetNotFoundAuthority=hard_deadline_only rule=pre_record_epg_execution_lifecycle_contract");
         }
         else
         {
@@ -1815,11 +2137,45 @@ public sealed class EpgCapture
             }
 
             var effectiveWait = waitSec;
+            if (isPreRecordCheck && preRecordExecutionContract is not null)
+            {
+                var remaining = (int)Math.Ceiling((preRecordExecutionContract.HardDeadline - DateTimeOffset.Now).TotalSeconds);
+                if (remaining <= 0)
+                {
+                    Log("PRE_REC_EPG_PROBE_TERMINAL", $"TS{group.TsId}",
+                        $"result=ABORTED reason=hard_deadline_reached_before_worker_launch worker={workerName} hardDeadline={preRecordExecutionContract.HardDeadline:O} targetNotFound=False action=no_worker_launch lifecycleOwner=EpgCapture rule=pre_record_epg_execution_lifecycle_contract");
+                    return 0;
+                }
+                effectiveWait = Math.Min(effectiveWait, remaining);
+            }
 
             // TunerPool からチューナーを確保
             // TvAIr管理TunerPoolのみから確保
-            var plannedEnd = DateTime.Now.AddSeconds(effectiveWait + (isPreRecordCheck ? 0 : 30));
-            var lease = await AcquireEpgLeaseWithShortWaitAsync(group, plannedEnd, workerName, ct, isPreRecordCheck, workerTaskState.RunId, isPreRecordCheck ? preferredRecordingTunerName : null);
+            var plannedEnd = isPreRecordCheck && preRecordExecutionContract is not null
+                ? preRecordExecutionContract.HardDeadline.LocalDateTime
+                : DateTime.Now.AddSeconds(effectiveWait + 30);
+            TunerLease? lease;
+            if (isPreRecordCheck && preclaimedPreRecordLease is not null)
+            {
+                // PRE_RECORD_EPG_ADMISSION_CLAIM_SSOT:
+                // ReservationSchedulerが安全候補選択と同時に確保したleaseをそのままworker ownerへ渡す。
+                // ここでは波単位RecordingLifecycleGateも再Acquireも行わず、Admissionの物理Tuner実行権を覆さない。
+                lease = preclaimedPreRecordLease;
+                if (!lease.IsCurrent
+                    || !string.Equals(lease.Name, preferredRecordingTunerName, StringComparison.OrdinalIgnoreCase)
+                    || !string.Equals(NormalizePreRecordAdmissionGroupForCapture(lease.Group), NormalizePreRecordAdmissionGroupForCapture(group.Group), StringComparison.OrdinalIgnoreCase))
+                {
+                    Log("PRE_REC_EPG_RUNTIME_TUNER_ACQUIRE", $"TS{group.TsId}",
+                        $"result=ADMISSION_CLAIM_INVALID worker={workerName} selectedTuner={SafeLogValue(preferredRecordingTunerName)} leaseTuner={SafeLogValue(lease.Name)} leaseGroup={SafeLogValue(lease.Group)} targetGroup={SafeLogValue(group.Group)} failureStage=admission_claim failureReason=claim_identity_mismatch action=no_worker_launch rule=pre_record_epg_admission_claim_ssot");
+                    return 0;
+                }
+                Log("PRE_REC_EPG_RUNTIME_TUNER_ACQUIRE", $"TS{group.TsId}",
+                    $"result=OK_PRECLAIMED worker={workerName} selectedTuner={preferredRecordingTunerName} actualTuner={lease.Name} did={lease.Did} group={group.Group} leaseId={lease.PoolLeaseId} generation={lease.OccupancyGeneration} targetSids=[{string.Join(',', group.Targets.Select(t => t.ServiceId).OrderBy(x => x))}] rule=pre_record_epg_admission_claim_ssot");
+            }
+            else
+            {
+                lease = await AcquireEpgLeaseWithShortWaitAsync(group, plannedEnd, workerName, ct, isPreRecordCheck, workerTaskState.RunId, isPreRecordCheck ? preferredRecordingTunerName : null);
+            }
             if (lease is null)
             {
                 if (!isPreRecordCheck)
@@ -1838,6 +2194,8 @@ public sealed class EpgCapture
                     $"result=REJECTED worker={workerName} attempt={attempt}/{maxAttempts} group={group.Group} reason={attemptRejectReason} action=release_new_lease_stop_retry rule=epg_worker_attempt_ownership_contract");
                 return 0;
             }
+            if (isPreRecordCheck && preclaimedPreRecordLease is not null && ReferenceEquals(lease, preclaimedPreRecordLease))
+                onPreclaimedLeaseAttached?.Invoke();
 
             // PHYSICAL_EPG_DEVICE_SESSION_INVARIANT:
             // 次局へ進める正本は「論理leaseがFreeになった」だけではない。
@@ -1857,7 +2215,7 @@ public sealed class EpgCapture
                 // 取得開始はグローバルゲートでシリアル化する。
                 // 録画前EPG確認は同一TS代表サービスで起動する場合があるため、
                 // ActivityKeeper/タスクバー識別は目的番組の expectedService を優先する。
-                var displayServiceName = ResolveActivityDisplayServiceName(group, isPreRecordCheck, expectedServiceId);
+                var displayServiceName = ResolveActivityDisplayServiceName(group, isPreRecordCheck, preRecordExecutionContract?.ServiceId);
                 bool BindStartedProcessOwnership(EpgWorkerLaunchResult startedLaunch)
                 {
                     // The just-created process belongs to this exact attempt before any OpenTuner/SetChannel/TS-read
@@ -1904,9 +2262,7 @@ public sealed class EpgCapture
                     preTuneChainPosition,
                     preTuneAction,
                     preTuneKeepWorkerUntilSafetyCeiling,
-                    preRecordProbeSnapshotOnly ? expectedEventId : null,
-                    preRecordProbeSnapshotOnly ? expectedStartTime : null,
-                    preRecordProbeSnapshotOnly ? expectedEndTime : null,
+                    preRecordExecutionContract,
                     BindStartedProcessOwnership,
                     async (unreadyLaunch, startupResult) => await StopAndRetireActiveEpgWorkerAsync(
                         unreadyLaunch,
@@ -1989,20 +2345,15 @@ public sealed class EpgCapture
                         tsFile,
                         launch.ProcessId,
                         workerName,
+                        launch.ProgressPath,
                         workerTaskState,
                         attemptGeneration,
-                        TimeSpan.FromSeconds(effectiveWait),
-                        expectedNetworkId,
-                        expectedTransportStreamId,
-                        expectedServiceId,
-                        expectedEventId,
-                        expectedStartTime,
-                        expectedEndTime,
+                        preRecordExecutionContract ?? throw new InvalidOperationException("PreRec execution contract is required for epg-check mode."),
                         !preRecordProbeSnapshotOnly,
                         ct,
                         preferredRecordingTunerName,
                         preTuneKeepWorkerUntilSafetyCeiling);
-
+                    onPreRecordProbeCompleted?.Invoke(probe);
 
                     if (!workerTaskState.TrySnapshotAttempt(attemptGeneration, out var probeSnapshot))
                         return 0;
@@ -2010,7 +2361,7 @@ public sealed class EpgCapture
                     if (probeIdentity == EpgWorkerProcessIdentityState.Match)
                     {
                         Log("PRE_REC_EPG_PROBE_STOP_REQUEST", $"TS{group.TsId}",
-                            $"pid={launch.ProcessId} worker={workerName} reason={(probe.TargetFound ? "target_event_seen" : "safety_ceiling_reached")} rule=epg_probe_runtime_contract");
+                            $"pid={launch.ProcessId} worker={workerName} reason={(probe.TargetFound ? "target_event_seen" : probe.TerminalReason == PreRecordProbeTerminalReason.DeadlineReachedTargetNotObserved ? "safety_ceiling_reached" : probe.TerminalReason.ToString())} terminalReason={probe.TerminalReason} lifecycleOwner=EpgCapture rule=pre_record_epg_execution_lifecycle_contract");
                         RequestTvAIrEpgRecStopOrKill(launch, workerName, group, "pre_record_target_probe_done");
                     }
                     else if (probeIdentity == EpgWorkerProcessIdentityState.IdentityUnknown)
@@ -2066,6 +2417,14 @@ public sealed class EpgCapture
                         return 0;
                     }
 
+                    // PRE_REC_BROADCAST_TIME_HANDOFF_INVARIANT:
+                    // PreRec may stop its worker immediately after the target event is proven.  That early
+                    // terminal path must still consume the worker's latest TDT/TOT evidence before runtime
+                    // artifacts are deleted; otherwise a successful short PreRec silently loses the newest
+                    // broadcast-vs-Windows correction.  Normal EPG terminal processing and recording-runtime
+                    // observation already feed the same BroadcastTimeReference SSOT.
+                    _ = TryApplyBroadcastTimeFromWorkerArtifacts(launch, group, "pre_record_check_early_terminal");
+
                     if (preRecordProbeSnapshotOnly)
                     {
                         if (probe.TargetFound)
@@ -2079,11 +2438,18 @@ public sealed class EpgCapture
                         else
                         {
                             imported = 0;
+                            var snapshotResult = probe.TerminalReason == PreRecordProbeTerminalReason.DeadlineReachedTargetNotObserved
+                                ? "TARGET_NOT_FOUND"
+                                : "EXECUTION_FAILED";
                             Log("PRE_REC_EPG_SNAPSHOT", $"TS{group.TsId}",
-                                $"result=TARGET_NOT_FOUND observedEvents={probe.Events.Count} dbWrite=none expectedEventId={(expectedEventId?.ToString() ?? "-")} action=fail_probe_keep_original_reservation_time rule=pre_record_epg_probe_snapshot_contract");
+                                $"result={snapshotResult} terminalReason={probe.TerminalReason} observedEvents={probe.Events.Count} dbWrite=none expectedEventId={(preRecordExecutionContract?.EventId?.ToString() ?? "-")} action=fail_probe_keep_original_reservation_time lifecycleOwner=EpgCapture rule=pre_record_epg_execution_lifecycle_contract");
                         }
                         try { File.Delete(tsFile); } catch { }
-                        CleanupTvAIrEpgRecRuntimeFiles(launch, workerName, group, reason: probe.TargetFound ? "pre_record_probe_target_found" : "pre_record_probe_target_not_found");
+                        CleanupTvAIrEpgRecRuntimeFiles(launch, workerName, group, reason: probe.TargetFound
+                            ? "pre_record_probe_target_found"
+                            : probe.TerminalReason == PreRecordProbeTerminalReason.DeadlineReachedTargetNotObserved
+                                ? "pre_record_probe_target_not_found_after_deadline"
+                                : $"pre_record_probe_execution_failed_{probe.TerminalReason}");
                     }
                     else
                     {
@@ -2108,7 +2474,21 @@ public sealed class EpgCapture
                 }
                 else
                 {
-                    // TvAIrEpgRec の終了を待つ
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+                    using var completenessObservationCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    var completenessObservationTask = ObserveNormalEpgCompletenessDuringCaptureAsync(
+                        group,
+                        tsFile,
+                        launch.ProcessId,
+                        workerName,
+                        workerTaskState,
+                        attemptGeneration,
+                        TimeSpan.FromSeconds(effectiveWait),
+                        completenessObservationCts.Token);
+#endif
+                    // TvAIrEpgRec の終了を待つ。
+                    // v1.2.2第一段階では予定枠/実取得上限を変更せず、completenessはDeveloper観測専用。
+                    // basic scheduleだけの早期completeで0x58-0x5F詳細scheduleを削らないことを優先する。
                     var processTimeout = TimeSpan.FromSeconds(effectiveWait + 8 + 30);
                     var waitResult = await WaitForExitOrExternalFailureAsync(
                         launch.ProcessId,
@@ -2116,6 +2496,16 @@ public sealed class EpgCapture
                         workerTaskState,
                         attemptGeneration,
                         ct).ConfigureAwait(false);
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+                    completenessObservationCts.Cancel();
+                    try { await completenessObservationTask.ConfigureAwait(false); }
+                    catch (OperationCanceledException) when (completenessObservationCts.IsCancellationRequested) { }
+                    catch (Exception ex)
+                    {
+                        Log("EPG_CAPTURE_COMPLETENESS_OBSERVER", $"TS{group.TsId}",
+                            $"result=OBSERVER_ERROR worker={workerName} pid={launch.ProcessId} error={ex.GetType().Name}:{SafeLogValue(ex.Message)} action=ignore_observer_error_keep_capture_contract rule=epg_capture_completeness_observer_v122");
+                    }
+#endif
 
                     if (waitResult is EpgProcessExitWaitResult.Exited or EpgProcessExitWaitResult.NotFound)
                         workerTaskState.MarkProcessExitObserved(attemptGeneration);
@@ -2196,7 +2586,7 @@ public sealed class EpgCapture
                     // independent facts. Always capture the worker-owned terminal result before cleanup;
                     // otherwise a failed worker can be hidden by a usable partial TS and its evidence lost.
                     var terminalEvidence = LogTvAIrEpgRecTerminalEvidence(
-                        launch, workerName, group, tsFile, attempt, maxAttempts, imported);
+                        launch, workerName, group, tsFile, attempt, maxAttempts, imported, isPreRecordCheck);
 
                     if (terminalEvidence.PreserveRuntimeArtifacts)
                     {
@@ -2408,6 +2798,141 @@ public sealed class EpgCapture
 
 
 
+    private bool TryApplyBroadcastTimeFromWorkerArtifacts(EpgWorkerLaunchResult launch, TsGroup group, string purpose)
+    {
+        // Prefer the terminal result because it contains the worker's final observation.  A short PreRec
+        // can be stopped before that result is durable, so progress is an equal-authority fallback.
+        if (TryReadBroadcastTimeFromResult(launch.ResultPath, out var observation))
+        {
+            return ApplyBroadcastTimeObservation(
+                group, purpose, "worker_result", observation.BroadcastTime, observation.SystemObservedAt,
+                observation.OffsetMilliseconds, observation.SourceTableId, observation.ObservationCount);
+        }
+
+        if (TryReadBroadcastTimeFromProgress(launch.ProgressPath, out observation))
+        {
+            return ApplyBroadcastTimeObservation(
+                group, purpose, "worker_progress", observation.BroadcastTime, observation.SystemObservedAt,
+                observation.OffsetMilliseconds, observation.SourceTableId, observation.ObservationCount);
+        }
+
+        Log("BROADCAST_TIME_OBSERVATION", $"TS{group.TsId}",
+            $"result=NOT_OBSERVED purpose={SafeLogValue(purpose)} source=worker_artifacts action=keep_existing_prerec_reference_unchanged " +
+            "updatePolicy=refresh_on_every_valid_observation_hold_latest_between_observations_persist_across_restart windowsTimeChanged=False " +
+            "reservationClockMutation=none prerecClockMutation=none recordingClockMutation=none epgClockMutation=none wakeClockMutation=none rule=broadcast_time_reference_single_source");
+        return false;
+    }
+
+    private bool ApplyBroadcastTimeObservation(
+        TsGroup group,
+        string purpose,
+        string source,
+        DateTimeOffset broadcastTime,
+        DateTimeOffset systemObservedAt,
+        long offsetMilliseconds,
+        int sourceTableId,
+        int observationCount)
+    {
+        var sourceTable = sourceTableId >= 0 ? $"0x{sourceTableId:X2}" : "-";
+        var referenceUpdated = broadcastTimeReference.TryUpdate(
+            broadcastTime.LocalDateTime,
+            systemObservedAt.LocalDateTime,
+            offsetMilliseconds,
+            sourceTableId,
+            Math.Max(1, observationCount),
+            out var referenceReason);
+
+        Log("BROADCAST_TIME_OBSERVATION", $"TS{group.TsId}",
+            $"result=OBSERVED purpose={SafeLogValue(purpose)} source={SafeLogValue(source)} tableId={sourceTable} observations={Math.Max(1, observationCount)} " +
+            $"broadcastTime={broadcastTime:O} systemTimeAtObservation={systemObservedAt:O} offsetMs={offsetMilliseconds} " +
+            $"precision=section_second_resolution_transport_latency_uncompensated action=update_prerec_reference_only updatePolicy=refresh_on_every_valid_observation_hold_latest_between_observations_persist_across_restart " +
+            $"referenceUpdated={referenceUpdated} referenceReason={SafeLogValue(referenceReason)} windowsTimeChanged=False " +
+            "reservationClockMutation=none prerecClockMutation=effective_clock_only recordingClockMutation=none epgClockMutation=none wakeClockMutation=none rule=broadcast_time_reference_single_source");
+        return referenceUpdated;
+    }
+
+    private static bool TryReadBroadcastTimeFromResult(string? resultPath, out BroadcastTimeWorkerObservation observation)
+    {
+        observation = default;
+        if (string.IsNullOrWhiteSpace(resultPath) || !File.Exists(resultPath)) return false;
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(resultPath));
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("tsReadProbe", out var probe) || probe.ValueKind != JsonValueKind.Object) return false;
+            return TryReadBroadcastTimeObservation(probe, out observation);
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+        catch (JsonException) { return false; }
+    }
+
+    private static bool TryReadBroadcastTimeFromProgress(string? progressPath, out BroadcastTimeWorkerObservation observation)
+    {
+        observation = default;
+        if (string.IsNullOrWhiteSpace(progressPath) || !File.Exists(progressPath)) return false;
+        try
+        {
+            foreach (var line in File.ReadLines(progressPath).Where(x => !string.IsNullOrWhiteSpace(x)).TakeLast(128).Reverse())
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(line);
+                    if (TryReadBroadcastTimeObservation(doc.RootElement, out observation)) return true;
+                }
+                catch (JsonException)
+                {
+                    // A worker can still be finishing the last JSONL line.  Older complete progress
+                    // records remain valid evidence and are checked next.
+                }
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        return false;
+    }
+
+    private static bool TryReadBroadcastTimeObservation(JsonElement root, out BroadcastTimeWorkerObservation observation)
+    {
+        observation = default;
+
+        static bool TryProperty(JsonElement element, string pascal, string camel, out JsonElement value)
+            => element.TryGetProperty(pascal, out value) || element.TryGetProperty(camel, out value);
+
+        if (!TryProperty(root, "BroadcastTimeObserved", "broadcastTimeObserved", out var observedElement)
+            || observedElement.ValueKind is not (JsonValueKind.True or JsonValueKind.False)
+            || !observedElement.GetBoolean()) return false;
+        if (!TryProperty(root, "BroadcastTimeValue", "broadcastTimeValue", out var broadcastElement)
+            || broadcastElement.ValueKind != JsonValueKind.String
+            || !DateTimeOffset.TryParse(broadcastElement.GetString(), out var broadcastTime)) return false;
+        if (!TryProperty(root, "BroadcastTimeSystemObservedAt", "broadcastTimeSystemObservedAt", out var systemElement)
+            || systemElement.ValueKind != JsonValueKind.String
+            || !DateTimeOffset.TryParse(systemElement.GetString(), out var systemObservedAt)) return false;
+        if (!TryProperty(root, "BroadcastTimeOffsetMilliseconds", "broadcastTimeOffsetMilliseconds", out var offsetElement)
+            || offsetElement.ValueKind != JsonValueKind.Number
+            || !offsetElement.TryGetInt64(out var offsetMilliseconds)) return false;
+        if (!TryProperty(root, "BroadcastTimeSourceTableId", "broadcastTimeSourceTableId", out var tableElement)
+            || tableElement.ValueKind != JsonValueKind.Number
+            || !tableElement.TryGetInt32(out var sourceTableId)) return false;
+
+        var observationCount = 1;
+        if (TryProperty(root, "BroadcastTimeObservationCount", "broadcastTimeObservationCount", out var countElement)
+            && countElement.ValueKind == JsonValueKind.Number
+            && countElement.TryGetInt32(out var parsedCount))
+            observationCount = Math.Max(1, parsedCount);
+
+        observation = new BroadcastTimeWorkerObservation(
+            broadcastTime, systemObservedAt, offsetMilliseconds, sourceTableId, observationCount);
+        return true;
+    }
+
+    private readonly record struct BroadcastTimeWorkerObservation(
+        DateTimeOffset BroadcastTime,
+        DateTimeOffset SystemObservedAt,
+        long OffsetMilliseconds,
+        int SourceTableId,
+        int ObservationCount);
+
     private EpgWorkerTerminalEvidence LogTvAIrEpgRecTerminalEvidence(
         EpgWorkerLaunchResult launch,
         string workerName,
@@ -2415,7 +2940,8 @@ public sealed class EpgCapture
         string tsFile,
         int attempt,
         int maxAttempts,
-        int imported)
+        int imported,
+        bool isPreRecordCheck)
     {
         static string ReadCompactFile(string? path, bool lastNonEmptyLine)
         {
@@ -2475,6 +3001,12 @@ public sealed class EpgCapture
         bool? workerSuccess = null;
         int? exitCode = null;
         bool? tsReadOk = null;
+        bool broadcastTimeObserved = false;
+        int broadcastTimeObservationCount = 0;
+        int broadcastTimeSourceTableId = -1;
+        DateTimeOffset? broadcastTimeValue = null;
+        DateTimeOffset? broadcastTimeSystemObservedAt = null;
+        long broadcastTimeOffsetMilliseconds = 0;
         string workerSummary;
         try
         {
@@ -2504,6 +3036,30 @@ public sealed class EpgCapture
                     && tsReadOkValue.ValueKind is JsonValueKind.True or JsonValueKind.False)
                     tsReadOk = tsReadOkValue.GetBoolean();
 
+                if (tsAvailable
+                    && ts.TryGetProperty("broadcastTimeObserved", out var broadcastObservedValue)
+                    && broadcastObservedValue.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                {
+                    broadcastTimeObserved = broadcastObservedValue.GetBoolean();
+                    if (ts.TryGetProperty("broadcastTimeObservationCount", out var countValue)
+                        && countValue.ValueKind == JsonValueKind.Number)
+                        countValue.TryGetInt32(out broadcastTimeObservationCount);
+                    if (ts.TryGetProperty("broadcastTimeSourceTableId", out var tableValue)
+                        && tableValue.ValueKind == JsonValueKind.Number)
+                        tableValue.TryGetInt32(out broadcastTimeSourceTableId);
+                    if (ts.TryGetProperty("broadcastTimeValue", out var broadcastValue)
+                        && broadcastValue.ValueKind == JsonValueKind.String
+                        && DateTimeOffset.TryParse(broadcastValue.GetString(), out var parsedBroadcastTime))
+                        broadcastTimeValue = parsedBroadcastTime;
+                    if (ts.TryGetProperty("broadcastTimeSystemObservedAt", out var observedAtValue)
+                        && observedAtValue.ValueKind == JsonValueKind.String
+                        && DateTimeOffset.TryParse(observedAtValue.GetString(), out var parsedSystemObservedAt))
+                        broadcastTimeSystemObservedAt = parsedSystemObservedAt;
+                    if (ts.TryGetProperty("broadcastTimeOffsetMilliseconds", out var offsetValue)
+                        && offsetValue.ValueKind == JsonValueKind.Number)
+                        offsetValue.TryGetInt64(out broadcastTimeOffsetMilliseconds);
+                }
+
                 workerSummary =
                     $"success={JsonScalar(root, "success")} cancelled={JsonScalar(root, "cancelled")} exitCode={JsonScalar(root, "exitCode")} " +
                     $"message={SafeLogValue(JsonScalar(root, "message"))} errorType={SafeLogValue(JsonScalar(root, "errorType"))} error={SafeLogValue(JsonScalar(root, "error"))} " +
@@ -2516,6 +3072,19 @@ public sealed class EpgCapture
         catch (Exception ex)
         {
             workerSummary = $"parse_error:{ex.GetType().Name}:{SafeLogValue(ex.Message)}";
+        }
+
+        if (broadcastTimeObserved && broadcastTimeValue.HasValue && broadcastTimeSystemObservedAt.HasValue)
+        {
+            _ = ApplyBroadcastTimeObservation(
+                group,
+                isPreRecordCheck ? "pre_record_check" : "normal_epg_capture",
+                "worker_result",
+                broadcastTimeValue.Value,
+                broadcastTimeSystemObservedAt.Value,
+                broadcastTimeOffsetMilliseconds,
+                broadcastTimeSourceTableId,
+                broadcastTimeObservationCount);
         }
 
         var resultTailEvidence = ReadCompactFile(launch.ResultPath, lastNonEmptyLine: false);
@@ -2941,9 +3510,9 @@ public sealed class EpgCapture
         => string.IsNullOrWhiteSpace(value) ? "-" : value.Replace('\r', ' ').Replace('\n', ' ').Trim();
 
 
-    private static async Task WaitForWorkerExitOrDeadlineAsync(int processId, DateTime deadline, CancellationToken cancellationToken)
+    private static async Task WaitForWorkerExitOrDeadlineAsync(int processId, DateTimeOffset deadline, CancellationToken cancellationToken)
     {
-        var remaining = deadline - DateTime.Now;
+        var remaining = deadline - DateTimeOffset.Now;
         if (remaining <= TimeSpan.Zero) return;
 
         try
@@ -2973,237 +3542,156 @@ public sealed class EpgCapture
         string tsFile,
         int processId,
         string workerName,
+        string? progressPath,
         ActiveEpgWorkerTask workerTaskState,
         long expectedAttemptGeneration,
-        TimeSpan safetyCeiling,
-        ushort? expectedNetworkId,
-        ushort? expectedTransportStreamId,
-        ushort? expectedServiceId,
-        ushort? expectedEventId,
-        DateTime? expectedStartTime,
-        DateTime? expectedEndTime,
+        PreRecordProbeExecutionContract executionContract,
         bool persistProbeEventsToDb,
         CancellationToken ct,
         string? preferredRecordingTunerName = null,
         bool preTuneKeepWorkerUntilSafetyCeiling = false)
     {
-        var started = DateTime.Now;
-        var deadline = started.Add(safetyCeiling);
+        var started = DateTimeOffset.Now;
+        var deadline = executionContract.HardDeadline;
         var pollNo = 0;
-        var lastLength = 0L;
+        var workerExitedBeforeDecision = false;
+        var attemptSuperseded = false;
         IReadOnlyList<EpgEvent> lastEvents = Array.Empty<EpgEvent>();
 
+        // PRE_REC_OBSERVATION_SSOT:
+        // TvAIrEpgRec is the sole TS/EIT observation owner. EpgCapture consumes only the worker's
+        // structured observation evidence and remains the sole lifecycle/terminal owner.
+        // Host-side TS copy/reparse is intentionally absent.
         Log("PRE_REC_EPG_PROBE_WAIT", $"TS{group.TsId}",
-            $"start worker={workerName} pid={processId} safetyCeilingSec={(int)safetyCeiling.TotalSeconds} expectedNid={(expectedNetworkId?.ToString() ?? "-")} expectedTsid={(expectedTransportStreamId?.ToString() ?? "-")} expectedSid={(expectedServiceId?.ToString() ?? "-")} expectedEventId={(expectedEventId?.ToString() ?? "-")} expectedStart={(expectedStartTime?.ToString("MM/dd HH:mm:ss") ?? "-")} runtimeTuner={SafeLogValue(preferredRecordingTunerName)} policy=stop_as_soon_as_target_event_seen_runtime_tuner rule=pre_record_epg_runtime_tuner_contract");
+            $"start worker={workerName} pid={processId} hardDeadline={deadline:O} initialRemainingSec={Math.Max(0, (int)Math.Ceiling((deadline - started).TotalSeconds))} expectedNid={executionContract.NetworkId} expectedTsid={executionContract.TransportStreamId} expectedSid={executionContract.ServiceId} expectedEventId={(executionContract.EventId?.ToString() ?? "-")} expectedStart={executionContract.ExpectedStartTime:MM/dd HH:mm:ss} runtimeTuner={SafeLogValue(executionContract.RuntimeTunerName)} contractIdentity={executionContract.IdentityText} lifecycleOwner=EpgCapture terminalOwner=EpgCapture observationOwner=TvAIrEpgRec targetNotFoundAuthority=hard_deadline_only rule=pre_record_epg_execution_lifecycle_contract");
 
-        while (DateTime.Now < deadline)
+        while (DateTimeOffset.Now < deadline)
         {
             ct.ThrowIfCancellationRequested();
             var attemptSnapshot = workerTaskState.Snapshot();
-            if (attemptSnapshot.AttemptGeneration != expectedAttemptGeneration) break;
-            var identity = GetOwnedWorkerProcessIdentity(attemptSnapshot);
-            if (identity is EpgWorkerProcessIdentityState.Missing or EpgWorkerProcessIdentityState.ReusedPid) break;
-
-            try { await Task.Delay(TimeSpan.FromSeconds(2), ct); }
-            catch (OperationCanceledException) { throw; }
-
-            pollNo++;
-            var fi = new FileInfo(tsFile);
-            if (!fi.Exists || fi.Length < 188 * 256 || fi.Length == lastLength)
-                continue;
-            lastLength = fi.Length;
-
-            var probe = await TryParsePreRecordProbeAsync(
-                group,
-                tsFile,
-                expectedNetworkId,
-                expectedTransportStreamId,
-                expectedServiceId,
-                expectedEventId,
-                expectedStartTime,
-                expectedEndTime,
-                persistProbeEventsToDb,
-                ct);
-            if (probe.Events.Count > 0) lastEvents = probe.Events;
-
-            if (probe.TargetFound)
+            if (attemptSnapshot.AttemptGeneration != expectedAttemptGeneration)
             {
+                attemptSuperseded = true;
+                break;
+            }
+
+            if (TryReadPreRecordObservationFromWorkerProgress(progressPath, executionContract, out var observed))
+            {
+                lastEvents = observed.Events;
+                pollNo++;
                 if (preTuneKeepWorkerUntilSafetyCeiling && !string.IsNullOrWhiteSpace(preferredRecordingTunerName))
                 {
                     Log("PRE_REC_EPG_PROBE_EVENT_FOUND", $"TS{group.TsId}",
-                        $"result=FOUND worker={workerName} pid={processId} poll={pollNo} fileBytes={fi.Length} observedEvents={probe.Events.Count} dbWrite={(persistProbeEventsToDb ? "epg_store_user_chain_protected" : "none")} event={probe.EventSummary} elapsedSec={(int)(DateTime.Now - started).TotalSeconds} action=transition_to_record_pretune_hold preferredTuner={SafeLogValue(preferredRecordingTunerName)} rule=release_contract");
-                    Log("PRE_REC_PRETUNE_STATE", $"TS{group.TsId}",
-                        $"state=record_prepare display=録画準備中 worker={workerName} pid={processId} preferredTuner={SafeLogValue(preferredRecordingTunerName)} holdUntil={deadline:MM/dd HH:mm:ss} reason=target_event_seen_same_worker_no_relaunch rule=release_contract");
-                    var foundProbe = probe with { TargetFound = true };
-                    // PRE_RECORD_PRETUNE_HOLD_INVARIANT:
-                    // Once the target event is found, this worker already owns the planned recording tuner.
-                    // Hold it until the safety deadline, cancellation, or actual process exit. Do not poll every
-                    // two seconds or add an environment-dependent settle; process exit/deadline are the evidence.
+                        $"result=FOUND worker={workerName} pid={processId} poll={pollNo} observedEvents={observed.Events.Count} dbWrite=none event={observed.EventSummary} elapsedSec={(int)(DateTimeOffset.Now - started).TotalSeconds} action=transition_to_record_pretune_hold preferredTuner={SafeLogValue(preferredRecordingTunerName)} observationOwner=TvAIrEpgRec lifecycleOwner=EpgCapture rule=pre_record_epg_execution_lifecycle_contract");
                     await WaitForWorkerExitOrDeadlineAsync(processId, deadline, ct).ConfigureAwait(false);
-                    return foundProbe;
+                    return observed with { TerminalReason = PreRecordProbeTerminalReason.TargetObserved };
                 }
 
                 Log("PRE_REC_EPG_PROBE_EVENT_FOUND", $"TS{group.TsId}",
-                    $"result=FOUND worker={workerName} pid={processId} poll={pollNo} fileBytes={fi.Length} observedEvents={probe.Events.Count} dbWrite={(persistProbeEventsToDb ? "epg_store_user_chain_protected" : "none")} event={probe.EventSummary} elapsedSec={(int)(DateTime.Now - started).TotalSeconds} action=stop_epg_worker_now rule=epg_probe_runtime_contract");
-                return probe with { TargetFound = true };
+                    $"result=FOUND worker={workerName} pid={processId} poll={pollNo} observedEvents={observed.Events.Count} dbWrite=none event={observed.EventSummary} elapsedSec={(int)(DateTimeOffset.Now - started).TotalSeconds} action=host_terminal_success_stop_worker observationOwner=TvAIrEpgRec lifecycleOwner=EpgCapture rule=pre_record_epg_execution_lifecycle_contract");
+                return observed with { TerminalReason = PreRecordProbeTerminalReason.TargetObserved };
             }
+
+            var identity = GetOwnedWorkerProcessIdentity(attemptSnapshot);
+            if (identity is EpgWorkerProcessIdentityState.Missing or EpgWorkerProcessIdentityState.ReusedPid)
+            {
+                workerExitedBeforeDecision = true;
+                break;
+            }
+
+            var remaining = deadline - DateTimeOffset.Now;
+            if (remaining <= TimeSpan.Zero) break;
+            await Task.Delay(remaining < TimeSpan.FromSeconds(1) ? remaining : TimeSpan.FromSeconds(1), ct).ConfigureAwait(false);
         }
 
-        // Non-chain snapshot mode only: worker may flush and exit between polls, so parse the final file
-        // once before declaring the target missing. The protected user-chain path intentionally keeps
-        // the established DB-backed behavior unchanged.
-        if (!persistProbeEventsToDb)
-        try
+        // One final worker-progress snapshot closes the observation race at process/deadline boundary.
+        if (TryReadPreRecordObservationFromWorkerProgress(progressPath, executionContract, out var finalObserved))
         {
-            if (File.Exists(tsFile))
-            {
-                var finalInfo = new FileInfo(tsFile);
-                finalInfo.Refresh();
-                Log("EPG_OUTPUT_LIFECYCLE", $"TS{group.TsId}",
-                    $"phase=worker_exit_final_stat worker={workerName} pid={processId} group={group.Group} size={finalInfo.Length} observed={finalInfo.Exists} nonZero={finalInfo.Length > 0} growing={finalInfo.Length > lastLength} elapsedMs={(int)(DateTime.Now - started).TotalMilliseconds} output={SafeLogValue(tsFile)} rule=epg_output_final_stat_contract");
-                if (finalInfo.Length >= 188 * 256)
-                {
-                    var finalProbe = await TryParsePreRecordProbeAsync(
-                        group, tsFile, expectedNetworkId, expectedTransportStreamId, expectedServiceId, expectedEventId, expectedStartTime, expectedEndTime, persistProbeEventsToDb, ct).ConfigureAwait(false);
-                    if (finalProbe.Events.Count > 0) lastEvents = finalProbe.Events;
-                    if (finalProbe.TargetFound)
-                    {
-                        Log("PRE_REC_EPG_PROBE_EVENT_FOUND", $"TS{group.TsId}",
-                            $"result=FOUND_FINAL_STAT worker={workerName} pid={processId} fileBytes={finalInfo.Length} observedEvents={finalProbe.Events.Count} dbWrite={(persistProbeEventsToDb ? "epg_store_user_chain_protected" : "none")} event={finalProbe.EventSummary} elapsedSec={(int)(DateTime.Now - started).TotalSeconds} action=accept_final_probe_snapshot rule=pre_record_epg_probe_snapshot_contract");
-                        return finalProbe;
-                    }
-                }
-            }
+            Log("PRE_REC_EPG_PROBE_EVENT_FOUND", $"TS{group.TsId}",
+                $"result=FOUND_FINAL_PROGRESS worker={workerName} pid={processId} observedEvents={finalObserved.Events.Count} dbWrite=none event={finalObserved.EventSummary} elapsedSec={(int)(DateTimeOffset.Now - started).TotalSeconds} action=host_terminal_success_from_worker_observation observationOwner=TvAIrEpgRec lifecycleOwner=EpgCapture rule=pre_record_epg_execution_lifecycle_contract");
+            return finalObserved with { TerminalReason = PreRecordProbeTerminalReason.TargetObserved };
         }
-        catch (IOException ex)
+
+        if (attemptSuperseded)
         {
-            Log("EPG_OUTPUT_LIFECYCLE", $"TS{group.TsId}", $"phase=worker_exit_final_stat_io worker={workerName} pid={processId} group={group.Group} error={SafeLog(ex.Message)} rule=epg_output_final_stat_contract");
+            Log("PRE_REC_EPG_PROBE_TERMINAL", $"TS{group.TsId}",
+                $"result=ABORTED reason=attempt_superseded worker={workerName} pid={processId} observedEvents={lastEvents.Count} elapsedSec={(int)(DateTimeOffset.Now - started).TotalSeconds} targetNotFound=False action=fallback_without_false_target_not_found lifecycleOwner=EpgCapture rule=pre_record_epg_execution_lifecycle_contract");
+            return new PreRecordProbeResult(false, lastEvents, "-") { TerminalReason = PreRecordProbeTerminalReason.AttemptSuperseded };
         }
-        catch (UnauthorizedAccessException ex)
+
+        if (workerExitedBeforeDecision && DateTimeOffset.Now < deadline)
         {
-            Log("EPG_OUTPUT_LIFECYCLE", $"TS{group.TsId}", $"phase=worker_exit_final_stat_access worker={workerName} pid={processId} group={group.Group} error={SafeLog(ex.Message)} rule=epg_output_final_stat_contract");
+            Log("PRE_REC_EPG_PROBE_TERMINAL", $"TS{group.TsId}",
+                $"result=EXECUTION_FAILED reason=worker_exited_before_host_decision worker={workerName} pid={processId} observedEvents={lastEvents.Count} elapsedSec={(int)(DateTimeOffset.Now - started).TotalSeconds} deadline={deadline:MM/dd HH:mm:ss} targetNotFound=False action=fallback_preserve_original_reservation_time lifecycleOwner=EpgCapture rule=pre_record_epg_execution_lifecycle_contract");
+            return new PreRecordProbeResult(false, lastEvents, "-") { TerminalReason = PreRecordProbeTerminalReason.WorkerExitedBeforeDecision };
         }
 
         Log("PRE_REC_EPG_PROBE_EVENT_NOT_FOUND", $"TS{group.TsId}",
-            $"result=NOT_FOUND worker={workerName} pid={processId} observedEvents={lastEvents.Count} dbWrite={(persistProbeEventsToDb ? "epg_store_user_chain_protected" : "none")} elapsedSec={(int)(DateTime.Now - started).TotalSeconds} action=fall_back_to_original_reservation_time rule=pre_record_epg_probe_snapshot_contract");
-        return new PreRecordProbeResult(false, lastEvents, "-");
+            $"result=NOT_FOUND reason=hard_deadline_reached worker={workerName} pid={processId} observedEvents={lastEvents.Count} dbWrite=none elapsedSec={(int)(DateTimeOffset.Now - started).TotalSeconds} deadline={deadline:MM/dd HH:mm:ss} observationOwner=TvAIrEpgRec targetNotFoundAuthority=hard_deadline_only action=fall_back_to_original_reservation_time lifecycleOwner=EpgCapture rule=pre_record_epg_execution_lifecycle_contract");
+        return new PreRecordProbeResult(false, lastEvents, "-") { TerminalReason = PreRecordProbeTerminalReason.DeadlineReachedTargetNotObserved };
     }
 
-    private async Task<PreRecordProbeResult> TryParsePreRecordProbeAsync(
-        TsGroup group,
-        string tsFile,
-        ushort? expectedNetworkId,
-        ushort? expectedTransportStreamId,
-        ushort? expectedServiceId,
-        ushort? expectedEventId,
-        DateTime? expectedStartTime,
-        DateTime? expectedEndTime,
-        bool persistProbeEventsToDb,
-        CancellationToken ct)
+    private static bool TryReadPreRecordObservationFromWorkerProgress(
+        string? progressPath,
+        PreRecordProbeExecutionContract executionContract,
+        out PreRecordProbeResult result)
     {
-        var tempFile = Path.Combine(Path.GetDirectoryName(tsFile) ?? Path.GetTempPath(), Path.GetFileNameWithoutExtension(tsFile) + ".probe_" + Guid.NewGuid().ToString("N") + ".ts");
-        try
+        result = new PreRecordProbeResult(false, Array.Empty<EpgEvent>(), "-");
+        if (!TryReadWorkerProgressSnapshot(progressPath, out var stages)) return false;
+
+        foreach (var (rawStage, message) in stages.AsEnumerable().Reverse())
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(tempFile)!);
-            using (var src = new FileStream(tsFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-            using (var dst = new FileStream(tempFile, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
+            var stage = NormalizeEpgWorkerProgressStage(rawStage);
+            if (!string.Equals(stage, "tsvariant_eit_target_service_found", StringComparison.OrdinalIgnoreCase)) continue;
+            var identityProven = message.Contains("targetIdentityProven=True", StringComparison.OrdinalIgnoreCase)
+                || message.Contains("exactEventSeen=True", StringComparison.OrdinalIgnoreCase);
+            if (!identityProven) continue;
+            if (!TryReadProgressField(message, "target", out var targetText)) continue;
+            var triplet = targetText.Split('/');
+            if (triplet.Length != 3 || !ushort.TryParse(triplet[0], out var nid) || !ushort.TryParse(triplet[1], out var tsid) || !ushort.TryParse(triplet[2], out var sid)) continue;
+            if (!TryReadProgressField(message, "expectedEventId", out var eventText) || !ushort.TryParse(eventText, out var eventId) || eventId == 0) continue;
+            if (nid != executionContract.NetworkId) continue;
+            if (tsid != executionContract.TransportStreamId) continue;
+            if (sid != executionContract.ServiceId) continue;
+            if (executionContract.EventId.HasValue && executionContract.EventId.Value != 0 && eventId != executionContract.EventId.Value) continue;
+
+            DateTime start = executionContract.ExpectedStartTime;
+            DateTime end = executionContract.ExpectedEndTime;
+            if (TryReadProgressField(message, "observedStart", out var startText) && DateTime.TryParse(startText, null, System.Globalization.DateTimeStyles.RoundtripKind, out var observedStart)) start = observedStart;
+            if (TryReadProgressField(message, "observedEnd", out var endText) && DateTime.TryParse(endText, null, System.Globalization.DateTimeStyles.RoundtripKind, out var observedEnd)) end = observedEnd;
+            var observedEvent = new EpgEvent
             {
-                await src.CopyToAsync(dst, ct).ConfigureAwait(false);
-            }
-
-            var epg = await new EpgAnalyzer(settings.MaxPacketsToScan).AnalyzeAsync(tempFile, ct).ConfigureAwait(false);
-            var allowedSids = group.Targets.Select(t => t.ServiceId).ToHashSet();
-            var events = epg.Events
-                .Where(e => allowedSids.Count == 0 || allowedSids.Contains(e.ServiceId))
-                .Select(e => new EpgEvent
-                {
-                    NetworkId = e.NetworkId,
-                    TransportStreamId = e.TransportStreamId,
-                    ServiceId = e.ServiceId,
-                    EventId = e.EventId,
-                    ServiceName = group.Targets.FirstOrDefault(t => t.ServiceId == e.ServiceId)?.Name ?? string.Empty,
-                    Title = string.Empty,
-                    Description = string.Empty,
-                    Genre = EpgProjection.GenreLabel(null, e.GenreCodes),
-                    GenreCodes = e.GenreCodes ?? string.Empty,
-                    TableId = e.BestTableId,
-                    SectionNumber = e.SectionNumber,
-                    VersionNumber = e.VersionNumber,
-                    RawDescriptorLoopHex = e.RawDescriptorLoopHex ?? string.Empty,
-                    RawShortEventDescriptorHex = e.RawShortEventDescriptorHex ?? string.Empty,
-                    RawExtendedEventDescriptorHex = e.RawExtendedEventDescriptorHex ?? string.Empty,
-                    RawContentDescriptorHex = e.RawContentDescriptorHex ?? string.Empty,
-                    DurationSeconds = e.DurationSeconds,
-                    Start = e.Start,
-                    End = e.End,
-                    UpdatedAt = DateTime.Now
-                })
-                .ToList();
-
-            if (persistProbeEventsToDb && events.Count > 0)
+                NetworkId = nid,
+                TransportStreamId = tsid,
+                ServiceId = sid,
+                EventId = eventId,
+                Start = start,
+                End = end,
+                DurationSeconds = start != DateTime.MinValue && end > start ? (int)Math.Round((end - start).TotalSeconds) : 0,
+                UpdatedAt = DateTime.Now
+            };
+            var events = new[] { observedEvent };
+            result = new PreRecordProbeResult(true, events, $"{nid}/{tsid}/{sid}/{eventId} {start:MM/dd HH:mm:ss}〜{end:MM/dd HH:mm:ss}")
             {
-                try
-                {
-                    _ = store.Upsert(events);
-                }
-                catch (Exception ex)
-                {
-                    Log("PRE_REC_EPG_STORE", $"TS{group.TsId}",
-                        $"result=FAILED events={events.Count} error={ex.GetType().Name}:{TrimLog(ex.Message)} action=preserve_probe_result rule=release_contract");
-                }
-            }
-
-            Log("PRE_REC_EPG_PARSE", $"TS{group.TsId}",
-                $"result=OK events={events.Count} dbWrite={(persistProbeEventsToDb ? "epg_store_user_chain_protected" : "none")} {epg.StatsLine} rule={(persistProbeEventsToDb ? "release_contract" : "pre_record_epg_probe_snapshot_contract")}");
-
-            var target = events.FirstOrDefault(ev => IsExpectedPreRecordEvent(
-                ev,
-                expectedNetworkId,
-                expectedTransportStreamId,
-                expectedServiceId,
-                expectedEventId,
-                expectedStartTime,
-                expectedEndTime));
-            if (target is not null)
-            {
-                return new PreRecordProbeResult(true, events,
-                    $"{target.NetworkId}/{target.TransportStreamId}/{target.ServiceId}/{target.EventId} {target.Start:MM/dd HH:mm:ss}〜{target.End:MM/dd HH:mm:ss} {SafeLog(target.Title)}");
-            }
-            return new PreRecordProbeResult(false, events, "-");
-        }
-        catch
-        {
-            return new PreRecordProbeResult(false, Array.Empty<EpgEvent>(), "-");
-        }
-        finally
-        {
-            try { File.Delete(tempFile); } catch { }
-        }
-    }
-
-
-    private static bool IsExpectedPreRecordEvent(
-        EpgEvent ev,
-        ushort? expectedNetworkId,
-        ushort? expectedTransportStreamId,
-        ushort? expectedServiceId,
-        ushort? expectedEventId,
-        DateTime? expectedStartTime,
-        DateTime? expectedEndTime)
-    {
-        if (expectedNetworkId.HasValue && ev.NetworkId != expectedNetworkId.Value) return false;
-        if (expectedTransportStreamId.HasValue && ev.TransportStreamId != expectedTransportStreamId.Value) return false;
-        if (expectedServiceId.HasValue && ev.ServiceId != expectedServiceId.Value) return false;
-        if (expectedEventId.HasValue && expectedEventId.Value != 0)
-            return ev.EventId == expectedEventId.Value;
-
-        if (expectedStartTime.HasValue)
-        {
-            var startDelta = Math.Abs((ev.Start - expectedStartTime.Value).TotalMinutes);
-            if (startDelta <= 180 && (!expectedEndTime.HasValue || Math.Abs((ev.End - expectedEndTime.Value).TotalMinutes) <= 240))
-                return true;
+                TerminalReason = PreRecordProbeTerminalReason.TargetObserved
+            };
+            return true;
         }
         return false;
+    }
+
+    private static bool TryReadProgressField(string message, string key, out string value)
+    {
+        value = string.Empty;
+        if (string.IsNullOrWhiteSpace(message) || string.IsNullOrWhiteSpace(key)) return false;
+        var marker = key + "=";
+        var start = message.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (start < 0) return false;
+        start += marker.Length;
+        var end = message.IndexOf(' ', start);
+        if (end < 0) end = message.Length;
+        value = message[start..end].Trim();
+        return value.Length > 0;
     }
 
     private Task HandleEpgProcessEndAsync(TsGroup group, string workerName, int processId, CancellationToken ct)
@@ -3230,6 +3718,13 @@ public sealed class EpgCapture
     /// EPG用チューナー確保。1.0.0: 空きなしを即スキップにせず、短時間だけ待って再投入する。
     /// ただし録画・STOPフェーズの安全性を優先し、長時間アイドルや無限待ちは行わない。
     /// </summary>
+    private static string NormalizePreRecordAdmissionGroupForCapture(string group)
+    {
+        if (string.Equals(group, "GR", StringComparison.OrdinalIgnoreCase)) return "GR";
+        if (group.Contains("BS", StringComparison.OrdinalIgnoreCase) || group.Contains("CS", StringComparison.OrdinalIgnoreCase)) return "BSCS";
+        return group.Trim();
+    }
+
     private async Task<TunerLease?> AcquireEpgLeaseWithShortWaitAsync(
         TsGroup group,
         DateTime plannedEnd,
@@ -3319,6 +3814,236 @@ public sealed class EpgCapture
         }
     }
 
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+    private async Task ObserveNormalEpgCompletenessDuringCaptureAsync(
+        TsGroup group,
+        string tsFile,
+        int processId,
+        string workerName,
+        ActiveEpgWorkerTask workerTaskState,
+        long expectedAttemptGeneration,
+        TimeSpan safetyCeiling,
+        CancellationToken ct)
+    {
+        // v1.2.2 diagnosis only:
+        // Keep the scheduler's fixed occupancy window and worker hard ceiling unchanged.
+        // Observe when the existing EpgSectionStatus contract becomes complete so the later
+        // production change can distinguish safe early finish from late extended EIT arrival.
+        var started = DateTime.Now;
+        var deadline = started.Add(safetyCeiling);
+        var targetSidSet = group.Targets.Select(t => t.ServiceId).ToHashSet();
+        var lastLength = -1L;
+        string? lastSignature = null;
+        DateTime? firstBasicCompleteAt = null;
+        DateTime? firstAllObservedActualCompleteAt = null;
+
+        Log("EPG_CAPTURE_COMPLETENESS_OBSERVER", $"TS{group.TsId}",
+            $"result=START worker={workerName} pid={processId} group={group.Group} hardCeilingSec={(int)safetyCeiling.TotalSeconds} targetSidCount={targetSidSet.Count} targetSids=[{string.Join(",", targetSidSet.OrderBy(x => x))}] mutation=none schedulerWindow=unchanged workerCeiling=unchanged rule=epg_capture_completeness_observer_v122");
+
+        while (DateTime.Now < deadline)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+
+            var snapshot = workerTaskState.Snapshot();
+            if (snapshot.AttemptGeneration != expectedAttemptGeneration)
+                break;
+            var identity = GetOwnedWorkerProcessIdentity(snapshot);
+            if (identity is EpgWorkerProcessIdentityState.Missing or EpgWorkerProcessIdentityState.ReusedPid)
+                break;
+
+            FileInfo info;
+            try
+            {
+                info = new FileInfo(tsFile);
+                if (!info.Exists || info.Length < 188L * 512 || info.Length == lastLength)
+                    continue;
+                lastLength = info.Length;
+            }
+            catch (IOException)
+            {
+                continue;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                continue;
+            }
+
+            EpgAnalyzeResult epg;
+            try
+            {
+                epg = await new EpgAnalyzer(settings.MaxPacketsToScan).AnalyzeAsync(tsFile, ct).ConfigureAwait(false);
+            }
+            catch (IOException)
+            {
+                continue;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                continue;
+            }
+
+            var actualSchedule = epg.SectionStatuses
+                .Where(st => targetSidSet.Contains(st.ServiceId) && EitTableContract.IsActualSchedule(st.TableId))
+                .OrderBy(st => st.ServiceId)
+                .ThenBy(st => st.TableId)
+                .ThenBy(st => st.VersionNumber)
+                .ToArray();
+            var basicSchedule = actualSchedule.Where(st => EitTableContract.IsActualBasicSchedule(st.TableId)).ToArray();
+            var extendedSchedule = actualSchedule.Where(st => EitTableContract.IsActualExtendedSchedule(st.TableId)).ToArray();
+            var basicCoverageIssues = BuildBasicScheduleTableCoverageIssues(basicSchedule, targetSidSet);
+            var basicIncomplete = basicSchedule.Count(st => !st.IsComplete);
+            var extendedIncomplete = extendedSchedule.Count(st => !st.IsComplete);
+            var basicComplete = basicSchedule.Length > 0 && basicIncomplete == 0 && basicCoverageIssues.Length == 0;
+            var allObservedActualComplete = basicComplete && actualSchedule.All(st => st.IsComplete);
+
+            if (basicComplete && firstBasicCompleteAt is null)
+                firstBasicCompleteAt = DateTime.Now;
+            if (allObservedActualComplete && firstAllObservedActualCompleteAt is null)
+                firstAllObservedActualCompleteAt = DateTime.Now;
+
+            var signature = $"basic={basicComplete}:{basicSchedule.Length}:{basicIncomplete}:{basicCoverageIssues.Length};extended={extendedSchedule.Length}:{extendedIncomplete};allObserved={allObservedActualComplete};ignoredOther={epg.IgnoredOtherTransportStreamEitSectionCount}";
+            if (string.Equals(signature, lastSignature, StringComparison.Ordinal))
+                continue;
+            lastSignature = signature;
+
+            Log("EPG_CAPTURE_COMPLETENESS_OBSERVER", $"TS{group.TsId}",
+                $"result=OBSERVED worker={workerName} pid={processId} elapsedSec={(int)(DateTime.Now - started).TotalSeconds} fileBytes={info.Length} " +
+                $"basicComplete={basicComplete} basicTables={basicSchedule.Length} basicIncomplete={basicIncomplete} basicCoverageIssues={basicCoverageIssues.Length} " +
+                $"extendedObserved={extendedSchedule.Length > 0} extendedTables={extendedSchedule.Length} extendedIncomplete={extendedIncomplete} allObservedActualComplete={allObservedActualComplete} " +
+                $"firstBasicCompleteSec={(firstBasicCompleteAt.HasValue ? (int)(firstBasicCompleteAt.Value - started).TotalSeconds : -1)} firstAllObservedActualCompleteSec={(firstAllObservedActualCompleteAt.HasValue ? (int)(firstAllObservedActualCompleteAt.Value - started).TotalSeconds : -1)} " +
+                $"ignoredOtherSections={epg.IgnoredOtherTransportStreamEitSectionCount} mutation=none stopRequested=false rule=epg_capture_completeness_observer_v122");
+        }
+
+        Log("EPG_CAPTURE_COMPLETENESS_OBSERVER", $"TS{group.TsId}",
+            $"result=END worker={workerName} pid={processId} elapsedSec={(int)(DateTime.Now - started).TotalSeconds} firstBasicCompleteSec={(firstBasicCompleteAt.HasValue ? (int)(firstBasicCompleteAt.Value - started).TotalSeconds : -1)} firstAllObservedActualCompleteSec={(firstAllObservedActualCompleteAt.HasValue ? (int)(firstAllObservedActualCompleteAt.Value - started).TotalSeconds : -1)} mutation=none rule=epg_capture_completeness_observer_v122");
+    }
+#endif
+
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+    private void ObserveOtherTransportStreamEit(
+        TsGroup group,
+        EpgAnalyzeResult other,
+        EpgAnalyzeResult actualEpg)
+    {
+        // Developer-only evidence path over the same isolated other-TS analysis used by
+        // the product supplement path. Never performs an additional TS parse or mutation.
+        var configuredServices = channelLoader.Load().Targets
+            .Select(t => (t.OriginalNetworkId, t.TransportStreamId, t.ServiceId))
+            .ToHashSet();
+
+        var scheduleEvents = other.Events
+            .Where(e => EitTableContract.IsOtherSchedule(e.BestTableId))
+            .Where(e => e.NetworkId != 0 && e.TransportStreamId != 0 && e.ServiceId != 0 && e.EventId != 0)
+            .GroupBy(e => (e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId))
+            .Select(g => g.OrderByDescending(e => !string.IsNullOrWhiteSpace(e.Title))
+                .ThenByDescending(e => e.Start)
+                .First())
+            .ToArray();
+
+        var configured = scheduleEvents
+            .Where(e => configuredServices.Contains((e.NetworkId, e.TransportStreamId, e.ServiceId)))
+            .ToArray();
+        var unresolved = scheduleEvents.Length - configured.Length;
+
+        var configuredKeys = configured
+            .Select(e => (e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId))
+            .Distinct()
+            .ToArray();
+        var dbKeys = store.GetByEventKeys(configuredKeys)
+            .Select(e => (e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId))
+            .ToHashSet();
+        var actualCaptureKeys = actualEpg.Events
+            .Select(e => (e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId))
+            .ToHashSet();
+
+        var alreadyInDb = configuredKeys.Count(dbKeys.Contains);
+        var alsoInCurrentActualCapture = configuredKeys.Count(actualCaptureKeys.Contains);
+        var missingFromDb = configuredKeys.Where(k => !dbKeys.Contains(k)).ToArray();
+        var missingFromDbAndCurrentActual = missingFromDb.Count(k => !actualCaptureKeys.Contains(k));
+        var titled = configured.Count(e => !string.IsNullOrWhiteSpace(e.Title));
+        var validTime = configured.Count(e => e.Start != DateTime.MinValue && e.DurationSeconds > 0);
+
+        var byNetwork = configured
+            .GroupBy(e => e.NetworkId)
+            .OrderBy(g => g.Key)
+            .Select(g => $"{g.Key}:{g.Select(e => (e.TransportStreamId, e.ServiceId, e.EventId)).Distinct().Count()}")
+            .ToArray();
+        var missingSample = missingFromDb
+            .Take(12)
+            .Select(k => $"{k.NetworkId}/{k.TransportStreamId}/{k.ServiceId}/{k.EventId}")
+            .ToArray();
+
+        Log("EPG_OTHER_TS_EIT_OBSERVER", $"TS{group.TsId}",
+            $"result=OBSERVED tunedGroup={group.Group} tunedTsid={group.TsId} " +
+            $"acceptedOtherSections={other.EitSectionCount} parsedOtherEvents={other.Events.Count} scheduleOtherEvents={scheduleEvents.Length} " +
+            $"configuredServiceResolvedEvents={configured.Length} unresolvedServiceEvents={unresolved} titledResolvedEvents={titled} validTimeResolvedEvents={validTime} " +
+            $"existingDbEvents={alreadyInDb} currentActualCaptureOverlap={alsoInCurrentActualCapture} missingDbEvents={missingFromDb.Length} missingDbAndCurrentActualEvents={missingFromDbAndCurrentActual} " +
+            $"networkEventCounts=[{string.Join(",", byNetwork)}] missingSample=[{string.Join(",", missingSample)}] " +
+            $"identity=onid_tsid_sid_eventId serviceResolution=configured_ch2_exact mutation=none dbWrite=none projectionWrite=none schedulerWindow=unchanged workerCeiling=unchanged " +
+            $"rule=epg_other_ts_eit_observer_v122");
+    }
+#endif
+
+    private List<EpgEvent> BuildOtherTransportStreamSupplementEvents(EpgAnalyzeResult other)
+    {
+        var configuredTargets = channelLoader.Load().Targets
+            .GroupBy(t => (t.OriginalNetworkId, t.TransportStreamId, t.ServiceId))
+            .ToDictionary(g => g.Key, g => g.First());
+
+        // Existence authority for other-TS schedule comes only from basic schedule 0x60-0x67.
+        // Extended schedule 0x68-0x6F may enrich a matching event but can never create an
+        // event on its own. This mirrors the actual-TS basic/extended responsibility split.
+        var basicAuthorityKeys = other.EventAccumulatorAudits
+            .Where(a => a.HasBasicScheduleObservation)
+            .Select(a => (a.NetworkId, a.TransportStreamId, a.ServiceId, a.EventId, a.Start, a.DurationSeconds))
+            .ToHashSet();
+
+        return other.Events
+            .Where(e => e.Start != DateTime.MinValue && e.End > e.Start)
+            .Where(e => configuredTargets.ContainsKey((e.NetworkId, e.TransportStreamId, e.ServiceId)))
+            .Where(e => basicAuthorityKeys.Contains((e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId, e.Start, e.DurationSeconds)))
+            .GroupBy(e => (e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId))
+            .Select(g => g
+                .OrderByDescending(e => !string.IsNullOrWhiteSpace(e.RawShortEventDescriptorHex))
+                .ThenByDescending(e => !string.IsNullOrWhiteSpace(e.RawExtendedEventDescriptorHex))
+                .ThenByDescending(e => e.Start)
+                .First())
+            .Select(e =>
+            {
+                var target = configuredTargets[(e.NetworkId, e.TransportStreamId, e.ServiceId)];
+                return new EpgEvent
+                {
+                    NetworkId = e.NetworkId,
+                    TransportStreamId = e.TransportStreamId,
+                    ServiceId = e.ServiceId,
+                    EventId = e.EventId,
+                    ServiceName = target.Name ?? string.Empty,
+                    Title = string.Empty,
+                    Description = string.Empty,
+                    Genre = EpgProjection.GenreLabel(null, e.GenreCodes),
+                    GenreCodes = e.GenreCodes ?? string.Empty,
+                    TableId = e.BestTableId,
+                    SectionNumber = e.SectionNumber,
+                    VersionNumber = e.VersionNumber,
+                    RawDescriptorLoopHex = e.RawDescriptorLoopHex ?? string.Empty,
+                    RawShortEventDescriptorHex = e.RawShortEventDescriptorHex ?? string.Empty,
+                    RawExtendedEventDescriptorHex = e.RawExtendedEventDescriptorHex ?? string.Empty,
+                    RawContentDescriptorHex = e.RawContentDescriptorHex ?? string.Empty,
+                    DurationSeconds = e.DurationSeconds,
+                    Start = e.Start,
+                    End = e.End,
+                    UpdatedAt = DateTime.Now
+                };
+            })
+            .OrderBy(e => e.NetworkId)
+            .ThenBy(e => e.TransportStreamId)
+            .ThenBy(e => e.ServiceId)
+            .ThenBy(e => e.Start)
+            .ThenBy(e => e.EventId)
+            .ToList();
+    }
+
     private async Task<int> ParseAndStoreAsync(
         TsGroup group, string tsFile, int attempt, int maxAttempts, CancellationToken ct, bool isPreRecordCheck)
     {
@@ -3333,17 +4058,90 @@ public sealed class EpgCapture
 
         try
         {
-            var epg = await new EpgAnalyzer(settings.MaxPacketsToScan).AnalyzeAsync(tsFile, ct);
-            var targetServiceIds = group.Targets.Select(t => t.ServiceId).Distinct().OrderBy(x => x).ToArray();
-            var targetSidSet = targetServiceIds.ToHashSet();
+            var epg = await new EpgAnalyzer(
+                settings.MaxPacketsToScan,
+                EitTransportStreamScope.ActualOnly,
+                persistentSectionCache: !isPreRecordCheck).AnalyzeAsync(tsFile, ct);
+            var configuredServiceIds = group.Targets
+                .Select(t => t.ServiceId)
+                .Distinct()
+                .OrderBy(x => x)
+                .ToArray();
             var targetNetworkId = group.Targets.FirstOrDefault()?.OriginalNetworkId
                 ?? epg.Events.FirstOrDefault()?.NetworkId
                 ?? (ushort)0;
+            var observedActualServiceIds = epg.Events
+                .Where(e => e.NetworkId == targetNetworkId && e.TransportStreamId == group.TsId)
+                .Select(e => e.ServiceId)
+                .Distinct()
+                .OrderBy(x => x)
+                .ToArray();
+
+            // Normal EPG uses the active/routable .ch2 service only to tune the physical TS.
+            // Once the TS is captured, every service identity actually observed in that TS is
+            // eligible for canonical EPG import, even when the service is absent/disabled in
+            // the current TVTest .ch2. PreRec remains reservation-service scoped.
+            var targetServiceIds = isPreRecordCheck
+                ? configuredServiceIds
+                : configuredServiceIds
+                    .Concat(observedActualServiceIds)
+                    .Distinct()
+                    .OrderBy(x => x)
+                    .ToArray();
+            var targetSidSet = targetServiceIds.ToHashSet();
             var serviceNameBySid = group.Targets
                 .Where(t => !string.IsNullOrWhiteSpace(t.Name))
                 .GroupBy(t => t.ServiceId)
                 .ToDictionary(g => g.Key, g => g.First().Name);
             var purpose = isPreRecordCheck ? "pre_record_check" : "normal_epg_capture";
+            var canonicalImportCutoff = DateTime.Now;
+
+            Log("EPG_ACTUAL_TS_SERVICE_SCOPE", $"TS{group.TsId}",
+                $"result=OK purpose={purpose} group={group.Group} nid={targetNetworkId} tsid={group.TsId} " +
+                $"configuredTargetSids=[{string.Join(",", configuredServiceIds)}] observedActualSids=[{string.Join(",", observedActualServiceIds)}] effectiveImportSids=[{string.Join(",", targetServiceIds)}] " +
+                $"physicalTuneSource=tvtest_ch2_active_service normalImportSource=observed_actual_ts_services preRecordScope=configured_target_only serviceActivationAffectsNormalEpgImport=false rule=release_contract");
+
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+            coverageAttribution.ObserveActual(epg.Events);
+#endif
+
+            EpgAnalyzeResult? otherEpg = null;
+            List<EpgEvent> otherSupplementCandidates = new();
+            if (!isPreRecordCheck
+                && string.Equals(group.Group, "BSCS", StringComparison.OrdinalIgnoreCase)
+                && epg.IgnoredOtherTransportStreamEitSectionCount > 0)
+            {
+                try
+                {
+                    otherEpg = await new EpgAnalyzer(
+                        settings.MaxPacketsToScan,
+                        EitTransportStreamScope.OtherOnly,
+                        persistentSectionCache: true).AnalyzeAsync(tsFile, ct).ConfigureAwait(false);
+                    otherSupplementCandidates = FilterCurrentOrFutureImportEvents(
+                        BuildOtherTransportStreamSupplementEvents(otherEpg), canonicalImportCutoff);
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+                    var configuredServiceKeys = channelLoader.Load().Targets
+                        .Select(t => (t.OriginalNetworkId, t.TransportStreamId, t.ServiceId))
+                        .ToHashSet();
+                    var otherBasicAuthorityKeys = otherEpg.EventAccumulatorAudits
+                        .Where(a => a.HasBasicScheduleObservation)
+                        .Select(a => (a.NetworkId, a.TransportStreamId, a.ServiceId, a.EventId, a.Start, a.DurationSeconds))
+                        .ToHashSet();
+                    coverageAttribution.ObserveOther(otherEpg.Events, configuredServiceKeys, otherBasicAuthorityKeys);
+                    coverageAttribution.MarkSupplementCandidates(otherSupplementCandidates);
+#endif
+                }
+                catch (IOException ex)
+                {
+                    Log("EPG_OTHER_TS_EIT_SUPPLEMENT", $"TS{group.TsId}",
+                        $"result=SKIPPED reason=io_error error={SafeLogValue(ex.Message)} dbWrite=none staleRetire=none rule=epg_other_ts_schedule_supplement_v122");
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    Log("EPG_OTHER_TS_EIT_SUPPLEMENT", $"TS{group.TsId}",
+                        $"result=SKIPPED reason=access_error error={SafeLogValue(ex.Message)} dbWrite=none staleRetire=none rule=epg_other_ts_schedule_supplement_v122");
+                }
+            }
 
             Log("EPG_IMPORT_SCOPE", $"TS{group.TsId}",
                 $"result=OK purpose={purpose} preRecord={isPreRecordCheck} rule=release_contract");
@@ -3351,19 +4149,32 @@ public sealed class EpgCapture
             Log("EPG_PARSE", $"TS{group.TsId}",
                 $"purpose={purpose} source=ts_file group={group.Group} {epg.StatsLine} rule=release_contract");
 
+            Log("EPG_COMMON_NORMALIZATION", $"TS{group.TsId}",
+                $"result=OK purpose={purpose} group={group.Group} commonEvents={epg.CommonEventCount} commonResolved={epg.CommonResolvedCount} commonUnresolved={epg.CommonUnresolvedCount} " +
+                $"resolutionKey=nid_tsid_referencedSid_referencedEid identityMutation=none titleGuessing=disabled sidGuessing=disabled timeGuessing=disabled rule=epg_event_group_common_normalization_contract");
+
             if (epg.IgnoredOtherTransportStreamEitSectionCount > 0)
             {
                 Log("EPG_OTHER_TS_EIT_IGNORED", $"TS{group.TsId}",
                     $"purpose={purpose} group={group.Group} ignoredSections={epg.IgnoredOtherTransportStreamEitSectionCount} " +
-                    $"acceptedTables=0x4E,0x50-0x5F ignoredTables=0x4F,0x60-0x6F action=drop_before_section_tracking_accumulator_projection_db_import " +
+                    $"acceptedTables=0x4E,0x50-0x5F isolatedSupplementTables=0x60-0x6F ignoredPfOther=0x4F action=actual_import_isolated_other_schedule_supplement " +
                     $"rule=actual_transport_stream_eit_scope");
             }
+
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+            if (otherEpg is not null)
+                ObserveOtherTransportStreamEit(group, otherEpg, epg);
+#endif
 
             if (epg.InvalidEitSectionCount > 0)
             {
                 Log("EPG_INVALID_EIT_SECTION_DROPPED", $"TS{group.TsId}",
                     $"purpose={purpose} group={group.Group} invalidSections={epg.InvalidEitSectionCount} " +
-                    $"validation=section_syntax_length_crc32_header_consistency action=drop_before_section_tracking_event_header_accumulator_projection_db_import " +
+                    $"syntaxOrLength={epg.InvalidSyntaxOrLengthEitSectionCount} crc={epg.InvalidCrcEitSectionCount} headerConsistency={epg.InvalidHeaderConsistencyEitSectionCount} " +
+                    $"transportErrorPackets={epg.TransportErrorPacketCount} continuityDiscontinuities={epg.ContinuityDiscontinuityCount} discontinuityIndicatorResets={epg.DiscontinuityIndicatorResetCount} " +
+                    $"exactDuplicatePayloadPackets={epg.DuplicatePayloadPacketCount} resyncWaitDropPackets={epg.ResyncWaitDropPacketCount} " +
+                    $"invalidSectionLengthResets={epg.InvalidSectionLengthResetCount} invalidPointerResets={epg.InvalidPointerResetCount} " +
+                    $"validation=section_syntax_length_crc32_header_consistency transportResync=pusi_after_error_or_discontinuity action=drop_before_section_tracking_event_header_accumulator_projection_db_import " +
                     $"rule=eit_section_integrity_contract");
             }
 
@@ -3388,6 +4199,13 @@ public sealed class EpgCapture
                     $"purpose={purpose} group={group.Group} ignoredSections={epg.IgnoredVersionSwitchEitSectionCount} ignoredBasicSchedule={epg.IgnoredBasicScheduleVersionSwitchEitSectionCount} " +
                     $"snapshot=first_current_version_per_service_table action=defer_new_version_to_next_capture " +
                     $"rule=eit_capture_snapshot_version_contract");
+            }
+
+            if (epg.ToleratedSameVersionScheduleMetadataDriftCount > 0)
+            {
+                Log("EPG_SAME_VERSION_SCHEDULE_METADATA_DRIFT", $"TS{group.TsId}",
+                    $"result=TOLERATED purpose={purpose} group={group.Group} sections={epg.ToleratedSameVersionScheduleMetadataDriftCount} " +
+                    $"action=accept_crc_valid_section_widen_bounds_no_stale_retire rule=eit_same_version_schedule_metadata_drift_contract");
             }
 
             if (epg.RejectedEventHeaderCount > 0)
@@ -3431,12 +4249,25 @@ public sealed class EpgCapture
             // (0x4E) and extended schedule (0x58-0x5F) may enrich the same event but
             // must not grant or revoke deletion authority.
             var staleAuthoritySectionStatuses = targetSectionStatuses
-                .Where(st => st.TableId >= 0x50 && st.TableId <= 0x57)
+                .Where(st => EitTableContract.IsActualBasicSchedule(st.TableId))
+                .ToArray();
+            // Basic schedule is the sole existence authority. Normal EPG may also observe PF-only
+            // services that are not configured in ch2 (for example a data/auxiliary SID). Such an
+            // observation is import/enrichment scope, not a reason to invalidate a complete Basic
+            // snapshot for unrelated services. Derive stale-retire completeness from the services
+            // that actually supplied Basic schedule authority in this capture.
+            var staleAuthoritySidSet = staleAuthoritySectionStatuses
+                .Select(st => st.ServiceId)
+                .Distinct()
+                .ToHashSet();
+            var nonAuthorityObservedSids = targetSidSet
+                .Where(sid => !staleAuthoritySidSet.Contains(sid))
+                .OrderBy(sid => sid)
                 .ToArray();
             var incompleteSectionStatuses = staleAuthoritySectionStatuses
                 .Where(st => !st.IsComplete)
                 .ToArray();
-            var scheduleCoverageIssues = BuildBasicScheduleTableCoverageIssues(staleAuthoritySectionStatuses, targetSidSet);
+            var scheduleCoverageIssues = BuildBasicScheduleTableCoverageIssues(staleAuthoritySectionStatuses, staleAuthoritySidSet);
             var completenessLines = targetSectionStatuses
                 .Take(40)
                 .Select(st => $"SID={st.ServiceId} table=0x{st.TableId:X2} version={st.VersionNumber} lastTable=0x{st.LastTableId:X2} sec={st.SeenSectionCount}/{st.ExpectedSectionCount} seg={st.SegmentSeenTotal}/{st.SegmentExpectedTotal} complete={st.IsComplete} missingSegs=[{string.Join(",", st.MissingSegments)}]")
@@ -3448,10 +4279,11 @@ public sealed class EpgCapture
             }
 
             var rawEvents = BuildRawEventsFromAccumulatorProjection(epg.Events, targetSidSet, serviceNameBySid);
+            rawEvents = FilterCurrentOrFutureImportEvents(rawEvents, canonicalImportCutoff);
             LogAccumulatorRawEventProjectionContract(group, purpose, targetServiceIds, epg.EventAccumulatorAudits, epg.Events, rawEvents);
 
             LogDbInsertPrecheck(group, purpose, targetServiceIds, rawEvents);
-            var strictTitleBodyMergeStats = ApplyStrictTitleBodyCanonicalMerge(group, purpose, targetServiceIds, epg.EventObservations, rawEvents);
+            var strictTitleBodyMergeStats = ApplyStrictTitleBodyCanonicalMerge(group, purpose, targetServiceIds, epg, rawEvents);
             LogStrictTitleBodyCanonicalMergeContract(group, purpose, targetServiceIds, strictTitleBodyMergeStats);
             rawEvents = rawEvents
                 .OrderBy(e => e.ServiceId)
@@ -3460,6 +4292,33 @@ public sealed class EpgCapture
                 .ThenBy(e => e.TableId)
                 .ToList();
 
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+            coverageAttribution.MarkActualCommitCandidates(rawEvents);
+            var incomingEventIdTimingCollisions = rawEvents
+                .GroupBy(e => (e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId))
+                .Select(g => new
+                {
+                    g.Key,
+                    Events = g
+                        .GroupBy(e => (e.Start, e.DurationSeconds))
+                        .Select(x => x.First())
+                        .OrderBy(e => e.Start)
+                        .ThenBy(e => e.DurationSeconds)
+                        .ToArray()
+                })
+                .Where(x => x.Events.Length > 1)
+                .ToArray();
+            if (incomingEventIdTimingCollisions.Length > 0)
+            {
+                var collisionEvents = incomingEventIdTimingCollisions.Sum(x => x.Events.Length);
+                var sample = string.Join(" | ", incomingEventIdTimingCollisions.Take(12).Select(x =>
+                    $"{x.Key.NetworkId}/{x.Key.TransportStreamId}/{x.Key.ServiceId}/{x.Key.EventId}=[{string.Join(",", x.Events.Take(8).Select(e => $"{e.Start:MM-ddTHH:mm:ss}/d{e.DurationSeconds}/t0x{e.TableId:X2}"))}]"));
+                Log("EPG_EVENT_ID_TIMING_COLLISION", $"TS{group.TsId}",
+                    $"result=OBSERVED phase=before_commit purpose={purpose} group={group.Group} collisionKeys={incomingEventIdTimingCollisions.Length} collisionEvents={collisionEvents} " +
+                    $"incomingIdentity=nid_tsid_sid_eventId_start_duration storagePrimaryKey=nid_tsid_sid_eventId sample=[{SafeLogValue(sample)}] mutation=none dbWrite=none rule=epg_event_identity_collision_observer_v122");
+            }
+#endif
+
             var basicScheduleEventKeys = epg.EventAccumulatorAudits
                 .Where(a => a.HasBasicScheduleObservation)
                 .Select(a => (a.NetworkId, a.TransportStreamId, a.ServiceId, a.EventId, a.Start, a.DurationSeconds))
@@ -3467,6 +4326,16 @@ public sealed class EpgCapture
             var staleAuthorityEvents = rawEvents
                 .Where(e => basicScheduleEventKeys.Contains((e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId, e.Start, e.DurationSeconds)))
                 .ToList();
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+            coverageAttribution.MarkActualBasicAuthority(staleAuthorityEvents);
+            coverageAttribution.RecordBasicScheduleCoverage(
+                group.Targets.Select(t => (t.OriginalNetworkId, t.TransportStreamId, t.ServiceId)),
+                staleAuthoritySectionStatuses,
+                scheduleCoverageIssues,
+                epg.RejectedBasicScheduleEventHeaderCount,
+                epg.IgnoredBasicScheduleVersionSwitchEitSectionCount,
+                epg.ToleratedSameVersionScheduleMetadataDriftCount);
+#endif
 
             var staleRetireBlockReasons = new List<string>();
             if (staleAuthorityEvents.Count == 0) staleRetireBlockReasons.Add("no_captured_basic_schedule_events");
@@ -3474,6 +4343,7 @@ public sealed class EpgCapture
             if (scheduleCoverageIssues.Length > 0) staleRetireBlockReasons.Add("incomplete_schedule_table_coverage");
             if (epg.RejectedBasicScheduleEventHeaderCount > 0) staleRetireBlockReasons.Add("rejected_basic_schedule_event_header");
             if (epg.IgnoredBasicScheduleVersionSwitchEitSectionCount > 0) staleRetireBlockReasons.Add("basic_schedule_version_switch_during_capture");
+            if (epg.ToleratedSameVersionScheduleMetadataDriftCount > 0) staleRetireBlockReasons.Add("same_version_schedule_metadata_drift_during_capture");
             var staleRetireEligible = staleAuthorityEvents.Count > 0 && staleRetireBlockReasons.Count == 0;
 
             var importGateWaitStartedAt = DateTime.Now;
@@ -3482,18 +4352,133 @@ public sealed class EpgCapture
             int promotedReservations;
             EpgUpsertStorageStats storageStats;
             EpgStaleRetireStats staleStats;
+            var retiredKeywordReservations = 0;
+            List<EpgEvent> otherSupplementCommittedEvents = new();
             try
             {
                 var importGateWaitMs = (int)Math.Max(0, (DateTime.Now - importGateWaitStartedAt).TotalMilliseconds);
                 Log("EPG_IMPORT_COMMIT_GATE", $"TS{group.TsId}",
                     $"result=ENTER purpose={purpose} group={group.Group} waitMs={importGateWaitMs} action=serialize_sqlite_write_keep_ts_analysis_parallel rule=epg_import_commit_contract");
 
+                // Canonical existence authority is Basic schedule EIT only. PF / extended / other
+                // observations may enrich a current identity but must never preserve an older EID
+                // after Basic EIT has moved the same service/time interval to a new identity.
                 var commitResult = store.CommitCapture(
                     rawEvents,
-                    staleRetireEligible ? staleAuthorityEvents : null);
+                    staleRetireEligible ? staleAuthorityEvents : null,
+                    staleRetireEligible ? staleAuthorityEvents : rawEvents);
                 upsertedCount = commitResult.Upsert.Count;
                 storageStats = commitResult.Upsert.Stats;
                 staleStats = commitResult.StaleRetire;
+
+                // The canonical EPG transition owns the lifecycle of automatic reservations that
+                // were derived from the retired exact occurrence. Do this while still holding the
+                // import commit lane so no later projection/allocation pass can observe a stale
+                // Scheduled keyword reservation as if it were still backed by canonical EPG.
+                if (staleStats.RetiredEvents.Count > 0)
+                {
+                    retiredKeywordReservations = reservationStore
+                        .DeleteScheduledKeywordReservationsForRetiredEpgEvents(staleStats.RetiredEvents);
+                    Log("EPG_AUTHORITY_RESERVATION_RECONCILE", $"TS{group.TsId}",
+                        $"result=OK purpose={purpose} group={group.Group} retiredEvents={staleStats.RetiredEvents.Count} removedScheduledKeyword={retiredKeywordReservations} " +
+                        "source=canonical_basic_eit_generation_transition manualProgramRuntimePreserved=True rule=epg_authority_reservation_reconcile_contract");
+                }
+
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+                if (rawEvents.Count > 0)
+                {
+                    var committedKeys = rawEvents
+                        .Select(e => (e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId))
+                        .Distinct()
+                        .ToArray();
+                    var storedAfterCommit = store.GetByEventKeys(committedKeys);
+                    var exactRetained = rawEvents
+                        .Where(e => storedAfterCommit.Any(dbEvent =>
+                            dbEvent.NetworkId == e.NetworkId &&
+                            dbEvent.TransportStreamId == e.TransportStreamId &&
+                            dbEvent.ServiceId == e.ServiceId &&
+                            dbEvent.EventId == e.EventId &&
+                            dbEvent.Start == e.Start &&
+                            dbEvent.DurationSeconds == e.DurationSeconds))
+                        .ToArray();
+                    coverageAttribution.MarkActualPresentAfterCommit(exactRetained);
+                    Log("EPG_ACTUAL_COMMIT_CONTINUITY", $"TS{group.TsId}",
+                        $"result=OBSERVED purpose={purpose} group={group.Group} commitCandidates={rawEvents.Count} exactPresentAfterCommit={exactRetained.Length} exactMissingAfterCommit={Math.Max(0, rawEvents.Count - exactRetained.Length)} mutation=none observerOnly=True rule=epg_actual_commit_continuity_observer_v122");
+                }
+
+                if (incomingEventIdTimingCollisions.Length > 0)
+                {
+                    var collisionKeys = incomingEventIdTimingCollisions
+                        .Select(x => (x.Key.NetworkId, x.Key.TransportStreamId, x.Key.ServiceId, x.Key.EventId))
+                        .ToArray();
+                    var storedCollisionRows = store.GetByEventKeys(collisionKeys);
+                    var exactIncomingRetained = incomingEventIdTimingCollisions.Sum(c =>
+                        c.Events.Count(e => storedCollisionRows.Any(dbEvent =>
+                            dbEvent.NetworkId == e.NetworkId &&
+                            dbEvent.TransportStreamId == e.TransportStreamId &&
+                            dbEvent.ServiceId == e.ServiceId &&
+                            dbEvent.EventId == e.EventId &&
+                            dbEvent.Start == e.Start &&
+                            dbEvent.DurationSeconds == e.DurationSeconds)));
+                    var distinctIncoming = incomingEventIdTimingCollisions.Sum(x => x.Events.Length);
+                    var sample = string.Join(" | ", incomingEventIdTimingCollisions.Take(12).Select(c =>
+                    {
+                        var retained = storedCollisionRows
+                            .Where(e => e.NetworkId == c.Key.NetworkId && e.TransportStreamId == c.Key.TransportStreamId && e.ServiceId == c.Key.ServiceId && e.EventId == c.Key.EventId)
+                            .Select(e => $"{e.Start:MM-ddTHH:mm:ss}/d{e.DurationSeconds}")
+                            .ToArray();
+                        return $"{c.Key.NetworkId}/{c.Key.TransportStreamId}/{c.Key.ServiceId}/{c.Key.EventId}:incoming={c.Events.Length}:stored=[{string.Join(",", retained)}]";
+                    }));
+                    Log("EPG_EVENT_ID_TIMING_COLLISION", $"TS{group.TsId}",
+                        $"result=OBSERVED phase=after_commit purpose={purpose} group={group.Group} collisionKeys={incomingEventIdTimingCollisions.Length} distinctIncomingEvents={distinctIncoming} " +
+                        $"storedRows={storedCollisionRows.Count} exactIncomingRetained={exactIncomingRetained} overwrittenOrUnrepresented={Math.Max(0, distinctIncoming - exactIncomingRetained)} " +
+                        $"storagePrimaryKey=nid_tsid_sid_eventId mutation=none observerOnly=True sample=[{SafeLogValue(sample)}] rule=epg_event_identity_collision_observer_v122");
+                }
+#endif
+
+                var otherSupplementInserted = 0;
+                var otherSupplementExisting = 0;
+                if (otherSupplementCandidates.Count > 0)
+                {
+                    // Re-check identity under the serialized import gate. Other-TS schedule is
+                    // supplement-only: it may insert a missing event, but never overwrites an
+                    // existing row and never participates in stale retirement. A later actual-TS
+                    // capture remains authoritative and may update the inserted row normally.
+                    var candidateKeys = otherSupplementCandidates
+                        .Select(e => (e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId))
+                        .Distinct()
+                        .ToArray();
+                    var existingKeys = store.GetByEventKeys(candidateKeys)
+                        .Select(e => (e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId))
+                        .ToHashSet();
+                    var missingOnly = otherSupplementCandidates
+                        .Where(e => !existingKeys.Contains((e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId)))
+                        .ToList();
+                    otherSupplementExisting = candidateKeys.Length - missingOnly.Count;
+                    if (existingKeys.Count > 0)
+                        store.MarkOtherScheduleSeen(existingKeys);
+                    if (missingOnly.Count > 0)
+                    {
+                        otherSupplementInserted = store.UpsertOtherScheduleSupplement(missingOnly).Count;
+                        if (otherSupplementInserted > 0)
+                        {
+                            otherSupplementCommittedEvents = missingOnly.Take(otherSupplementInserted).ToList();
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+                            coverageAttribution.MarkInserted(otherSupplementCommittedEvents);
+#endif
+                        }
+                    }
+
+                    Log("EPG_OTHER_TS_EIT_SUPPLEMENT", $"TS{group.TsId}",
+                        $"result=OK group={group.Group} candidates={otherSupplementCandidates.Count} existingAtCommit={otherSupplementExisting} insertedMissing={otherSupplementInserted} " +
+                        $"identity=onid_tsid_sid_eventId serviceResolution=configured_ch2_exact existenceAuthority=0x60-0x67 enrichment=0x68-0x6F actualPriority=existing_row_preserved auxiliaryObservation=other_schedule_seen existenceVetoAgainstActualBasic=none staleRetire=none pfOther=ignored schedulerWindow=unchanged workerCeiling=unchanged " +
+                        $"rule=epg_other_ts_schedule_supplement_v122");
+                }
+                else if (otherEpg is not null)
+                {
+                    Log("EPG_OTHER_TS_EIT_SUPPLEMENT", $"TS{group.TsId}",
+                        $"result=OK group={group.Group} candidates=0 existingAtCommit=0 insertedMissing=0 identity=onid_tsid_sid_eventId serviceResolution=configured_ch2_exact existenceAuthority=0x60-0x67 enrichment=0x68-0x6F actualPriority=existing_row_preserved auxiliaryObservation=other_schedule_seen existenceVetoAgainstActualBasic=none staleRetire=none pfOther=ignored schedulerWindow=unchanged workerCeiling=unchanged rule=epg_other_ts_schedule_supplement_v122");
+                }
                 try
                 {
                     // DB identity promotion belongs to the same SQLite commit lane, but the common
@@ -3523,19 +4508,25 @@ public sealed class EpgCapture
             // fails later, that interval becomes permanent. Match immediately after each
             // successful DB commit, outside the SQLite commit gate. The existing final
             // EpgCompletePostImport pass remains as an idempotent convergence pass.
-            if (!isPreRecordCheck && upsertedCount > 0)
+            if (!isPreRecordCheck && (upsertedCount > 0 || otherSupplementCommittedEvents.Count > 0))
             {
                 try
                 {
-                    var keywordAdded = keywordMatcher.RunMatching(rawEvents);
-                    if (keywordAdded > 0)
+                    var keywordEvents = rawEvents
+                        .Concat(otherSupplementCommittedEvents)
+                        .GroupBy(e => (e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId))
+                        .Select(g => g.First())
+                        .ToList();
+                    var keywordAdded = keywordMatcher.RunMatching(keywordEvents);
+                    var keywordReservationChanged = keywordAdded > 0 || retiredKeywordReservations > 0;
+                    if (keywordReservationChanged)
                     {
                         projectionPromotion.RunAllocationRoute(
-                            $"EpgCapture:{purpose}:{group.Group}:TS{group.TsId}:KeywordMatch",
+                            $"EpgCapture:{purpose}:{group.Group}:TS{group.TsId}:KeywordAuthorityConverge",
                             ReservationAllocationWakeRefreshMode.BoundedCoalesce);
                     }
                     Log("EPG_INCREMENTAL_KEYWORD_MATCH", $"TS{group.TsId}",
-                        $"result=OK purpose={purpose} group={group.Group} imported={upsertedCount} keywordAdded={keywordAdded} allocationRun={keywordAdded > 0} timing=after_committed_ts_import_before_full_epg_completion rule=incremental_keyword_match_contract");
+                        $"result=OK purpose={purpose} group={group.Group} imported={upsertedCount} otherSupplementInserted={otherSupplementCommittedEvents.Count} retiredKeyword={retiredKeywordReservations} keywordAdded={keywordAdded} allocationRun={keywordReservationChanged} timing=after_committed_ts_import_before_full_epg_completion rule=incremental_keyword_match_contract");
                 }
                 catch (Exception ex)
                 {
@@ -3576,14 +4567,16 @@ public sealed class EpgCapture
                 .ToArray();
             Log("EPG_STALE_EVENT_RETIRE_CONTRACT", $"TS{group.TsId}",
                 $"result={(staleRetireEligible ? "OK" : "SKIPPED_INCOMPLETE_CAPTURE")} purpose={purpose} group={group.Group} services={staleStats.Services} capturedIncoming={rawEvents.Count} basicScheduleAuthorityIncoming={staleAuthorityEvents.Count} retireIncoming={staleStats.IncomingEvents} deleted={staleStats.DeletedRows} " +
-                $"scopeStart={staleScopeStart} scopeEnd={staleScopeEnd} blockReasons=[{string.Join(",", staleRetireBlockReasons)}] incompleteSectionSample=[{string.Join(",", incompleteSectionSample)}] " +
-                $"policy=delete_only_from_complete_basic_schedule_snapshot authorityTables=0x50-0x57 supplementaryTables=0x4E,0x58-0x5F upsertPartialCapture=allowed titleSynthesis=none bodyToTitlePromotion=none reservationTitleBorrow=none startupDbClear=none dbSchemaMutation=none rule=release_contract");
+                $"authoritySids=[{string.Join(",", staleAuthoritySidSet.OrderBy(x => x))}] nonAuthorityObservedSids=[{string.Join(",", nonAuthorityObservedSids)}] scopeStart={staleScopeStart} scopeEnd={staleScopeEnd} blockReasons=[{string.Join(",", staleRetireBlockReasons)}] incompleteSectionSample=[{string.Join(",", incompleteSectionSample)}] " +
+                $"policy=delete_only_overlapping_current_authoritative_basic_schedule_event authorityTables=0x50-0x57 preserveAuthority=basic_schedule_identity_only supplementaryTables=0x4E,0x58-0x5F supplementaryExistenceVeto=none otherScheduleExistenceVeto=none retiredKeyword={retiredKeywordReservations} upsertPartialCapture=allowed titleSynthesis=none bodyToTitlePromotion=none reservationTitleBorrow=none startupDbClear=none dbSchemaMutation=none rule=release_contract");
 
-            var rawStoredTitleBlankCount = rawEvents.Count(e => string.IsNullOrEmpty(e.Title));
+            var normalizedTitlePresentCount = rawEvents.Count(e => !string.IsNullOrWhiteSpace(e.Title));
+            var normalizedTitleBlankCount = Math.Max(0, rawEvents.Count - normalizedTitlePresentCount);
             var importedSids = rawEvents.Select(e => e.ServiceId).Distinct().OrderBy(x => x).ToArray();
             Log("EPG_IMPORT", $"TS{group.TsId}",
                 $"result=OK purpose={purpose} " +
-                $"imported={upsertedCount} rawEvents={rawEvents.Count} rawStoredTitleBlank={rawStoredTitleBlankCount} displayTitleSource=cellText_decoder " +
+                $"imported={upsertedCount} rawEvents={rawEvents.Count} otherSupplementCandidates={otherSupplementCandidates.Count} normalizedTitlePresent={normalizedTitlePresentCount} normalizedTitleBlank={normalizedTitleBlankCount} " +
+                $"storageTitleColumn=descriptor_canonical_empty_by_design displayTitleSource=raw_short_event_descriptor_decoder commonEvents={epg.CommonEventCount} commonResolved={epg.CommonResolvedCount} commonUnresolved={epg.CommonUnresolvedCount} " +
                 $"targetSids=[{string.Join(",", targetServiceIds)}] importSids=[{string.Join(",", importedSids)}] " +
                 $"rule=release_contract");
 
@@ -3633,20 +4626,15 @@ public sealed class EpgCapture
     }
 
 
-    private static List<TsGroup> FilterGroupsForExpectedService(
+    private static List<TsGroup> FilterGroupsForExpectedServiceIdentity(
         IReadOnlyList<TsGroup> groups,
-        ushort? expectedNetworkId,
-        ushort? expectedTransportStreamId,
-        ushort? expectedServiceId,
-        string? expectedServiceName)
+        ushort expectedNetworkId,
+        ushort expectedTransportStreamId,
+        ushort expectedServiceId)
     {
-        var serviceName = (expectedServiceName ?? string.Empty).Trim();
+        var expected = new ServiceIdentityContract.Key(expectedNetworkId, expectedTransportStreamId, expectedServiceId);
         return groups
-            .Where(g => g.Targets.Any(t =>
-                (!expectedNetworkId.HasValue || t.OriginalNetworkId == expectedNetworkId.Value) &&
-                (!expectedTransportStreamId.HasValue || t.TransportStreamId == expectedTransportStreamId.Value) &&
-                (!expectedServiceId.HasValue || t.ServiceId == expectedServiceId.Value) &&
-                (string.IsNullOrWhiteSpace(serviceName) || string.Equals(t.Name, serviceName, StringComparison.OrdinalIgnoreCase))))
+            .Where(g => g.Targets.Any(t => ServiceIdentityContract.Matches(t, expected)))
             .ToList();
     }
 
@@ -3661,7 +4649,7 @@ public sealed class EpgCapture
         foreach (var sid in serviceIds)
         {
             var schedule = sectionStatuses
-                .Where(x => x.ServiceId == sid && x.TableId >= 0x50 && x.TableId <= 0x57)
+                .Where(x => x.ServiceId == sid && EitTableContract.IsActualBasicSchedule(x.TableId))
                 .OrderBy(x => x.TableId)
                 .ToArray();
             if (schedule.Length == 0)
@@ -3725,7 +4713,7 @@ public sealed class EpgCapture
     private static string ServiceTimeKeyForAudit(EpgEventObservation e)
         => ServiceTimeKeyForAudit(e.NetworkId, e.TransportStreamId, e.ServiceId, e.Start, e.DurationSeconds);
 
-    private static bool IsScheduleBodyTable(byte tableId) => tableId is >= 0x58 and <= 0x5F;
+    private static bool IsScheduleBodyTable(byte tableId) => EitTableContract.IsActualExtendedSchedule(tableId);
     private static bool HasRawShort(EpgEvent e) => !string.IsNullOrWhiteSpace(e.RawShortEventDescriptorHex);
     private static bool HasRawShort(ParsedEpgEvent e) => !string.IsNullOrWhiteSpace(e.RawShortEventDescriptorHex);
     private static bool HasRawShort(EpgEventObservation e) => !string.IsNullOrWhiteSpace(e.RawShortEventDescriptorHex);
@@ -3743,7 +4731,7 @@ public sealed class EpgCapture
 
 
 
-    private static bool IsScheduleShortCarrierCandidateTable(byte tableId) => tableId is >= 0x50 and <= 0x57;
+    private static bool IsScheduleShortCarrierCandidateTable(byte tableId) => EitTableContract.IsActualBasicSchedule(tableId);
 
 
 
@@ -3929,20 +4917,40 @@ public sealed class EpgCapture
         int Ineligible,
         int AmbiguousStrictMultiple,
         int NoStrictCandidate,
+        int NearbyTimingAligned,
+        int PreviousVersionDonorUsed,
         int TablePairMismatch,
         int MissingTitleRawShort,
         int MissingBodyRawExtended,
         int RawExtendedMerged,
         int RawExtendedAlreadyCovered,
+        int BodyOnlyCurrentExactTitlePresent,
+        int BodyOnlyCacheExactTitlePresent,
+        int BodyOnlyCurrentAuthorityMissingCacheStored,
+        int BodyOnlyCurrentAuthorityMissingCacheAbsent,
+        int BodyOnlyCurrentAuthorityPresentCacheEventAbsent,
+        int BodyOnlyCurrentPairedSectionPresent,
+        int BodyOnlyCachePairedSectionPresent,
+        int BodyOnlyPairedSectionContainsEventId,
+        int BodyOnlyBasicEventIdFoundOtherSection,
+        int BodyOnlyPairedSectionMissingBoth,
+        int BodyOnlyPairedSectionPresentEventAbsent,
+        int BodyOnlyPreviousVersionAvailable,
+        int BodyOnlyPreviousBasicExactEventFound,
+        int BodyOnlyPreviousBasicShortPresent,
+        int BodyOnlyPreviousBasicDonorEligible,
+        int BodyOnlyPreviousBasicDonorAmbiguous,
+        string CacheGapSample,
         string Sample);
 
     private StrictTitleBodyCanonicalMergeStats ApplyStrictTitleBodyCanonicalMerge(
         TsGroup group,
         string purpose,
         IReadOnlyList<ushort> targetServiceIds,
-        IReadOnlyList<EpgEventObservation> observations,
+        EpgAnalyzeResult epg,
         List<EpgEvent> rawEvents)
     {
+        var observations = epg.EventObservations;
         var targetSidSet = targetServiceIds.ToHashSet();
         var rawEventsBefore = rawEvents.Count;
         var titleRows = observations
@@ -3972,8 +4980,8 @@ public sealed class EpgCapture
             title.DurationSeconds == body.DurationSeconds;
 
         static bool ExpectedTablePair(byte titleTable, byte bodyTable) =>
-            bodyTable >= 0x58 && bodyTable <= 0x5F &&
-            titleTable >= 0x50 && titleTable <= 0x57 &&
+            EitTableContract.IsActualExtendedSchedule(bodyTable) &&
+            EitTableContract.IsActualBasicSchedule(titleTable) &&
             titleTable == bodyTable - 0x08;
 
         static string CompactBody(EpgEvent e) => $"0x{e.TableId:X2}/s{e.SectionNumber}/eid{e.EventId}/t{e.Start:MM-ddTHH:mm}/d{e.DurationSeconds}";
@@ -3986,11 +4994,48 @@ public sealed class EpgCapture
         var removedBodyRows = 0;
         var ambiguousStrictMultiple = 0;
         var noStrictCandidate = 0;
+        var nearbyTimingAligned = 0;
+        var previousVersionDonorUsed = 0;
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        var existingDbExactIdentityFound = 0;
+        var existingDbExactTimingFound = 0;
+        var existingDbDecodedTitlePresent = 0;
+        var existingDbRawShortPresent = 0;
+        var existingDbDonorEligible = 0;
+        var existingDbDonorTimingMismatch = 0;
+        var existingDbDonorSamples = new List<string>();
+        var residualNoPreviousVersionSubtable = 0;
+        var residualPreviousVersionNoSameEventId = 0;
+        var residualPreviousSameEventIdTimingMismatch = 0;
+        var residualPreviousExactTimingNoShort = 0;
+        var residualPreviousShortAmbiguous = 0;
+        var residualNearbyCurrentNone = 0;
+        var residualNearbyCurrentAmbiguous = 0;
+        var residualByDate = new Dictionary<string, int>(StringComparer.Ordinal);
+        var residualReasonSamples = new List<string>();
+#endif
         var tablePairMismatch = 0;
         var missingTitleRawShort = 0;
         var missingBodyRawExtended = 0;
         var rawExtendedMerged = 0;
         var rawExtendedAlreadyCovered = 0;
+        var bodyOnlyCurrentExactTitlePresent = 0;
+        var bodyOnlyCacheExactTitlePresent = 0;
+        var bodyOnlyCurrentAuthorityMissingCacheStored = 0;
+        var bodyOnlyCurrentAuthorityMissingCacheAbsent = 0;
+        var bodyOnlyCurrentAuthorityPresentCacheEventAbsent = 0;
+        var bodyOnlyCurrentPairedSectionPresent = 0;
+        var bodyOnlyCachePairedSectionPresent = 0;
+        var bodyOnlyPairedSectionContainsEventId = 0;
+        var bodyOnlyBasicEventIdFoundOtherSection = 0;
+        var bodyOnlyPairedSectionMissingBoth = 0;
+        var bodyOnlyPairedSectionPresentEventAbsent = 0;
+        var bodyOnlyPreviousVersionAvailable = 0;
+        var bodyOnlyPreviousBasicExactEventFound = 0;
+        var bodyOnlyPreviousBasicShortPresent = 0;
+        var bodyOnlyPreviousBasicDonorEligible = 0;
+        var bodyOnlyPreviousBasicDonorAmbiguous = 0;
+        var cacheGapSamples = new List<string>();
         var samples = new List<string>();
         var bodiesToRemove = new HashSet<EpgEvent>();
 
@@ -4007,16 +5052,292 @@ public sealed class EpgCapture
                 .Where(t => SameObservedEventTime(t, body))
                 .OrderBy(t => t.TableId).ThenBy(t => t.SectionNumber).ThenBy(t => t.ObservationIndex)
                 .ToList();
-            if (strictSameEvent.Count == 0)
+
+            // EIT basic schedule (0x50-0x57) and extended schedule (0x58-0x5F) are
+            // separate subtables and broadcasters may move an event's timing in one
+            // table before the paired table catches up.  Do not discard a valid body
+            // solely for that transient timing skew when the broadcast identity is
+            // otherwise exact: same NID/TSID/SID/EID, expected paired table, one
+            // unique nearby title timing, and a real raw short descriptor.  The body
+            // remains timing authority; this only supplies its title descriptor.
+            var titleCandidates = strictSameEvent;
+            var usedNearbyTimingAlignment = false;
+            var usedPreviousVersionDonor = false;
+            if (titleCandidates.Count == 0)
             {
-                noStrictCandidate++;
-                bodiesToRemove.Add(body);
-                if (samples.Count < 36)
-                    samples.Add($"sid={body.ServiceId}:body={CompactBody(body)}:merged=False:removed=True:reason=no_strict_candidate");
-                continue;
+                var expectedTitleTable = (byte)(body.TableId - 0x08);
+                var nearbyDistinct = titleRows
+                    .Where(t =>
+                        t.NetworkId == body.NetworkId &&
+                        t.TransportStreamId == body.TransportStreamId &&
+                        t.ServiceId == body.ServiceId &&
+                        t.EventId == body.EventId &&
+                        t.TableId == expectedTitleTable &&
+                        HasRawShort(t) &&
+                        Math.Abs((t.Start - body.Start).TotalMinutes) <= EitAlignmentNearbyTitleStartWindowMinutes)
+                    .GroupBy(t => (t.Start, t.DurationSeconds, t.TableId))
+                    .Select(g => g.OrderBy(t => t.SectionNumber).ThenBy(t => t.ObservationIndex).First())
+                    .OrderBy(t => Math.Abs((t.Start - body.Start).TotalSeconds))
+                    .ThenBy(t => t.Start)
+                    .ToList();
+
+                if (nearbyDistinct.Count == 1)
+                {
+                    titleCandidates = nearbyDistinct;
+                    usedNearbyTimingAlignment = true;
+                    nearbyTimingAligned++;
+                }
+                else
+                {
+                    // No usable Basic title exists in the current capture/same-version
+                    // replay set.  A previous-version row may donate only its raw short
+                    // descriptor when the full broadcast identity and timing are exact
+                    // and exactly one expected Basic-table donor exists.  The current
+                    // Extended row remains authority for identity, timing and body.
+                    noStrictCandidate++;
+                    var previousExactEvents = epg.PreviousVersionCacheEventObservations
+                        .Where(t =>
+                            t.NetworkId == body.NetworkId &&
+                            t.TransportStreamId == body.TransportStreamId &&
+                            t.ServiceId == body.ServiceId &&
+                            t.EventId == body.EventId &&
+                            t.Start == body.Start &&
+                            t.DurationSeconds == body.DurationSeconds &&
+                            t.TableId == expectedTitleTable)
+                        .OrderBy(t => t.SectionNumber)
+                        .ThenBy(t => t.ObservationIndex)
+                        .ToList();
+                    var previousShortEvents = previousExactEvents.Where(HasRawShort).ToList();
+
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+                    // Keep the capture-gap attribution counters comparable even after the
+                    // validated donor path becomes active.  These values describe the
+                    // current-capture gap, not whether the product later rescued it.
+                    var currentExactTitle = epg.CurrentCaptureEventObservations.Any(t =>
+                        t.NetworkId == body.NetworkId &&
+                        t.TransportStreamId == body.TransportStreamId &&
+                        t.ServiceId == body.ServiceId &&
+                        t.EventId == body.EventId &&
+                        t.Start == body.Start &&
+                        t.DurationSeconds == body.DurationSeconds &&
+                        t.TableId == expectedTitleTable &&
+                        HasRawShort(t));
+                    var cacheExactTitle = epg.PersistentCacheEventObservations.Any(t =>
+                        t.NetworkId == body.NetworkId &&
+                        t.TransportStreamId == body.TransportStreamId &&
+                        t.ServiceId == body.ServiceId &&
+                        t.EventId == body.EventId &&
+                        t.Start == body.Start &&
+                        t.DurationSeconds == body.DurationSeconds &&
+                        t.TableId == expectedTitleTable &&
+                        HasRawShort(t));
+                    var currentAuthority = epg.CurrentCaptureSubtables.FirstOrDefault(v =>
+                        v.NetworkId == body.NetworkId &&
+                        v.TransportStreamId == body.TransportStreamId &&
+                        v.ServiceId == body.ServiceId &&
+                        v.TableId == expectedTitleTable);
+                    var cacheSubtable = epg.PersistentCacheSubtables.FirstOrDefault(v =>
+                        v.NetworkId == body.NetworkId &&
+                        v.TransportStreamId == body.TransportStreamId &&
+                        v.ServiceId == body.ServiceId &&
+                        v.TableId == expectedTitleTable);
+                    var stored = new PersistentEitSectionCache().ProbeStoredSubtable(
+                        body.NetworkId, body.TransportStreamId, body.ServiceId, expectedTitleTable);
+
+                    if (currentExactTitle) bodyOnlyCurrentExactTitlePresent++;
+                    if (cacheExactTitle) bodyOnlyCacheExactTitlePresent++;
+                    if (currentAuthority is null)
+                    {
+                        if (stored.Exists && stored.Valid && stored.SectionCount > 0) bodyOnlyCurrentAuthorityMissingCacheStored++;
+                        else bodyOnlyCurrentAuthorityMissingCacheAbsent++;
+                    }
+                    else if (!cacheExactTitle)
+                    {
+                        bodyOnlyCurrentAuthorityPresentCacheEventAbsent++;
+                    }
+
+                    var currentPairedSection = epg.CurrentCaptureSectionInventories.FirstOrDefault(section =>
+                        section.NetworkId == body.NetworkId &&
+                        section.TransportStreamId == body.TransportStreamId &&
+                        section.ServiceId == body.ServiceId &&
+                        section.TableId == expectedTitleTable &&
+                        section.SectionNumber == body.SectionNumber);
+                    var cachePairedSection = epg.PersistentCacheSectionInventories.FirstOrDefault(section =>
+                        section.NetworkId == body.NetworkId &&
+                        section.TransportStreamId == body.TransportStreamId &&
+                        section.ServiceId == body.ServiceId &&
+                        section.TableId == expectedTitleTable &&
+                        section.SectionNumber == body.SectionNumber);
+                    var currentEventElsewhere = epg.CurrentCaptureSectionInventories.Any(section =>
+                        section.NetworkId == body.NetworkId &&
+                        section.TransportStreamId == body.TransportStreamId &&
+                        section.ServiceId == body.ServiceId &&
+                        section.TableId == expectedTitleTable &&
+                        section.SectionNumber != body.SectionNumber &&
+                        section.EventIds.Contains(body.EventId));
+                    var cacheEventElsewhere = epg.PersistentCacheSectionInventories.Any(section =>
+                        section.NetworkId == body.NetworkId &&
+                        section.TransportStreamId == body.TransportStreamId &&
+                        section.ServiceId == body.ServiceId &&
+                        section.TableId == expectedTitleTable &&
+                        section.SectionNumber != body.SectionNumber &&
+                        section.EventIds.Contains(body.EventId));
+                    var pairedContainsEventId =
+                        currentPairedSection?.EventIds.Contains(body.EventId) == true ||
+                        cachePairedSection?.EventIds.Contains(body.EventId) == true;
+
+                    if (currentPairedSection is not null) bodyOnlyCurrentPairedSectionPresent++;
+                    if (cachePairedSection is not null) bodyOnlyCachePairedSectionPresent++;
+                    if (pairedContainsEventId) bodyOnlyPairedSectionContainsEventId++;
+                    if (currentEventElsewhere || cacheEventElsewhere) bodyOnlyBasicEventIdFoundOtherSection++;
+                    if (currentPairedSection is null && cachePairedSection is null)
+                        bodyOnlyPairedSectionMissingBoth++;
+                    else if (!pairedContainsEventId)
+                        bodyOnlyPairedSectionPresentEventAbsent++;
+
+                    var previousVersionSubtable = epg.PreviousVersionCacheSubtables.FirstOrDefault(v =>
+                        v.NetworkId == body.NetworkId &&
+                        v.TransportStreamId == body.TransportStreamId &&
+                        v.ServiceId == body.ServiceId &&
+                        v.TableId == expectedTitleTable);
+                    if (previousVersionSubtable is not null) bodyOnlyPreviousVersionAvailable++;
+                    if (previousExactEvents.Count > 0) bodyOnlyPreviousBasicExactEventFound++;
+                    if (previousShortEvents.Count > 0) bodyOnlyPreviousBasicShortPresent++;
+                    if (previousShortEvents.Count == 1) bodyOnlyPreviousBasicDonorEligible++;
+                    else if (previousShortEvents.Count > 1) bodyOnlyPreviousBasicDonorAmbiguous++;
+
+                    if (cacheGapSamples.Count < 36)
+                    {
+                        cacheGapSamples.Add(
+                            $"sid={body.ServiceId}:body={CompactBody(body)}:titleTable=0x{expectedTitleTable:X2}" +
+                            $":currentExact={currentExactTitle}:cacheExact={cacheExactTitle}" +
+                            $":currentAuthority={(currentAuthority is null ? "none" : $"v{currentAuthority.VersionNumber}")}" +
+                            $":loadedCacheSubtable={(cacheSubtable is null ? "none" : $"v{cacheSubtable.VersionNumber}/sec{cacheSubtable.SectionCount}")}" +
+                            $":storedCache={(stored.Exists ? (stored.Valid ? $"v{stored.VersionNumber}/sec{stored.SectionCount}" : "invalid") : "none")}" +
+                            $":pairedSection=s{body.SectionNumber}:current={(currentPairedSection is null ? "missing" : $"v{currentPairedSection.VersionNumber}/events{currentPairedSection.EventIds.Count}")}" +
+                            $":cache={(cachePairedSection is null ? "missing" : $"v{cachePairedSection.VersionNumber}/events{cachePairedSection.EventIds.Count}")}" +
+                            $":pairedContainsEid={pairedContainsEventId}:eventElsewhere={currentEventElsewhere || cacheEventElsewhere}" +
+                            $":previousVersion={(previousVersionSubtable is null ? "none" : $"currentV{previousVersionSubtable.CurrentVersionNumber}/previousV{previousVersionSubtable.PreviousVersionNumber}/sec{previousVersionSubtable.SectionCount}")}" +
+                            $":previousExact={previousExactEvents.Count}:previousShort={previousShortEvents.Count}:previousDonorEligible={previousShortEvents.Count == 1}:previousDonorAmbiguous={previousShortEvents.Count > 1}");
+                    }
+#endif
+
+                    if (previousShortEvents.Count == 1)
+                    {
+                        titleCandidates = previousShortEvents;
+                        usedPreviousVersionDonor = true;
+                        previousVersionDonorUsed++;
+                    }
+                    else
+                    {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+                        // Classify the remaining body-only rows without relaxing any donor rule.
+                        // The categories are intentionally fail-closed and mutually exclusive so the next step can
+                        // distinguish true previous-version absence from EID/timing/descriptor mismatches.
+                        var previousExpectedTableSameEid = epg.PreviousVersionCacheEventObservations
+                            .Where(t =>
+                                t.NetworkId == body.NetworkId &&
+                                t.TransportStreamId == body.TransportStreamId &&
+                                t.ServiceId == body.ServiceId &&
+                                t.EventId == body.EventId &&
+                                t.TableId == expectedTitleTable)
+                            .OrderBy(t => t.Start)
+                            .ThenBy(t => t.DurationSeconds)
+                            .ThenBy(t => t.SectionNumber)
+                            .ThenBy(t => t.ObservationIndex)
+                            .ToList();
+                        var previousVersionSubtableForResidual = epg.PreviousVersionCacheSubtables.FirstOrDefault(v =>
+                            v.NetworkId == body.NetworkId &&
+                            v.TransportStreamId == body.TransportStreamId &&
+                            v.ServiceId == body.ServiceId &&
+                            v.TableId == expectedTitleTable);
+
+                        string residualReason;
+                        if (previousVersionSubtableForResidual is null)
+                        {
+                            residualNoPreviousVersionSubtable++;
+                            residualReason = "no_previous_version_subtable";
+                        }
+                        else if (previousExpectedTableSameEid.Count == 0)
+                        {
+                            residualPreviousVersionNoSameEventId++;
+                            residualReason = "previous_version_no_same_eid";
+                        }
+                        else if (previousExactEvents.Count == 0)
+                        {
+                            residualPreviousSameEventIdTimingMismatch++;
+                            residualReason = "previous_same_eid_timing_mismatch";
+                        }
+                        else if (previousShortEvents.Count == 0)
+                        {
+                            residualPreviousExactTimingNoShort++;
+                            residualReason = "previous_exact_timing_no_short";
+                        }
+                        else
+                        {
+                            residualPreviousShortAmbiguous++;
+                            residualReason = "previous_short_ambiguous";
+                        }
+
+                        if (nearbyDistinct.Count == 0) residualNearbyCurrentNone++;
+                        else residualNearbyCurrentAmbiguous++;
+
+                        var residualDateKey = body.Start.ToString("yyyy-MM-dd");
+                        residualByDate[residualDateKey] = residualByDate.TryGetValue(residualDateKey, out var residualDateCount)
+                            ? residualDateCount + 1
+                            : 1;
+
+                        if (residualReasonSamples.Count < 36)
+                        {
+                            var previousTimingSample = string.Join(',', previousExpectedTableSameEid.Take(4).Select(t => $"{t.Start:MM-ddTHH:mm:ss}/d{t.DurationSeconds}/short{HasRawShort(t)}"));
+                            residualReasonSamples.Add(
+                                $"{body.NetworkId}/{body.TransportStreamId}/{body.ServiceId}/{body.EventId}" +
+                                $":body={body.Start:MM-ddTHH:mm:ss}/d{body.DurationSeconds}:table=0x{expectedTitleTable:X2}" +
+                                $":nearbyCurrent={nearbyDistinct.Count}:previousSubtable={(previousVersionSubtableForResidual is null ? "none" : $"v{previousVersionSubtableForResidual.PreviousVersionNumber}")}" +
+                                $":previousSameEid={previousExpectedTableSameEid.Count}:previousExact={previousExactEvents.Count}:previousShort={previousShortEvents.Count}" +
+                                $":reason={residualReason}:previousTiming=[{previousTimingSample}]");
+                        }
+
+                        // Existing-DB donor evidence is retained as diagnostics only for regression
+                        // comparison. It remains non-authoritative and is never used as a donor.
+                        var existingDb = store.GetOne(body.NetworkId, body.TransportStreamId, body.ServiceId, body.EventId);
+                        if (existingDb is not null)
+                        {
+                            existingDbExactIdentityFound++;
+                            var exactTiming = existingDb.Start == body.Start && existingDb.DurationSeconds == body.DurationSeconds;
+                            if (exactTiming)
+                            {
+                                existingDbExactTimingFound++;
+                                var existingDbDecodedTitle = ProgramGuideCellTextDecoder.Decode(existingDb).Title;
+                                if (!string.IsNullOrWhiteSpace(existingDbDecodedTitle)) existingDbDecodedTitlePresent++;
+                                if (HasRawShort(existingDb)) existingDbRawShortPresent++;
+                                if (!string.IsNullOrWhiteSpace(existingDbDecodedTitle) && HasRawShort(existingDb))
+                                    existingDbDonorEligible++;
+                            }
+                            else
+                            {
+                                existingDbDonorTimingMismatch++;
+                            }
+
+                            if (existingDbDonorSamples.Count < 24)
+                            {
+                                existingDbDonorSamples.Add(
+                                    $"{body.NetworkId}/{body.TransportStreamId}/{body.ServiceId}/{body.EventId}" +
+                                    $":body={body.Start:MM-ddTHH:mm:ss}/d{body.DurationSeconds}" +
+                                    $":db={existingDb.Start:MM-ddTHH:mm:ss}/d{existingDb.DurationSeconds}" +
+                                    $":exactTiming={exactTiming}:decodedTitlePresent={!string.IsNullOrWhiteSpace(ProgramGuideCellTextDecoder.Decode(existingDb).Title)}:rawShortPresent={HasRawShort(existingDb)}");
+                            }
+                        }
+#endif
+                        bodiesToRemove.Add(body);
+                        if (samples.Count < 36)
+                            samples.Add($"sid={body.ServiceId}:body={CompactBody(body)}:merged=False:removed=True:reason=no_current_or_previous_exact_title:nearbyDistinct={nearbyDistinct.Count}:previousShort={previousShortEvents.Count}");
+                        continue;
+                    }
+                }
             }
 
-            var rawShortStrict = strictSameEvent.Where(HasRawShort).ToList();
+            var rawShortStrict = titleCandidates.Where(HasRawShort).ToList();
             if (rawShortStrict.Count == 0)
             {
                 missingTitleRawShort++;
@@ -4050,8 +5371,15 @@ public sealed class EpgCapture
             var existingTitleRows = rawEvents
                 .Where(e => !ReferenceEquals(e, body))
                 .Where(e => IsScheduleShortCarrierCandidateTable(e.TableId) && HasRawShort(e))
-                .Where(e => SameRawEventTime(e, body))
                 .Where(e => ExpectedTablePair(e.TableId, body.TableId))
+                .Where(e => usedNearbyTimingAlignment
+                    ? e.NetworkId == title.NetworkId &&
+                      e.TransportStreamId == title.TransportStreamId &&
+                      e.ServiceId == title.ServiceId &&
+                      e.EventId == title.EventId &&
+                      e.Start == title.Start &&
+                      e.DurationSeconds == title.DurationSeconds
+                    : SameRawEventTime(e, body))
                 .OrderBy(e => e.TableId).ThenBy(e => e.SectionNumber)
                 .ToList();
 
@@ -4066,7 +5394,17 @@ public sealed class EpgCapture
 
             var canonical = existingTitleRows.Count == 1
                 ? existingTitleRows[0]
-                : CreateCanonicalTitleBodyEvent(title, body);
+                : CreateCanonicalTitleBodyEvent(title, body, shortDescriptorOnlyDonor: usedPreviousVersionDonor);
+
+            if (usedNearbyTimingAlignment && existingTitleRows.Count == 1)
+            {
+                // The paired extended table carries the newer timing.  Move the
+                // existing title row to that timing instead of adding a second row
+                // with the same broadcast EID; the DB event key remains collision-free.
+                canonical.Start = body.Start;
+                canonical.End = body.End;
+                canonical.DurationSeconds = body.DurationSeconds;
+            }
 
             var beforeExt = canonical.RawExtendedEventDescriptorHex;
             var beforeLoop = canonical.RawDescriptorLoopHex;
@@ -4100,6 +5438,8 @@ public sealed class EpgCapture
                 var op = existingTitleRows.Count == 1 ? "merged_into_existing_title_row" : "canonicalized_from_body_row";
                 samples.Add(
                     $"sid={body.ServiceId}:body={CompactBody(body)}:merged=True:removed=True:operation={op}:title={CompactTitle(title)}" +
+                    $":timingAlignment={(usedNearbyTimingAlignment ? "nearby_same_event_id" : "exact")}" +
+                    $":titleSource={(usedPreviousVersionDonor ? "previous_version_exact_short_donor" : "current_or_same_version")}" +
                     $":rawExtendedBytes={HexSequenceByteLength(body.RawExtendedEventDescriptorHex)}");
             }
         }
@@ -4109,6 +5449,25 @@ public sealed class EpgCapture
             if (rawEvents.Remove(body))
                 removedBodyRows++;
         }
+
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        Log("EIT_BODY_ONLY_RESIDUAL_REASON_OBSERVER", $"TS{group.TsId}",
+            $"result=OBSERVED purpose={purpose} group={group.Group} tsid={group.TsId} targetSids=[{string.Join(",", targetServiceIds)}] " +
+            $"candidateScope=no_current_or_previous_exact_short total={residualNoPreviousVersionSubtable + residualPreviousVersionNoSameEventId + residualPreviousSameEventIdTimingMismatch + residualPreviousExactTimingNoShort + residualPreviousShortAmbiguous} " +
+            $"noPreviousVersionSubtable={residualNoPreviousVersionSubtable} previousVersionNoSameEventId={residualPreviousVersionNoSameEventId} " +
+            $"previousSameEventIdTimingMismatch={residualPreviousSameEventIdTimingMismatch} previousExactTimingNoShort={residualPreviousExactTimingNoShort} previousShortAmbiguous={residualPreviousShortAmbiguous} " +
+            $"nearbyCurrentNone={residualNearbyCurrentNone} nearbyCurrentAmbiguous={residualNearbyCurrentAmbiguous} " +
+            $"byDate=[{string.Join(',', residualByDate.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key}:{kv.Value}"))}] " +
+            $"mutation=none donorRule=unchanged dbWrite=none projectionWrite=none schedulerWindow=unchanged workerCeiling=unchanged " +
+            $"sample={SafeLogValue(TrimLog(string.Join('|', residualReasonSamples), 7600))} rule=epg_body_only_residual_reason_observer_v122");
+
+        Log("EIT_BODY_ONLY_EXISTING_DB_TITLE_DONOR_OBSERVER", $"TS{group.TsId}",
+            $"result=OBSERVED purpose={purpose} group={group.Group} tsid={group.TsId} targetSids=[{string.Join(",", targetServiceIds)}] " +
+            $"candidateScope=no_current_or_previous_exact_title exactIdentityFound={existingDbExactIdentityFound} exactTimingFound={existingDbExactTimingFound} " +
+            $"decodedTitlePresent={existingDbDecodedTitlePresent} rawShortPresent={existingDbRawShortPresent} donorEligible={existingDbDonorEligible} timingMismatch={existingDbDonorTimingMismatch} " +
+            $"identity=nid_tsid_sid_eventId timing=start_duration donorRequirement=exact_identity_and_exact_timing_and_decodable_raw_short mutation=none dbWrite=none projectionWrite=none schedulerWindow=unchanged workerCeiling=unchanged " +
+            $"sample={SafeLogValue(TrimLog(string.Join('|', existingDbDonorSamples), 7600))} rule=epg_existing_db_exact_short_donor_observer_v122");
+#endif
 
         var ineligible = bodyRows.Count - eligible;
         return new StrictTitleBodyCanonicalMergeStats(
@@ -4122,15 +5481,37 @@ public sealed class EpgCapture
             ineligible,
             ambiguousStrictMultiple,
             noStrictCandidate,
+            nearbyTimingAligned,
+            previousVersionDonorUsed,
             tablePairMismatch,
             missingTitleRawShort,
             missingBodyRawExtended,
             rawExtendedMerged,
             rawExtendedAlreadyCovered,
+            bodyOnlyCurrentExactTitlePresent,
+            bodyOnlyCacheExactTitlePresent,
+            bodyOnlyCurrentAuthorityMissingCacheStored,
+            bodyOnlyCurrentAuthorityMissingCacheAbsent,
+            bodyOnlyCurrentAuthorityPresentCacheEventAbsent,
+            bodyOnlyCurrentPairedSectionPresent,
+            bodyOnlyCachePairedSectionPresent,
+            bodyOnlyPairedSectionContainsEventId,
+            bodyOnlyBasicEventIdFoundOtherSection,
+            bodyOnlyPairedSectionMissingBoth,
+            bodyOnlyPairedSectionPresentEventAbsent,
+            bodyOnlyPreviousVersionAvailable,
+            bodyOnlyPreviousBasicExactEventFound,
+            bodyOnlyPreviousBasicShortPresent,
+            bodyOnlyPreviousBasicDonorEligible,
+            bodyOnlyPreviousBasicDonorAmbiguous,
+            TrimLog(string.Join('|', cacheGapSamples), 7600),
             TrimLog(string.Join('|', samples), 7600));
     }
 
-    private static EpgEvent CreateCanonicalTitleBodyEvent(EpgEventObservation title, EpgEvent body)
+    private static EpgEvent CreateCanonicalTitleBodyEvent(
+        EpgEventObservation title,
+        EpgEvent body,
+        bool shortDescriptorOnlyDonor = false)
     {
         return new EpgEvent
         {
@@ -4143,13 +5524,20 @@ public sealed class EpgCapture
             Description = body.Description,
             Genre = body.Genre,
             GenreCodes = body.GenreCodes,
-            TableId = title.TableId,
-            SectionNumber = title.SectionNumber,
-            VersionNumber = title.VersionNumber,
-            RawDescriptorLoopHex = MergeRawHex(title.RawDescriptorLoopHex, body.RawDescriptorLoopHex),
+            // A previous-version donor contributes only raw short_event_descriptor.
+            // Preserve the current Extended row's table/section/version and all other
+            // descriptors so stale previous-version metadata cannot become authority.
+            TableId = shortDescriptorOnlyDonor ? body.TableId : title.TableId,
+            SectionNumber = shortDescriptorOnlyDonor ? body.SectionNumber : title.SectionNumber,
+            VersionNumber = shortDescriptorOnlyDonor ? body.VersionNumber : title.VersionNumber,
+            RawDescriptorLoopHex = shortDescriptorOnlyDonor
+                ? body.RawDescriptorLoopHex
+                : MergeRawHex(title.RawDescriptorLoopHex, body.RawDescriptorLoopHex),
             RawShortEventDescriptorHex = title.RawShortEventDescriptorHex,
             RawExtendedEventDescriptorHex = body.RawExtendedEventDescriptorHex,
-            RawContentDescriptorHex = MergeRawHex(title.RawContentDescriptorHex, body.RawContentDescriptorHex),
+            RawContentDescriptorHex = shortDescriptorOnlyDonor
+                ? body.RawContentDescriptorHex
+                : MergeRawHex(title.RawContentDescriptorHex, body.RawContentDescriptorHex),
             DurationSeconds = body.DurationSeconds,
             Start = body.Start,
             End = body.End,
@@ -4221,13 +5609,33 @@ public sealed class EpgCapture
             $"result={result} purpose={purpose} group={group.Group} tsid={group.TsId} targetSids=[{string.Join(",", targetServiceIds)}] " +
             $"rawEventsBefore={stats.RawEventsBefore} rawEventsAfter={stats.RawEventsAfter} bodyOnlyCandidates={stats.BodyOnlyCandidates} eligible={stats.Eligible} ineligible={stats.Ineligible} " +
             $"canonicalizedFromBodyRow={stats.CanonicalizedFromBodyRow} mergedIntoExistingTitleRow={stats.MergedIntoExistingTitleRow} removedBodyRows={stats.RemovedBodyRows} " +
-            $"ambiguousStrictMultiple={stats.AmbiguousStrictMultiple} noStrictCandidate={stats.NoStrictCandidate} tablePairMismatch={stats.TablePairMismatch} missingTitleRawShort={stats.MissingTitleRawShort} missingBodyRawExtended={stats.MissingBodyRawExtended} " +
+            $"ambiguousStrictMultiple={stats.AmbiguousStrictMultiple} noStrictCandidate={stats.NoStrictCandidate} nearbyTimingAligned={stats.NearbyTimingAligned} previousVersionDonorUsed={stats.PreviousVersionDonorUsed} tablePairMismatch={stats.TablePairMismatch} missingTitleRawShort={stats.MissingTitleRawShort} missingBodyRawExtended={stats.MissingBodyRawExtended} " +
             $"rawExtendedMerged={stats.RawExtendedMerged} rawExtendedAlreadyCovered={stats.RawExtendedAlreadyCovered} residualStrictCandidate=0 dominantCause={dominantCause} " +
-            $"policy=fail_closed_parser_event_identity_nid_tsid_sid_eid_start_duration action=pre_db_strict_identity_guard dbPostFix=none renderMutation=none titleSynthesis=none bodyToTitlePromotion=none existingDbTitleBurnIn=none sample={SafeLogValue(stats.Sample)} " +
+            $"policy=current_exact_then_unique_nearby_then_previous_version_exact_short_donor expectedTablePair=True previousDonorIdentity=nid_tsid_sid_eid_start_duration previousDonorAmbiguous=reject nearbyWindowMinutes={EitAlignmentNearbyTitleStartWindowMinutes} action=pre_db_title_body_canonical_merge dbPostFix=none renderMutation=none titleSynthesis=none bodyToTitlePromotion=none existingDbTitleBurnIn=none sample={SafeLogValue(stats.Sample)} " +
             $"rule=release_contract");
+
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        Log("EIT_BODY_ONLY_BASIC_SECTION_CACHE_ATTRIBUTION", $"TS{group.TsId}",
+            $"result=OBSERVED purpose={purpose} group={group.Group} tsid={group.TsId} targetSids=[{string.Join(",", targetServiceIds)}] " +
+            $"bodyOnlyNoStrict={stats.NoStrictCandidate} currentExactTitlePresent={stats.BodyOnlyCurrentExactTitlePresent} cacheExactTitlePresent={stats.BodyOnlyCacheExactTitlePresent} " +
+            $"currentAuthorityMissingCacheStored={stats.BodyOnlyCurrentAuthorityMissingCacheStored} currentAuthorityMissingCacheAbsent={stats.BodyOnlyCurrentAuthorityMissingCacheAbsent} " +
+            $"currentAuthorityPresentCacheEventAbsent={stats.BodyOnlyCurrentAuthorityPresentCacheEventAbsent} " +
+            $"currentPairedSectionPresent={stats.BodyOnlyCurrentPairedSectionPresent} cachePairedSectionPresent={stats.BodyOnlyCachePairedSectionPresent} " +
+            $"pairedSectionContainsEventId={stats.BodyOnlyPairedSectionContainsEventId} basicEventIdFoundOtherSection={stats.BodyOnlyBasicEventIdFoundOtherSection} " +
+            $"pairedSectionMissingBoth={stats.BodyOnlyPairedSectionMissingBoth} pairedSectionPresentEventAbsent={stats.BodyOnlyPairedSectionPresentEventAbsent} " +
+            $"previousVersionAvailable={stats.BodyOnlyPreviousVersionAvailable} previousBasicExactEventFound={stats.BodyOnlyPreviousBasicExactEventFound} " +
+            $"previousBasicShortPresent={stats.BodyOnlyPreviousBasicShortPresent} previousBasicDonorEligible={stats.BodyOnlyPreviousBasicDonorEligible} previousBasicDonorAmbiguous={stats.BodyOnlyPreviousBasicDonorAmbiguous} " +
+            $"previousVersionDonorUsed={stats.PreviousVersionDonorUsed} interpretation=previous_version_exact_short_descriptor_donor_enabled_only_when_current_strict_and_nearby_title_are_unavailable_and_exact_nid_tsid_sid_eid_start_duration_expected_basic_table_has_one_short_descriptor;paired_section_missing_both_means_section_coverage_gap_present_event_absent_means_basic_extended_content_asymmetry_event_elsewhere_means_section_relocation_or_segment_skew " +
+            $"dbWrite=canonical_merge_only schedulerWindow=unchanged workerCeiling=unchanged sample={SafeLogValue(stats.CacheGapSample)} rule=epg_body_only_basic_section_cache_attribution_v122");
+#endif
     }
 
 
+
+    private static List<EpgEvent> FilterCurrentOrFutureImportEvents(IEnumerable<EpgEvent> events, DateTime cutoff)
+        => events
+            .Where(e => e.End > cutoff)
+            .ToList();
 
     private void LogDbInsertPrecheck(TsGroup group, string purpose, IReadOnlyList<ushort> targetServiceIds, IReadOnlyList<EpgEvent> rawEvents)
     {
@@ -4450,12 +5858,16 @@ public sealed class EpgCapture
         return string.Join(";", tokens);
     }
 
-    internal List<TsGroup> BuildGroups(IReadOnlyList<ChannelTarget> targets, bool emitDiagnostics = true)
+    internal List<TsGroup> BuildGroups(
+        IReadOnlyList<ChannelTarget> targets,
+        IReadOnlyList<ChannelServiceState>? epgServiceStates = null,
+        bool emitDiagnostics = true)
     {
         // release_contract: 通常EPGは「局単位」ではなく .ch2 由来の同一TS束で回す。
-        // group+nid+tsid に加えて、実際に BonDriver/TVTest へ渡す chspace/chi も同一であることを
-        // TS束の条件に含める。NID/TSIDだけが一致していても、ch2/ChSet上の選局点が違うものを
-        // 1つに混ぜない。逆に同じ選局点に複数サービスがある場合は targetSids へ全件載せる。
+        // 物理選局はTVTestでactiveかつChSet解決済みのChannelTargetを正本とする一方、
+        // 通常EPGのサービス収集範囲は同一NID/TSIDの.ch2記載サービス全体とする。
+        // これにより、TVTestでOFFのサブサービスもEPGへ蓄積するが、検索・予約・録画の
+        // active判定には一切昇格させない。PreRecはepgServiceStatesを渡さず従来どおりactive対象のみ。
         var groups = targets
             .GroupBy(t => new
             {
@@ -4467,23 +5879,75 @@ public sealed class EpgCapture
             })
             .Select(g =>
             {
-                var targetList = g
+                var activeTargets = g
                     .GroupBy(t => t.ServiceId)
                     .Select(x => x.OrderBy(t => t.Ch2LineNumber).First())
                     .OrderBy(t => t.Ch2LineNumber)
                     .ToList();
-                var ch2ActiveSameTsServices = targetList.Count == 0 ? 0 : targetList.Max(t => t.SameTransportServiceCount);
-                var bundleStatus = ch2ActiveSameTsServices > targetList.Count
-                    ? "WARN_ACTIVE_CH2_SERVICE_SUBSET"
-                    : "OK_ACTIVE_CH2_SERVICE_COVERED";
+
+                // The first entry must remain an active/routable service because it owns the physical tune.
+                // Same-TS .ch2 service rows may be attached here as planning metadata, but this list is not
+                // authoritative for normal-EPG import. ParseAndStoreAsync expands canonical import from the
+                // actual service identities observed in the captured TS.
+                var targetList = new List<ChannelTarget>(activeTargets);
+                var routeVariantCount = targets
+                    .Where(t => t.OriginalNetworkId == g.Key.OriginalNetworkId
+                                && t.TransportStreamId == g.Key.TransportStreamId)
+                    .Select(t => (t.ResolvedSpace, t.ResolvedChannelIndex))
+                    .Distinct()
+                    .Count();
+                var canExpandAllServices = epgServiceStates is not null && activeTargets.Count > 0 && routeVariantCount == 1;
+                if (canExpandAllServices)
+                {
+                    var representative = activeTargets[0];
+                    var presentSids = targetList.Select(t => t.ServiceId).ToHashSet();
+                    var allSameTsStates = epgServiceStates!
+                        .Where(s => s.OriginalNetworkId == g.Key.OriginalNetworkId
+                                    && s.TransportStreamId == g.Key.TransportStreamId)
+                        .GroupBy(s => s.ServiceId)
+                        .Select(x => x.OrderBy(s => s.Ch2LineNumber).First())
+                        .OrderBy(s => s.Ch2LineNumber)
+                        .ToList();
+
+                    foreach (var state in allSameTsStates)
+                    {
+                        if (!presentSids.Add(state.ServiceId)) continue;
+                        targetList.Add(new ChannelTarget
+                        {
+                            Group = representative.Group,
+                            ServiceId = state.ServiceId,
+                            OriginalNetworkId = state.OriginalNetworkId,
+                            TransportStreamId = state.TransportStreamId,
+                            Name = state.Name,
+                            ChannelArgument = BuildEpgTransportRouteArgument(representative),
+                            Ch2FileName = state.Ch2FileName,
+                            Ch2LineNumber = state.Ch2LineNumber,
+                            BonDriverChannel = representative.BonDriverChannel,
+                            ResolvedSpace = representative.ResolvedSpace,
+                            ResolvedChannelIndex = representative.ResolvedChannelIndex,
+                            SameTransportServiceCount = allSameTsStates.Count,
+                            ChannelBuildSource = "epg_same_transport_service_identity"
+                        });
+                    }
+                }
+
+                var ch2ActiveSameTsServices = activeTargets.Count == 0
+                    ? 0
+                    : activeTargets.Max(t => t.SameTransportServiceCount);
+                var epgConfiguredSameTsServices = targetList.Count;
+                var bundleStatus = epgServiceStates is null
+                    ? (ch2ActiveSameTsServices > activeTargets.Count ? "WARN_ACTIVE_CH2_SERVICE_SUBSET" : "OK_ACTIVE_CH2_SERVICE_COVERED")
+                    : routeVariantCount > 1
+                        ? "WARN_AMBIGUOUS_TS_ROUTE_FOR_ALL_SERVICE_EPG"
+                        : "OK_ALL_CH2_SERVICES_COVERED";
                 var targetSids = string.Join(",", targetList.Select(t => t.ServiceId).OrderBy(x => x));
                 var ch2Lines = string.Join(",", targetList.Select(t => t.Ch2LineNumber).OrderBy(x => x));
                 if (emitDiagnostics)
                 {
                     Log("EPG_CH2_TS_SCOPE", $"TS{g.Key.TransportStreamId}",
                         $"result={bundleStatus} group={g.Key.Group} nid={g.Key.OriginalNetworkId} tsid={g.Key.TransportStreamId} chspace={g.Key.ResolvedSpace} chi={g.Key.ResolvedChannelIndex} " +
-                        $"ch2ActiveSameTsServices={ch2ActiveSameTsServices} epgTargetSidCount={targetList.Count} targetSids=[{targetSids}] ch2Lines=[{ch2Lines}] " +
-                        $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC note=epg_uses_ch2_bundle_before_tvairepgrec_job rule=release_contract");
+                        $"ch2ActiveSameTsServices={ch2ActiveSameTsServices} epgConfiguredSameTsServices={epgConfiguredSameTsServices} epgTargetSidCount={targetList.Count} targetSids=[{targetSids}] ch2Lines=[{ch2Lines}] routeVariants={routeVariantCount} " +
+                        $"serviceActivationAffectsPhysicalTune=true serviceActivationAffectsNormalEpgImport=false commonRoute=ALLOC_ROUTE/TUNER_ALLOC note=physical_route_scope_plus_ch2_metadata_actual_import_expands_from_observed_ts rule=release_contract");
                 }
                 return new TsGroup(
                     Key:               $"{g.Key.Group}:{g.Key.OriginalNetworkId}:{g.Key.TransportStreamId}:{g.Key.ResolvedSpace}:{g.Key.ResolvedChannelIndex}",
@@ -4505,6 +5969,16 @@ public sealed class EpgCapture
                 $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
         }
         return groups;
+    }
+
+
+    private static string BuildEpgTransportRouteArgument(ChannelTarget representative)
+    {
+        // EPGの追加サービスidentityは物理TSを共有するだけで、サービスactive状態を変更しない。
+        // /sid は視聴・録画サービス選択の意味を持つため、EPG用の合成identityには持ち込まない。
+        return NormalizeGroup(representative.Group) == "GR"
+            ? $"/ch {representative.ResolvedChannelIndex}"
+            : $"/chspace {representative.ResolvedSpace} /chi {representative.ResolvedChannelIndex}";
     }
 
     private string ResolveBonDriver(string group)
@@ -4716,6 +6190,7 @@ public sealed class EpgCapture
 
     // ─── ユーティリティ ──────────────────────────────────────────
 
+    [System.Diagnostics.Conditional("TVAIR_DEVELOPER_DIAGNOSTICS")]
     private void Log(string ev, string title, string msg)
         => log.Add(ev, title, msg);
 
@@ -5189,7 +6664,19 @@ internal sealed record TsGroup(
 
 // ─── 公開型 ──────────────────────────────────────────────────────
 
-internal sealed record PreRecordProbeResult(bool TargetFound, IReadOnlyList<EpgEvent> Events, string EventSummary);
+internal enum PreRecordProbeTerminalReason
+{
+    ObservationOnly = 0,
+    TargetObserved = 1,
+    DeadlineReachedTargetNotObserved = 2,
+    WorkerExitedBeforeDecision = 3,
+    AttemptSuperseded = 4
+}
+
+internal sealed record PreRecordProbeResult(bool TargetFound, IReadOnlyList<EpgEvent> Events, string EventSummary)
+{
+    public PreRecordProbeTerminalReason TerminalReason { get; init; } = PreRecordProbeTerminalReason.ObservationOnly;
+}
 
 public sealed record EpgCaptureResult(
     bool Success,

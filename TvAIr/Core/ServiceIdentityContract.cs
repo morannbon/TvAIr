@@ -3,8 +3,9 @@ namespace TvAIr.Core;
 /// <summary>
 /// TvAIr-wide service identity contract.
 /// A service is identified by the exact NID/TSID/SID triplet. ServiceName is mutable display metadata
-/// and must never be used as the identity key. Current display name is resolved from the current
-/// ChannelTarget set; stored names are fallback snapshots for identities no longer resolvable.
+/// and must never be used as the identity key. General channel display uses the current ChannelTarget;
+/// reservation/recording presentation additionally preserves the exact event/persisted service label
+/// before falling back to physical-route metadata.
 /// </summary>
 internal static class ServiceIdentityContract
 {
@@ -23,6 +24,14 @@ internal static class ServiceIdentityContract
         => target.OriginalNetworkId == networkId
            && target.TransportStreamId == transportStreamId
            && target.ServiceId == serviceId;
+
+    public static bool Matches(ChannelTarget target, Key key)
+        => Matches(target, key.NetworkId, key.TransportStreamId, key.ServiceId);
+
+    public static bool Matches(Reservation left, Reservation right)
+        => left.NetworkId == right.NetworkId
+           && left.TransportStreamId == right.TransportStreamId
+           && left.ServiceId == right.ServiceId;
 
     public static ChannelTarget? ResolveTarget(
         IEnumerable<ChannelTarget> targets,
@@ -44,6 +53,32 @@ internal static class ServiceIdentityContract
             return current;
 
         return storedFallback?.Trim() ?? string.Empty;
+    }
+
+    /// <summary>
+    /// Reservation/recording presentation resolver. The exact programme-event service name is
+    /// the strongest display metadata for the immutable NID/TSID/SID identity, followed by the
+    /// persisted reservation snapshot. ChannelTarget is a physical-route catalogue and is used
+    /// only as the final fallback; sibling-service route aliases must not overwrite a recording's
+    /// exact service label.
+    /// </summary>
+    public static string ResolveReservationServiceName(
+        IEnumerable<ChannelTarget> targets,
+        ushort networkId,
+        ushort transportStreamId,
+        ushort serviceId,
+        string? projectedEventServiceName,
+        string? storedFallback = null)
+    {
+        var projected = projectedEventServiceName?.Trim() ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(projected))
+            return projected;
+
+        var stored = storedFallback?.Trim() ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(stored))
+            return stored;
+
+        return ResolveCurrentServiceName(targets, networkId, transportStreamId, serviceId, storedFallback);
     }
 
     public static bool TryParseKey(string? value, out Key key)

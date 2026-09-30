@@ -48,6 +48,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         PlaybackProgressStore playbackProgress,
         ReservationScheduler reservationScheduler,
         PluginManagedExternalLookupHost externalLookupHost,
+        PluginInternetAccessGate internetAccessGate,
         string pluginId,
         string pluginDisplayName,
         string pluginsDirectory,
@@ -98,6 +99,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         Hosts = new HostsApi(permissionGate);
         Plugins = new PluginsApi(registry, permissionGate);
         ExternalLookup = new ExternalLookupApi(normalizedPluginId, pluginDisplayName, externalLookupHost, permissionGate);
+        InternetAccess = new InternetAccessApi(normalizedPluginId, internetAccessGate, permissionGate);
     }
 
     public ITvAirLogsApi Logs { get; }
@@ -132,6 +134,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
     public ITvAirHostsApi Hosts { get; }
     public ITvAirPluginsApi Plugins { get; }
     public ITvAirExternalLookupApi ExternalLookup { get; }
+    public ITvAirInternetAccessApi InternetAccess { get; }
 
 
     private sealed class CapabilityPermissionGate
@@ -163,6 +166,26 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
     }
 
 
+
+    private sealed class InternetAccessApi(
+        string pluginId,
+        PluginInternetAccessGate gate,
+        CapabilityPermissionGate permissions) : ITvAirInternetAccessApi
+    {
+        public TvAirInternetAccessStateDto GetState()
+        {
+            var declared = permissions.Has(PluginPermission.UseInternetAccess);
+            return new TvAirInternetAccessStateDto
+            {
+                PluginDeclaredPermission = declared,
+                UserAllowed = declared && gate.IsUserAllowed(pluginId),
+                NetworkUsageEnabled = gate.NetworkUsageEnabled
+            };
+        }
+
+        public CancellationTokenSource CreateLinkedCancellation(CancellationToken cancellationToken = default)
+            => gate.CreateLinkedCancellation(pluginId, permissions.Has(PluginPermission.UseInternetAccess), cancellationToken);
+    }
 
     private sealed class ExternalLookupApi(
         string pluginId,
@@ -332,6 +355,8 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
                 SearchOutline = rule.SearchOutline,
                 SearchDetail = rule.SearchDetail,
                 SearchCast = rule.SearchCast,
+                RecordCurrentServiceOnly = rule.RecordCurrentServiceOnly,
+                RecordSubtitles = rule.RecordSubtitles,
                 Enabled = rule.Enabled,
                 UseAllChannels = rule.UseAllChannels,
                 TargetServices = rule.TargetServices,

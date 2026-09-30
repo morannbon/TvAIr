@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <Platforms>AnyCPU;x86;x64</Platforms>
@@ -41,4 +41,7 @@
     <Copy SourceFiles="@(TvAIrEpgRecSelfOutput)" DestinationFolder="$(TvAIrOutputDir)" SkipUnchangedFiles="true" Condition="'@(TvAIrEpgRecSelfOutput)' != ''" />
   </Target>
 
+  <ItemGroup>
+    <Compile Include="..\Shared\EitEventGroupContract.cs" Link="Shared\EitEventGroupContract.cs" />
+  </ItemGroup>
 </Project>

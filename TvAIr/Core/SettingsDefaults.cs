@@ -7,6 +7,9 @@ public static class SettingsDefaults
 {
     public const int Port = 55884;
     public const string SystemTheme = "current";
+    // THEME_GENRE_PALETTE_SCHEMA_VERSION
+    // v2 is the first fully canonical light/dark palette contract. Older/unversioned persisted palettes are reset once to this canonical mapping.
+    public const int GenrePaletteSchemaVersion = 2;
 
     public const bool EpgEnabled = true;
     public const int EpgHour = 3;
@@ -55,40 +58,56 @@ public static class SettingsDefaults
     public const bool UserLogDetailStateChange = true;
     public const bool UserLogDetailEndOrFailureReason = true;
 
-    // GENRE_PALETTE_DEFAULT_SINGLE_SOURCE
-    // 初期値 / INI欠落補完 / API DefaultThemeGenrePalettes / 設定画面「標準に戻す」はこの配色だけを正本とする。
-    public static Dictionary<string, string> CreateLightGenreColors() => new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["g-news"]    = "#d3ffcb",
-        ["g-sports"]  = "#ffcbee",
-        ["g-info"]    = "#b8f0ac",
-        ["g-drama"]   = "#ffbbbb",
-        ["g-music"]   = "#b4f2ff",
-        ["g-variety"] = "#faffb4",
-        ["g-movie"]   = "#cbfcf4",
-        ["g-anime"]   = "#dcdcfe",
-        ["g-docu"]    = "#f0f0f0",
-        ["g-other"]   = "#f0f0f0",
-    };
+    // THEME_GENRE_PALETTE_SINGLE_SOURCE
+    // Genre identity -> hue family is shared by light/dark. Persistence/API/UI/default reset/preset editor project from this contract.
+    // Do not add page-local palette literals.
+    private sealed record GenreThemeColor(string Key, string Light, string Dark);
+    private sealed record GenreThemePreset(string Light, string Dark);
 
-    public static Dictionary<string, string> CreateDarkGenreColors() => new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["g-news"]    = "#1f5a45",
-        ["g-sports"]  = "#245c7a",
-        ["g-info"]    = "#2d6f61",
-        ["g-drama"]   = "#704332",
-        ["g-music"]   = "#286b78",
-        ["g-variety"] = "#6b5a24",
-        ["g-movie"]   = "#563a73",
-        ["g-anime"]   = "#394f95",
-        ["g-docu"]    = "#3f5366",
-        ["g-other"]   = "#4a5058",
-    };
+    private static readonly GenreThemeColor[] GenreThemeColors =
+    [
+        new("g-news",    "#cce8c8", "#365f40"), // green
+        new("g-sports",  "#c6ddf4", "#355d7a"), // blue
+        new("g-info",    "#c8e8dc", "#347066"), // teal
+        new("g-drama",   "#f3c8c2", "#7a4540"), // coral/red
+        new("g-music",   "#c7e7ef", "#356b78"), // cyan
+        new("g-variety", "#f1e4b5", "#756128"), // yellow/ochre
+        new("g-movie",   "#d9cdef", "#654b7e"), // violet
+        new("g-anime",   "#cbd2f0", "#49578c"), // indigo
+        new("g-docu",    "#e5cfb7", "#6b5540"), // sand/brown
+        new("g-other",   "#d9dde2", "#535960"), // neutral gray
+    ];
+
+    // Preset editor uses paired swatches so the same hue family means the same thing in both themes.
+    // Broad families appear at most twice; the editor remains calm but genres stay visually separable.
+    private static readonly GenreThemePreset[] GenreThemePresets =
+    [
+        new("#cce8c8", "#365f40"), new("#c6ddf4", "#355d7a"),
+        new("#c8e8dc", "#347066"), new("#f3c8c2", "#7a4540"),
+        new("#c7e7ef", "#356b78"), new("#f1e4b5", "#756128"),
+        new("#d9cdef", "#654b7e"), new("#cbd2f0", "#49578c"),
+        new("#e5cfb7", "#6b5540"), new("#d9dde2", "#535960"),
+        new("#efcfdf", "#74495f"), new("#d7e6b9", "#596a32"),
+        new("#f2d0b4", "#7b5536"), new("#c8d9e8", "#415e74"),
+        new("#e1c9e4", "#6c4d70"), new("#d5d0c8", "#5e5850"),
+    ];
+
+    public static Dictionary<string, string> CreateLightGenreColors()
+        => GenreThemeColors.ToDictionary(x => x.Key, x => x.Light, StringComparer.OrdinalIgnoreCase);
+
+    public static Dictionary<string, string> CreateDarkGenreColors()
+        => GenreThemeColors.ToDictionary(x => x.Key, x => x.Dark, StringComparer.OrdinalIgnoreCase);
 
     public static Dictionary<string, Dictionary<string, string>> CreateDefaultThemeGenrePalettes() => new(StringComparer.OrdinalIgnoreCase)
     {
         ["light"] = CreateLightGenreColors(),
         ["dark"] = CreateDarkGenreColors(),
+    };
+
+    public static Dictionary<string, List<string>> CreateThemeGenrePresetColors() => new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["light"] = GenreThemePresets.Select(x => x.Light).ToList(),
+        ["dark"] = GenreThemePresets.Select(x => x.Dark).ToList(),
     };
 
     public const int PortMin = 1024;

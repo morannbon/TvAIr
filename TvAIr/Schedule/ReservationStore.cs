@@ -87,6 +87,11 @@ public sealed record UserChainMutationResult(
     int ReservationId,
     Reservation? Reservation);
 
+public sealed record UserChainFeatureDisableDetachResult(
+    bool Applied,
+    string Reason,
+    IReadOnlyList<Reservation> DetachedReservations);
+
 public sealed record ReservationLifecycleTransitionResult(
     bool Applied,
     string Reason,
@@ -104,7 +109,7 @@ public sealed class ReservationStore
 {
     private readonly Database db;
     private readonly LogRepository log;
-    private readonly ChainDirectRecorderSessionRegistry chainSessionRegistry;
+    private readonly ChainRuntimeSnapshotRegistry chainSessionRegistry;
     private readonly ChannelFileLoader channelLoader;
     private readonly ReservationMutationJournal mutationJournal;
     private readonly NormalEpgWaveOccupation normalEpgWaveOccupation;
@@ -136,24 +141,23 @@ public sealed class ReservationStore
         public string? PinnedTuner { get; init; }
         public string? ContinuityPreferredTuner { get; init; }
         public string PinCandidates { get; init; } = string.Empty;
-        // release_contract: チェーンは外部予約との競合では番組単位で採否を再計算する。
-        // ChainRootだけをKeyにすると全子予約が一つの長大な占有区間へ潰れ、
-        // 最初に競合した子以降だけを可逆に競合化できないため、予約IDまで含める。
+        // PHYSICAL_OCCUPANCY_IDENTITY_SINGLE_SOURCE:
+        // UnitKey はイベント単位の競合採否・監査ID、PhysicalOccupancyKey は物理Tuner消費の正本。
+        // 明示UserChainだけがroot単位で1つの物理占有を共有し、独立予約は予約ごとに別占有とする。
+        // 競合判定・repack・Tuner継承が個別に「同一chain例外」を再実装することを禁止する。
         public string UnitKey => ChainRootId.HasValue
             ? $"{Group}:CHAIN:{ChainRootId.Value}:R{PriorityReservation.Id}"
             : $"{Group}:UNIT:{UnitId}";
+        public string PhysicalOccupancyKey => IsUserChain && ChainRootId.HasValue
+            ? $"{Group}:CHAIN_ROOT:{ChainRootId.Value}"
+            : UnitKey;
         public string MemberIds => string.Join(">", Reservations.Select(r => $"R{r.Id}"));
     }
 
     /// <summary>時間追従の変化検出閾値（秒）。この秒数以上ずれていれば更新対象とみなす。</summary>
     private const int TimeFollowThresholdSeconds = 30;
 
-    // Completed は物理占有ではない。明示チェーンの直接後続が境界再試行中である場合だけ、
-    // 後続開始30秒前から後続予約終了までを同一物理Tuner継承のhandoff anchor範囲とする。
-    // 任意の5分/3分quiet windowを再導入せず、時間追従後のStartTimeと予約EndTimeを正本にする。
-    private const int CompletedHandoffAnchorFrontCutSeconds = 30;
-
-    public ReservationStore(Database db, LogRepository log, ChainDirectRecorderSessionRegistry chainSessionRegistry, ChannelFileLoader channelLoader, ReservationMutationJournal mutationJournal, NormalEpgWaveOccupation normalEpgWaveOccupation)
+    public ReservationStore(Database db, LogRepository log, ChainRuntimeSnapshotRegistry chainSessionRegistry, ChannelFileLoader channelLoader, ReservationMutationJournal mutationJournal, NormalEpgWaveOccupation normalEpgWaveOccupation)
     {
         this.db = db;
         this.log = log;
@@ -510,7 +514,7 @@ public sealed class ReservationStore
         return ReadReservations(cmd).FirstOrDefault();
     }
 
-    // ChainReservationContract.CHAIN_DEVELOPER_APPROVAL_REQUIRED: 以下の保存トポロジー契約変更は開発者の明示承認が必須。
+    // CHAIN_ROOT_SINGLE_SOURCE_INVARIANT: 保存トポロジーはChainReservationContractとこの永続値を正本とする。
     // CHAIN_ROOT_SINGLE_SOURCE_INVARIANT — 変更禁止:
     // ChainRootはチェーン作成時に確定した永続トポロジーの識別子であり、予約状態、競合、録画完了、
     // 残存メンバー、実行中アンカーから再推定してはならない。前段リンクを辿るのは保存値の整合性検証だけに使い、
@@ -536,11 +540,7 @@ public sealed class ReservationStore
                 failureReason = "chain_cycle_detected";
                 return false;
             }
-            if (++depth > 32)
-            {
-                failureReason = "chain_depth_exceeded";
-                return false;
-            }
+            depth++;
             if (!allById.TryGetValue(cursor.UserChainPreviousId.Value, out var predecessor))
             {
                 failureReason = "chain_broken_predecessor";
@@ -579,7 +579,7 @@ public sealed class ReservationStore
 
     /// <summary>
     /// ユーザー明示チェーンの追加または既存予約昇格を、チェーン構造検証と同一Transactionで確定する。
-    /// 同一前番組への複数後続、既存後続の別前番組付替え、循環、壊れたroot、深度超過を拒否する。
+    /// 同一前番組への複数後続、既存後続の別前番組付替え、循環、壊れたrootを拒否する。
     /// </summary>
     public UserChainMutationResult AddOrPromoteUserChain(Reservation requested, int predecessorId, int rootId, bool featureEnabled)
     {
@@ -631,7 +631,7 @@ public sealed class ReservationStore
                 && x.TransportStreamId == requested.TransportStreamId
                 && x.ServiceId == requested.ServiceId
                 && x.EventId == requested.EventId
-                && x.Status is ReservationStatus.Scheduled or ReservationStatus.Starting or ReservationStatus.Recording or ReservationStatus.Stopping)
+                && ReservationLifecycleContract.IsChainTopologyActive(x.Status))
             .OrderByDescending(x => x.Id)
             .FirstOrDefault();
         var successorId = existing?.Id ?? 0;
@@ -639,7 +639,7 @@ public sealed class ReservationStore
         var competingSuccessor = active.FirstOrDefault(x => x.IsUserChain
             && x.UserChainPreviousId == predecessorId
             && x.Id != successorId
-            && x.Status is ReservationStatus.Scheduled or ReservationStatus.Starting or ReservationStatus.Recording or ReservationStatus.Stopping);
+            && ReservationLifecycleContract.IsChainTopologyActive(x.Status));
         if (competingSuccessor is not null)
             return new UserChainMutationResult(false, false, "predecessor_already_has_successor", competingSuccessor.Id, competingSuccessor);
 
@@ -772,6 +772,106 @@ public sealed class ReservationStore
         return new UserChainMutationResult(true, added, "applied", id, result);
     }
 
+    /// <summary>
+    /// CHAIN_FEATURE_DISABLE_DETACH_SINGLE_SOURCE_INVARIANT:
+    /// チェーン機能の有効→無効遷移では、まだ実行へ入っていないScheduledの保存トポロジーだけを
+    /// 同一Transactionで通常予約へdetachする。予約そのもの、ActualTunerName、録画実績は変更しない。
+    /// TunerNameは旧chain FinalConflictPlanの派生値なので未確定へ戻し、後段の共通割当で独立予約として再解決する。
+    /// Starting/Recording/Stoppingはactive physical captureを設定変更だけで切断しないため対象外。
+    /// </summary>
+    public UserChainFeatureDisableDetachResult DetachScheduledUserChainsForFeatureDisable(
+        string source,
+        IReadOnlySet<int>? runtimeAttachedReservationIds = null)
+    {
+        using var con = db.Open();
+        using var tx = con.BeginTransaction(System.Data.IsolationLevel.Serializable);
+
+        List<Reservation> before;
+        using (var read = con.CreateCommand())
+        {
+            read.Transaction = tx;
+            read.CommandText = """
+                SELECT id, network_id, transport_stream_id, service_id, event_id,
+                       title, start_time, end_time, status, source, created_at, updated_at,
+                       channel_argument, is_conflicted, is_enabled, tuner_name, actual_tuner_name,
+                       recording_started_at, recording_finished_at, service_name,
+                       scheduled_start_time, source_rule_id, source_rule_name,
+                       is_user_chain, user_chain_previous_id, user_chain_root_id,
+                       recording_recovery_chain_id, recovery_parent_reservation_id, data_version,
+                       reservation_intent, created_through, created_by_plugin_id
+                FROM reservations
+                WHERE status = 'scheduled'
+                  AND source <> 'epg'
+                  AND (is_user_chain = 1 OR user_chain_previous_id IS NOT NULL OR user_chain_root_id IS NOT NULL)
+                ORDER BY start_time, id;
+                """;
+            before = ReadReservations(read, projectRuntimeStatus: false).ToList();
+        }
+
+        var protectedIds = runtimeAttachedReservationIds ?? new HashSet<int>();
+        before = before.Where(x => !protectedIds.Contains(x.Id)).ToList();
+
+        if (before.Count == 0)
+        {
+            tx.Commit();
+            log.Add("CHAIN_FEATURE_DISABLE_DETACH", "Settings",
+                $"result=NOOP source={source} scheduledChainRows=0 protectedRuntimeSegments={protectedIds.Count} action=none activeRuntimeSegmentsPreserved=True rule=chain_lifecycle_single_source");
+            return new UserChainFeatureDisableDetachResult(true, "no_scheduled_chain_rows", Array.Empty<Reservation>());
+        }
+
+        var nowText = DateTime.Now.ToString("O");
+        foreach (var target in before)
+        {
+            using var update = con.CreateCommand();
+            update.Transaction = tx;
+            update.CommandText = """
+                UPDATE reservations
+                SET is_user_chain = 0,
+                    user_chain_previous_id = NULL,
+                    user_chain_root_id = NULL,
+                    tuner_name = '',
+                    data_version = data_version + 1,
+                    updated_at = $now
+                WHERE id = $id
+                  AND status = 'scheduled'
+                  AND data_version = $dataVersion
+                  AND (is_user_chain = 1 OR user_chain_previous_id IS NOT NULL OR user_chain_root_id IS NOT NULL);
+                """;
+            update.Parameters.AddWithValue("$now", nowText);
+            update.Parameters.AddWithValue("$id", target.Id);
+            update.Parameters.AddWithValue("$dataVersion", target.DataVersion);
+            if (update.ExecuteNonQuery() != 1)
+            {
+                tx.Rollback();
+                log.Add("CHAIN_FEATURE_DISABLE_DETACH", $"R{target.Id}",
+                    $"result=REJECTED source={source} reason=snapshot_changed expectedStatus=Scheduled expectedDataVersion={target.DataVersion} action=rollback_entire_detach activeRuntimeSegmentsPreserved=True rule=chain_lifecycle_single_source");
+                return new UserChainFeatureDisableDetachResult(false, "snapshot_changed", Array.Empty<Reservation>());
+            }
+        }
+
+        tx.Commit();
+        var after = before
+            .Select(x => GetById(x.Id))
+            .Where(x => x is not null)
+            .Cast<Reservation>()
+            .OrderBy(x => x.StartTime)
+            .ThenBy(x => x.Id)
+            .ToList();
+
+        foreach (var beforeRow in before)
+        {
+            var afterRow = after.FirstOrDefault(x => x.Id == beforeRow.Id);
+            if (afterRow is null) continue;
+            mutationJournal.Record(ReservationMutationKind.Updated, beforeRow, afterRow,
+                nameof(Reservation.IsUserChain), nameof(Reservation.UserChainPreviousId), nameof(Reservation.UserChainRootId),
+                nameof(Reservation.TunerName), nameof(Reservation.DataVersion));
+        }
+
+        log.Add("CHAIN_FEATURE_DISABLE_DETACH", "Settings",
+            $"result=APPLIED source={source} detached={after.Count} targets=[{string.Join(',', after.Select(x => $"R{x.Id}"))}] protectedRuntimeSegments={protectedIds.Count} reservationDelete=False actualTunerMutation=False tunerPlanReset=True conflictDecision=user_reservation_list_after_common_allocation activeRuntimeSegmentsPreserved=True rule=chain_lifecycle_single_source");
+        return new UserChainFeatureDisableDetachResult(true, "applied", after);
+    }
+
     private void LogStartingDataVersionMutation(
         string mutationOwner,
         Reservation? before,
@@ -801,7 +901,7 @@ public sealed class ReservationStore
         // 定時EPG取得と録画前EPG確認は独立したSystemEpg運用予約であり、
         // ユーザー予約やチェーン親の候補には含めない。
         if (r.Source == ReservationSource.Epg) return false;
-        if (r.Status is not (ReservationStatus.Scheduled or ReservationStatus.Starting or ReservationStatus.Recording or ReservationStatus.Stopping)) return false;
+        if (!ReservationLifecycleContract.IsChainTopologyActive(r.Status)) return false;
         if (!r.IsEnabled) return false;
         return true;
     }
@@ -913,7 +1013,7 @@ public sealed class ReservationStore
     /// Active parent duplicate detection and INSERT are performed under one immediate SQLite transaction.
     /// HTTP retries, plugin retries and Immediate button repetition therefore converge on one reservation id.
     /// </summary>
-    public AddOrGetActiveParentResult AddOrGetActiveParent(Reservation r)
+    public AddOrGetActiveParentResult AddOrGetActiveParent(Reservation r, ReservationRecordingOptions? recordingOptions = null)
     {
         r.Title = NormalizeReservationTitleForStorage(r.Title, r.ServiceName, r.Id);
         var key = ReservationDedupeKey(r);
@@ -1181,6 +1281,22 @@ public sealed class ReservationStore
             newId = Convert.ToInt32(cmd.ExecuteScalar());
         }
 
+        if (recordingOptions is not null)
+        {
+            using var optionCmd = con.CreateCommand();
+            optionCmd.Transaction = tx;
+            optionCmd.CommandText = """
+                INSERT INTO reservation_recording_options
+                  (reservation_id, current_service_only, save_subtitles, created_at)
+                VALUES ($id, $currentServiceOnly, $saveSubtitles, $now);
+                """;
+            optionCmd.Parameters.AddWithValue("$id", newId);
+            optionCmd.Parameters.AddWithValue("$currentServiceOnly", recordingOptions.CurrentServiceOnly ? 1 : 0);
+            optionCmd.Parameters.AddWithValue("$saveSubtitles", recordingOptions.SaveSubtitles ? 1 : 0);
+            optionCmd.Parameters.AddWithValue("$now", now);
+            optionCmd.ExecuteNonQuery();
+        }
+
         tx.Commit();
         var added = GetById(newId) ?? throw new InvalidOperationException($"Inserted reservation R{newId} could not be reloaded.");
         log.Add("RESERVATION_AUDIT", "ADD_ATOMIC",
@@ -1258,7 +1374,7 @@ public sealed class ReservationStore
     /// <summary>
     /// 録画開始に失敗して終端化した明示チェーン前段に対し、Scheduledの後続範囲も同一TransactionでFailedへ閉じる。
     /// 壊れたチェーン後続を通常の独立予約として再割当してはならない。チェーン構造とTuner証拠は診断用に保持する。
-    /// この終端伝播契約を変更する場合は、チェーン録画仕様の開発者承認を必要とする。
+    /// 終端伝播の結果を変更する場合は、チェーン全経路の終端・再割当・復旧を横断確認する。
     /// </summary>
     public IReadOnlyList<Reservation> FailScheduledUserChainSuccessorsAfterPredecessorFailure(int predecessorId, string reason)
     {
@@ -1787,7 +1903,7 @@ WHERE id = $id
     /// <summary>
     /// worker起動成功後のStarting予約を、実チューナー・開始実績と同じTransactionでRecordingへ確定する。
     /// </summary>
-    public ReservationLifecycleTransitionResult TryCompleteRecordingStart(int id, long expectedDataVersion, string actualTunerName)
+    public ReservationLifecycleTransitionResult TryCompleteRecordingStart(int id, long expectedDataVersion, string actualTunerName, DateTime? recordingStartedAt = null)
     {
         using var con = db.Open();
         using var tx = con.BeginTransaction();
@@ -1839,6 +1955,7 @@ WHERE id = $id
 
         var actual = actualTunerName ?? string.Empty;
         var now = DateTime.Now;
+        var effectiveRecordingStartedAt = recordingStartedAt ?? now;
         using (var update = con.CreateCommand())
         {
             update.Transaction = tx;
@@ -1847,7 +1964,7 @@ WHERE id = $id
                 SET status = 'recording',
                     is_conflicted = 0,
                     actual_tuner_name = $tuner,
-                    recording_started_at = CASE WHEN COALESCE(recording_started_at, '') = '' THEN $now ELSE recording_started_at END,
+                    recording_started_at = CASE WHEN COALESCE(recording_started_at, '') = '' THEN $started ELSE recording_started_at END,
                     data_version = data_version + 1,
                     updated_at = $now
                 WHERE id = $id
@@ -1855,6 +1972,7 @@ WHERE id = $id
                   AND data_version = $version;
                 """;
             update.Parameters.AddWithValue("$tuner", actual);
+            update.Parameters.AddWithValue("$started", effectiveRecordingStartedAt.ToString("O"));
             update.Parameters.AddWithValue("$now", now.ToString("O"));
             update.Parameters.AddWithValue("$id", id);
             update.Parameters.AddWithValue("$version", expectedDataVersion);
@@ -1869,7 +1987,7 @@ WHERE id = $id
         tx.Commit();
         var after = GetByIdPersisted(id);
         log.Add("RESERVATION_LIFECYCLE_CAS", $"R{id}",
-            $"result=APPLIED from=Starting to=Recording dataVersion={expectedDataVersion}->{after?.DataVersion ?? expectedDataVersion + 1} actualTuner={SafeTuner(actual)} atomicStartEvidence=True rule=release_contract");
+            $"result=APPLIED from=Starting to=Recording dataVersion={expectedDataVersion}->{after?.DataVersion ?? expectedDataVersion + 1} actualTuner={SafeTuner(actual)} recordingStartedAt={effectiveRecordingStartedAt:O} atomicStartEvidence=True rule=release_contract");
         // RECORDING_START_MUTATION_FIELD_INVARIANT:
         // Recording開始CASが実際に変更したStatus・競合解除・実Tuner・開始実績・DataVersionを漏れなく通知する。
         // DataVersionだけ、またはIsConflictedだけを通知から落とす実装へ戻してはならない。
@@ -2406,32 +2524,31 @@ WHERE id = $id
     }
 
     /// <summary>
-    /// 録画中前段の時間追従境界を、前段時刻と明示チェーン直接後続の開始時刻へ同一トランザクションで反映する。
-    /// CHAIN_FOLLOW_ATOMIC_BOUNDARY_INVARIANT:
-    /// 前段EndTimeだけ、または後続StartTimeだけが保存された中間状態を公開してはならない。
-    /// 30秒前停止・10秒緊急投入・Completed handoff pin・FinalConflictPlanは同じ境界を参照する。
-    /// CHAIN_FOLLOW_ATOMIC_CAS_INVARIANT:
-    /// commit時点でも前段が録画中、後続が有効な明示チェーン直接後続かつ同一サービスであることをDB上で再検証する。
-    /// CHAIN_FOLLOW_ATOMIC_VERSION_CAS_INVARIANT:
-    /// Schedulerが時間追従判定に使用した前段・後続スナップショットのDataVersionを、そのままCAS条件として受け取る。
-    /// Store内でDataVersionを再読込して期待値を作り直してはならない。それでは判定後からStore呼出しまでに入った予約編集を検出できない。
-    /// 前段・後続とも呼出元スナップショットのDataVersionをCAS条件に含め、実変更と同時に世代を進める。
-    /// 後続EndTimeは時間追従対象ではないため書き直さず、実際に変更したStartTimeとDataVersionだけをmutationへ記録する。
+    /// 録画中前段の正式な時間追従を、前段と未開始の線形チェーン未来側へ同一トランザクションで反映する。
+    /// CHAIN_FOLLOW_SERIES_ATOMIC_INVARIANT:
+    /// 前段EndTimeだけ、または一部memberだけが保存された中間状態を公開しない。
+    /// 未来memberは前段EndのdeltaをStart/Endへ同量適用し、各番組尺とチェーン隣接関係を維持する。
+    /// 各member自身の実EITが得られた場合は、呼出元がこのatomic commit後に通常のEventIdentity追従を行い、実観測値へ収束させる。
+    /// CHAIN_FOLLOW_SERIES_CAS_INVARIANT:
+    /// 前段はRecording、未来memberはScheduled/Enabled/UserChain、同一service identity、保存済みprevious/root、DataVersion一致を全件検証する。
+    /// 1件でも不一致なら全体をrollbackし、古いfollow snapshotで部分更新しない。
     /// </summary>
-    public bool UpdateRecordingFollowChainBoundaryAtomic(
+    public bool UpdateRecordingFollowChainSeriesAtomic(
         int predecessorId,
         long expectedPredecessorDataVersion,
         DateTime predecessorStart,
         DateTime predecessorEnd,
-        int successorId,
-        long expectedSuccessorDataVersion,
-        DateTime successorStart)
+        IReadOnlyList<Reservation> expectedSuccessors,
+        TimeSpan boundaryDelta)
     {
-        var beforePredecessor = GetById(predecessorId);
-        var beforeSuccessor = GetById(successorId);
-        if (beforePredecessor is null || beforeSuccessor is null)
+        if (expectedSuccessors.Count == 0)
             return false;
 
+        var beforePredecessor = GetById(predecessorId);
+        if (beforePredecessor is null || beforePredecessor.DataVersion != expectedPredecessorDataVersion)
+            return false;
+
+        var beforeSuccessors = expectedSuccessors.ToDictionary(x => x.Id);
         using var con = db.Open();
         using var tx = con.BeginTransaction();
         var now = DateTime.Now.ToString("O");
@@ -2462,46 +2579,57 @@ WHERE id = $id
             }
         }
 
-        using (var successor = con.CreateCommand())
+        var expectedPreviousId = predecessorId;
+        foreach (var expected in expectedSuccessors)
         {
+            var newStart = expected.StartTime.Add(boundaryDelta);
+            var newEnd = expected.EndTime.Add(boundaryDelta);
+            using var successor = con.CreateCommand();
             successor.Transaction = tx;
             successor.CommandText = """
                 UPDATE reservations
                 SET start_time = $start,
+                    end_time = $end,
                     data_version = data_version + 1,
                     updated_at = $now
                 WHERE id = $id
                   AND status = 'scheduled'
                   AND is_enabled = 1
                   AND is_user_chain = 1
-                  AND user_chain_previous_id = $predecessorId
+                  AND user_chain_previous_id = $previousId
+                  AND (($rootId IS NULL AND user_chain_root_id IS NULL) OR user_chain_root_id = $rootId)
                   AND network_id = $networkId
                   AND transport_stream_id = $transportStreamId
                   AND service_id = $serviceId
                   AND data_version = $dataVersion;
                 """;
-            successor.Parameters.AddWithValue("$start", successorStart.ToString("O"));
+            successor.Parameters.AddWithValue("$start", newStart.ToString("O"));
+            successor.Parameters.AddWithValue("$end", newEnd.ToString("O"));
             successor.Parameters.AddWithValue("$now", now);
-            successor.Parameters.AddWithValue("$id", successorId);
-            successor.Parameters.AddWithValue("$predecessorId", predecessorId);
+            successor.Parameters.AddWithValue("$id", expected.Id);
+            successor.Parameters.AddWithValue("$previousId", expectedPreviousId);
+            successor.Parameters.AddWithValue("$rootId", (object?)expected.UserChainRootId ?? DBNull.Value);
             successor.Parameters.AddWithValue("$networkId", beforePredecessor.NetworkId);
             successor.Parameters.AddWithValue("$transportStreamId", beforePredecessor.TransportStreamId);
             successor.Parameters.AddWithValue("$serviceId", beforePredecessor.ServiceId);
-            successor.Parameters.AddWithValue("$dataVersion", expectedSuccessorDataVersion);
+            successor.Parameters.AddWithValue("$dataVersion", expected.DataVersion);
             if (successor.ExecuteNonQuery() != 1)
             {
                 tx.Rollback();
                 return false;
             }
+
+            expectedPreviousId = expected.Id;
         }
 
         tx.Commit();
-        var afterPredecessor = GetById(predecessorId);
-        var afterSuccessor = GetById(successorId);
-        mutationJournal.Record(ReservationMutationKind.Updated, beforePredecessor, afterPredecessor,
+        mutationJournal.Record(ReservationMutationKind.Updated, beforePredecessor, GetById(predecessorId),
             nameof(Reservation.StartTime), nameof(Reservation.EndTime), nameof(Reservation.DataVersion));
-        mutationJournal.Record(ReservationMutationKind.Updated, beforeSuccessor, afterSuccessor,
-            nameof(Reservation.StartTime), nameof(Reservation.DataVersion));
+        foreach (var before in beforeSuccessors.Values)
+        {
+            mutationJournal.Record(ReservationMutationKind.Updated, before, GetById(before.Id),
+                nameof(Reservation.StartTime), nameof(Reservation.EndTime), nameof(Reservation.DataVersion));
+        }
         return true;
     }
 
@@ -2550,6 +2678,68 @@ WHERE id = $id
             return false;
 
         mutationJournal.Record(ReservationMutationKind.Updated, before, GetById(id),
+            nameof(Reservation.Title), nameof(Reservation.StartTime), nameof(Reservation.EndTime), nameof(Reservation.DataVersion));
+        return true;
+    }
+
+    /// <summary>
+    /// USER_CHAIN_TIME_FOLLOW_OWNER_CAS_INVARIANT:
+    /// 明示チェーンownerが系列全体を追従するときだけ使用するScheduled member専用CAS。
+    /// 通常予約用CASの非チェーン保護は変更せず、保存時にEventIdentityと保存済みチェーントポロジー
+    /// (previous/root)が判定時スナップショットから変化していないことを同一UPDATEで再検証する。
+    /// </summary>
+    private bool TryUpdateScheduledUserChainTitleStartEndTimeCas(
+        Reservation expected,
+        string title,
+        string serviceName,
+        DateTime startTime,
+        DateTime endTime)
+    {
+        if (!expected.IsUserChain || expected.Status != ReservationStatus.Scheduled || !expected.IsEnabled)
+            return false;
+
+        var before = GetById(expected.Id);
+        if (before is null || before.DataVersion != expected.DataVersion)
+            return false;
+
+        var safeTitle = NormalizeReservationTitleForStorage(title, serviceName, expected.Id);
+        using var con = db.Open();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = """
+            UPDATE reservations
+            SET title = $title,
+                start_time = $start,
+                end_time = $end,
+                data_version = data_version + 1,
+                updated_at = $now
+            WHERE id = $id
+              AND status = 'scheduled'
+              AND is_enabled = 1
+              AND is_user_chain = 1
+              AND network_id = $networkId
+              AND transport_stream_id = $transportStreamId
+              AND service_id = $serviceId
+              AND event_id = $eventId
+              AND (($previousId IS NULL AND user_chain_previous_id IS NULL) OR user_chain_previous_id = $previousId)
+              AND (($rootId IS NULL AND user_chain_root_id IS NULL) OR user_chain_root_id = $rootId)
+              AND data_version = $dataVersion;
+            """;
+        cmd.Parameters.AddWithValue("$title", safeTitle);
+        cmd.Parameters.AddWithValue("$start", startTime.ToString("O"));
+        cmd.Parameters.AddWithValue("$end", endTime.ToString("O"));
+        cmd.Parameters.AddWithValue("$now", DateTime.Now.ToString("O"));
+        cmd.Parameters.AddWithValue("$id", expected.Id);
+        cmd.Parameters.AddWithValue("$networkId", expected.NetworkId);
+        cmd.Parameters.AddWithValue("$transportStreamId", expected.TransportStreamId);
+        cmd.Parameters.AddWithValue("$serviceId", expected.ServiceId);
+        cmd.Parameters.AddWithValue("$eventId", expected.EventId);
+        cmd.Parameters.AddWithValue("$previousId", expected.UserChainPreviousId.HasValue ? expected.UserChainPreviousId.Value : DBNull.Value);
+        cmd.Parameters.AddWithValue("$rootId", expected.UserChainRootId.HasValue ? expected.UserChainRootId.Value : DBNull.Value);
+        cmd.Parameters.AddWithValue("$dataVersion", expected.DataVersion);
+        if (cmd.ExecuteNonQuery() != 1)
+            return false;
+
+        mutationJournal.Record(ReservationMutationKind.Updated, before, GetById(expected.Id),
             nameof(Reservation.Title), nameof(Reservation.StartTime), nameof(Reservation.EndTime), nameof(Reservation.DataVersion));
         return true;
     }
@@ -3950,17 +4140,16 @@ WHERE source <> 'Epg'
 
     private static bool IsExactContinuousPair(Reservation predecessor, Reservation successor)
     {
-        // CHAIN_DEVELOPER_APPROVAL_REQUIRED: チェーン境界の同一サービス/隣接判定は
+        // CHAIN_ELIGIBILITY_SINGLE_SOURCE_INVARIANT: 新規チェーン成立条件は
         // ChainReservationEligibilityContract / ChainReservationContract を唯一の正本とする。
         // Allocation側でチャンネル名・ChannelArgument・独自時間窓へフォールバックしてはならない。
         return ChainReservationEligibilityContract.IsSameServiceAndAdjacent(predecessor, successor);
     }
 
     /// <summary>
-    /// 実際に同一チューナーで引き継がれる連続番組ペアを返す。
-    /// 条件: 同一 service（network_id / ts_id / service_id 完全一致）かつ
-    ///       前番組 EndTime と後番組 StartTime が共通隣接契約内（-5秒〜+120秒）かつ
-    ///       同一 TunerName が確定していること。
+    /// 保存済みユーザー明示チェーンの現在有効な直列ペアを返す。
+    /// 成立条件の再推論はせず、is_user_chain / user_chain_previous_id の永続topologyだけを読む。
+    /// TunerはFinalConflictPlanまたはactive ActualTuner/leaseの別正本であり、このtopology読取条件には含めない。
     /// key=後続ID, value=前番組ID
     /// </summary>
     public Dictionary<int, int> GetChainPredecessors()
@@ -3970,9 +4159,8 @@ WHERE source <> 'Epg'
         // is_user_chain / user_chain_previous_id だけを正本とする。
         // Scheduled/Recordingなど現在の状態集合からRootや所属を再推論しない。
         //
-        // 後続が実行対象である間は、前段がCompleted/Stoppingになってもリンクを保持する。
-        // これにより R1(Completed) -> R2(Stopping) -> R3(Scheduled) の途中で
-        // R2が新しいRootとして扱われることを防ぐ。
+        // lifecycle状態にかかわらず、保存済みprevious/rootリンクを同一チェーントポロジーとして保持する。
+        // Root判定を現在の状態集合から再推論しない。
         //
         // 同一サービス・隣接時刻・同一Tunerからの自動チェーン生成は禁止。
         //
@@ -4005,6 +4193,42 @@ WHERE source <> 'Epg'
             result[reader.GetInt32(0)] = reader.GetInt32(1);
         }
 
+        return result;
+    }
+
+    /// <summary>
+    /// active logical ownerを起点に、現在も保存トポロジーで連結している後続IDを返す。
+    /// shared capture controlのEnabled集合はこの結果を正本にし、削除・取消・設定OFF detach済みsegmentを
+    /// worker controlへ残さない。固定深度上限は持たず、cycle guardだけで終端する。
+    /// </summary>
+    public IReadOnlySet<int> GetStoredUserChainDescendantIds(int anchorReservationId, bool includeAnchor = true)
+    {
+        var predecessors = GetChainPredecessors();
+        var successorOf = new Dictionary<int, int>();
+        foreach (var pair in predecessors.OrderBy(x => x.Key))
+        {
+            if (!successorOf.TryAdd(pair.Value, pair.Key))
+            {
+                log.Add("CHAIN_TOPOLOGY_AUDIT", $"R{anchorReservationId}",
+                    $"result=INVALID reason=multiple_successors predecessor=R{pair.Value} existing=R{successorOf[pair.Value]} duplicate=R{pair.Key} action=stop_descendant_walk rule=chain_lifecycle_single_source");
+            }
+        }
+
+        var result = new HashSet<int>();
+        if (includeAnchor) result.Add(anchorReservationId);
+        var visited = new HashSet<int> { anchorReservationId };
+        var current = anchorReservationId;
+        while (successorOf.TryGetValue(current, out var next))
+        {
+            if (!visited.Add(next))
+            {
+                log.Add("CHAIN_TOPOLOGY_AUDIT", $"R{anchorReservationId}",
+                    $"result=INVALID reason=cycle_detected at=R{next} action=stop_descendant_walk rule=chain_lifecycle_single_source");
+                break;
+            }
+            result.Add(next);
+            current = next;
+        }
         return result;
     }
 
@@ -4426,13 +4650,21 @@ WHERE source <> 'Epg'
                 continue;
             }
 
-            if (!TryUpdateScheduledTitleStartEndTimeCas(
+            var updated = r.IsUserChain && allowUserChainSeriesFollow
+                ? TryUpdateScheduledUserChainTitleStartEndTimeCas(
+                    r,
+                    effectiveTitle,
+                    ev.ServiceName,
+                    ev.Start,
+                    ev.End)
+                : TryUpdateScheduledTitleStartEndTimeCas(
                     r.Id,
                     r.DataVersion,
                     effectiveTitle,
                     ev.ServiceName,
                     ev.Start,
-                    ev.End))
+                    ev.End);
+            if (!updated)
             {
                 results.Add(BuildTimeFollowResult(r, false, "REJECTED_SCHEDULED_FOLLOW_CAS", ev, effectiveTitle));
                 continue;
@@ -4524,18 +4756,10 @@ WHERE source <> 'Epg'
         return value is null || value is DBNull ? 0L : Convert.ToInt64(value);
     }
 
-    // ========================================================================
-    // 【開発者の明示承認なしに変更禁止】共通割り当てDB commit保護契約
-    // この入口のCAS条件、DataVersion、allocation generation、TunerName、
-    // IsConflicted、Mutation／Wake連携を変更する場合は、着手前に必ず開発者の
-    // 明示承認を得ること。最適化・整理・不具合修正名目の無断変更も禁止する。
-    // この保護コメント自体も、開発者の明示承認なしに改変・削除・弱体化禁止。
-    // 過去のTVTest録画コア／旧録画起動ルートを復活させないこと。
-    // 固定wait、sleep、delay、cooldown、settle、quiet windowで競合や解放を
-    // 隠さず、状態・物理解放・worker終了の証拠で判定すること。
-    // DBのテーブル、カラム、Trigger、Index、PRAGMA、別DB、一時DB、shadow table、
-    // 補正値、隠し状態、二重保存、移行処理は、開発者の明示承認なしに追加・変更禁止。
-    // ========================================================================
+    // ALLOCATION_COMMIT_SINGLE_SOURCE_INVARIANT:
+    // CAS条件、DataVersion、allocation generation、TunerName、IsConflicted、Mutation/Wake連携は
+    // このcommit入口へ集約する。別録画起動経路や固定waitによる競合回避を追加せず、
+    // 状態・物理解放・worker終了の証拠で判定し、割り当て専用の隠しDB状態を持たない。
     private (bool Applied, long AllocationGeneration, string Reason, IReadOnlyList<(int Id, string ServiceName, string Title, bool Conflicted)> Changes, IReadOnlyList<AllocationCommittedRowChange> RowChanges)
         TryCommitAllocationPlan(
             IReadOnlyList<AllocationRowUpdate> updates,
@@ -4658,7 +4882,7 @@ WHERE source <> 'Epg'
 
     public ReservationAllocationEvaluationResult ReevaluateConflicts(
         IReadOnlyList<Core.TunerProfile> tunerProfiles, bool laterProgramPriority,
-        bool pseudoContinuous, int postEndMarginSeconds,
+        bool continuousChainPlanning, bool configuredChainFeatureEnabled, int postEndMarginSeconds,
         Tuner.TunerPool? tunerPool,
         int preStartMarginSeconds)
     {
@@ -4758,74 +4982,22 @@ WHERE source <> 'Epg'
             .ToList();
         var recordingReservationIds = recordingReservations.Select(r => r.Id).ToHashSet();
 
-        // CHAIN_ALLOCATION_INVARIANT:
-        // 物理解放後から終端確定までの前段はStoppingだが、明示チェーンの占有単位と確定Tunerを保持するアンカーである。
-        // Stoppingを評価対象外にすると後続がchain_broken_predecessorとなり、単体予約への再配置で同一Tuner契約が壊れる。
-        // この状態を通常予約へフォールバックさせたり、別Tunerへ再割当したりしてはならない。
-        var stoppingReservations = GetByStatus(ReservationStatus.Stopping)
-            .Where(r => r.Source != ReservationSource.Epg)
-            .Where(r => r.IsEnabled)
-            .ToList();
-        var stoppingReservationIds = stoppingReservations.Select(r => r.Id).ToHashSet();
-
-        // チェーンhandoff直後は、前番組が既にCompletedへ移行しているため
-        // scheduled + recording だけを見ると UserChainPreviousId の参照先が評価対象外になり、
-        // 後続チェーンの TunerName が空に戻って競合化する。
-        // そのため、明示チェーンの直前予約は Completed でも境界再試行中の「hard pinチェーンアンカー」として扱い、
-        // 直前予約の実チューナーを後続へ必ず継承する。弱い希望や通常再配置へ落としてはならない。
-        var completedChainAnchorById = new Dictionary<int, Reservation>();
-        var completedHandoffAuditAt = DateTime.Now;
-        foreach (var forced in scheduled.Concat(recordingReservations).Concat(stoppingReservations)
-            .Where(r => r.IsUserChain && r.UserChainPreviousId.HasValue)
-            .GroupBy(r => r.Id)
-            .Select(g => g.First()))
-        {
-            var pred = GetById(forced.UserChainPreviousId!.Value);
-            var handoffWindowStart = forced.StartTime.AddSeconds(-CompletedHandoffAnchorFrontCutSeconds);
-            var handoffWindowEnd = forced.EndTime;
-            var handoffWindowOpen = completedHandoffAuditAt >= handoffWindowStart
-                && completedHandoffAuditAt < handoffWindowEnd;
-            if (pred != null
-                && pred.Source != ReservationSource.Epg
-                && pred.IsEnabled
-                && pred.Status == ReservationStatus.Completed
-                && handoffWindowOpen
-                && !string.IsNullOrWhiteSpace(pred.ActualTunerName)
-                && IsExactContinuousPair(pred, forced))
-            {
-                completedChainAnchorById[pred.Id] = pred;
-            }
-            else if (pred?.Status == ReservationStatus.Completed && !handoffWindowOpen)
-            {
-                log.Add("CHAIN_HANDOFF_ANCHOR", $"R{pred.Id}",
-                    $"result=INACTIVE successor=R{forced.Id} now={completedHandoffAuditAt:MM/dd HH:mm:ss} boundaryStart={handoffWindowStart:MM/dd HH:mm:ss} successorEnd={handoffWindowEnd:MM/dd HH:mm:ss} action=do_not_hold_completed_anchor_outside_successor_execution_window rule=release_contract");
-            }
-            else if (pred?.Status == ReservationStatus.Completed
-                && handoffWindowOpen
-                && string.IsNullOrWhiteSpace(pred.ActualTunerName))
-            {
-                log.Add("CHAIN_HANDOFF_ANCHOR", $"R{pred.Id}",
-                    $"result=REJECTED successor=R{forced.Id} reason=missing_predecessor_actual_tuner action=do_not_fallback_to_planned_tuner rule=chain_same_physical_tuner_contract");
-            }
-        }
-        var completedChainAnchorIds = completedChainAnchorById.Keys.ToHashSet();
-
         // CHAIN_TUNER_ASSIGNMENT_PHASE_INVARIANT:
         // まだ前段の実録画Tunerが存在しない予約作成・通常計画段階ではLogicalTunerDisplayNameを候補にする。
-        // ただし前段がRecording／Stopping／境界直後Completedになった時点ではActualTunerNameが正本となり、
-        // 後続を同一物理Tunerへhard pinする。計画段階の説明をhandoff実行段階へ適用してはならない。
-        // release_contract: チェーンは「後番組優先ON＋チェーン録画ON」を利用条件にしたうえで、
-        // ユーザー明示の同一SID連続予約だけを共通割り当てルートで有効化する。
-        var configuredPseudoContinuous = pseudoContinuous;
-        var chainModeEnabled = laterProgramPriority && configuredPseudoContinuous;
+        // 前段がRecordingになった時点ではActualTunerNameが正本となり、同一continuous captureの全後続を
+        // 同じ物理Tunerへhard pinする。
+        // CHAIN_PLANNING_SINGLE_SOURCE_INVARIANT:
+        // 新規作成可否は設定契約、実行中/Startingを含む既存保存topologyの物理計画はcontinuousChainPlanningを正本にする。
+        // LaterProgramPriorityをOFFにした瞬間にactive shared captureを通常予約へ分解してはならない。
+        var configuredChainFeature = configuredChainFeatureEnabled;
 
         var userChainLockedTunerById = new Dictionary<int, string>();
-        foreach (var chainReservation in scheduled.Where(x => chainModeEnabled && x.IsUserChain && x.UserChainPreviousId.HasValue))
+        foreach (var chainReservation in scheduled.Where(x => continuousChainPlanning && x.IsUserChain && x.UserChainPreviousId.HasValue))
         {
             var predForContract = GetById(chainReservation.UserChainPreviousId!.Value);
             if (predForContract == null
                 || predForContract.Status == ReservationStatus.Cancelled
-                || !IsExactContinuousPair(predForContract, chainReservation))
+                || !ChainReservationEligibilityContract.IsPersistedExplicitRuntimePair(predForContract, chainReservation))
             {
                 var predecessorLabel = predForContract == null ? "-" : "R" + predForContract.Id;
                 var sameSid = predForContract != null
@@ -4849,8 +5021,8 @@ WHERE source <> 'Epg'
         }
 
         var userChainCandidatePairs = scheduled.Count(r => r.IsUserChain && r.UserChainPreviousId.HasValue);
-        var hasUserForcedChain = chainModeEnabled && userChainCandidatePairs > 0;
-        pseudoContinuous = chainModeEnabled && hasUserForcedChain;
+        // Persisted explicit chain topology is the canonical physical-occupancy source.
+        // Do not disable it merely because a successor has already moved from Scheduled to Starting/Recording.
 
         // グループ別チューナー本数（地/BS/CS は GR/BSCS の両方の候補に含める）
         var tunerCountByGroup = scheduled
@@ -4861,11 +5033,8 @@ WHERE source <> 'Epg'
                 g => recordingTunerProfiles.Count(p => SupportsReservationGroup(p.Group, g)),
                 StringComparer.OrdinalIgnoreCase);
 
-        // チェーン予約ペアの競合除外（pseudoContinuous=trueの場合のみ）
-        // 前番組と後番組は同一チューナーで引き継ぐため、後番組は前番組の占有区間と重複しない扱いにする。
-        // 具体的には: チェーンの後続番組は「前番組が使うチューナー」を予約済みとして扱い、
-        // 前番組の占有終了タイミングで引き継ぐため競合カウントから外す。
-        // 実装上はチェーンペアのIDセットを持ち、後続番組の占有区間を前番組の占有終了に合わせて調整する。
+        // 明示チェーンの保存トポロジーを読み、同一rootの物理占有を同じPhysicalOccupancyKeyへ投影する。
+        // 各番組の競合判定は通常の前後マージン全量を維持し、同一root内部の重複だけを同一物理captureとして扱う。
         var chainPredecessors = new Dictionary<int, int>(); // key=後続ID, value=前番組ID
         var chainSuccessors = new Dictionary<int, int>();   // key=前番組ID, value=後続ID
         var invalidChainReservationIds = new HashSet<int>();
@@ -4887,7 +5056,7 @@ WHERE source <> 'Epg'
             ReservationStatus.Stopping
         };
 
-        if (pseudoContinuous)
+        if (continuousChainPlanning)
         {
             var forcedCandidates = allChainReservationsById.Values
                 .Where(r => r.IsEnabled)
@@ -4930,12 +5099,18 @@ WHERE source <> 'Epg'
                     continue;
                 }
 
-                if (!IsExactContinuousPair(pred, forced))
+                if (!ChainReservationEligibilityContract.IsPersistedExplicitRuntimePair(pred, forced))
                 {
                     invalidChainReservationIds.Add(forced.Id);
                     log.Add("CHAIN_CONTRACT_AUDIT", $"R{forced.Id}",
-                        $"result=REJECTED_AT_ALLOC_ROUTE reason=not_same_sid_adjacent predecessor=R{predId} prevNid={pred.NetworkId} prevTsid={pred.TransportStreamId} prevSid={pred.ServiceId} nextNid={forced.NetworkId} nextTsid={forced.TransportStreamId} nextSid={forced.ServiceId} gapSec={(int)Math.Round((forced.StartTime - pred.EndTime).TotalSeconds)} rule=release_contract");
+                        $"result=REJECTED_AT_ALLOC_ROUTE reason=not_same_sid_or_runtime_continuous predecessor=R{predId} prevNid={pred.NetworkId} prevTsid={pred.TransportStreamId} prevSid={pred.ServiceId} nextNid={forced.NetworkId} nextTsid={forced.TransportStreamId} nextSid={forced.ServiceId} gapSec={(int)Math.Round((forced.StartTime - pred.EndTime).TotalSeconds)} rule=release_contract");
                     continue;
+                }
+
+                if (!IsExactContinuousPair(pred, forced))
+                {
+                    log.Add("CHAIN_CONTRACT_AUDIT", $"R{forced.Id}",
+                        $"result=PRESERVED_AT_ALLOC_ROUTE reason=time_follow_overlap_on_persisted_explicit_chain predecessor=R{predId} root=R{forced.UserChainRootId} gapSec={(int)Math.Round((forced.StartTime - pred.EndTime).TotalSeconds)} additionalTuner=0 physicalRetune=False workerRestart=False recordingEpgSupplement=unchanged rule=chain_time_follow_overlap_contract");
                 }
 
                 chainPredecessors[forced.Id] = predId;
@@ -5060,7 +5235,7 @@ WHERE source <> 'Epg'
             }
 
             // 前番組優先/後番組優先は、同一サービスの隣接境界で勝敗方向を決めるだけ。
-            // 前番組末尾30秒の欠落や通常マージン短縮には使用しない。
+            // チェーンでも通常の前後マージン全量をそのまま使用する。
             if (adjacentBoundaryEligible
                 && IsSameService(a, b)
                 && a.StartTime != b.StartTime
@@ -5078,101 +5253,55 @@ WHERE source <> 'Epg'
             return aStableId.CompareTo(bStableId);
         }
 
-        // TunerPoolの現在録画中スロットを「仮想予約」として占有区間に追加
-        // これにより起動直後・録画中でも正確な競合判定が可能
-        // チェーン前番組が録画中の場合は handoff時刻（後続のStartTime）で占有終了を打ち切る
-        var virtualOccupied = new List<(string TunerName, string TunerGroup, DateTime OccupyEnd, int? ReservationId)>();
-
-        // チェーン前番組のhandoff時刻マップ: reservationId → 後続のStartTime
-        // （録画中スロットの占有終了調整用）
-        var chainHandoffByReservationId = new Dictionary<int, DateTime>();
-        if (pseudoContinuous)
-        {
-            foreach (var kv in chainPredecessors) // key=後続ID, value=前番組ID
-            {
-                var successor = GetById(kv.Key);
-                if (successor != null)
-                    chainHandoffByReservationId[kv.Value] = OccupyStart(successor);
-            }
-        }
-
-        if (tunerSlots != null)
-        {
-            foreach (var slot in tunerSlots.Where(s =>
-                s.UsageKind == Tuner.TunerUsageKind.Recording && s.PlannedEndTime.HasValue))
-            {
-                var grp = string.Equals(slot.Group, "BSCS", StringComparison.OrdinalIgnoreCase)
-                    ? "BSCS" : "GR";
-                // チェーン前番組なら占有終了をhandoff時刻に差し替える
-                var occupyEnd = (slot.ReservationId.HasValue
-                                 && chainHandoffByReservationId.TryGetValue(slot.ReservationId.Value, out var handoff))
-                    ? handoff
-                    : slot.PlannedEndTime!.Value;
-                virtualOccupied.Add((ToRoleBindingTunerName(slot.Name, grp), slot.Group, occupyEnd, slot.ReservationId));
-            }
-        }
-        else
-        {
-            // TunerPoolがない場合はDBのrecordingでフォールバック
-            foreach (var rec in GetByStatus(ReservationStatus.Recording)
-                .Where(r => r.Source != ReservationSource.Epg))
-            {
-                var occupyEnd = chainHandoffByReservationId.TryGetValue(rec.Id, out var handoff)
-                    ? handoff
-                    : rec.EndTime + postMargin;
-                virtualOccupied.Add((ToRoleBindingTunerName(EffectiveTunerName(rec), ResolveGroup(rec)), ResolveGroup(rec), occupyEnd, rec.Id));
-            }
-        }
-
         // 競合判定：グループ別に処理
         // 各予約の占有区間に対して、同時に占有されるチューナー数がグループのチューナー本数を超えるか判定
         var conflictedIds = new HashSet<int>();
         var assignedIds   = new HashSet<int>(); // 競合しない（チューナーを確保できる）予約
 #if TVAIR_DEVELOPER_DIAGNOSTICS
-        var debugTrace = new List<TunerAllocationDebugTraceEntry>();
+        object debugTrace = new List<TunerAllocationDebugTraceEntry>();
 #else
-        List<TunerAllocationDebugTraceEntry>? debugTrace = null;
+        object? debugTrace = null;
 #endif
-        // チェーン占有終了調整用（ループ内DBアクセス回避）
+        // 予約ID参照用（ループ内DBアクセス回避）
         var scheduledById = scheduled.ToDictionary(s => s.Id);
 
         // USER_CHAIN_PHYSICAL_SLOT_SOURCE_INVARIANT — 変更禁止:
         // 物理Tuner所有はchain root単位、競合採否は予約イベント単位である。
         // 将来予約のRoot/TunerNameは直前FinalConflictPlanの弱い安定候補であり、hard pinではない。
-        // hard pinにできるのはRecording/Stopping/境界直後CompletedのActualTunerNameだけである。
+        // hard pinにできるのは現在のshared captureを所有するRecording段のActualTunerNameだけである。
         // FinalConflictPlanはイベント評価へ入る前に、全chain rootを共通物理時間軸上へ一度だけ配置し、
         // 同一rootの各イベントが処理順や再計算passによって別Tunerを選び直すことを禁止する。
         var chainPlannedTunerPreferenceByRoot = new Dictionary<int, string>();
         // CHAIN_SLOT_SINGLE_SOURCE:
         // 今回のFinalConflictPlanで解決したroot単位の物理Tuner正本。
-        // 最終投影・PreRecEpg・Wake・実行handoffは、このroot単位Mapから投影されたTunerNameを参照する。
+        // 最終投影・PreRecEpg・Wake・continuous capture実行は、このroot単位Mapから投影されたTunerNameを参照する。
         var chainResolvedTunerByRoot = new Dictionary<int, string>();
         foreach (var chainGroup in scheduled
-            .Where(x => chainModeEnabled && (x.IsUserChain || chainSuccessors.ContainsKey(x.Id)))
+            .Where(x => continuousChainPlanning && (x.IsUserChain || chainSuccessors.ContainsKey(x.Id)))
             .GroupBy(ResolveStoredChainRootId))
         {
             var rootId = chainGroup.Key;
             var rootReservation = GetById(rootId) ?? chainGroup.OrderBy(x => x.StartTime).ThenBy(x => x.Id).First();
-            var fixedTuner = ToRoleBindingTunerName(EffectiveTunerName(rootReservation), ResolveGroup(rootReservation));
-            if (string.IsNullOrWhiteSpace(fixedTuner) || fixedTuner == "-")
+            var plannedTunerPreference = ToRoleBindingTunerName(EffectiveTunerName(rootReservation), ResolveGroup(rootReservation));
+            if (string.IsNullOrWhiteSpace(plannedTunerPreference) || plannedTunerPreference == "-")
             {
-                fixedTuner = chainGroup
+                plannedTunerPreference = chainGroup
                     .OrderBy(x => x.StartTime)
                     .ThenBy(x => x.Id)
                     .Select(x => ToRoleBindingTunerName(EffectiveTunerName(x), ResolveGroup(x)))
                     .FirstOrDefault(x => !string.IsNullOrWhiteSpace(x) && x != "-") ?? string.Empty;
             }
 
-            if (!string.IsNullOrWhiteSpace(fixedTuner) && fixedTuner != "-")
+            if (!string.IsNullOrWhiteSpace(plannedTunerPreference) && plannedTunerPreference != "-")
             {
-                chainPlannedTunerPreferenceByRoot[rootId] = fixedTuner;
+                chainPlannedTunerPreferenceByRoot[rootId] = plannedTunerPreference;
                 AddTunerAllocationDebugTrace(debugTrace!, recordingTunerProfiles, "CHAIN_PLANNED_TUNER_PREFERENCE", rootReservation,
-                    $"chainRoot=R{rootId} preferredTuner={fixedTuner} source=previous_final_assignment strength=weak_reselectable action=root_preplan_capacity_check rule=chain_fixed_physical_tuner_contract");
+                    $"chainRoot=R{rootId} preferredTuner={plannedTunerPreference} source=previous_final_assignment strength=weak_reselectable action=root_preplan_capacity_check rule=chain_tuner_phase_contract");
             }
             else
             {
                 AddTunerAllocationDebugTrace(debugTrace!, recordingTunerProfiles, "CHAIN_PLANNED_TUNER_PREFERENCE", rootReservation,
-                    $"chainRoot=R{rootId} preferredTuner=- source=none strength=weak_reselectable action=root_preplan_select rule=chain_fixed_physical_tuner_contract");
+                    $"chainRoot=R{rootId} preferredTuner=- source=none strength=weak_reselectable action=root_preplan_select rule=chain_tuner_phase_contract");
             }
         }
 
@@ -5191,12 +5320,27 @@ WHERE source <> 'Epg'
             return reservation.Id;
         }
 
+        string ResolvePhysicalOccupancyKey(Reservation reservation, string groupKey)
+        {
+            // PHYSICAL_OCCUPANCY_IDENTITY_SINGLE_SOURCE:
+            // TunerPool上の実録画leaseとFinalConflictPlan上の将来Unitを同じID空間で比較する。
+            // continuous chainだけがroot単位で1本の物理captureを共有し、通常予約は予約単位で独立占有する。
+            // 旧30秒handoff時刻・別worker・境界停止を物理占有判定へ再導入してはならない。
+            if (continuousChainPlanning
+                && (reservation.IsUserChain || chainSuccessors.ContainsKey(reservation.Id) || chainPredecessors.ContainsKey(reservation.Id)))
+            {
+                var rootId = ResolveStoredChainRootId(reservation);
+                return $"{groupKey}:CHAIN_ROOT:{rootId}";
+            }
+
+            return $"{groupKey}:RESERVATION:{reservation.Id}";
+        }
+
         // CHAIN_EXECUTING_TUNER_INVARIANT:
-        // 録画開始後の残存チェーンは、現在段のActualTunerまたはhandoff証拠へhard pinする。
+        // 録画開始後の残存チェーンは、現在のshared captureを所有するRecording段のActualTunerだけをhard pin正本にする。
+        // hard pinは現在のRecording ownerのActualTunerNameだけから作る。
         // ただし外部予約との採否は通常の共通優先計算で再評価し、チェーンであることを優先度には使わない。
         var chainActivePinnedTunersByRoot = recordingReservations
-            .Concat(stoppingReservations)
-            .Concat(completedChainAnchorById.Values)
             .Where(r => r.IsUserChain || chainSuccessors.ContainsKey(r.Id) || chainPredecessors.ContainsKey(r.Id))
             .Select(r => new
             {
@@ -5226,22 +5370,9 @@ WHERE source <> 'Epg'
                 var recordingMembers = ordered
                     .Where(x => x.Status == ReservationStatus.Recording)
                     .ToList();
-                var handoffAnchorMembers = ordered
-                    .Where(x => x.Status == ReservationStatus.Stopping && stoppingReservationIds.Contains(x.Id))
-                    .ToList();
-                var completedHandoffAnchorMembers = ordered
-                    .Where(x => x.Status == ReservationStatus.Completed && completedChainAnchorIds.Contains(x.Id))
-                    .ToList();
-                var activeOrHandoffMembers = recordingMembers
-                    .Concat(handoffAnchorMembers)
-                    .Concat(completedHandoffAnchorMembers)
-                    .GroupBy(x => x.Id)
-                    .Select(g => g.First())
-                    .ToList();
 
                 // CHAIN_TUNER_PIN_INVARIANT:
-                // final planの固定Tunerは、現在の実録画所有またはhandoff中のStopping前段が保持するActualTunerを正本にする。
-                // 将来予約の希望Tunerや再計算した空きTunerで、この物理Tuner継承を上書きしてはならない。
+                // final planのhard pinは、現在のshared captureを所有するRecording段のActualTunerだけを正本にする。
                 var pinCandidates = new List<string>();
                 if (tunerSlots != null)
                 {
@@ -5254,14 +5385,9 @@ WHERE source <> 'Epg'
                         .Select(slot => ToRoleBindingTunerName(slot.Name, groupKey)));
                 }
                 pinCandidates.AddRange(recordingMembers
-                    .Concat(handoffAnchorMembers)
                     .Select(x => ToRoleBindingTunerName(
                         !string.IsNullOrWhiteSpace(x.ActualTunerName) ? x.ActualTunerName : x.TunerName,
                         groupKey)));
-                // Completed handoff anchorは計画Tunerへフォールバックしない。
-                // 前段録画で確定したActualTunerNameだけをhard pin証拠として採用する。
-                pinCandidates.AddRange(completedHandoffAnchorMembers
-                    .Select(x => ToRoleBindingTunerName(x.ActualTunerName, groupKey)));
                 if (resolvedChainRootId.HasValue
                     && chainActivePinnedTunersByRoot.TryGetValue(resolvedChainRootId.Value, out var activeRootPins))
                 {
@@ -5273,19 +5399,14 @@ WHERE source <> 'Epg'
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToList();
 
-                // CHAIN_COMPLETED_HANDOFF_PIN_INVARIANT:
-                // 物理解放後に前段がCompletedへ終端しても、境界後続がScheduledのまま再試行中である限り、
-                // completedChainAnchorIdsに入った直前前段は同一物理Tuner継承のhard pinである。
-                // ここを弱い希望へ落とすと、前段Completed直後の再評価で別Tunerへ通常再配置されるため禁止する。
-                // hard pinの有効範囲は、時間追従後の後続開始30秒前から後続終了までの正確な直接後続だけに限定する。
-                // Completed前段ではActualTunerName以外を継承根拠にしてはならない。
+                // CHAIN_CONTINUOUS_PIN_INVARIANT:
+                // shared captureが生存している間は、そのRecording段のActualTunerだけをhard pin正本にする。
+                // capture ownerが存在しない計画段階では、保存済みTunerNameを弱い継続候補として扱う。
                 var continuityPreferredTuner = resolvedChainRootId.HasValue
                     && chainActivePinnedTunersByRoot.TryGetValue(resolvedChainRootId.Value, out var rootPins)
                     && rootPins.Count == 1
                         ? rootPins[0]
-                        : completedHandoffAnchorMembers
-                            .Select(x => ToRoleBindingTunerName(x.ActualTunerName, groupKey))
-                            .FirstOrDefault(x => !string.IsNullOrWhiteSpace(x) && x != "-");
+                        : null;
 
                 if (string.IsNullOrWhiteSpace(continuityPreferredTuner)
                     && isUserChain
@@ -5296,21 +5417,20 @@ WHERE source <> 'Epg'
 
                 // CHAIN_CONFLICT_FULL_MARGIN_INVARIANT — 変更禁止:
                 // 競合の勝敗はチェーン/通常を区別せず、各イベントの開始・終了マージン全量と共通優先順位で行う。
-                // チェーンであることを優先加点、容量救済、マージン短縮、敗者救済に使用してはならない。
-                // ただし、同じ可動予約を別の空きRecording Tunerへ配置できる場合に固定チェーンTunerを
-                // 不必要に選ばないことは優先順位変更ではなく、FinalConflictPlan内の物理Tuner配置規則である。
+                // チェーンでも通常の共通優先順位と前後マージン全量を使用する。
+                // ただし、同じ可動予約を別の空きRecording Tunerへ配置できる場合に、解決済みchain root計画Tunerと
+                // 不必要に競合させないことは優先順位変更ではなく、FinalConflictPlan内の物理Tuner配置規則である。
                 // 全候補で同時成立できない場合は、この配置規則で勝敗を覆さず共通優先順位へ戻す。
-                // 前番組末尾30秒の欠落は、前後イベントがともに有効・非競合で、保存済みチェーントポロジーと
-                // 固定物理Tuner継承が成立し、チェーン境界を正当に実行する場合だけ適用する実行時処理である。
-                // それ以外の通常終了、競合落ち、取消、無効化、開始/取得失敗、復旧、容量調整では一切行わない。
-                // したがって予約段階では必ず通常の OccupyStart / OccupyEnd を使用する。
+                // 実行時は後続pre-marginと前段post-marginを同一captureの別Sinkへ重複出力する。
+                // 予約段階・実行段階ともに前後マージン全量を正本とする。
+                // したがって常に通常の OccupyStart / OccupyEnd を使用する。
                 var unitOccupyEnd = ordered.Max(OccupyEnd);
 
                 var hasRootActivePin = resolvedChainRootId.HasValue
                     && chainActivePinnedTunersByRoot.TryGetValue(resolvedChainRootId.Value, out var rootActivePins)
                     && rootActivePins.Count > 0;
                 // 保存済みTunerNameはroot preplanの弱い候補としてだけ使用する。
-                // active/handoffのActualTunerNameはdistinctPinsに入り、root全体のhard pinになる。
+                // active shared-capture ownerのActualTunerNameはdistinctPinsに入り、root全体のhard pinになる。
                 if (isUserChain
                     && resolvedChainRootId.HasValue
                     && string.IsNullOrWhiteSpace(continuityPreferredTuner)
@@ -5332,8 +5452,8 @@ WHERE source <> 'Epg'
                     ChainRootId = resolvedChainRootId,
                     // 外部予約との優先度は、将来子が実行中チェーンに属することだけでは上げない。
                     // 現在段そのものだけをactive anchorとして扱い、将来子は通常優先計算へ流す。
-                    HasActiveAnchor = activeOrHandoffMembers.Count > 0,
-                    RequiresPinnedTuner = activeOrHandoffMembers.Count > 0 || hasRootActivePin,
+                    HasActiveAnchor = recordingMembers.Count > 0,
+                    RequiresPinnedTuner = recordingMembers.Count > 0 || hasRootActivePin,
                     HasPinnedTunerConflict = distinctPins.Count > 1,
                     PinnedTuner = distinctPins.Count == 1 ? distinctPins[0] : null,
                     ContinuityPreferredTuner = continuityPreferredTuner,
@@ -5343,11 +5463,11 @@ WHERE source <> 'Epg'
 
             // CHAIN_EVENT_UNIT_INVARIANT:
             // 外部予約との共通競合は、チェーン全体を一つの長大な占有区間へ潰さず、番組単位で再計算する。
-            // チェーンの特殊性は、同一Tuner継承と内部境界の前段終了調整だけに限定する。
+            // チェーンの特殊性は、同一物理Tuner継承と同一capture内のSink重複だけに限定する。
             // 最初に競合した子以降の伝播はFinal Plan後の可逆な派生結果として扱い、DBトポロジーは変更しない。
             foreach (var r in groupReservations.OrderBy(r => r.StartTime).ThenBy(r => r.Id))
             {
-                var isChainMember = pseudoContinuous
+                var isChainMember = continuousChainPlanning
                     && (chainPredecessors.ContainsKey(r.Id) || chainSuccessors.ContainsKey(r.Id));
                 var rootId = isChainMember ? ResolveStoredChainRootId(r) : (int?)null;
                 units.Add(CreateUnit(new List<Reservation> { r }, isChainMember, rootId));
@@ -5390,17 +5510,17 @@ WHERE source <> 'Epg'
             foreach (var unit in occupancyUnits)
             {
                 AddTunerAllocationDebugTrace(debugTrace!, recordingTunerProfiles, unit.IsUserChain ? "CHAIN_OCCUPANCY_UNIT" : "OCCUPANCY_UNIT", unit.PriorityReservation,
-                    $"unit={unit.UnitId} members={unit.MemberIds} chainRoot=R{(unit.ChainRootId.HasValue ? unit.ChainRootId.Value.ToString() : "-")} cost=1 occupy={unit.OccupyStart:MM/dd HH:mm:ss}〜{unit.OccupyEnd:MM/dd HH:mm:ss} capacitySource=RoleBinding/Recording recordingTuners={recordingCapacityTuners} displaySource=LogicalTunerDisplayName decisionOwner=FinalConflictPlan rule=release_contract");
+                    $"unit={unit.UnitId} members={unit.MemberIds} chainRoot=R{(unit.ChainRootId.HasValue ? unit.ChainRootId.Value.ToString() : "-")} physicalOccupancy={unit.PhysicalOccupancyKey} occupy={unit.OccupyStart:MM/dd HH:mm:ss}〜{unit.OccupyEnd:MM/dd HH:mm:ss} capacitySource=RoleBinding/Recording recordingTuners={recordingCapacityTuners} displaySource=LogicalTunerDisplayName decisionOwner=FinalConflictPlan rule=release_contract");
             }
         }
 
         // チューナー名の割り当て（assignedIdsに含まれる予約に LogicalTunerDisplayName を割り当てる）
         // LogicalTunerDisplayName は優先順位用であり、LogicalTunerIdentity を未来日予約へ固定しない。
         // FINAL_TUNER_ASSIGNMENT_SINGLE_SOURCE_INVARIANT — 変更禁止:
-        // 物理Tunerの最終選択、チェーン固定Tunerの容量判定、通常予約とのイベント単位競合、
-        // 競合開始地点以降の伝播、競合解除時の同一固定Tuner復帰は、
+        // 物理Tunerの最終選択、chain root計画Tuner／active ActualTuner hard pinの容量判定、通常予約とのイベント単位競合、
+        // 競合開始地点以降の伝播、競合解除時の同一root計画Tunerへの再収束は、
         // ReconcileFinalConflictPlanByUnitKey() だけが決定する。
-        // 可動予約が別の空きTunerを使える場合の固定チェーンTuner回避もFinalConflictPlan内部で
+        // 可動予約が別の空きTunerを使える場合のchain root計画配置回避もFinalConflictPlan内部で
         // 全Unit・共通優先順位・代替候補を参照して決定し、代替不能時は全候補へ戻す。
         // 最終競合状態はConflictOccupancyUnit(UnitKey)を正本として一度だけ合算し、
         // active recording / active chain / normal reservationを同じUnitKeyタイムラインで評価する。
@@ -5501,6 +5621,9 @@ WHERE source <> 'Epg'
                         $"group={grpKey} tuners={string.Join(",", occupiedTuners)} mode={(epgOccupation.PhysicalTailOnly ? "physical_tail" : "wave_wide")} plannedEnd={epgOccupation.PlannedEndAt:MM/dd HH:mm:ss} activeUntilClear=True source={epgOccupation.Source} silent={epgOccupation.Silent} runGeneration={epgOccupation.RunGeneration} revision={epgOccupation.Revision} tailMappingComplete={tailMappingComplete} physicalLeaseMutation=False rule=normal_epg_wave_occupation_contract");
                 }
 
+                var externalOccupancyKeyByTuner = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+                var externalOccupancyReasonByTuner = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
                 if (tunerSlots != null)
                 {
                     foreach (var slot in tunerSlots.Where(s =>
@@ -5524,15 +5647,23 @@ WHERE source <> 'Epg'
                                 $"unitKey={ownedUnit.UnitKey} member=R{slot.ReservationId.Value} poolTuner={virtualName} pinnedTuner={(ownedUnit.PinnedTuner ?? "-")} pinCandidates={ownedUnit.PinCandidates} reason=pool_slot_does_not_match_unit_pin rule=release_contract");
                         }
                         if (!finalFreeAt.ContainsKey(virtualName)) continue;
-                        var externalOccupyEnd = slot.ReservationId.HasValue
-                            && chainHandoffByReservationId.TryGetValue(slot.ReservationId.Value, out var chainHandoffAt)
-                                ? chainHandoffAt
-                                : slot.PlannedEndTime!.Value;
+                        var externalOccupyEnd = slot.PlannedEndTime!.Value;
+                        string? physicalOccupancyKey = null;
+                        if (slot.ReservationId.HasValue
+                            && allChainReservationsById.TryGetValue(slot.ReservationId.Value, out var activeReservation))
+                        {
+                            physicalOccupancyKey = ResolvePhysicalOccupancyKey(activeReservation, grpKey);
+                        }
+
                         var current = finalFreeAt[virtualName];
                         if (externalOccupyEnd > current)
+                        {
                             finalFreeAt[virtualName] = externalOccupyEnd;
+                            externalOccupancyKeyByTuner[virtualName] = physicalOccupancyKey;
+                            externalOccupancyReasonByTuner[virtualName] = "active_recording_lease";
+                        }
                         AddTunerAllocationDebugTrace(debugTrace!, recordingTunerProfiles, "FINAL_UNIT_EXTERNAL_OCCUPY", new Reservation { Id = slot.ReservationId ?? 0, Title = "ExternalOrActiveRecording" },
-                            $"group={grpKey} tuner={virtualName} reservation=R{(slot.ReservationId.HasValue ? slot.ReservationId.Value.ToString() : "-")} occupyUntil={externalOccupyEnd:MM/dd HH:mm:ss} reason={(slot.ReservationId.HasValue && chainHandoffByReservationId.ContainsKey(slot.ReservationId.Value) ? "active_chain_handoff_boundary" : "active_recording_outside_unit")} rule=release_contract");
+                            $"group={grpKey} tuner={virtualName} reservation=R{(slot.ReservationId.HasValue ? slot.ReservationId.Value.ToString() : "-")} occupyUntil={externalOccupyEnd:MM/dd HH:mm:ss} physicalOccupancy={(physicalOccupancyKey ?? "-")} reason=active_recording_lease rule=physical_occupancy_single_source");
                     }
                 }
                 else
@@ -5543,18 +5674,27 @@ WHERE source <> 'Epg'
                             continue;
                         var virtualName = ToRoleBindingTunerName(EffectiveTunerName(rec), grpKey);
                         if (string.IsNullOrWhiteSpace(virtualName) || !finalFreeAt.ContainsKey(virtualName)) continue;
-                        var recEnd = chainHandoffByReservationId.TryGetValue(rec.Id, out var chainHandoffAt)
-                            ? chainHandoffAt
-                            : rec.EndTime + postMargin;
+                        var recEnd = rec.EndTime + postMargin;
+                        var physicalOccupancyKey = ResolvePhysicalOccupancyKey(rec, grpKey);
                         if (recEnd > finalFreeAt[virtualName])
+                        {
                             finalFreeAt[virtualName] = recEnd;
+                            externalOccupancyKeyByTuner[virtualName] = physicalOccupancyKey;
+                            externalOccupancyReasonByTuner[virtualName] = "db_recording_fallback";
+                        }
                         AddTunerAllocationDebugTrace(debugTrace!, recordingTunerProfiles, "FINAL_UNIT_EXTERNAL_OCCUPY", rec,
-                            $"group={grpKey} tuner={virtualName} reservation=R{rec.Id} occupyUntil={recEnd:MM/dd HH:mm:ss} reason={(chainHandoffByReservationId.ContainsKey(rec.Id) ? "active_chain_handoff_boundary" : "db_recording_outside_unit")} rule=release_contract");
+                            $"group={grpKey} tuner={virtualName} reservation=R{rec.Id} occupyUntil={recEnd:MM/dd HH:mm:ss} physicalOccupancy={physicalOccupancyKey} reason=db_recording_fallback rule=physical_occupancy_single_source");
                     }
                 }
 
                 bool UnitOverlaps(ConflictOccupancyUnit a, ConflictOccupancyUnit b)
                     => a.OccupyStart < b.OccupyEnd && b.OccupyStart < a.OccupyEnd;
+
+                bool SamePhysicalOccupancy(ConflictOccupancyUnit a, ConflictOccupancyUnit b)
+                    => string.Equals(a.PhysicalOccupancyKey, b.PhysicalOccupancyKey, StringComparison.OrdinalIgnoreCase);
+
+                bool PhysicalOccupanciesCompete(ConflictOccupancyUnit a, ConflictOccupancyUnit b)
+                    => !SamePhysicalOccupancy(a, b) && UnitOverlaps(a, b);
 
                 bool IntervalOverlaps(DateTime start, DateTime end, DateTime otherStart, DateTime otherEnd)
                     => start < otherEnd && otherStart < end;
@@ -5564,7 +5704,7 @@ WHERE source <> 'Epg'
 
                 int CompareFinalUnitPriority(ConflictOccupancyUnit a, ConflictOccupancyUnit b)
                 {
-                    // 録画中・handoff中の実体は移動できないため、通常の予約優先順位より先に固定する。
+                    // 現在shared captureを所有する録画中の実体は移動できないため、通常の予約優先順位より先に固定する。
                     if (a.HasActiveAnchor != b.HasActiveAnchor)
                         return a.HasActiveAnchor ? 1 : -1;
 
@@ -5580,26 +5720,42 @@ WHERE source <> 'Epg'
 
                 var finalIntervals = candidateNames.ToDictionary(
                     name => name,
-                    _ => new List<(DateTime Start, DateTime End, ConflictOccupancyUnit? Unit, string Reason)>(),
+                    _ => new List<(DateTime Start, DateTime End, ConflictOccupancyUnit? Unit, string? PhysicalOccupancyKey, string Reason)>(),
                     StringComparer.OrdinalIgnoreCase);
 
                 foreach (var kv in finalFreeAt)
                 {
                     if (kv.Value > DateTime.MinValue && finalIntervals.ContainsKey(kv.Key))
                     {
-                        finalIntervals[kv.Key].Add((DateTime.MinValue, kv.Value, null, "external_or_active_recording"));
+                        externalOccupancyKeyByTuner.TryGetValue(kv.Key, out var physicalOccupancyKey);
+                        var reason = externalOccupancyReasonByTuner.TryGetValue(kv.Key, out var externalReason)
+                            ? externalReason
+                            : "external_or_active_recording";
+                        finalIntervals[kv.Key].Add((DateTime.MinValue, kv.Value, null, physicalOccupancyKey, reason));
                     }
                 }
                 foreach (var epgInterval in normalEpgIntervals)
                 {
                     if (finalIntervals.TryGetValue(epgInterval.TunerName, out var intervals))
-                        intervals.Add((epgInterval.Start, epgInterval.End, null, "normal_epg_wave"));
+                        intervals.Add((epgInterval.Start, epgInterval.End, null, null, "normal_epg_wave"));
                 }
 
-                // CHAIN_ROOT_PHYSICAL_SLOT_PREPLAN_INVARIANT — 変更禁止:
-                // root物理枠はイベント処理順より前に一度だけ決める。競合判定用UnitKeyはイベント単位のまま維持し、
-                // 物理Tunerだけをroot単位で共有する。これにより途中子だけの競合を保ちながら、同一rootの
-                // T1→T2→T3分裂、別rootの同一Tuner重複、single-flight再計算順による揺れを同時に禁止する。
+                bool IntervalCompetesWithUnit((DateTime Start, DateTime End, ConflictOccupancyUnit? Unit, string? PhysicalOccupancyKey, string Reason) interval, ConflictOccupancyUnit unit)
+                {
+                    if (!IntervalOverlaps(unit.OccupyStart, unit.OccupyEnd, interval.Start, interval.End))
+                        return false;
+                    if (interval.Unit != null)
+                        return !SamePhysicalOccupancy(unit, interval.Unit);
+                    if (!string.IsNullOrWhiteSpace(interval.PhysicalOccupancyKey)
+                        && string.Equals(interval.PhysicalOccupancyKey, unit.PhysicalOccupancyKey, StringComparison.OrdinalIgnoreCase))
+                        return false;
+                    return true;
+                }
+
+                // PHYSICAL_OCCUPANCY_PREPLAN_SINGLE_SOURCE — 変更禁止:
+                // 明示UserChainのPhysicalOccupancyKeyはroot全体で一つ。イベント単位Unitを長大な一区間へ潰さず、
+                // 各memberの実占有segment集合を一つの物理Tunerへ配置する。競合・継承・repackはこの物理IDを参照し、
+                // 個別の「chainなら重複を無視」条件を追加してはならない。
                 var finalChainTunerByRoot = chainResolvedTunerByRoot;
                 var chainRootClaims = new List<(int RootId, string TunerName, DateTime Start, DateTime End)>();
                 var chainRootPlans = unitsByKey
@@ -5638,19 +5794,31 @@ WHERE source <> 'Epg'
                     .ThenBy(p => p.RootId)
                     .ToList();
 
-                bool RootTunerAvailable(string tunerName, DateTime start, DateTime end)
-                    => candidateNames.Contains(tunerName, StringComparer.OrdinalIgnoreCase)
-                       && finalIntervals.TryGetValue(tunerName, out var intervals)
-                       && !intervals.Any(x => IntervalOverlaps(start, end, x.Start, x.End))
-                       && !chainRootClaims.Any(x => string.Equals(x.TunerName, tunerName, StringComparison.OrdinalIgnoreCase)
-                           && IntervalOverlaps(start, end, x.Start, x.End));
+                bool RootTunerAvailable(string tunerName, IReadOnlyList<ConflictOccupancyUnit> members)
+                {
+                    if (!candidateNames.Contains(tunerName, StringComparer.OrdinalIgnoreCase)
+                        || !finalIntervals.TryGetValue(tunerName, out var intervals))
+                        return false;
+
+                    foreach (var member in members)
+                    {
+                        if (intervals.Any(x => IntervalCompetesWithUnit(x, member)))
+                            return false;
+
+                        if (chainRootClaims.Any(x => (!member.ChainRootId.HasValue || x.RootId != member.ChainRootId.Value)
+                            && string.Equals(x.TunerName, tunerName, StringComparison.OrdinalIgnoreCase)
+                            && IntervalOverlaps(member.OccupyStart, member.OccupyEnd, x.Start, x.End)))
+                            return false;
+                    }
+                    return true;
+                }
 
                 foreach (var plan in chainRootPlans)
                 {
                     if (plan.HasInvalidActivePin)
                     {
                         AddTunerAllocationDebugTrace(debugTrace!, recordingTunerProfiles, "CHAIN_ROOT_SLOT_PREPLAN_INVALID_PIN", plan.Representative.PriorityReservation,
-                            $"chainRoot=R{plan.RootId} activePins=[{string.Join(',', plan.ActivePins)}] occupy={plan.Start:MM/dd HH:mm:ss}〜{plan.End:MM/dd HH:mm:ss} action=event_conflict_no_reassignment rule=chain_fixed_physical_tuner_contract");
+                            $"chainRoot=R{plan.RootId} activePins=[{string.Join(',', plan.ActivePins)}] occupy={plan.Start:MM/dd HH:mm:ss}〜{plan.End:MM/dd HH:mm:ss} action=event_conflict_no_reassignment rule=chain_tuner_phase_contract");
                         continue;
                     }
 
@@ -5660,15 +5828,15 @@ WHERE source <> 'Epg'
                     {
                         selected = plan.ActivePins[0];
                         source = "active_actual_tuner_hard_pin";
-                        if (!RootTunerAvailable(selected, plan.Start, plan.End))
+                        if (!RootTunerAvailable(selected, plan.Members))
                         {
                             AddTunerAllocationDebugTrace(debugTrace!, recordingTunerProfiles, "CHAIN_ROOT_SLOT_PREPLAN_BLOCKED", plan.Representative.PriorityReservation,
-                                $"chainRoot=R{plan.RootId} requiredTuner={selected} source={source} occupy={plan.Start:MM/dd HH:mm:ss}〜{plan.End:MM/dd HH:mm:ss} action=event_conflict_no_reassignment rule=chain_fixed_physical_tuner_contract");
+                                $"chainRoot=R{plan.RootId} requiredTuner={selected} source={source} occupy={plan.Start:MM/dd HH:mm:ss}〜{plan.End:MM/dd HH:mm:ss} action=event_conflict_no_reassignment rule=chain_tuner_phase_contract");
                             continue;
                         }
                     }
                     else if (chainPlannedTunerPreferenceByRoot.TryGetValue(plan.RootId, out var preferredRootTuner)
-                        && RootTunerAvailable(preferredRootTuner, plan.Start, plan.End))
+                        && RootTunerAvailable(preferredRootTuner, plan.Members))
                     {
                         selected = preferredRootTuner;
                         source = "previous_final_assignment_weak_reused";
@@ -5676,7 +5844,7 @@ WHERE source <> 'Epg'
                     else
                     {
                         selected = candidateNames
-                            .Where(name => RootTunerAvailable(name, plan.Start, plan.End))
+                            .Where(name => RootTunerAvailable(name, plan.Members))
                             .OrderBy(name => chainRootClaims
                                 .Where(x => string.Equals(x.TunerName, name, StringComparison.OrdinalIgnoreCase) && x.End <= plan.Start)
                                 .Select(x => x.End)
@@ -5690,31 +5858,32 @@ WHERE source <> 'Epg'
                     if (string.IsNullOrWhiteSpace(selected))
                     {
                         AddTunerAllocationDebugTrace(debugTrace!, recordingTunerProfiles, "CHAIN_ROOT_SLOT_PREPLAN_UNAVAILABLE", plan.Representative.PriorityReservation,
-                            $"chainRoot=R{plan.RootId} occupy={plan.Start:MM/dd HH:mm:ss}〜{plan.End:MM/dd HH:mm:ss} candidates={recordingCapacityTuners} action=event_priority_conflict_without_mid_chain_switch rule=chain_fixed_physical_tuner_contract");
+                            $"chainRoot=R{plan.RootId} occupy={plan.Start:MM/dd HH:mm:ss}〜{plan.End:MM/dd HH:mm:ss} candidates={recordingCapacityTuners} action=event_priority_conflict_without_mid_chain_switch rule=chain_tuner_phase_contract");
                         continue;
                     }
 
                     finalChainTunerByRoot[plan.RootId] = selected;
-                    chainRootClaims.Add((plan.RootId, selected, plan.Start, plan.End));
+                    foreach (var member in plan.Members)
+                        chainRootClaims.Add((plan.RootId, selected, member.OccupyStart, member.OccupyEnd));
                     AddTunerAllocationDebugTrace(debugTrace!, recordingTunerProfiles, "CHAIN_ROOT_SLOT_PREPLAN", plan.Representative.PriorityReservation,
-                        $"chainRoot=R{plan.RootId} tuner={selected} source={source} occupy={plan.Start:MM/dd HH:mm:ss}〜{plan.End:MM/dd HH:mm:ss} members=[{string.Join(',', plan.Members.SelectMany(u => u.Reservations).Select(r => $"R{r.Id}").Distinct())}] result=COMMITTED_BEFORE_EVENT_PLAN rule=chain_fixed_physical_tuner_contract");
+                        $"chainRoot=R{plan.RootId} physicalOccupancy={plan.Representative.PhysicalOccupancyKey} tuner={selected} source={source} envelope={plan.Start:MM/dd HH:mm:ss}〜{plan.End:MM/dd HH:mm:ss} segments={plan.Members.Count} members=[{string.Join(',', plan.Members.SelectMany(u => u.Reservations).Select(r => $"R{r.Id}").Distinct())}] result=COMMITTED_BEFORE_EVENT_PLAN rule=physical_occupancy_single_source");
                 }
 
                 // FINAL_TUNER_PLACEMENT_CHAIN_AVOIDANCE_INVARIANT:
                 // これはチェーンへの優先加点・絶対保護ではなく、可動な非チェーン予約の物理Tuner配置規則である。
-                // 固定チェーン区間と重なるTunerを選ばなくても同じ予約を成立させられる場合は、
-                // その非置換候補だけから選び、空いている別Tunerを使わず固定枠を崩す配置を禁止する。
-                // 非置換候補が一つも無い場合は固定Tunerを候補から封鎖せず全候補へ戻し、
+                // すでにroot単位で解決済みのchain計画区間と重なるTunerを選ばなくても同じ予約を成立させられる場合は、
+                // その非置換候補だけから選び、空いている別Tunerを使わずroot計画配置を崩すことを避ける。
+                // 非置換候補が一つも無い場合はroot計画Tunerを候補から封鎖せず全候補へ戻し、
                 // 共通優先順位どおり通常予約が勝てる状態を維持する。
                 // この判断はFinalConflictPlan内部だけで行い、チェーン側の優先順位は変更しない。
-                var fixedChainPlacementClaims = unitsByKey
+                var resolvedChainPlacementClaims = unitsByKey
                     .Where(u => string.Equals(u.Group, grpKey, StringComparison.OrdinalIgnoreCase)
                         && u.IsUserChain
                         && (forcedChainConflictIds == null || !u.Reservations.Any(m => forcedChainConflictIds.Contains(m.Id)))
                         && u.ChainRootId.HasValue
-                        && finalChainTunerByRoot.TryGetValue(u.ChainRootId.Value, out var fixedName)
-                        && !string.IsNullOrWhiteSpace(fixedName)
-                        && candidateNames.Contains(fixedName, StringComparer.OrdinalIgnoreCase))
+                        && finalChainTunerByRoot.TryGetValue(u.ChainRootId.Value, out var resolvedName)
+                        && !string.IsNullOrWhiteSpace(resolvedName)
+                        && candidateNames.Contains(resolvedName, StringComparer.OrdinalIgnoreCase))
                     .Select(u => (
                         TunerName: finalChainTunerByRoot[u.ChainRootId!.Value],
                         u.OccupyStart,
@@ -5743,10 +5912,10 @@ WHERE source <> 'Epg'
                     // final planは前段plannerの一時tunerAssignmentや、過去MutationでDBへ残った通常未来予約の
                     // TunerNameを配置入力にしない。同一の現在予約集合・active ownership・設定からは、
                     // 操作履歴（Disable/Enable、Conflict/復帰）に依存せず同じ物理配置へ収束させる。
-                    // hard pinは現在の実録画所有を正本にし、明示チェーンroot/continuityだけを固定継承候補とする。
-                    // 通常未来予約は capacity / 固定チェーン非破壊 / 論理Tuner名の決定順で選ぶ。
+                    // hard pinは現在の実録画所有を正本にし、明示チェーンroot/continuityだけを同一plan内の継承候補とする。
+                    // 通常未来予約は capacity / 解決済みchain root計画配置との非衝突 / 論理Tuner名の決定順で選ぶ。
                     // 過去区間の previousFreeAt は診断値に留め、別の時間成分へ物理配置を伝播させる tie-break には使わない。
-                    // 予約優先順位、隣接境界、チェーン固定、active recording pinの契約をこの安定化規則で変更してはならない。
+                    // 予約優先順位、隣接境界、chain root計画、active recording hard pinの契約をこの安定化規則で変更してはならない。
                     if (unit.RequiresPinnedTuner
                         && (unit.HasPinnedTunerConflict
                             || string.IsNullOrWhiteSpace(unit.PinnedTuner)
@@ -5773,29 +5942,15 @@ WHERE source <> 'Epg'
                                 ? unit.ContinuityPreferredTuner
                                 : null;
 
-                    bool IsDirectChainBoundaryPair(ConflictOccupancyUnit current, ConflictOccupancyUnit existing)
-                    {
-                        if (!current.IsUserChain || !existing.IsUserChain
-                            || !current.ChainRootId.HasValue || !existing.ChainRootId.HasValue
-                            || current.ChainRootId.Value != existing.ChainRootId.Value)
-                            return false;
-
-                        var currentId = current.PriorityReservation.Id;
-                        var existingId = existing.PriorityReservation.Id;
-                        return (chainSuccessors.TryGetValue(currentId, out var currentSuccessor) && currentSuccessor == existingId)
-                            || (chainSuccessors.TryGetValue(existingId, out var existingSuccessor) && existingSuccessor == currentId);
-                    }
-
                     bool CanUseTuner(string name)
                         => finalIntervals.TryGetValue(name, out var intervals)
-                           && !intervals.Any(x => IntervalOverlaps(unit.OccupyStart, unit.OccupyEnd, x.Start, x.End)
-                               && (x.Unit == null || !IsDirectChainBoundaryPair(unit, x.Unit)));
+                           && !intervals.Any(x => IntervalCompetesWithUnit(x, unit));
 
                     bool CanUseTunerWithoutNormalEpg(string name)
                         => finalIntervals.TryGetValue(name, out var intervals)
                            && !intervals.Any(x => !string.Equals(x.Reason, "normal_epg_wave", StringComparison.OrdinalIgnoreCase)
                                && IntervalOverlaps(unit.OccupyStart, unit.OccupyEnd, x.Start, x.End)
-                               && (x.Unit == null || !IsDirectChainBoundaryPair(unit, x.Unit)));
+                               && IntervalCompetesWithUnit(x, unit));
 
                     bool HasOverlappingNormalEpg(string name)
                         => finalIntervals.TryGetValue(name, out var intervals)
@@ -5830,7 +5985,7 @@ WHERE source <> 'Epg'
                         if (unit.IsUserChain || unit.RequiresPinnedTuner)
                             return false;
 
-                        return fixedChainPlacementClaims.Any(c =>
+                        return resolvedChainPlacementClaims.Any(c =>
                             !string.Equals(c.UnitKey, unit.UnitKey, StringComparison.OrdinalIgnoreCase)
                             && string.Equals(c.TunerName, name, StringComparison.OrdinalIgnoreCase)
                             && IntervalOverlaps(unit.OccupyStart, unit.OccupyEnd, c.OccupyStart, c.OccupyEnd));
@@ -5947,12 +6102,14 @@ WHERE source <> 'Epg'
                             if (!finalIntervals.TryGetValue(tunerName, out var intervals))
                                 return true;
                             return intervals.Any(x =>
-                                (x.Unit == null || !componentKeys.Contains(x.Unit.UnitKey))
+                                (x.Unit == null
+                                    ? (string.IsNullOrWhiteSpace(x.PhysicalOccupancyKey) || !string.Equals(x.PhysicalOccupancyKey, moving.PhysicalOccupancyKey, StringComparison.OrdinalIgnoreCase))
+                                    : (!componentKeys.Contains(x.Unit.UnitKey) && !SamePhysicalOccupancy(moving, x.Unit)))
                                 && IntervalOverlaps(moving.OccupyStart, moving.OccupyEnd, x.Start, x.End));
                         }
 
                         bool OverlapsFixedChainClaim(ConflictOccupancyUnit moving, string tunerName)
-                            => fixedChainPlacementClaims.Any(c =>
+                            => resolvedChainPlacementClaims.Any(c =>
                                 !string.Equals(c.UnitKey, moving.UnitKey, StringComparison.OrdinalIgnoreCase)
                                 && string.Equals(c.TunerName, tunerName, StringComparison.OrdinalIgnoreCase)
                                 && IntervalOverlaps(moving.OccupyStart, moving.OccupyEnd, c.OccupyStart, c.OccupyEnd));
@@ -5966,12 +6123,12 @@ WHERE source <> 'Epg'
                                 .Where(name => !placement.Any(kv =>
                                     string.Equals(kv.Value, name, StringComparison.OrdinalIgnoreCase)
                                     && searchUnitByKey.TryGetValue(kv.Key, out var other)
-                                    && UnitOverlaps(moving, other)))
+                                    && PhysicalOccupanciesCompete(moving, other)))
                                 .ToList();
 
                             currentTunerByUnitKey.TryGetValue(moving.UnitKey, out var currentTuner);
                             return available
-                                // 固定チェーン枠を避けても成立するなら、既存契約どおりそちらを先に試す。
+                                // 解決済みchain root計画枠との競合を避けても成立するなら、既存契約どおりそちらを先に試す。
                                 .OrderBy(name => OverlapsFixedChainClaim(moving, name) ? 1 : 0)
                                 // 同じ成立性なら不要なTuner移動を避ける。
                                 .ThenBy(name => string.Equals(name, currentTuner, StringComparison.OrdinalIgnoreCase) ? 0 : 1)
@@ -6030,7 +6187,7 @@ WHERE source <> 'Epg'
                         {
                             if (!placement.TryGetValue(existing.UnitKey, out var tunerName))
                                 continue;
-                            finalIntervals[tunerName].Add((existing.OccupyStart, existing.OccupyEnd, existing, "final_capacity_repack"));
+                            finalIntervals[tunerName].Add((existing.OccupyStart, existing.OccupyEnd, existing, existing.PhysicalOccupancyKey, "final_capacity_repack"));
                             finalIntervals[tunerName].Sort((a, b) => a.Start.CompareTo(b.Start));
 
                             currentTunerByUnitKey.TryGetValue(existing.UnitKey, out var previousTuner);
@@ -6147,7 +6304,7 @@ WHERE source <> 'Epg'
                         // 空きTunerが複数ある場合、過去の非重複区間でどのTunerが最後に使われたかは
                         // 現在Unitの成立性とは無関係。ここで previousFreeAt を選択軸にすると、局所Mutationが
                         // 時間的に独立した未来予約へ連鎖し、不要な物理Tuner再配置を生む。
-                        // したがって固定チェーンを避けた空き候補から論理Tuner名だけで決定し、
+                        // したがって解決済みchain root計画との不要な競合を避けた空き候補から論理Tuner名だけで決定し、
                         // 真に重なる成分で成立性が必要な場合は後段の局所repackに任せる。
                         chosen = FreeCandidatesPreferNonDisplacingChainTuner()
                             .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
@@ -6167,7 +6324,7 @@ WHERE source <> 'Epg'
                     if (chosen != null
                         && !unit.IsUserChain
                         && !unit.RequiresPinnedTuner
-                        && fixedChainPlacementClaims.Any(c =>
+                        && resolvedChainPlacementClaims.Any(c =>
                             string.Equals(c.TunerName, chosen, StringComparison.OrdinalIgnoreCase)
                             && IntervalOverlaps(unit.OccupyStart, unit.OccupyEnd, c.OccupyStart, c.OccupyEnd)))
                     {
@@ -6187,7 +6344,9 @@ WHERE source <> 'Epg'
                         var blockingUnits = candidateNames
                             .Where(name => finalIntervals.ContainsKey(name))
                             .SelectMany(name => finalIntervals[name]
-                                .Where(x => x.Unit != null && IntervalOverlaps(unit.OccupyStart, unit.OccupyEnd, x.Start, x.End))
+                                .Where(x => x.Unit != null
+                                    && !SamePhysicalOccupancy(unit, x.Unit)
+                                    && IntervalOverlaps(unit.OccupyStart, unit.OccupyEnd, x.Start, x.End))
                                 .Select(x => (Tuner: name, Unit: x.Unit!)))
                             .GroupBy(x => x.Unit.UnitKey, StringComparer.OrdinalIgnoreCase)
                             .Select(g => g.First())
@@ -6228,8 +6387,9 @@ WHERE source <> 'Epg'
                         var overlapSummary = string.Join("|", candidateNames.Select(name =>
                         {
                             var overlaps = finalIntervals[name]
-                                .Where(x => IntervalOverlaps(unit.OccupyStart, unit.OccupyEnd, x.Start, x.End))
-                                .Select(x => x.Unit == null ? $"{name}:external" : $"{name}:{x.Unit.UnitKey}")
+                                .Where(x => IntervalOverlaps(unit.OccupyStart, unit.OccupyEnd, x.Start, x.End)
+                                    && IntervalCompetesWithUnit(x, unit))
+                                .Select(x => x.Unit == null ? $"{name}:external:{x.PhysicalOccupancyKey ?? "-"}" : $"{name}:{x.Unit.PhysicalOccupancyKey}")
                                 .ToList();
                             return overlaps.Count == 0 ? $"{name}:free" : string.Join(",", overlaps);
                         }));
@@ -6248,7 +6408,7 @@ WHERE source <> 'Epg'
                         .Select(x => x.End)
                         .DefaultIfEmpty(DateTime.MinValue)
                         .Max();
-                    finalIntervals[chosen].Add((unit.OccupyStart, unit.OccupyEnd, unit, "final_unit_plan"));
+                    finalIntervals[chosen].Add((unit.OccupyStart, unit.OccupyEnd, unit, unit.PhysicalOccupancyKey, "final_unit_plan"));
                     finalIntervals[chosen].Sort((a, b) => a.Start.CompareTo(b.Start));
                     foreach (var member in unit.Reservations.Where(m => evaluatedIds.Contains(m.Id)))
                     {
@@ -6262,7 +6422,7 @@ WHERE source <> 'Epg'
                         if (unit.ChainRootId.HasValue)
                             finalChainTunerByRoot[unit.ChainRootId.Value] = chosen;
                         AddTunerAllocationDebugTrace(debugTrace!, recordingTunerProfiles, "CHAIN_UNIT_TUNER_ASSIGN", unit.PriorityReservation,
-                            $"unitKey={unit.UnitKey} unit={unit.UnitId} members={unit.MemberIds} chainRoot=R{(unit.ChainRootId.HasValue ? unit.ChainRootId.Value.ToString() : "-")} tuner={chosen} unitOccupy={unit.OccupyStart:MM/dd HH:mm:ss}〜{unit.OccupyEnd:MM/dd HH:mm:ss} capacitySource=RoleBinding/Recording fixedTuner={unit.PinnedTuner ?? "-"} displaySource=LogicalTunerDisplayName reason={(string.IsNullOrWhiteSpace(unit.PinnedTuner) ? "chain_slot_initial_tuner_committed" : "chain_fixed_tuner_capacity_accepted")} result=ASSIGNED source=chain_slot_single_source rule=chain_fixed_physical_tuner_contract");
+                            $"unitKey={unit.UnitKey} unit={unit.UnitId} members={unit.MemberIds} chainRoot=R{(unit.ChainRootId.HasValue ? unit.ChainRootId.Value.ToString() : "-")} tuner={chosen} unitOccupy={unit.OccupyStart:MM/dd HH:mm:ss}〜{unit.OccupyEnd:MM/dd HH:mm:ss} capacitySource=RoleBinding/Recording resolvedPlanTuner={chosen} activeActualTunerPin={unit.PinnedTuner ?? "-"} displaySource=LogicalTunerDisplayName reason={(string.IsNullOrWhiteSpace(unit.PinnedTuner) ? "chain_root_plan_tuner_selected" : "active_actual_tuner_pin_capacity_accepted")} result=ASSIGNED source=chain_tuner_plan_single_source rule=chain_tuner_phase_contract");
                     }
                 }
             }
@@ -6305,18 +6465,22 @@ WHERE source <> 'Epg'
         }
 
         // USER_CHAIN_ALLOCATION_INVARIANT — 変更禁止:
-        // 1. チェーン専用ボタンで成立した連続予約は、作成時に確定した同一物理録画Tunerを
-        //    Rootから全後続へ継承し、チェーン終了まで別Tunerへ変更しない。
-        // 2. 固定されるのは物理Tunerであり、予約優先順位ではない。各イベントは通常予約と同じ
+        // 1. 録画開始前のチェーンTunerはFinalConflictPlanがroot単位で毎回解決する。過去のTunerNameは
+        //    weak/reselectableな安定候補であり、作成時Tunerをhard pinしてはならない。
+        // 2. shared capture開始後だけ、現在Recording ownerのActualTunerNameをhard pin正本とし、
+        //    その物理captureが生きている残存後続を同一Tunerへ固定する。論理境界で別Tunerへ移さない。
+        // 3. 固定されるのは稼働中physical captureのTunerであり、予約優先順位ではない。各イベントは通常予約と同じ
         //    予約元・ルール順・同一サービス境界・ユーザー確定時刻の共通優先順位で採否を決める。
-        // 3. 競合判定はイベント単位で、開始・終了マージン全量を使用する。最初に競合した
+        // 4. 競合判定はイベント単位で、開始・終了マージン全量を使用する。最初に競合した
         //    チェーンイベントが確定した場合、そのイベント以降だけを保存済みトポロジーに沿って競合化する。
-        // 4. 競合原因が消えた再計算では、競合開始地点以降を同じ固定物理Tuner上のチェーン区間として復帰させる。
-        //    個別イベントだけの復帰、別Tunerへの再選択、チェーン優先加点は禁止する。
-        // 5. 前番組末尾30秒の欠落は、前後イベントがともに有効・非競合で、同一チェーン・同一固定物理Tunerの
-        //    境界を正当に実行する場合だけ行い、後番組を開始時刻から完全録画するために使用する。
-        //    通常終了、競合落ち、取消、無効化、開始/取得失敗、復旧、容量調整では一切行わない。
-        // この5条件を、Tuner再選択、チェーン絶対優先、マージン救済、部分録画救済、イベント単独復活へ改変してはならない。
+        //    競合原因が消えた再計算では、成立可能区間を同じroot物理枠として復帰させる。チェーン優先加点は禁止する。
+        // 5. 実行時は1本のBonDriver/OpenTuner/TS-read workerを物理終端まで維持し、後続pre-marginと前段post-marginを
+        //    予約ごとの別Sinkへ重複出力する。論理境界ではTuner解放/BonDriver Close/retune/worker restartを行わず、
+        //    各番組を独立TSファイルとして確定し、論理Reservation ownerだけを後続へ移す。
+        // 6. 取消・無効化・時間短縮・rebase後は、現在有効なsegment集合からphysical capture終端を再導出し、
+        //    session / lease / worker deadlineを延長・短縮の両方向へ収束させる。
+        // この契約を、作成時Tuner永久固定、チェーン絶対優先、旧境界worker切替、別Tuner救済、固定段数上限、
+        // マージン救済、部分録画救済、イベント単独復活へ改変してはならない。
         ApplyFinalPlanWithChainPropagation();
 
         void ApplyFinalPlanWithChainPropagation()
@@ -6459,9 +6623,9 @@ WHERE source <> 'Epg'
 
             var includedInEvaluation = scheduledIds.Contains(r.Id);
             var newConflicted = includedInEvaluation && conflictedIds.Contains(r.Id);
-            var isChainSlotMember = pseudoContinuous && (r.IsUserChain || chainSuccessors.ContainsKey(r.Id));
+            var isChainSlotMember = continuousChainPlanning && (r.IsUserChain || chainSuccessors.ContainsKey(r.Id));
             var resolvedChainRootId = isChainSlotMember ? ResolveStoredChainRootId(r) : 0;
-            var fixedChainTuner = isChainSlotMember
+            var resolvedChainPlanTuner = isChainSlotMember
                 && chainResolvedTunerByRoot.TryGetValue(resolvedChainRootId, out var chainTuner)
                     ? chainTuner
                     : isChainSlotMember
@@ -6471,7 +6635,7 @@ WHERE source <> 'Epg'
             // root preplanで成立した全メンバーは、競合イベントを含め同じroot Tunerを保持する。
             // root枠を確定できなかった場合だけ前回計画値を表示上保持するが、次回計画では弱い候補として扱う。
             var newTuner = isChainSlotMember
-                ? fixedChainTuner
+                ? resolvedChainPlanTuner
                 : (!includedInEvaluation || newConflicted) ? "" :
                     (tunerAssignment.TryGetValue(r.Id, out var tn) ? tn : "");
             var tunerChanged = !string.Equals(r.TunerName ?? string.Empty, newTuner, StringComparison.Ordinal);
@@ -6491,7 +6655,7 @@ WHERE source <> 'Epg'
             if (slotMembers.Count == 0) continue;
             var root = slotMembers.FirstOrDefault(x => x.Id == resolvedSlot.Key) ?? slotMembers[0];
             AddTunerAllocationDebugTrace(debugTrace!, recordingTunerProfiles, "CHAIN_SLOT_COMMIT", root,
-                $"chainRoot=R{resolvedSlot.Key} fixedTuner={resolvedSlot.Value} members=[{string.Join(',', slotMembers.Select(x => $"R{x.Id}"))}] action=commit_root_and_members_once topology=preserved rule=chain_slot_single_source_contract");
+                $"chainRoot=R{resolvedSlot.Key} resolvedPlanTuner={resolvedSlot.Value} members=[{string.Join(',', slotMembers.Select(x => $"R{x.Id}"))}] action=commit_root_plan_and_member_projection_once topology=preserved rule=chain_tuner_plan_single_source_contract");
         }
 
         var commit = TryCommitAllocationPlan(
@@ -6537,9 +6701,8 @@ WHERE source <> 'Epg'
             chainPredecessors,
             chainSuccessors,
             laterProgramPriority,
-            pseudoContinuous,
-            configuredPseudoContinuous,
-            chainModeEnabled,
+            continuousChainPlanning,
+            configuredChainFeature,
             userChainCandidatePairs,
             preStartMarginSeconds,
             postEndMarginSeconds,
@@ -6626,14 +6789,15 @@ WHERE source <> 'Epg'
     /// </summary>
     [System.Diagnostics.Conditional("TVAIR_DEVELOPER_DIAGNOSTICS")]
     private void AddTunerAllocationDebugTrace(
-        List<TunerAllocationDebugTraceEntry> trace,
+        object? trace,
         IReadOnlyList<Core.TunerProfile> tunerProfiles,
         string stage,
         Reservation reservation,
         string detail)
     {
 #if TVAIR_DEVELOPER_DIAGNOSTICS
-        trace.Add(new TunerAllocationDebugTraceEntry
+        if (trace is not List<TunerAllocationDebugTraceEntry> typedTrace) return;
+        typedTrace.Add(new TunerAllocationDebugTraceEntry
         {
             Stage = stage,
             Group = ReservationTunerGroupResolver.Resolve(reservation, tunerProfiles),
@@ -6644,26 +6808,20 @@ WHERE source <> 'Epg'
 #endif
     }
 
+#if TVAIR_DEVELOPER_DIAGNOSTICS
     public string GetTunerAllocationDebugPath()
     {
-#if TVAIR_DEVELOPER_DIAGNOSTICS
         var dir = Path.Combine(db.DataDirectory, "logs");
         Directory.CreateDirectory(dir);
         return Path.Combine(dir, "tuner_allocation_debug.json");
-#else
-        return string.Empty;
-#endif
     }
 
     public string? ReadTunerAllocationDebugJson()
     {
-#if TVAIR_DEVELOPER_DIAGNOSTICS
         var path = GetTunerAllocationDebugPath();
         return File.Exists(path) ? File.ReadAllText(path) : null;
-#else
-        return null;
-#endif
     }
+#endif
 
     [System.Diagnostics.Conditional("TVAIR_DEVELOPER_DIAGNOSTICS")]
     private void WriteTunerAllocationDebugSnapshot(
@@ -6677,15 +6835,15 @@ WHERE source <> 'Epg'
         IReadOnlyDictionary<int, int> chainPredecessors,
         IReadOnlyDictionary<int, int> chainSuccessors,
         bool laterProgramPriority,
-        bool pseudoContinuous,
-        bool configuredPseudoContinuous,
-        bool chainModeEnabled,
+        bool continuousChainPlanning,
+        bool configuredChainFeatureEnabled,
         int userChainCandidatePairs,
         int preStartMarginSeconds,
         int postEndMarginSeconds,
-        IReadOnlyList<TunerAllocationDebugTraceEntry> trace)
+        object? trace)
     {
 #if TVAIR_DEVELOPER_DIAGNOSTICS
+        if (trace is not IReadOnlyList<TunerAllocationDebugTraceEntry> typedTrace) return;
         // 視聴用チューナーは録画・EPG取得の割当対象から外す。
         // デバッグ出力上の上限・候補数にも録画用チューナーだけを反映する。
         var recordingTunerProfiles = tunerProfiles
@@ -6705,9 +6863,8 @@ WHERE source <> 'Epg'
             Settings = new TunerAllocationDebugSettings
             {
                 LaterProgramPriority = laterProgramPriority,
-                PseudoContinuousRecording = pseudoContinuous,
-                ConfiguredPseudoContinuousRecording = configuredPseudoContinuous,
-                ChainModeEnabled = chainModeEnabled,
+                ContinuousChainPlanning = continuousChainPlanning,
+                ConfiguredChainFeatureEnabled = configuredChainFeatureEnabled,
                 UserChainCandidatePairs = userChainCandidatePairs,
                 PreStartMarginSeconds = preStartMarginSeconds,
                 PostEndMarginSeconds = postEndMarginSeconds
@@ -6718,7 +6875,7 @@ WHERE source <> 'Epg'
         foreach (var tp in recordingTunerProfiles.GroupBy(t => t.Group, StringComparer.OrdinalIgnoreCase))
             snapshot.TunerLimits[tp.Key] = tp.Count();
 
-        snapshot.Trace.AddRange(trace);
+        snapshot.Trace.AddRange(typedTrace);
 
         var evaluable = scheduled
             .Where(r => r.Source != ReservationSource.Epg && r.IsEnabled)
@@ -6847,11 +7004,11 @@ WHERE source <> 'Epg'
     private void WriteTunerAllocationDebugLog(TunerAllocationDebugSnapshot snapshot)
     {
         log.Add("TUNER_ALLOC_SUMMARY", "Summary",
-            $"evaluated={snapshot.Summary.EvaluatedCount} allocated={snapshot.Summary.AllocatedCount} conflict={snapshot.Summary.ConflictCount} skipped={snapshot.Summary.SkippedCount} laterPriority={snapshot.Settings.LaterProgramPriority} chain={snapshot.Settings.PseudoContinuousRecording} preStart={snapshot.Settings.PreStartMarginSeconds}s postEnd={snapshot.Settings.PostEndMarginSeconds}s");
+            $"evaluated={snapshot.Summary.EvaluatedCount} allocated={snapshot.Summary.AllocatedCount} conflict={snapshot.Summary.ConflictCount} skipped={snapshot.Summary.SkippedCount} laterPriority={snapshot.Settings.LaterProgramPriority} chain={snapshot.Settings.ContinuousChainPlanning} preStart={snapshot.Settings.PreStartMarginSeconds}s postEnd={snapshot.Settings.PostEndMarginSeconds}s");
         log.Add("TUNER_PRIORITY_CONTRACT", "Summary",
             $"sourcePriority=ProgramGuideLike(Manual,Immediate,KeywordSearch)>AutoSearch(Keyword)>Program activeChainExplicitOnly=True overlapUsesMargins=True" +
             $" sameServiceBoundaryPriority=True peerProgramGuideUsesLatestUserDecision=True autoSearchUsesRuleSortOrder=True programUsesRuleOrder=True capacityFirst=True" +
-            $" laterPriority={snapshot.Settings.LaterProgramPriority} chain={snapshot.Settings.PseudoContinuousRecording}" +
+            $" laterPriority={snapshot.Settings.LaterProgramPriority} chain={snapshot.Settings.ContinuousChainPlanning}" +
             $" evaluated={snapshot.Summary.EvaluatedCount} conflict={snapshot.Summary.ConflictCount} rule=release_contract");
         log.Add("TUNER_CONFLICT_VISIBILITY_CONTRACT", "Summary",
             $"candidatePreflight=False conflictVisibleAfterReservation=True programGuideUnreservedAction=reserve" +
@@ -7239,6 +7396,77 @@ WHERE source <> 'Epg'
         return Convert.ToHexString(bytes);
     }
 
+    // ─── 予約録画オプション snapshot ─────────────────────────────
+
+    public ReservationRecordingOptions GetReservationRecordingOptions(int reservationId)
+    {
+        using var con = db.Open();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = "SELECT current_service_only, save_subtitles FROM reservation_recording_options WHERE reservation_id = $id;";
+        cmd.Parameters.AddWithValue("$id", reservationId);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return new ReservationRecordingOptions();
+        return new ReservationRecordingOptions(
+            CurrentServiceOnly: reader.IsDBNull(0) || reader.GetInt32(0) != 0,
+            SaveSubtitles: reader.IsDBNull(1) || reader.GetInt32(1) != 0);
+    }
+
+    /// <summary>
+    /// KeywordRule -> Scheduled Keyword Reservation recording-options handoff.
+    /// The rule is the editable source; reservation_recording_options is the launch snapshot.
+    /// Only Scheduled rows owned by the same rule may be changed.
+    /// </summary>
+    public int SyncScheduledKeywordReservationRecordingOptions(int ruleId, ReservationRecordingOptions options)
+    {
+        using var con = db.Open();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO reservation_recording_options
+                (reservation_id, current_service_only, save_subtitles, created_at)
+            SELECT r.id, $currentServiceOnly, $saveSubtitles, $now
+            FROM reservations r
+            WHERE r.source = 'keyword'
+              AND r.status = 'scheduled'
+              AND r.source_rule_id = $ruleId
+            ON CONFLICT(reservation_id) DO UPDATE SET
+                current_service_only = excluded.current_service_only,
+                save_subtitles = excluded.save_subtitles
+            WHERE reservation_recording_options.current_service_only <> excluded.current_service_only
+               OR reservation_recording_options.save_subtitles <> excluded.save_subtitles;
+            """;
+        cmd.Parameters.AddWithValue("$ruleId", ruleId);
+        cmd.Parameters.AddWithValue("$currentServiceOnly", options.CurrentServiceOnly ? 1 : 0);
+        cmd.Parameters.AddWithValue("$saveSubtitles", options.SaveSubtitles ? 1 : 0);
+        cmd.Parameters.AddWithValue("$now", DateTime.Now.ToString("O"));
+        return cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Self-heal all Scheduled Keyword reservation snapshots from their owning current rules.
+    /// Used by KeywordMatcher so upgrades and interrupted prior edits converge without user action.
+    /// </summary>
+    public int SyncScheduledKeywordReservationRecordingOptionsFromRules()
+    {
+        using var con = db.Open();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO reservation_recording_options
+                (reservation_id, current_service_only, save_subtitles, created_at)
+            SELECT r.id, k.record_current_service_only, k.record_subtitles, $now
+            FROM reservations r
+            INNER JOIN keyword_rules k ON k.id = r.source_rule_id
+            WHERE r.source = 'keyword'
+              AND r.status = 'scheduled'
+            ON CONFLICT(reservation_id) DO UPDATE SET
+                current_service_only = excluded.current_service_only,
+                save_subtitles = excluded.save_subtitles
+            WHERE reservation_recording_options.current_service_only <> excluded.current_service_only
+               OR reservation_recording_options.save_subtitles <> excluded.save_subtitles;
+            """;
+        cmd.Parameters.AddWithValue("$now", DateTime.Now.ToString("O"));
+        return cmd.ExecuteNonQuery();
+    }
+
     // ─── キーワードルール CRUD ────────────────────────────────────
 
     public IReadOnlyList<KeywordRule> GetKeywordRules()
@@ -7249,7 +7477,7 @@ WHERE source <> 'Epg'
             SELECT id, name, pattern, exclude_pattern, use_regex,
                    search_fields, search_title, search_outline, search_detail, search_cast,
                    use_all_channels, target_services, target_genres, target_days, use_time_range, start_time, end_time, sort_order,
-                   expires_on, enabled, created_at, updated_at
+                   expires_on, record_current_service_only, record_subtitles, enabled, created_at, updated_at
             FROM keyword_rules ORDER BY sort_order, id;
             """;
         return ReadKeywordRules(cmd);
@@ -7265,13 +7493,13 @@ WHERE source <> 'Epg'
               (name, pattern, exclude_pattern, use_regex, search_fields,
                search_title, search_outline, search_detail, search_cast,
                use_all_channels, target_services, target_genres, target_days, use_time_range, start_time, end_time, sort_order,
-               expires_on, enabled, created_at, updated_at)
+               expires_on, record_current_service_only, record_subtitles, enabled, created_at, updated_at)
             VALUES
               ($name, $pat, $exc, $regex, $fields,
                $stitle, $soutline, $sdetail, $scast,
                $useAllChannels, $svc, $genres, $days, $useTime, $startTime, $endTime,
                COALESCE((SELECT MAX(sort_order) + 1 FROM keyword_rules), 1),
-               $exp, $en, $now, $now);
+               $exp, $recordCurrentServiceOnly, $recordSubtitles, $en, $now, $now);
             SELECT last_insert_rowid();
             """;
         BindKeywordRule(cmd, r, now);
@@ -7291,7 +7519,8 @@ WHERE source <> 'Epg'
               use_all_channels=$useAllChannels,
               target_services=$svc, target_genres=$genres, target_days=$days,
               use_time_range=$useTime, start_time=$startTime, end_time=$endTime,
-              expires_on=$exp, enabled=$en, updated_at=$now
+              expires_on=$exp, record_current_service_only=$recordCurrentServiceOnly, record_subtitles=$recordSubtitles,
+              enabled=$en, updated_at=$now
             WHERE id=$id;
             """;
         BindKeywordRule(cmd, r, now);
@@ -7395,6 +7624,69 @@ WHERE source <> 'Epg'
         }
         tx.Commit();
         return total;
+    }
+
+    /// <summary>
+    /// Canonical Basic EIT が世代交代として退場させた旧イベントに正確に紐づく、
+    /// 未開始の自動検索予約だけを同じauthority transitionの従属結果として退場させる。
+    /// Manual / Program / Starting以降はユーザーまたは実行正本なので対象外。
+    /// event_idは再利用され得るため、NID/TSID/SID/EIDに加えて開始・終了時刻まで完全一致させる。
+    /// </summary>
+    public int DeleteScheduledKeywordReservationsForRetiredEpgEvents(
+        IReadOnlyCollection<EpgRetiredEventIdentity> retiredEvents)
+    {
+        if (retiredEvents.Count == 0) return 0;
+
+        var retiredKeys = retiredEvents
+            .Select(e => (e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId, e.Start, e.End))
+            .ToHashSet();
+
+        using var con = db.Open();
+        using var tx = con.BeginTransaction();
+
+        var ruleIds = new List<int>();
+        using (var ruleSelect = con.CreateCommand())
+        {
+            ruleSelect.Transaction = tx;
+            ruleSelect.CommandText = """
+                SELECT DISTINCT source_rule_id
+                FROM reservations
+                WHERE source = 'keyword'
+                  AND status = 'scheduled'
+                  AND source_rule_id IS NOT NULL;
+                """;
+            using var reader = ruleSelect.ExecuteReader();
+            while (reader.Read())
+                ruleIds.Add(reader.GetInt32(0));
+        }
+
+        var removed = new List<Reservation>();
+        foreach (var ruleId in ruleIds)
+        {
+            var candidates = ReadScheduledKeywordReservations(con, tx, ruleId)
+                .Where(r => retiredKeys.Contains((
+                    r.NetworkId,
+                    r.TransportStreamId,
+                    r.ServiceId,
+                    r.EventId,
+                    r.StartTime,
+                    r.EndTime)))
+                .ToList();
+            if (candidates.Count == 0)
+                continue;
+
+            removed.AddRange(DeleteScheduledReservations(
+                con,
+                tx,
+                candidates,
+                ReservationSource.Keyword,
+                ruleId,
+                requireDataVersionMatch: true));
+        }
+
+        tx.Commit();
+        RecordProjectedReservationRemovals(removed, "epg_authority_event_retired");
+        return removed.Count;
     }
 
     public int DeleteScheduledKeywordReservationsByIds(int ruleId, IReadOnlyCollection<int> reservationIds)
@@ -7543,12 +7835,12 @@ WHERE source <> 'Epg'
                   (id, name, pattern, exclude_pattern, use_regex, search_fields,
                    search_title, search_outline, search_detail, search_cast,
                    use_all_channels, target_services, target_genres, target_days, use_time_range, start_time, end_time, sort_order,
-                   expires_on, enabled, created_at, updated_at)
+                   expires_on, record_current_service_only, record_subtitles, enabled, created_at, updated_at)
                 VALUES
                   ($id, $name, $pat, $exc, $regex, $fields,
                    $stitle, $soutline, $sdetail, $scast,
                    $useAllChannels, $svc, $genres, $days, $useTime, $startTime, $endTime, $sortOrder,
-                   $exp, $en, $createdAt, $updatedAt);
+                   $exp, $recordCurrentServiceOnly, $recordSubtitles, $en, $createdAt, $updatedAt);
                 """;
             cmd.Parameters.AddWithValue("$id", r.Id > 0 ? r.Id : i + 1);
             cmd.Parameters.AddWithValue("$name", r.Name ?? "");
@@ -7569,6 +7861,8 @@ WHERE source <> 'Epg'
             cmd.Parameters.AddWithValue("$endTime", string.IsNullOrWhiteSpace(r.EndTime) ? "23:59" : r.EndTime);
             cmd.Parameters.AddWithValue("$sortOrder", i + 1);
             cmd.Parameters.AddWithValue("$exp", r.ExpiresOn ?? "");
+            cmd.Parameters.AddWithValue("$recordCurrentServiceOnly", r.RecordCurrentServiceOnly ? 1 : 0);
+            cmd.Parameters.AddWithValue("$recordSubtitles", r.RecordSubtitles ? 1 : 0);
             cmd.Parameters.AddWithValue("$en", r.Enabled ? 1 : 0);
             cmd.Parameters.AddWithValue("$createdAt", (r.CreatedAt == default ? DateTime.Now : r.CreatedAt).ToString("O"));
             cmd.Parameters.AddWithValue("$updatedAt", (r.UpdatedAt == default ? DateTime.Now : r.UpdatedAt).ToString("O"));
@@ -7922,9 +8216,11 @@ WHERE source <> 'Epg'
                 EndTime        = r.IsDBNull(16) ? "23:59" : r.GetString(16),
                 SortOrder      = r.IsDBNull(17) ? 0 : r.GetInt32(17),
                 ExpiresOn      = r.IsDBNull(18) ? "" : r.GetString(18),
-                Enabled        = r.GetInt32(19) != 0,
-                CreatedAt      = r.IsDBNull(20) ? DateTime.MinValue : DateTime.Parse(r.GetString(20)),
-                UpdatedAt      = r.IsDBNull(21) ? DateTime.MinValue : DateTime.Parse(r.GetString(21)),
+                RecordCurrentServiceOnly = r.IsDBNull(19) || r.GetInt32(19) != 0,
+                RecordSubtitles = r.IsDBNull(20) || r.GetInt32(20) != 0,
+                Enabled        = r.GetInt32(21) != 0,
+                CreatedAt      = r.IsDBNull(22) ? DateTime.MinValue : DateTime.Parse(r.GetString(22)),
+                UpdatedAt      = r.IsDBNull(23) ? DateTime.MinValue : DateTime.Parse(r.GetString(23)),
             });
         }
         return list;
@@ -8426,6 +8722,8 @@ WHERE source <> 'Epg'
         cmd.Parameters.AddWithValue("$startTime", string.IsNullOrWhiteSpace(r.StartTime) ? "00:00" : r.StartTime);
         cmd.Parameters.AddWithValue("$endTime",   string.IsNullOrWhiteSpace(r.EndTime) ? "23:59" : r.EndTime);
         cmd.Parameters.AddWithValue("$exp",       r.ExpiresOn ?? "");
+        cmd.Parameters.AddWithValue("$recordCurrentServiceOnly", r.RecordCurrentServiceOnly ? 1 : 0);
+        cmd.Parameters.AddWithValue("$recordSubtitles", r.RecordSubtitles ? 1 : 0);
         cmd.Parameters.AddWithValue("$en",        r.Enabled ? 1 : 0);
         cmd.Parameters.AddWithValue("$now",       now);
     }

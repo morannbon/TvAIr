@@ -3,16 +3,81 @@ using TvAIr.Epg;
 using TvAIr.Schedule;
 using TvAIr.Tuner;
 using TvAIr.Plugin;
+using TvAIrPlugin;
 
 namespace TvAIr.Core;
 
+public sealed record HostThemeRuntimeSnapshot(
+    string SelectedTheme,
+    string EffectiveTheme,
+    string Generation,
+    long Revision,
+    bool Changed);
+
 public sealed class SettingsRuntimeState
 {
+    private readonly object _themeGate = new();
+    private string _selectedTheme;
+    private string _effectiveTheme;
+    private readonly string _themeGeneration = Guid.NewGuid().ToString("N");
     private long _themeRevision;
+    private readonly Dictionary<string, (long Revision, long? PreviousRevision)> _pendingPluginThemeRefresh = new(StringComparer.OrdinalIgnoreCase);
+
+    public SettingsRuntimeState(IniSettingsService ini)
+    {
+        _selectedTheme = HostThemeStateContract.NormalizeSelected(ini.SystemTheme);
+        _effectiveTheme = HostThemeStateContract.ResolveEffective(_selectedTheme);
+    }
 
     public long ThemeRevision => Interlocked.Read(ref _themeRevision);
 
-    public long AdvanceThemeRevision() => Interlocked.Increment(ref _themeRevision);
+
+
+
+    public void RegisterPluginThemeRefresh(string? routeSegment, long revision, long? previousRevision)
+    {
+        var route = (routeSegment ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(route) || revision < 0) return;
+        lock (_themeGate)
+        {
+            _pendingPluginThemeRefresh[route] = (revision, previousRevision);
+        }
+    }
+
+    public bool TryCompletePluginThemeRefresh(string? routeSegment, long renderedRevision, out long targetRevision, out long? previousRevision)
+    {
+        targetRevision = -1;
+        previousRevision = null;
+        var route = (routeSegment ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(route)) return false;
+        lock (_themeGate)
+        {
+            if (!_pendingPluginThemeRefresh.TryGetValue(route, out var pending)) return false;
+            if (pending.Revision != renderedRevision) return false;
+            _pendingPluginThemeRefresh.Remove(route);
+            targetRevision = pending.Revision;
+            previousRevision = pending.PreviousRevision;
+            return true;
+        }
+    }
+
+    public HostThemeRuntimeSnapshot ObserveTheme(string? selectedTheme)
+    {
+        var selected = HostThemeStateContract.NormalizeSelected(selectedTheme);
+        var effective = HostThemeStateContract.ResolveEffective(selected);
+        lock (_themeGate)
+        {
+            var changed = !string.Equals(_selectedTheme, selected, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(_effectiveTheme, effective, StringComparison.OrdinalIgnoreCase);
+            if (changed)
+            {
+                _selectedTheme = selected;
+                _effectiveTheme = effective;
+                _themeRevision++;
+            }
+            return new HostThemeRuntimeSnapshot(_selectedTheme, _effectiveTheme, _themeGeneration, _themeRevision, changed);
+        }
+    }
 }
 
 public sealed class SettingsValidationException : ArgumentException
@@ -32,6 +97,7 @@ public sealed record SettingsChangeResult(
     bool RequiresRestart,
     bool TunerTopologyRestartRequired,
     bool ReservationActionUiHotReloaded,
+    bool ThemeChanged,
     long ThemeRevision);
 
 /// <summary>
@@ -44,28 +110,38 @@ public sealed class SettingsChangeApplicationService
     private readonly IniSettingsService _ini;
     private readonly ChannelFileLoader _channelLoader;
     private readonly EpgScheduler _epgScheduler;
-    private readonly StartupRegistryService _startupService;
+    private readonly WindowsAutoStartService _startupService;
     private readonly NetworkAccessSecurity _networkSecurity;
     private readonly NetworkUsageGate _networkUsage;
     private readonly ReservationAllocationRouteService _allocationRoute;
     private readonly ReservationScheduler _reservationScheduler;
+    private readonly ChainLifecycleCoordinator _chainLifecycle;
     private readonly LogRepository _log;
     private readonly SettingsRuntimeState _runtimeState;
     private readonly PluginToolWindowHostService _toolWindows;
+    private readonly PluginRegistry _pluginRegistry;
+    private readonly PluginInternetAccessPermissionStore _pluginInternetPermissions;
+    private readonly PluginTypedEventHub _pluginTypedEvents;
+    private readonly SettingsUiCommitHub _settingsUiCommits;
     private readonly object _applyGate = new();
 
     public SettingsChangeApplicationService(
         IniSettingsService ini,
         ChannelFileLoader channelLoader,
         EpgScheduler epgScheduler,
-        StartupRegistryService startupService,
+        WindowsAutoStartService startupService,
         NetworkAccessSecurity networkSecurity,
         NetworkUsageGate networkUsage,
         ReservationAllocationRouteService allocationRoute,
         ReservationScheduler reservationScheduler,
+        ChainLifecycleCoordinator chainLifecycle,
         LogRepository log,
         SettingsRuntimeState runtimeState,
-        PluginToolWindowHostService toolWindows)
+        PluginToolWindowHostService toolWindows,
+        PluginRegistry pluginRegistry,
+        PluginInternetAccessPermissionStore pluginInternetPermissions,
+        PluginTypedEventHub pluginTypedEvents,
+        SettingsUiCommitHub settingsUiCommits)
     {
         _ini = ini;
         _channelLoader = channelLoader;
@@ -75,9 +151,14 @@ public sealed class SettingsChangeApplicationService
         _networkUsage = networkUsage;
         _allocationRoute = allocationRoute;
         _reservationScheduler = reservationScheduler;
+        _chainLifecycle = chainLifecycle;
         _log = log;
         _runtimeState = runtimeState;
         _toolWindows = toolWindows;
+        _pluginRegistry = pluginRegistry;
+        _pluginInternetPermissions = pluginInternetPermissions;
+        _pluginTypedEvents = pluginTypedEvents;
+        _settingsUiCommits = settingsUiCommits;
     }
 
     public SettingsChangeResult Apply(WebSettingsUpdateDto dto)
@@ -93,6 +174,42 @@ public sealed class SettingsChangeApplicationService
             var merged = MergeWebRequest(current, dto);
             return ApplyCore(merged);
         }
+    }
+
+
+    private void PublishPluginInternetAccessEffectiveStateChanged(bool networkUsageEnabled)
+    {
+        var notified = 0;
+        foreach (var plugin in _pluginRegistry.GetRuntimePlugins())
+        {
+            var permissions = PluginPermissionResolver.Resolve(plugin.Descriptor.RequiredPermissions);
+            var declared = PluginPermissionResolver.DeclaresAnyInternet(permissions);
+            if (!declared) continue;
+
+            var pluginId = PluginIdentity.Normalize(plugin.Descriptor.PluginId);
+            var userAllowed = _pluginInternetPermissions.IsAllowed(pluginId);
+            var effective = networkUsageEnabled && userAllowed;
+
+            _pluginTypedEvents.Publish(new TvAirEventDto
+            {
+                EventType = TvAirEventType.PluginPermissionChanged,
+                EntityId = $"plugin-permission:{pluginId}:internet-access-effective",
+                ChangeKind = effective ? "EffectiveEnabled" : "EffectiveDisabled",
+                Details = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["pluginId"] = pluginId,
+                    ["permission"] = "InternetAccess",
+                    ["allowed"] = userAllowed ? "true" : "false",
+                    ["networkUsageEnabled"] = networkUsageEnabled ? "true" : "false",
+                    ["effective"] = effective ? "true" : "false",
+                    ["changeSource"] = "NetworkUsageMaster"
+                }
+            });
+            notified++;
+        }
+
+        _log.Add("PLUGIN_INTERNET_ACCESS_EFFECTIVE_NOTIFY", "Settings",
+            $"result=DISPATCHED source=NetworkUsageMaster networkUsageEnabled={networkUsageEnabled} notified={notified} eventType=PluginPermissionChanged target=internet_capable_plugins rule=plugin_internet_access_effective_state_notification_contract");
     }
 
     private static IniSettingsUpdateDto MergeWebRequest(IniSettingsDto current, WebSettingsUpdateDto requested) => new()
@@ -173,8 +290,8 @@ public sealed class SettingsChangeApplicationService
         if (!HasPersistedDifference(before, dto))
         {
             // SETTINGS_STARTUP_RECONCILIATION_CONTRACT
-            // StartupEnabledはINIだけでなくHKCU Runキーへの外部投影を持つ。
-            // 前回の反映失敗や利用者によるRunキー削除後、保存値が同じという理由だけで
+            // StartupEnabledはINIだけでなくWindowsログオン自動起動タスクへの外部投影を持つ。
+            // 前回の反映失敗や利用者による自動起動タスク削除後、保存値が同じという理由だけで
             // NO_CHANGE終了すると設定画面から再試行できないため、差分0件でも保存済み値へ再同期する。
             var noChangeStartupApplySucceeded = _startupService.Set(before.StartupEnabled);
             _log.Add("SETTINGS_SAVE", "Settings",
@@ -194,6 +311,7 @@ public sealed class SettingsChangeApplicationService
                 RequiresRestart: topologyRestartPendingBefore || hostRestartPendingBefore,
                 TunerTopologyRestartRequired: topologyRestartPendingBefore,
                 ReservationActionUiHotReloaded: false,
+                ThemeChanged: false,
                 ThemeRevision: _runtimeState.ThemeRevision);
         }
 
@@ -356,6 +474,13 @@ public sealed class SettingsChangeApplicationService
             _networkUsage.Apply(after.NetworkUsageEnabled);
             _log.Add("NETWORK_USAGE_MASTER", "Settings",
                 $"result=CHANGED enabled={after.NetworkUsageEnabled} mode={(after.NetworkUsageEnabled ? "normal" : "closed_network")} nonLoopback={(after.NetworkUsageEnabled ? "evaluate_lower_policy" : "deny")} inFlightExternal={(after.NetworkUsageEnabled ? "unchanged" : "cancel")} rule=network_usage_master_contract");
+
+            // PLUGIN_INTERNET_ACCESS_EFFECTIVE_STATE_NOTIFICATION_CONTRACT
+            // NetworkUsage ON/OFFはPlugin個別許可そのものを変更しないが、Pluginから見た
+            // InternetAccess.Effectiveを即時に変える。個別許可変更と同じtyped-event境界で
+            // Internet-capable Pluginへ再評価契機を配送し、OFFでcancelされた待機sessionが
+            // ON復帰時に永久待機しないようにする。Plugin別の通信実装や再接続policyはHostが所有しない。
+            PublishPluginInternetAccessEffectiveStateChanged(after.NetworkUsageEnabled);
         }
 
         if ((before.NetworkUsageEnabled && !after.NetworkUsageEnabled) || (before.NetworkLanAccessEnabled && !after.NetworkLanAccessEnabled) || networkPasswordChanged)
@@ -380,16 +505,18 @@ public sealed class SettingsChangeApplicationService
                 $"changed=True serviceList={channelServiceListChanged} tuningMap={channelTuningMapChanged} action=invalidate_channel_cache dataRefresh=False displayRefresh=next_regular_fetch allocation=False preRecRefresh=False wake=False dbMutation=none tunerTopologyMutation={tunerTopologyChanged} rule=release_contract");
         }
 
-        var themeRevision = systemThemeChanged ? _runtimeState.AdvanceThemeRevision() : _runtimeState.ThemeRevision;
-        if (systemThemeChanged)
+        var themeSnapshot = _runtimeState.ObserveTheme(afterSystemTheme);
+        var themeRevision = themeSnapshot.Revision;
+        if (themeSnapshot.Changed)
         {
-            // ThemeRevisionとINIは既に確定済みである。開いているToolWindowへの通知失敗を
-            // 保存失敗としてHTTP 500へ漏らさず、次回再描画・再オープンで確定テーマへ収束させる。
+            // ThemeRevisionとselected/effective stateは既に確定済みである。ToolWindowはHost window fan-out、通常Plugin Pageは
+            // SettingsUiCommitHubのHost commit broadcastから各browser surfaceが同一ThemeRevisionへ収束する。browser pollingや親iframe通知を正規経路にしない。
+            // ToolWindow通知失敗は保存失敗としてHTTP 500へ漏らさず、次回再描画・再オープンで確定テーマへ収束させる。
             try
             {
                 var refreshedToolWindows = _toolWindows.RefreshAllForThemeChange(themeRevision, afterSystemTheme);
                 _log.Add("SETTINGS_THEME_HOT_RELOAD", "Theme",
-                    $"changed=True before={beforeSystemTheme} after={afterSystemTheme} revision={themeRevision} openWindows={refreshedToolWindows} rule=release_contract");
+                    $"changed=True before={beforeSystemTheme} after={afterSystemTheme} revision={themeRevision} openWindows={refreshedToolWindows} pageRefresh=host_settings_commit_broadcast_contract pagePreserveScroll=True pageActivation=False pageFocus=preserve_existing_best_effort rule=release_contract");
             }
             catch (Exception ex)
             {
@@ -405,6 +532,31 @@ public sealed class SettingsChangeApplicationService
             // RecordingSessionが開始時snapshotを保持する。保存値を実行中sessionへ後段上塗りしない。
             _log.Add("SETTINGS_HOT_RELOAD", "RecordingSchedulePolicy",
                 $"changed=True beforeLater={before.LaterProgramPriority} afterLater={after.LaterProgramPriority} beforeChain={before.PseudoContinuousRecording} afterChain={after.PseudoContinuousRecording} pre={before.PreStartMarginSeconds}->{after.PreStartMarginSeconds} post={before.PostEndMarginSeconds}->{after.PostEndMarginSeconds} activeRecordingMarginApply=future_session_only rule=release_contract");
+        }
+
+        var chainFeatureTransition = new ChainFeatureTransitionResult(false, true, 0, "not_applicable");
+        var chainTransitionWarning = false;
+        try
+        {
+            chainFeatureTransition = _chainLifecycle.ApplyFeatureTransition(
+                before.LaterProgramPriority,
+                before.PseudoContinuousRecording,
+                after.LaterProgramPriority,
+                after.PseudoContinuousRecording,
+                "Settings.Save");
+            if (chainFeatureTransition.TransitionedToDisabled && !chainFeatureTransition.DetachApplied)
+            {
+                chainTransitionWarning = true;
+                postCommitWarnings.Add("チェーン予約の通常予約への切り替えに失敗しました。ログを確認してください。");
+            }
+        }
+        catch (Exception ex)
+        {
+            chainTransitionWarning = true;
+            postCommitWarnings.Add("チェーン予約の通常予約への切り替えに失敗しました。ログを確認してください。");
+            _log.Add("SETTINGS_POST_COMMIT_WARNING", "ChainLifecycle",
+                $"result=FAILED stage=chain_feature_transition persisted=True exception={ex.GetType().Name} reason={ex.Message} " +
+                "action=preserve_stored_topology_and_runtime_then_retry_from_persisted_settings rule=settings_post_commit_side_effect_contract");
         }
 
         if (recordingCompletionPolicyChanged)
@@ -442,8 +594,8 @@ public sealed class SettingsChangeApplicationService
         }
 
         // SETTINGS_STARTUP_PROJECTION_RECONCILIATION_CONTRACT
-        // StartupEnabledの正本は保存済みINI。Runキーは外部投影なので、Startup値を変更した時だけでなく
-        // すべての設定保存成功後に正本へ再同期する。実行中にRunキーが削除・変更されていても、
+        // StartupEnabledの正本は保存済みINI。Windowsログオン自動起動タスクは外部投影なので、Startup値を変更した時だけでなく
+        // すべての設定保存成功後に正本へ再同期する。実行中に自動起動タスクが削除・変更されていても、
         // unrelated setting saveで古い外部状態を残さない。Setは同値ならno-op。
         // 反映失敗は保存済みINIを巻き戻さず、部分適用として呼出元へ明示する。
         var startupApplySucceeded = _startupService.Set(after.StartupEnabled);
@@ -451,19 +603,19 @@ public sealed class SettingsChangeApplicationService
         // チューナー構成は保存のみでRuntime未変更、ChannelMapはChannelFileLoaderの即時再読込責務であるため、
         // どちらも共通割当・PreRec・Wakeの再実行理由にしない。
         var epgScheduleRefreshRequired = dailyEpgScheduleChanged || preRecordEpgPolicyChanged;
-        var allocationRefreshRequired = recordingSchedulePolicyChanged || epgScheduleRefreshRequired;
+        var allocationRefreshRequired = recordingSchedulePolicyChanged || chainFeatureTransition.DetachedScheduledReservations > 0 || epgScheduleRefreshRequired;
         // SETTINGS_PROGRAM_RULE_SYNC_SCOPE_CONTRACT
         // ProgramRule予約の発生時刻・曜日・期限・局指定はProgramRule自身が正本であり、
-        // LaterProgramPriority／PseudoContinuousRecording／録画前後マージン／EPG設定を参照しない。
+        // 後番組優先／チェーン予約設定／録画前後マージン／EPG設定を参照しない。
         // したがって設定保存を理由にProgramRule予約を再生成しない。録画方針変更は既存予約の
         // Allocation／PreRec／Wakeだけを新設定で再評価する。ProgramRuleの作成・変更・削除側が同期責務を持つ。
         const bool programRuleSyncRequired = false;
         // Daily EPGのON/OFF・時刻・深度変更はDaily行だけの責務であり、
         // 録画前EPG確認行を削除・再生成する理由にはしない。
         // PreRec再構築は録画スケジュール方針または録画前EPG確認時刻が変わった場合だけ行う。
-        var preRecordRefreshRequired = recordingSchedulePolicyChanged || preRecordEpgPolicyChanged;
+        var preRecordRefreshRequired = recordingSchedulePolicyChanged || chainFeatureTransition.DetachedScheduledReservations > 0 || preRecordEpgPolicyChanged;
         var wakeRefreshRequired = allocationRefreshRequired || wakePolicyChanged;
-        var conflictLogRequired = recordingSchedulePolicyChanged;
+        var conflictLogRequired = recordingSchedulePolicyChanged || chainFeatureTransition.DetachedScheduledReservations > 0;
         // Route起動条件は、現在の包含関係（WakeがAllocationを内包する等）へ依存させない。
         // 各副作用フラグのどれかがtrueなら必ず共通Routeを通し、将来の責務分離で
         // PreRecやProgramRuleだけがtrueになっても処理が黙って脱落しないようにする。
@@ -509,7 +661,7 @@ public sealed class SettingsChangeApplicationService
         var requiresRestart = topologyRestartPendingAfter || hostRestartPendingAfter;
 
         _log.Add("SETTINGS_SAVE", "Settings",
-            $"result=APPLIED persistedChanges={changedAreas.Count} areas=[{string.Join(',', changedAreas.OrderBy(x => x, StringComparer.Ordinal))}] persistedTopologyChanged={tunerTopologyChanged} runtimeTopologyPending={topologyRestartPendingAfter} runtimeHostPending={hostRestartPendingAfter} recordingSchedule={recordingSchedulePolicyChanged} recordingCompletion={recordingCompletionPolicyChanged} workerPresentation={recordingWorkerPresentationChanged} epgDaily={dailyEpgScheduleChanged} epgPreRecord={preRecordEpgPolicyChanged} epgWorker={epgWorkerPolicyChanged} networkImmediate={networkAccessChanged} revokedSessions={revokedNetworkSessions} clearedLoginFailures={clearedNetworkLoginFailures} route={routeExecutionRequired} routeApply={allocationRouteSucceeded} syncProgram={programRuleSyncRequired} allocation={allocationRefreshRequired} preRecRefresh={preRecordRefreshRequired} wake={wakeRefreshRequired} conflictLog={conflictLogRequired} startupApply={startupApplySucceeded} postCommitWarnings={postCommitWarnings.Count} restart={requiresRestart} rule=settings_canonical_diff_contract");
+            $"result=APPLIED persistedChanges={changedAreas.Count} areas=[{string.Join(',', changedAreas.OrderBy(x => x, StringComparer.Ordinal))}] persistedTopologyChanged={tunerTopologyChanged} runtimeTopologyPending={topologyRestartPendingAfter} runtimeHostPending={hostRestartPendingAfter} recordingSchedule={recordingSchedulePolicyChanged} chainFeatureDisabled={chainFeatureTransition.TransitionedToDisabled} chainDetached={chainFeatureTransition.DetachedScheduledReservations} chainDetachWarning={chainTransitionWarning} recordingCompletion={recordingCompletionPolicyChanged} workerPresentation={recordingWorkerPresentationChanged} epgDaily={dailyEpgScheduleChanged} epgPreRecord={preRecordEpgPolicyChanged} epgWorker={epgWorkerPolicyChanged} networkImmediate={networkAccessChanged} revokedSessions={revokedNetworkSessions} clearedLoginFailures={clearedNetworkLoginFailures} route={routeExecutionRequired} routeApply={allocationRouteSucceeded} syncProgram={programRuleSyncRequired} allocation={allocationRefreshRequired} preRecRefresh={preRecordRefreshRequired} wake={wakeRefreshRequired} conflictLog={conflictLogRequired} startupApply={startupApplySucceeded} postCommitWarnings={postCommitWarnings.Count} restart={requiresRestart} rule=settings_canonical_diff_contract");
 
         // SETTINGS_SAVE_RESULT_MESSAGE_COMPOSITION_CONTRACT
         // 外部副作用の部分失敗と再起動待ちは同時に成立し得るため、優先順位で片方を隠さず加算して通知する。
@@ -524,13 +676,26 @@ public sealed class SettingsChangeApplicationService
             messageParts.Add("データ保存先またはポート変更はTvAIrの再起動後に反映されます。");
         var message = string.Join(string.Empty, messageParts);
 
-        return new SettingsChangeResult(
+        var result = new SettingsChangeResult(
             Message: message,
             PersistedChanged: true,
             RequiresRestart: requiresRestart,
             TunerTopologyRestartRequired: topologyRestartPendingAfter,
             ReservationActionUiHotReloaded: reservationActionUiPolicyChanged,
+            ThemeChanged: themeSnapshot.Changed,
             ThemeRevision: themeRevision);
+
+        var uiCommit = _settingsUiCommits.Publish(
+            persistedChanged: result.PersistedChanged,
+            themeChanged: result.ThemeChanged,
+            themeRevision: result.ThemeRevision,
+            reservationActionUiHotReloaded: result.ReservationActionUiHotReloaded,
+            requiresRestart: result.RequiresRestart,
+            tunerTopologyRestartRequired: result.TunerTopologyRestartRequired);
+        _log.Add("SETTINGS_UI_COMMIT_BROADCAST", "Settings",
+            $"result=PUBLISHED sequence={uiCommit.Sequence} themeChanged={uiCommit.ThemeChanged} themeRevision={uiCommit.ThemeRevision} reservationActionUiHotReloaded={uiCommit.ReservationActionUiHotReloaded} source=settings_application_service target=all_browser_surfaces transport=sse rule=settings_ui_commit_broadcast_single_source");
+
+        return result;
     }
 
     private static bool HasPersistedDifference(IniSettingsDto current, IniSettingsUpdateDto requested)
@@ -602,9 +767,9 @@ public sealed class SettingsChangeApplicationService
         if (string.IsNullOrWhiteSpace(requested.DataDirectory))
             throw new SettingsValidationException(nameof(IniSettingsUpdateDto.DataDirectory), "データ保存先フォルダが未入力です。");
         if (!SettingsDefaults.EpgHourOptions.Contains(requested.EpgHour))
-            throw new SettingsValidationException(nameof(IniSettingsUpdateDto.EpgHour), "定期取得時刻の時を選択してください。");
+            throw new SettingsValidationException(nameof(IniSettingsUpdateDto.EpgHour), "定時EPG取得時刻の時を選択してください。");
         if (!SettingsDefaults.EpgMinuteOptions.Contains(requested.EpgMinute))
-            throw new SettingsValidationException(nameof(IniSettingsUpdateDto.EpgMinute), "定期取得時刻の分を選択してください。");
+            throw new SettingsValidationException(nameof(IniSettingsUpdateDto.EpgMinute), "定時EPG取得時刻の分を選択してください。");
         if (!SettingsDefaults.IsPreStartMarginSecondsAllowed(requested.PreStartMarginSeconds))
             throw new SettingsValidationException(nameof(IniSettingsUpdateDto.PreStartMarginSeconds), "録画開始マージンを選択してください。");
         if (!SettingsDefaults.IsPostEndMarginSecondsAllowed(requested.PostEndMarginSeconds))

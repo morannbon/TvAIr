@@ -1,4 +1,4 @@
-﻿using TvAIr.Channel;
+using TvAIr.Channel;
 using TvAIr.Core;
 using TvAIr.Epg.Projection;
 using TvAIr.Schedule;
@@ -69,11 +69,22 @@ internal sealed class PluginReadModelSource
             storedFallback);
 
     public string ResolveCurrentServiceName(Reservation reservation)
-        => ResolveCurrentServiceName(
+    {
+        var projected = reservation.EventId == 0
+            ? null
+            : _programEvents.GetByEventKey(
+                reservation.NetworkId,
+                reservation.TransportStreamId,
+                reservation.ServiceId,
+                reservation.EventId);
+        return ServiceIdentityContract.ResolveReservationServiceName(
+            GetChannelLoad().Targets,
             reservation.NetworkId,
             reservation.TransportStreamId,
             reservation.ServiceId,
+            projected?.ServiceName,
             reservation.ServiceName);
+    }
 
     public IReadOnlyList<TunerSlotStatus> GetTunerStatus()
         => _tunerPool.GetStatus();

@@ -1078,6 +1078,7 @@ public sealed class UserEventLogService
         var operationId = BuildOperationId("PRE_REC_EPG_FAILED", at);
         var title = NormalizeOperationText(parent.Title);
         var service = NormalizeOperationText(parent.ServiceName);
+        var failureReasonText = DescribePreRecordEpgFailureReason(reason);
 
         // USER_LOG_PRESENTATION_INVARIANT
         // 標準ログは、画面をうるさくしないため必ずシンプルな1行表示にする。
@@ -1109,9 +1110,51 @@ public sealed class UserEventLogService
             ServiceName = service,
             ScheduledStart = parent.StartTime,
             ScheduledEnd = parent.EndTime,
-            CompletionReason = "EPG確認ができなかったため、予約時刻のまま録画します",
-            Detail = BuildCompactDetail(new [] { $"reservationId=R{parent.Id}", $"service={service}", $"programTitle={title}", string.IsNullOrWhiteSpace(reason) ? string.Empty : $"diagnosticReason={NormalizeOperationText(reason)}" })
+            CompletionReason = failureReasonText,
+            Detail = BuildCompactDetail(new [] { $"reservationId=R{parent.Id}", $"service={service}", $"programTitle={title}", string.IsNullOrWhiteSpace(reason) ? string.Empty : $"diagnosticReason={NormalizeOperationText(reason)}", $"displayReason={failureReasonText}" })
         });
+    }
+
+    private static string DescribePreRecordEpgFailureReason(string? reason)
+    {
+        if (string.IsNullOrWhiteSpace(reason))
+            return "EPG確認を完了できなかったため、予約時刻のまま録画します";
+
+        var value = reason.Trim();
+        if (value.Contains("admission_claim_lost", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("admission_claim_not_current", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("claim_identity_mismatch", StringComparison.OrdinalIgnoreCase))
+            return "EPG確認用に確保した録画用チューナーの実行権を維持できませんでした。予約時刻のまま録画します";
+
+        if (value.Contains("target_service_identity_not_found", StringComparison.OrdinalIgnoreCase))
+            return "録画対象サービスのNID/TSID/SIDに対応する放送TSを特定できませんでした。予約時刻のまま録画します";
+
+        if (value.Contains("target_service_identity_ambiguous", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("target_ts_not_unique", StringComparison.OrdinalIgnoreCase))
+            return "録画対象サービスのNID/TSID/SIDに対応する放送TSを一意に特定できませんでした。予約時刻のまま録画します";
+
+        if (value.Contains("no_prerec_channels", StringComparison.OrdinalIgnoreCase))
+            return "EPG確認対象のチャンネル情報を取得できませんでした。予約時刻のまま録画します";
+
+        if (value.Contains("target_event_not_observed", StringComparison.OrdinalIgnoreCase))
+            return "EPG確認workerは実行しましたが、対象番組のEPGを確認できませんでした。予約時刻のまま録画します";
+
+        if (value.Contains("probe_no_completion_evidence", StringComparison.OrdinalIgnoreCase))
+            return "EPG確認workerを実行しましたが、確認完了を確定できませんでした。予約時刻のまま録画します";
+
+        if (value.Contains("normal_epg_running", StringComparison.OrdinalIgnoreCase))
+            return "同じ放送波で定時・手動EPG取得が実行中だったため録画前EPG確認を行いませんでした。予約時刻のまま録画します";
+
+        if (value.Contains("no_free_recording_tuner", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("no_safe_free_recording_tuner", StringComparison.OrdinalIgnoreCase))
+            return "録画前EPG確認に使用できる録画用チューナーがありませんでした。予約時刻のまま録画します";
+
+        if (value.Contains("recording_due_priority", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("too_close_to_recording", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("insufficient_probe_window", StringComparison.OrdinalIgnoreCase))
+            return "録画開始が近いためEPG確認を終了し、録画を優先しました。予約時刻のまま録画します";
+
+        return $"EPG確認を完了できませんでした（{NormalizeOperationText(value)}）。予約時刻のまま録画します";
     }
 
     public void AddPreRecordEpgCheckedNoChange(Reservation reservation, DateTime? createdAt = null)

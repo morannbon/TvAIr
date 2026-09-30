@@ -204,7 +204,7 @@ public sealed class TvTestLauncher
                     // VIEWER_ACTIVATION_WINDOW_READY_WAIT_INVARIANT:
                     // TVTestの所有PIDとプロセス状態を正本とし、無条件の固定sleepでウィンドウ生成を推測しない。
                     // 入力待機完了または50ms上限のどちらかで直ちに再確認する。探索回数・所有PID限定・前面化動作は変更しない。
-                    // この順序・上限・所有PID条件の変更には、着手前に開発者の明示承認が必要。
+                    // 順序・上限・所有PID限定はViewer activationの不変条件として維持する。
                     try { _ = process.WaitForInputIdle(50); }
                     catch (InvalidOperationException) { }
                     catch (NotSupportedException) { }
@@ -507,7 +507,7 @@ public sealed class TvTestLauncher
             // TVTest再起動後の復元は、所有PIDのMainWindowHandleが実在した時点で直ちに進む。
             // 固定待機ではなく、各反復でTVTest自身の
             // input-idle成立を最大250msだけ待ち、ウィンドウ実在を再確認する。探索上限40回、
-            // 所有PID限定、復元順序を変更する場合は開発者の明示承認を要する。
+            // 所有PID限定と復元順序はViewer復元の不変条件として維持する。
             for (var i = 0; i < 40; i++)
             {
                 if (process.HasExited)
@@ -592,7 +592,7 @@ public sealed class TvTestLauncher
                 // Alt+Enter は対象TVTestが実際に前面化したことを確認してから送る。
                 // 前面化が確認できれば即時に進み、確認できない場合だけ必要な範囲で再確認する。
                 // 上限はOSが前面化要求を拒否・遅延した場合に処理を閉じるためだけに使う。
-                // この契約または待機方式を変更する場合は、開発者の明示承認を事前に得ること。
+                // 前面化確認と待機上限はViewer activationの同一契約として維持する。
                 long foregroundWaitMs = 0;
                 var foregroundReady = foregroundRequested && WaitForForegroundWindow(hwnd, TimeSpan.FromMilliseconds(200), out foregroundWaitMs);
                 if (foregroundReady)

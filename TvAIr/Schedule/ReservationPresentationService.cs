@@ -1,4 +1,4 @@
-﻿using TvAIr.Channel;
+using TvAIr.Channel;
 using TvAIr.Core;
 using TvAIr.Epg;
 using TvAIr.Epg.Projection;
@@ -72,7 +72,7 @@ public sealed class ReservationPresentationService
         {
             var items = GetReservations()
                 .Where(x => x.SourceKind == ReservationSource.Keyword)
-                .Where(x => x.StatusKind is ReservationStatus.Scheduled or ReservationStatus.Starting or ReservationStatus.Recording or ReservationStatus.Stopping)
+                .Where(x => ReservationLifecycleContract.IsScheduledOrRuntimeOwned(x.StatusKind))
                 .OrderBy(x => x.StartTime)
                 .ThenBy(x => x.ServiceName)
                 .ThenBy(x => x.Title)
@@ -132,8 +132,8 @@ public sealed class ReservationPresentationService
         var preRecordRowsByTuner = new Dictionary<string, List<Reservation>>(StringComparer.OrdinalIgnoreCase);
         if (preRecordEnabled)
         {
-            // PreRecの「直近」判定そのものはSystemEpgResponsibilityPlanを正本とする。
-            // Presentationは、その正本が選んだPreRecをどの録画Tunerの予定として見せるかだけ投影する。
+            // PreRecの①/②/③判定と表示優先度はSystemEpgResponsibilityPlanを正本とする。
+            // PriorityNameはユーザー向け順次サーチ表示(T1→T2→T3 / S1→S2→S3)であり、物理PreRec Tunerではない。
             foreach (var row in activeSystemRows
                          .Where(IsPreRecordEpgRow)
                          .Where(r => r.SourceRuleId.HasValue && selectedByParent.ContainsKey(r.SourceRuleId.Value)))
@@ -167,32 +167,33 @@ public sealed class ReservationPresentationService
         var visibleRows = new List<Reservation>();
         var priorityNames = new Dictionary<int, string>();
 
-        // RESERVATION_LIST_SYSTEM_EPG_NEXT_ACTION:
-        // 予約一覧はScheduler内部の「責務割当」を見せる画面ではなく、各録画Tunerで次に実行予定の
-        // System EPGを1件だけ示す。Daily ON時は永続化済みDaily行を基本候補として保持し、PreRecは
-        // 同じ候補列で開始順を比較して、Dailyより先に来る場合だけ次予定として選ぶ。
-        // 「そのTunerにPreRec責務が存在する」という理由だけで、より早いDailyを隠してはならない。
+        // RESERVATION_LIST_SYSTEM_EPG_NEXT_RESPONSIBILITY:
+        // SystemEpgResponsibilityPlanを各録画Tunerの「次のSystem EPG責務」の正本とする。
+        // PlanはGR/BSCS別に①通常PreRec / ②波内先頭1件 / ③Dailyを判定し、
+        // 表示優先度ごとの現在の次責務を確定する。物理PreRec Tuner選択は実行時資源側の責務。
+        // Presentation層では再判定せず、PlanのPreRec責務またはDaily fallbackをそのまま投影する。
+        var dailyFallbackTuners = plan.DailyFallbackTuners;
         foreach (var tuner in recordingTuners)
         {
-            var candidates = new List<Reservation>();
-
-            if (dailyEnabled && dailyRowsByTuner.TryGetValue(tuner.Name, out var dailyRows))
-            {
-                var daily = SelectVisibleDailyEpg(dailyRows);
-                if (daily is not null)
-                    candidates.Add(daily);
-            }
+            Reservation? next = null;
 
             if (preRecordEnabled && preRecordRowsByTuner.TryGetValue(tuner.Name, out var preRecordRows))
             {
-                candidates.AddRange(preRecordRows);
+                next = preRecordRows
+                    .OrderBy(r => r.Status == ReservationStatus.Recording ? 0 : 1)
+                    .ThenBy(r => r.StartTime)
+                    .ThenBy(r => r.Id)
+                    .FirstOrDefault();
             }
 
-            var next = candidates
-                .OrderBy(r => r.Status == ReservationStatus.Recording ? 0 : 1)
-                .ThenBy(r => r.StartTime)
-                .ThenBy(r => r.Id)
-                .FirstOrDefault();
+            if (next is null
+                && dailyEnabled
+                && dailyFallbackTuners.Contains(tuner.Name)
+                && dailyRowsByTuner.TryGetValue(tuner.Name, out var dailyRows))
+            {
+                next = SelectVisibleDailyEpg(dailyRows);
+            }
+
             if (next is null)
                 continue;
 
@@ -313,6 +314,7 @@ public sealed class ReservationPresentationService
                     IsResolvedEventReservation = origin.IsResolvedEventReservation,
                     CanToggleEnabled = ReservationOperationPolicy.CanToggleEnabled(r),
                     CanCancel = ReservationOperationPolicy.CanCancel(r),
+                    IsUserChain = r.IsUserChain,
                     ChainRole = chainInfo?.Role ?? string.Empty,
                     ChainLabel = chainInfo?.Label ?? string.Empty,
                     CreatedAt = r.CreatedAt,
@@ -466,18 +468,21 @@ public sealed class ReservationPresentationService
     {
         var stored = reservation.ServiceName?.Trim() ?? string.Empty;
 
-        // SERVICE_IDENTITY_CONTRACT:
-        // NID/TSID/SID is the service identity. ServiceName is mutable display metadata.
-        // Reservation rows keep the name captured at creation time as a fallback snapshot, but
-        // current presentation must prefer the exact current ChannelTarget name when available.
-        // Never infer a current station by SID-only or by station-name matching.
+        // RECORDING_SERVICE_PRESENTATION_SINGLE_SOURCE:
+        // The reservation owns the exact NID/TSID/SID recording identity. For its display label,
+        // prefer the exact projected event metadata bound to that identity, then the persisted
+        // reservation snapshot. ChannelTarget is physical-route metadata and is only the final
+        // fallback, so a sibling-service route alias cannot relabel a reservation as another
+        // service on the same transport.
         try
         {
-            return ServiceIdentityContract.ResolveCurrentServiceName(
+            var projectedServiceName = ResolveProjectedEvent(reservation)?.ServiceName;
+            return ServiceIdentityContract.ResolveReservationServiceName(
                 _channelLoader.Load().Targets,
                 reservation.NetworkId,
                 reservation.TransportStreamId,
                 reservation.ServiceId,
+                projectedServiceName,
                 stored);
         }
         catch (Exception ex)
@@ -535,6 +540,7 @@ public sealed class ReservationPresentationItem
     public bool IsResolvedEventReservation { get; set; }
     public bool CanToggleEnabled { get; set; }
     public bool CanCancel { get; set; }
+    public bool IsUserChain { get; set; }
     public string ChainRole { get; set; } = "";
     public string ChainLabel { get; set; } = "";
     public DateTime CreatedAt { get; set; }

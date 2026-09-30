@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param()
 
 $ErrorActionPreference = 'Stop'
@@ -37,6 +37,21 @@ $versionContract = Read-Text 'TvAIr\Core\TvAIrVersionContract.generated.cs'
 Assert-True ($versionContract.Contains("ProductVersion = `"$product`"")) 'TvAIrVersionContract.ProductVersion does not match source of truth.'
 Assert-True ($versionContract.Contains("PluginSdkVersion = `"$sdk`"")) 'TvAIrVersionContract.PluginSdkVersion does not match source of truth.'
 Assert-True ($versionContract.Contains("PluginHostContractVersion = `"$hostContract`"")) 'TvAIrVersionContract.PluginHostContractVersion does not match source of truth.'
+
+$webFiles = Get-ChildItem -LiteralPath (Join-Path $root 'TvAIr\wwwroot') -Recurse -File |
+    Where-Object { $_.Extension -in '.html', '.js', '.css' }
+foreach ($webFile in $webFiles) {
+    $webText = Get-Content -LiteralPath $webFile.FullName -Raw -Encoding UTF8
+    Assert-True ($webText -notmatch ('\?v=' + [regex]::Escape($product) + '-')) "Internal cache-buster suffix remains in $($webFile.FullName). Use the product version only."
+}
+
+$embeddedUiSources = @(
+    (Join-Path $root 'TvAIr\Program.cs')
+)
+foreach ($embeddedUiSource in $embeddedUiSources) {
+    $embeddedText = Get-Content -LiteralPath $embeddedUiSource -Raw -Encoding UTF8
+    Assert-True ($embeddedText -notmatch ('\?v=' + [regex]::Escape($product) + '-')) "Internal cache-buster suffix remains in $embeddedUiSource. Use the product version only."
+}
 Assert-True ($versionContract.Contains("MinimumSupportedPluginHostContractVersion = `"$minimumHost`"")) 'Minimum host contract version does not match source of truth.'
 Assert-True ($versionContract.Contains("PluginCompatibilityMajor = $compatibilityMajor")) 'Compatibility major does not match source of truth.'
 
@@ -50,7 +65,8 @@ $readmeMd = Read-Text 'README.md'
 $readmeTxt = Read-Text 'README.txt'
 Assert-True ($readmeMd -match "(?m)^# TvAIr $([regex]::Escape($product))\r?$") 'README.md product version does not match.'
 Assert-True ($readmeTxt -match "(?m)^# TvAIr $([regex]::Escape($product))\r?$") 'README.txt product version does not match.'
-Assert-True ($readmeTxt -eq $readmeMd) 'README.md and README.txt must be identical.'
+Assert-True ($readmeMd -ceq $readmeTxt) 'README.md and README.txt must be byte-equivalent text content.'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $root 'RELEASE_NOTES.txt'))) 'RELEASE_NOTES.txt must not be separately managed; release history belongs in README.'
 
 $projectFiles = @('TvAIr\TvAIr.csproj', 'TvAIrEpgRec\TvAIrEpgRec.csproj', 'TvAIrPlugin\TvAIrPlugin.csproj')
 foreach ($relativePath in $projectFiles) {

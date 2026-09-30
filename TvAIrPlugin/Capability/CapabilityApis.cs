@@ -38,6 +38,7 @@ public interface ITvAirPluginContext
     ITvAirHostsApi Hosts { get; }
     ITvAirPluginsApi Plugins { get; }
     ITvAirExternalLookupApi ExternalLookup { get; }
+    ITvAirInternetAccessApi InternetAccess { get; }
 }
 
 // Runtime plugin implementations receive ITvAirPluginContext through
@@ -253,6 +254,8 @@ public sealed class TvAirKeywordRuleDto
     public bool SearchOutline { get; init; }
     public bool SearchDetail { get; init; }
     public bool SearchCast { get; init; }
+    public bool RecordCurrentServiceOnly { get; init; } = true;
+    public bool RecordSubtitles { get; init; } = true;
     public bool Enabled { get; init; }
     public bool UseAllChannels { get; init; }
     /// <summary>Comma-separated exact service identities in NID:TSID:SID form. SID-only values are legacy Host data and must not be newly authored.</summary>

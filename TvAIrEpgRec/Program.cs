@@ -1,15 +1,14 @@
-﻿using System.Buffers;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Numerics;
-using System.Drawing;
-using System.Drawing.Drawing2D;
-using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Reflection;
+using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using TvAIrEpgRec.CommonTsRoute;
+using TvAIr.Epg.Shared;
 
 namespace TvAIrEpgRec;
 
@@ -47,7 +46,7 @@ internal static class Program
         var cancelPath = parsed.Get("cancel");
         var keepAliveMs = parsed.GetInt("keep-alive-ms", 0);
 
-        ApplyTaskbarTitle(mode, null, "起動中");
+        WorkerPresentation.UpdateBase(mode, null, ensureWindow: false);
 
         TvAIrEpgRecJob? job = null;
         try
@@ -63,8 +62,7 @@ internal static class Program
                     : job?.ResultPath ?? job?.OutputPath;
                 cancelPath ??= job?.CancelSignalPath;
 
-                ApplyTaskbarTitle(mode, job, "準備中");
-                EnsureWorkerStatusWindow(mode, job);
+                WorkerPresentation.UpdateBase(mode, job, ensureWindow: true);
                 var loadedJobId = FirstNonEmpty(job?.JobId, parsed.Get("job-id"), Guid.NewGuid().ToString("N"));
                 await WriteProgressAsync(progressPath, new WorkerProgress
                 {
@@ -79,7 +77,7 @@ internal static class Program
             }
 
             mode ??= "runtime";
-            ApplyTaskbarTitle(mode, job, "実行中");
+            WorkerPresentation.UpdateBase(mode, job, ensureWindow: true);
             if (string.IsNullOrWhiteSpace(resultPath) && !string.Equals(mode, "record", StringComparison.OrdinalIgnoreCase))
             {
                 resultPath = parsed.Get("output");
@@ -174,8 +172,7 @@ internal static class Program
             };
 
             var finalStage = cancelled ? "キャンセル" : (resultSuccess ? "完了" : "確認要");
-            ApplyTaskbarTitle(mode, job, finalStage);
-            EnsureWorkerStatusWindow(mode, job);
+            WorkerPresentation.UpdateBase(mode, job, ensureWindow: true);
             await WriteResultAsync(resultPath, result).ConfigureAwait(false);
             await WriteProgressAsync(progressPath, new WorkerProgress
             {
@@ -212,8 +209,7 @@ internal static class Program
                 Arguments = parsed.Values
             };
 
-            ApplyTaskbarTitle(mode, job, "異常終了");
-            EnsureWorkerStatusWindow(mode, job);
+            WorkerPresentation.UpdateBase(mode, job, ensureWindow: true);
 
             await WriteResultAsync(resultPath, result).ConfigureAwait(false);
             await WriteProgressAsync(progressPath, new WorkerProgress
@@ -231,352 +227,6 @@ internal static class Program
         }
     }
 
-
-
-    private static readonly object WorkerStatusWindowLock = new();
-    private static WorkerStatusForm? WorkerStatusWindow;
-    private static Thread? WorkerStatusThread;
-    private static string? WorkerStatusTitle;
-    private static string? WorkerStatusTitleBarLogoPath;
-    private static string? WorkerStatusCenterLogoPath;
-    private static readonly List<Icon> WorkerStatusRetainedIcons = new();
-
-    private static void EnsureWorkerStatusWindow(string? mode, TvAIrEpgRecJob? job)
-    {
-        try
-        {
-            var title = BuildTaskbarTitle(mode, job);
-            var logoPaths = GetDisplayLogoPaths(job);
-            lock (WorkerStatusWindowLock)
-            {
-                WorkerStatusTitle = title;
-                WorkerStatusTitleBarLogoPath = logoPaths.TitleBarLogoPath;
-                WorkerStatusCenterLogoPath = logoPaths.CenterLogoPath;
-
-                if (WorkerStatusWindow is not null && !WorkerStatusWindow.IsDisposed)
-                {
-                    WorkerStatusWindow.BeginInvoke(new Action(() => WorkerStatusWindow.ApplyState(title, logoPaths.TitleBarLogoPath, logoPaths.CenterLogoPath)));
-                    return;
-                }
-
-                if (WorkerStatusThread is not null && WorkerStatusThread.IsAlive)
-                {
-                    return;
-                }
-
-                WorkerStatusThread = new Thread(() =>
-                {
-                    try
-                    {
-                        System.Windows.Forms.Application.EnableVisualStyles();
-                        System.Windows.Forms.Application.SetCompatibleTextRenderingDefault(false);
-                        string? initialTitle;
-                        string? initialTitleBarLogo;
-                        string? initialCenterLogo;
-                        lock (WorkerStatusWindowLock)
-                        {
-                            initialTitle = WorkerStatusTitle;
-                            initialTitleBarLogo = WorkerStatusTitleBarLogoPath;
-                            initialCenterLogo = WorkerStatusCenterLogoPath;
-                        }
-
-                        using var form = new WorkerStatusForm(initialTitle ?? "TvAIrEpgRec", initialTitleBarLogo, initialCenterLogo);
-                        lock (WorkerStatusWindowLock)
-                        {
-                            WorkerStatusWindow = form;
-                        }
-                        System.Windows.Forms.Application.Run(form);
-                    }
-                    catch
-                    {
-                        // The status window is only a visual aid. It must never affect EPG/record execution.
-                    }
-                })
-                {
-                    IsBackground = true,
-                    Name = "TvAIrEpgRecStatusWindow",
-                };
-                WorkerStatusThread.SetApartmentState(ApartmentState.STA);
-                WorkerStatusThread.Start();
-            }
-        }
-        catch
-        {
-            // The status window is only a visual aid. It must never affect EPG/record execution.
-        }
-    }
-
-    private static void UpdateWorkerStatusWindowTitle(string? mode, TvAIrEpgRecJob? job)
-    {
-        try
-        {
-            var title = BuildTaskbarTitle(mode, job);
-            lock (WorkerStatusWindowLock)
-            {
-                WorkerStatusTitle = title;
-                var window = WorkerStatusWindow;
-                if (window is not null && !window.IsDisposed)
-                {
-                    window.BeginInvoke(new Action(() => window.ApplyTitle(title)));
-                }
-            }
-        }
-        catch
-        {
-            // Status title is a visual aid only.
-        }
-    }
-
-    private sealed class WorkerStatusForm : System.Windows.Forms.Form
-    {
-        private readonly System.Windows.Forms.PictureBox _pictureBox = new();
-        private Image? _currentImage;
-        private Icon? _currentIcon;
-        private bool _minimizeQueued;
-
-        public WorkerStatusForm(string title, string? titleBarLogoPath, string? centerLogoPath)
-        {
-            Text = title;
-            ShowInTaskbar = true;
-            StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen;
-            Size = new Size(220, 140);
-            MinimumSize = new Size(180, 110);
-            MaximizeBox = false;
-            BackColor = Color.FromArgb(238, 238, 238);
-
-            _pictureBox.Dock = System.Windows.Forms.DockStyle.Fill;
-            _pictureBox.BackColor = Color.FromArgb(238, 238, 238);
-            _pictureBox.SizeMode = System.Windows.Forms.PictureBoxSizeMode.CenterImage;
-            _pictureBox.Padding = new System.Windows.Forms.Padding(12);
-            Controls.Add(_pictureBox);
-
-            ApplyState(title, titleBarLogoPath, centerLogoPath);
-        }
-
-        public void ApplyTitle(string title)
-        {
-            Text = title;
-        }
-
-        public void ApplyState(string title, string? titleBarLogoPath, string? centerLogoPath)
-        {
-            ApplyTitle(title);
-            using var iconSource = LoadLogoOrFallback(titleBarLogoPath);
-            using var centerSource = LoadLogoOrFallback(centerLogoPath ?? titleBarLogoPath);
-            SetWindowIcon(iconSource);
-            SetCenterImage(centerSource);
-            QueueMinimizeOnce();
-        }
-
-        private void SetWindowIcon(Bitmap source)
-        {
-            try
-            {
-                var icon = CreateIconFromBitmap(source, 64);
-                if (icon is null) return;
-                var previous = _currentIcon;
-                _currentIcon = icon;
-                Icon = icon;
-                lock (WorkerStatusWindowLock)
-                {
-                    WorkerStatusRetainedIcons.Add(icon);
-                }
-                previous?.Dispose();
-            }
-            catch
-            {
-                // Icon conversion is visual only.
-            }
-        }
-
-        private void SetCenterImage(Bitmap source)
-        {
-            var size = Math.Max(48, Math.Min(96, Math.Min(ClientSize.Width, ClientSize.Height) - 24));
-            var canvas = new Bitmap(size, size, PixelFormat.Format32bppArgb);
-            using (var g = Graphics.FromImage(canvas))
-            {
-                g.Clear(Color.Transparent);
-                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                g.SmoothingMode = SmoothingMode.HighQuality;
-                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                var maxW = size - 8f;
-                var maxH = size - 8f;
-                var scale = Math.Min(maxW / Math.Max(1, source.Width), maxH / Math.Max(1, source.Height));
-                var w = Math.Max(1, (int)Math.Round(source.Width * scale));
-                var h = Math.Max(1, (int)Math.Round(source.Height * scale));
-                var x = (size - w) / 2;
-                var y = (size - h) / 2;
-                g.DrawImage(source, new Rectangle(x, y, w, h));
-            }
-
-            var previous = _currentImage;
-            _currentImage = canvas;
-            _pictureBox.Image = canvas;
-            previous?.Dispose();
-        }
-
-        private void QueueMinimizeOnce()
-        {
-            if (_minimizeQueued) return;
-            _minimizeQueued = true;
-            Shown += (_, _) =>
-            {
-                var timer = new System.Windows.Forms.Timer { Interval = 350 };
-                timer.Tick += (_, _) =>
-                {
-                    timer.Stop();
-                    timer.Dispose();
-                    WindowState = System.Windows.Forms.FormWindowState.Minimized;
-                };
-                timer.Start();
-            };
-        }
-
-        private static Bitmap LoadLogoOrFallback(string? logoPath)
-        {
-            try
-            {
-                if (!string.IsNullOrWhiteSpace(logoPath) && File.Exists(logoPath))
-                {
-                    return new Bitmap(logoPath);
-                }
-            }
-            catch
-            {
-                // Fall back to the application icon below.
-            }
-
-            try
-            {
-                using var appIcon = Icon.ExtractAssociatedIcon(Environment.ProcessPath ?? string.Empty);
-                if (appIcon is not null)
-                {
-                    return appIcon.ToBitmap();
-                }
-            }
-            catch
-            {
-                // Fall through to generated fallback.
-            }
-
-            var fallback = new Bitmap(64, 64, PixelFormat.Format32bppArgb);
-            using var g = Graphics.FromImage(fallback);
-            g.Clear(Color.Transparent);
-            using var brush = new SolidBrush(Color.FromArgb(34, 34, 34));
-            using var pen = new Pen(Color.FromArgb(210, 24, 24), 5);
-            g.FillRectangle(brush, new Rectangle(8, 8, 48, 48));
-            g.DrawLine(pen, 25, 20, 25, 44);
-            g.DrawLine(pen, 25, 20, 44, 32);
-            g.DrawLine(pen, 44, 32, 25, 44);
-            return fallback;
-        }
-
-        private static Icon? CreateIconFromBitmap(Bitmap source, int size)
-        {
-            try
-            {
-                using var canvas = new Bitmap(size, size, PixelFormat.Format32bppArgb);
-                using (var g = Graphics.FromImage(canvas))
-                {
-                    g.Clear(Color.Transparent);
-                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                    g.SmoothingMode = SmoothingMode.HighQuality;
-                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                    var maxW = size - 6f;
-                    var maxH = size - 6f;
-                    var scale = Math.Min(maxW / Math.Max(1, source.Width), maxH / Math.Max(1, source.Height));
-                    var w = Math.Max(1, (int)Math.Round(source.Width * scale));
-                    var h = Math.Max(1, (int)Math.Round(source.Height * scale));
-                    var x = (size - w) / 2;
-                    var y = (size - h) / 2;
-                    g.DrawImage(source, new Rectangle(x, y, w, h));
-                }
-
-                var handle = canvas.GetHicon();
-                using var temp = Icon.FromHandle(handle);
-                return (Icon)temp.Clone();
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing)
-            {
-                _pictureBox.Image = null;
-                _currentImage?.Dispose();
-                _currentIcon?.Dispose();
-                _pictureBox.Dispose();
-            }
-            base.Dispose(disposing);
-        }
-    }
-
-    private static WorkerDisplayLogoPaths GetDisplayLogoPaths(TvAIrEpgRecJob? job)
-    {
-        if (job?.Metadata == null) return WorkerDisplayLogoPaths.Empty;
-        var titleBar = FirstNonEmpty(
-            job.Metadata.TryGetValue("titleBarLogoPath", out var titleBarLogoPath) ? titleBarLogoPath : null,
-            job.Metadata.TryGetValue("displayLogoPath", out var displayLogoPath) ? displayLogoPath : null,
-            job.Metadata.TryGetValue("serviceLogoPath", out var serviceLogoPath) ? serviceLogoPath : null,
-            job.Metadata.TryGetValue("logoPath", out var logoPath) ? logoPath : null);
-        var center = FirstNonEmpty(
-            job.Metadata.TryGetValue("centerLogoPath", out var centerLogoPath) ? centerLogoPath : null,
-            job.Metadata.TryGetValue("displayLogoPath", out var displayLogoPath2) ? displayLogoPath2 : null);
-        return new WorkerDisplayLogoPaths(titleBar, center);
-    }
-
-    private sealed record WorkerDisplayLogoPaths(string? TitleBarLogoPath, string? CenterLogoPath)
-    {
-        public static WorkerDisplayLogoPaths Empty { get; } = new(null, null);
-    }
-
-    private static void ApplyTaskbarTitle(string? mode, TvAIrEpgRecJob? job, string stage)
-    {
-        try
-        {
-            var title = BuildTaskbarTitle(mode, job);
-            Console.Title = title;
-            UpdateWorkerStatusWindowTitle(mode, job);
-        }
-        catch
-        {
-            // Taskbar title is a user-facing visibility aid. It must never interrupt recording/EPG execution.
-        }
-    }
-
-    private static string BuildTaskbarTitle(string? mode, TvAIrEpgRecJob? job)
-    {
-        var normalizedMode = NormalizeMode(mode) ?? NormalizeMode(job?.Mode) ?? "runtime";
-        var preTuneLabel = job?.Metadata != null && job.Metadata.TryGetValue("preTuneDisplayLabel", out var label) ? label : null;
-        var modeLabel = normalizedMode.Equals("record", StringComparison.OrdinalIgnoreCase) ? "録画" :
-            normalizedMode.Equals("epg-check", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(preTuneLabel) ? preTuneLabel! :
-            normalizedMode.Equals("epg-check", StringComparison.OrdinalIgnoreCase) ? "EPG確認" :
-            normalizedMode.Equals("epg", StringComparison.OrdinalIgnoreCase) ? "EPG取得" :
-            "TvAIrEpgRec";
-
-        var title = FirstNonEmpty(
-            job?.Metadata != null && job.Metadata.TryGetValue("title", out var programTitle) ? programTitle : null,
-            job?.Metadata != null && job.Metadata.TryGetValue("displayTitle", out var displayTitle) ? displayTitle : null,
-            job?.Metadata != null && job.Metadata.TryGetValue("worker", out var worker) ? worker : null,
-            job?.Channels?.FirstOrDefault()?.ServiceName,
-            job?.Group,
-            string.Empty);
-
-        var shortTitle = TrimForConsoleTitle(title, 44);
-        return string.IsNullOrWhiteSpace(shortTitle) ? modeLabel : $"{modeLabel} {shortTitle}";
-    }
-
-    private static string TrimForConsoleTitle(string? value, int max)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
-        var normalized = value.Replace('\u3000', ' ').Replace("\r", " ").Replace("\n", " ").Trim();
-        while (normalized.Contains("  ", StringComparison.Ordinal)) normalized = normalized.Replace("  ", " ");
-        return normalized.Length <= max ? normalized : normalized[..Math.Max(0, max - 1)] + "…";
-    }
 
 
     private static async Task<EpgContractSummary> BuildEpgContractSummaryAsync(TvAIrEpgRecJob? job, CliOptions parsed, string? progressPath, string jobId, string mode)
@@ -891,7 +541,12 @@ internal static class Program
         var firstChannel = job?.Channels?.FirstOrDefault();
         var chspace = firstChannel?.ChannelSpace ?? parsed.GetIntNullable("chspace") ?? 0;
         var chi = firstChannel?.ChannelIndex ?? parsed.GetIntNullable("chi") ?? 0;
-        var service = FirstNonEmpty(firstChannel?.ServiceName, parsed.Get("service"), "unknown");
+        var probeChannel = job?.PreRecordProbe is null
+            ? null
+            : job?.Channels?.FirstOrDefault(c => c.NetworkId == job.PreRecordProbe.NetworkId
+                && c.TransportStreamId == job.PreRecordProbe.TransportStreamId
+                && c.ServiceId == job.PreRecordProbe.ServiceId);
+        var service = FirstNonEmpty(probeChannel?.ServiceName, firstChannel?.ServiceName, parsed.Get("service"), "unknown");
         var summary = new SetChannelProbeSummary
         {
             RequestedBonDriver = bonDriver,
@@ -972,6 +627,17 @@ internal static class Program
                 ? Math.Clamp(requestedReadSeconds, 1, 30 * 60)
                 : Math.Clamp(requestedReadSeconds, 1, 180);
         var targetEventsMin = Math.Clamp(parsed.GetInt("target-events-min", parsed.GetInt("targetEventsMin", 1)), 1, 50);
+        var isPreRecordCheckMode = string.Equals(mode, "epg-check", StringComparison.OrdinalIgnoreCase);
+        var probeContract = isPreRecordCheckMode ? job?.PreRecordProbe : null;
+        if (isPreRecordCheckMode
+            && (probeContract is null
+                || probeContract.NetworkId <= 0
+                || probeContract.TransportStreamId <= 0
+                || probeContract.ServiceId <= 0
+                || probeContract.HardDeadlineUtc == default))
+        {
+            throw new InvalidOperationException("epg-check requires one complete PreRecordProbe execution contract; channel-route fallback is forbidden.");
+        }
         var summary = new TsReadProbeSummary
         {
             RequestedBonDriver = bonDriver,
@@ -981,13 +647,16 @@ internal static class Program
             Group = FirstNonEmpty(job?.Group, parsed.Get("group"), string.Empty),
             ChannelSpace = chspace,
             ChannelIndex = chi,
-            TargetOriginalNetworkId = firstChannel?.NetworkId ?? parsed.GetIntNullable("nid") ?? 0,
-            TargetTransportStreamId = firstChannel?.TransportStreamId ?? parsed.GetIntNullable("tsid") ?? 0,
-            TargetServiceId = firstChannel?.ServiceId ?? parsed.GetIntNullable("sid") ?? 0,
+            // PRE_REC_TARGET_SSOT: in epg-check mode target identity comes only from PreRecordProbe.
+            // channels[0] is a physical tune/observation route and must never overwrite the reservation target.
+            TargetOriginalNetworkId = probeContract?.NetworkId ?? firstChannel?.NetworkId ?? parsed.GetIntNullable("nid") ?? 0,
+            TargetTransportStreamId = probeContract?.TransportStreamId ?? firstChannel?.TransportStreamId ?? parsed.GetIntNullable("tsid") ?? 0,
+            TargetServiceId = probeContract?.ServiceId ?? firstChannel?.ServiceId ?? parsed.GetIntNullable("sid") ?? 0,
             ReadSeconds = readSeconds,
-            ExpectedEventId = job?.Metadata is not null && job.Metadata.TryGetValue("expectedEventId", out var expectedEventIdText) && int.TryParse(expectedEventIdText, out var expectedEventId) ? expectedEventId : 0,
-            ExpectedEventStart = job?.Metadata is not null && job.Metadata.TryGetValue("expectedEventStart", out var expectedEventStartText) ? expectedEventStartText : string.Empty,
-            ExpectedEventEnd = job?.Metadata is not null && job.Metadata.TryGetValue("expectedEventEnd", out var expectedEventEndText) ? expectedEventEndText : string.Empty,
+            ExpectedEventId = probeContract?.EventId ?? 0,
+            ExpectedEventStart = probeContract is null ? string.Empty : probeContract.ExpectedStartTime.ToString("O"),
+            ExpectedEventEnd = probeContract is null ? string.Empty : probeContract.ExpectedEndTime.ToString("O"),
+            PreRecordHardDeadlineUtc = probeContract?.HardDeadlineUtc.ToUniversalTime(),
             TargetServiceEventMin = targetEventsMin,
             Variant = ResolveTsGetStreamVariant(job, parsed),
             ReadyThreshold = ResolveTsGetStreamReadyThreshold(job, parsed),
@@ -998,6 +667,9 @@ internal static class Program
             RecordStopSignalPath = string.Equals(mode, "record", StringComparison.OrdinalIgnoreCase) || IsEpgLikeMode(mode)
                 ? FirstNonEmptyOrNull(job?.CancelSignalPath, parsed.Get("stop-signal"), parsed.Get("stopSignalPath"), parsed.Get("cancel"))
                 : null,
+            ChainControlPath = string.Equals(mode, "record", StringComparison.OrdinalIgnoreCase)
+                ? FirstNonEmptyOrNull(job?.ChainControlPath, parsed.Get("chain-control"), parsed.Get("chainControlPath"))
+                : null,
             RecordWriteEnabled = string.Equals(mode, "record", StringComparison.OrdinalIgnoreCase) || IsEpgLikeMode(mode),
             Purpose = mode == "epg-check"
                 ? "mode_epg_check_after_single_process_tuner_runtime_dbwrite_false_ts_output_enabled"
@@ -1007,8 +679,10 @@ internal static class Program
         };
 
         summary.RuntimeStatsPath = DirectRecorderCompatibleResult.ResolveRuntimeStatsPath(job, summary.RecordOutputPath);
-        // One worker owns exactly one reservation, one TS file, and one quality result.
-        // Chain successors are started by TvAIr after the predecessor worker stops and releases the tuner.
+        // Normal recording remains one reservation / one output. Explicit user-chain recording may attach
+        // additional reservation-local sinks to the same BonDriver/OpenTuner/TS-read worker through the immutable-generation
+        // ChainControlPath store. Logical boundaries never close/reopen or retune this worker; the same physical capture remains
+        // alive until the latest enabled segment CloseAt, and that deadline may move both later and earlier as topology changes.
         summary.Recording = NormalizeSingleRecording(job?.Recording, summary.RecordOutputPath);
 
         ApplyTvTestCardReaderReference(job, parsed, summary);
@@ -1075,7 +749,7 @@ internal static class Program
             JobId = jobId,
             Mode = mode,
             Stage = "common_ts_route_facade_attached",
-            Message = $"routeBeforeMode={summary.CommonTsRoute?.RouteBeforeMode} routeReady={summary.CommonTsRoute?.RouteReadyForMode} mode={mode} service={service} chspace={chspace} chi={chi} target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} seconds={readSeconds} targetEventsMin={targetEventsMin} requested={requestedPath} resolved={resolvedPath} exists={File.Exists(resolvedPath)}",
+            Message = $"routeBeforeMode={summary.CommonTsRoute?.RouteBeforeMode} routeReady={summary.CommonTsRoute?.RouteReadyForMode} mode={mode} service={service} chspace={chspace} chi={chi} target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} targetIdentitySource={(probeContract is not null ? "pre_record_probe_contract" : "channel_route")} expectedEventId={summary.ExpectedEventId} seconds={readSeconds} targetEventsMin={targetEventsMin} requested={requestedPath} resolved={resolvedPath} exists={File.Exists(resolvedPath)}",
             ProcessId = Environment.ProcessId
         }).ConfigureAwait(false);
 
@@ -1157,7 +831,7 @@ internal static class Program
                 ? target
                 : "録画準備";
             job.Metadata["preTuneDisplayLabel"] = targetLabel;
-            ApplyTaskbarTitle(mode, job, "pre_tune_state_transition");
+            WorkerPresentation.UpdateBase(mode, job, ensureWindow: true);
             await WriteProgressAsync(progressPath, new WorkerProgress
             {
                 Timestamp = DateTimeOffset.Now,
@@ -1269,7 +943,7 @@ internal static class Program
             EpgCheckExecutionOwner = "TvAIrEpgRec mode=epg-check",
             ServiceIdentityRule = "NID/TSID/SID/chspace/chi; no station-name partial matching; no NEXT string search",
             ChainRecordingRule = "TvAIr owns chain decisions and physical tuner continuity; TvAIrEpgRec executes each reservation recording through the same common TS runtime",
-            SharedRouteRoot = "TvAIrEpgRec integrated common TS route: BonDriver LoadLibrary/Create/OpenTuner/SetChannel/NID/TSID/SID/PAT/PMT/SDT/TargetServiceReady/service-scoped TS/CloseTuner/Release/FreeLibrary before mode-specific record/epg/epg-check processing",
+            SharedRouteRoot = "TvAIrEpgRec integrated common TS route: BonDriver LoadLibrary/Create/OpenTuner/SetChannel/NID/TSID/SID/PAT/PMT/SDT/TargetServiceReady/per-reservation output policy/CloseTuner/Release/FreeLibrary before mode-specific record/epg/epg-check processing",
             RecordModule = "TvAIrEpgRec mode=record executes TS writing after the TvAIr common allocation decision",
             EpgModule = "TvAIrEpgRec mode=epg performs EIT/ARIB/intermediate-model work after the common TS route identifies the transport stream",
             EpgCheckModule = "TvAIrEpgRec mode=epg-check performs short timing confirmation; DB write stays false",
@@ -1281,7 +955,11 @@ internal static class Program
 
     private static WorkerProgress CreateTsReadProgress(string jobId, string mode, string stage, string message, TsReadProbeSummary summary)
     {
-        var phase = summary.RecordBytesWritten > 0 && summary.RecordServiceScopeReady && summary.RecordServiceScopeMediaPackets > 0
+        var currentServiceOnly = RecordingOutputPolicyContract.Resolve(summary.Recording).CurrentServiceOnly;
+        var recordingActive = summary.RecordBytesWritten > 0
+            && summary.TsReadStarted
+            && (!currentServiceOnly || (summary.RecordServiceScopeReady && summary.RecordServiceScopeMediaPackets > 0));
+        var phase = recordingActive
             ? "Active"
             : summary.TsReadStarted
                 ? "InputStarted"
@@ -1307,10 +985,17 @@ internal static class Program
             TsReadStarted = summary.TsReadStarted,
             TargetServiceConfirmed = summary.RecordServiceScopeReady,
             ScopeReady = summary.RecordServiceScopeReady,
+            CurrentServiceOnly = currentServiceOnly,
             BytesRead = summary.BytesRead,
             BytesWritten = summary.RecordBytesWritten,
             PacketsWritten = summary.RecordBytesWritten / 188,
             MediaPackets = summary.RecordServiceScopeMediaPackets,
+            BroadcastTimeObserved = summary.BroadcastTimeObserved,
+            BroadcastTimeObservationCount = summary.BroadcastTimeObservationCount,
+            BroadcastTimeSourceTableId = summary.BroadcastTimeSourceTableId,
+            BroadcastTimeValue = summary.BroadcastTimeValue,
+            BroadcastTimeSystemObservedAt = summary.BroadcastTimeSystemObservedAt,
+            BroadcastTimeOffsetMilliseconds = summary.BroadcastTimeOffsetMilliseconds,
             FailureCode = ResolveTsReadFailureCode(stage, summary),
             FailureDetail = summary.Error
         };
@@ -1726,10 +1411,24 @@ internal sealed class TvAIrEpgRecJob
     public string? ProgressPath { get; set; }
     public string? RuntimeStatsPath { get; set; }
     public string? CancelSignalPath { get; set; }
+    public string? ChainControlPath { get; set; }
     public int? TsReadSeconds { get; set; }
     public List<EpgChannelJob>? Channels { get; set; }
+    public PreRecordProbeJob? PreRecordProbe { get; set; }
     public RecordingJob? Recording { get; set; }
     public Dictionary<string, string>? Metadata { get; set; }
+}
+
+internal sealed class PreRecordProbeJob
+{
+    public int NetworkId { get; set; }
+    public int TransportStreamId { get; set; }
+    public int ServiceId { get; set; }
+    public int? EventId { get; set; }
+    public DateTime ExpectedStartTime { get; set; }
+    public DateTime ExpectedEndTime { get; set; }
+    public DateTimeOffset HardDeadlineUtc { get; set; }
+    public string? RuntimeTunerName { get; set; }
 }
 
 internal sealed class EpgChannelJob
@@ -1751,6 +1450,31 @@ internal sealed class RecordingJob
     public DateTime StartTime { get; set; }
     public DateTime EndTime { get; set; }
     public string? OutputPath { get; set; }
+    public bool CurrentServiceOnly { get; set; } = true;
+    public bool SaveSubtitles { get; set; } = true;
+}
+
+internal sealed class ChainRecordingControl
+{
+    public int Version { get; set; }
+    public int ChainRootReservationId { get; set; }
+    public bool ContinuousCapture { get; set; } = true;
+    public List<ChainRecordingSegment> Segments { get; set; } = new();
+}
+
+internal sealed class ChainRecordingSegment
+{
+    public int ReservationId { get; set; }
+    public string? ServiceName { get; set; }
+    public string? Title { get; set; }
+    public bool Enabled { get; set; } = true;
+    public DateTime OpenAt { get; set; }
+    public DateTime CloseAt { get; set; }
+    public string? OutputPath { get; set; }
+    public string? ResultPath { get; set; }
+    public string? RuntimeStatsPath { get; set; }
+    public bool CurrentServiceOnly { get; set; } = true;
+    public bool SaveSubtitles { get; set; } = true;
 }
 
 internal sealed class EpgContractSummary
@@ -1871,12 +1595,35 @@ internal sealed class TsReadProbeSummary
     public int ExpectedEventId { get; set; }
     public string ExpectedEventStart { get; set; } = string.Empty;
     public string ExpectedEventEnd { get; set; } = string.Empty;
+    public DateTimeOffset? PreRecordHardDeadlineUtc { get; set; }
+    public string LiveExpectedEventStart { get; set; } = string.Empty;
+    public string LiveExpectedEventEnd { get; set; } = string.Empty;
+    public int LiveExpectedEventRunningStatus { get; set; } = -1;
+    public int LiveExpectedEventTableId { get; set; } = -1;
+    public int LiveExpectedEventSectionNumber { get; set; } = -1;
+    public int LiveExpectedEventCurrentNextIndicator { get; set; } = -1;
+    public DateTimeOffset? LiveExpectedEventObservedAt { get; set; }
+    public int LivePresentEventId { get; set; } = -1;
+    public string LivePresentEventStart { get; set; } = string.Empty;
+    public string LivePresentEventEnd { get; set; } = string.Empty;
+    public int LivePresentEventRunningStatus { get; set; } = -1;
+    public int LivePresentEventTableId { get; set; } = -1;
+    public int LivePresentEventSectionNumber { get; set; } = -1;
+    public int LivePresentEventCurrentNextIndicator { get; set; } = -1;
+    public DateTimeOffset? LivePresentEventObservedAt { get; set; }
+    public bool BroadcastTimeObserved { get; set; }
+    public int BroadcastTimeObservationCount { get; set; }
+    public int BroadcastTimeSourceTableId { get; set; } = -1;
+    public DateTimeOffset? BroadcastTimeValue { get; set; }
+    public DateTimeOffset? BroadcastTimeSystemObservedAt { get; set; }
+    public long BroadcastTimeOffsetMilliseconds { get; set; }
     public string Variant { get; set; } = "ready-only";
     public int ReadyThreshold { get; set; } = 50;
     public string Mode { get; set; } = string.Empty;
     public bool RecordWriteEnabled { get; set; }
     public string? RecordOutputPath { get; set; }
     public string? RecordStopSignalPath { get; set; }
+    public string? ChainControlPath { get; set; }
     public RecordingJob? Recording { get; set; }
     public int RecordReservationId { get; set; }
     public string RecordTitle { get; set; } = string.Empty;
@@ -1914,12 +1661,14 @@ internal sealed class TsReadProbeSummary
     public long OutputSyncErrors => RecordingQuality.Output.SyncErrors;
     public long OutputTransportErrorPackets => RecordingQuality.Output.TransportErrorPackets;
     public long OutputScrambledLikePackets => RecordingQuality.Output.ScrambledPackets;
+    public long OutputTargetMediaScrambledPackets { get; set; }
     public long OutputContinuityErrors => RecordingQuality.Output.ContinuityErrors;
     public long OutputContinuityDrops => RecordingQuality.Output.ContinuityDrops;
     public long OutputContinuityGapEvents => RecordingQuality.Output.ContinuityGapEvents;
     public long OutputSameCcContentMismatches => RecordingQuality.Output.SameCcContentMismatches;
     public long OutputDuplicatePackets => RecordingQuality.Output.DuplicatePackets;
     public long OutputDiscontinuityResets => RecordingQuality.Output.DiscontinuityResets;
+    public long TdtTotPackets { get; set; }
     public long RawContinuityErrors => RecordingQuality.Raw.ContinuityErrors;
     public long RawContinuityDrops => RecordingQuality.Raw.ContinuityDrops;
     public long RawContinuityGapEvents => RecordingQuality.Raw.ContinuityGapEvents;
@@ -1949,6 +1698,11 @@ internal sealed class TsReadProbeSummary
     public int RecordTargetPmtPid { get; set; } = -1;
     public int RecordTargetPcrPid { get; set; } = -1;
     public List<int> RecordTargetStreamPids { get; set; } = new();
+    public List<int> RecordSubtitlePids { get; set; } = new();
+    [JsonIgnore]
+    public Dictionary<int, byte[]> RecordSubtitleFilteredPmtSections { get; } = new();
+    [JsonIgnore]
+    public Dictionary<int, int> RecordFilteredPmtNextContinuity { get; } = new();
     public List<int> RecordWrittenServiceIds { get; set; } = new();
     public List<int> RecordExcludedServiceIds { get; set; } = new();
     public long RecordServiceScopeInputPackets { get; set; }
@@ -2044,6 +1798,10 @@ internal sealed class TsReadProbeSummary
     public long TargetMatchedFromTripletCount { get; set; }
     public long TargetMatchedEventListCount { get; set; }
     public bool ExpectedTargetEventSeen { get; set; }
+    public bool ExpectedTargetEventDirectSeen { get; set; }
+    public string ExpectedTargetEventEvidence { get; set; } = string.Empty;
+    public string ObservedExpectedEventStart { get; set; } = string.Empty;
+    public string ObservedExpectedEventEnd { get; set; } = string.Empty;
     public Dictionary<int, long> TargetServiceDescriptorTagCounts { get; set; } = new();
     public bool EpgIntermediateModelProbe { get; set; }
     public bool EpgIntermediateModelOk { get; set; }
@@ -2122,6 +1880,7 @@ internal sealed class EitEventMinimal
     public bool ShortEventDecoded { get; set; }
     public string ShortEventDecodeSource { get; set; } = string.Empty;
     public List<int> DescriptorTags { get; set; } = new();
+    public List<EitEventReference> CommonReferences { get; set; } = new();
 }
 
 
@@ -2350,8 +2109,62 @@ internal sealed class CommonTsRouteExecutionBoundary
     public string[] StopLine { get; set; } = [];
 }
 
+
+internal readonly record struct EffectiveRecordingPolicy(bool CurrentServiceOnly, bool SaveSubtitles);
+
+// Canonical recording-output policy. This contract must be visible to every worker result /
+// progress / TS-write path, not scoped inside BonDriverNativeProbe. Missing/legacy snapshots preserve
+// the historical ON/ON behavior.
+internal static class RecordingOutputPolicyContract
+{
+    public static EffectiveRecordingPolicy Resolve(RecordingJob? recording)
+        => new(recording?.CurrentServiceOnly != false, recording?.SaveSubtitles != false);
+}
+
 internal static class BonDriverNativeProbe
 {
+    private static bool TryResolveLatestChainControlSnapshot(string path, out string snapshotPath, out string versionToken)
+    {
+        snapshotPath = string.Empty;
+        versionToken = string.Empty;
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        try
+        {
+            var storePath = Directory.Exists(path)
+                ? path
+                : Directory.Exists(path + ".store") ? path + ".store" : string.Empty;
+            if (!string.IsNullOrWhiteSpace(storePath))
+            {
+                var latest = Directory.EnumerateFiles(storePath, "*.json", SearchOption.TopDirectoryOnly)
+                    .Select(file => new { File = file, Name = Path.GetFileNameWithoutExtension(file) })
+                    .Where(x => long.TryParse(x.Name, out _))
+                    .OrderByDescending(x => x.Name, StringComparer.Ordinal)
+                    .FirstOrDefault();
+                if (latest is null) return false;
+                snapshotPath = latest.File;
+                versionToken = latest.Name;
+                return true;
+            }
+            if (!File.Exists(path)) return false;
+            snapshotPath = path;
+            versionToken = File.GetLastWriteTimeUtc(path).Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string ReadLatestChainControlText(string path, out string versionToken)
+    {
+        if (!TryResolveLatestChainControlSnapshot(path, out var snapshotPath, out versionToken))
+            throw new FileNotFoundException("chain control snapshot not found", path);
+        using var stream = new FileStream(snapshotPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
+    }
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr LoadLibraryW(string lpFileName);
 
@@ -2690,22 +2503,310 @@ internal static class BonDriverNativeProbe
 
     private sealed class RecordOutputContext : IAsyncDisposable
     {
+        private static readonly JsonSerializerOptions ChainControlJsonOptions = new()
+        {
+            PropertyNameCaseInsensitive = true
+        };
+
+        private sealed class SegmentSink : IAsyncDisposable
+        {
+            private static readonly JsonSerializerOptions ResultOptions = new(JsonSerializerDefaults.Web)
+            {
+                WriteIndented = true,
+                DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            };
+            private static readonly JsonSerializerOptions RuntimeOptions = new(JsonSerializerDefaults.Web)
+            {
+                WriteIndented = false,
+                DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            };
+
+            public ChainRecordingSegment Segment { get; private set; }
+            public FileStream Stream { get; }
+            public TransportQualityState Quality { get; } = new();
+            public long TargetMediaScrambledPackets { get; private set; }
+            public long BytesWritten { get; private set; }
+            public long ChunksWritten { get; private set; }
+            public DateTime StartedAt { get; } = DateTime.Now;
+            public DateTime? EndedAt { get; private set; }
+            public bool Closed { get; private set; }
+            private DateTime lastRuntimeAt = DateTime.MinValue;
+            private int patContinuityCounter;
+            private bool patWritten;
+            private readonly Dictionary<int, int> filteredPmtNextContinuity = new();
+
+            public SegmentSink(ChainRecordingSegment segment)
+            {
+                Segment = segment;
+                var path = Path.GetFullPath(segment.OutputPath ?? string.Empty);
+                var parent = Path.GetDirectoryName(path);
+                if (!string.IsNullOrWhiteSpace(parent)) Directory.CreateDirectory(parent);
+                Stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.ReadWrite, 4 * 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            }
+
+            public void UpdateDefinition(ChainRecordingSegment segment)
+            {
+                Segment = segment;
+            }
+
+            private void ObserveBuffer(ReadOnlyMemory<byte> buffer, IReadOnlyCollection<int> targetStreamPids)
+            {
+                var span = buffer.Span;
+                var packets = span.Length / 188;
+                for (var i = 0; i < packets; i++)
+                {
+                    var packet = span.Slice(i * 188, 188);
+                    if (packet[0] == 0x47)
+                    {
+                        var pid = ((packet[1] & 0x1F) << 8) | packet[2];
+                        if ((packet[3] & 0xC0) != 0 && targetStreamPids.Contains(pid))
+                            TargetMediaScrambledPackets++;
+                    }
+                    Quality.ObservePacket(packet);
+                }
+            }
+
+            public async Task WriteAsync(
+                ReadOnlyMemory<byte> primaryBuffer,
+                ReadOnlyMemory<byte> broadBuffer,
+                RecordingJob primaryRecording,
+                TsReadProbeSummary summary)
+            {
+                if (Closed) return;
+
+                var samePolicy = Segment.CurrentServiceOnly == primaryRecording.CurrentServiceOnly
+                    && Segment.SaveSubtitles == primaryRecording.SaveSubtitles;
+                PooledRecordBuffer? transformed = null;
+                try
+                {
+                    ReadOnlyMemory<byte> output;
+                    if (samePolicy)
+                    {
+                        output = primaryBuffer;
+                    }
+                    else if (!Segment.CurrentServiceOnly && Segment.SaveSubtitles)
+                    {
+                        output = broadBuffer;
+                    }
+                    else
+                    {
+                        transformed = BuildSegmentOutputBuffer(broadBuffer, summary);
+                        output = transformed.Length <= 0
+                            ? ReadOnlyMemory<byte>.Empty
+                            : transformed.Buffer.AsMemory(0, transformed.Length);
+                    }
+                    if (output.Length == 0) return;
+
+                    ObserveBuffer(output, summary.RecordTargetStreamPids);
+                    await Stream.WriteAsync(output).ConfigureAwait(false);
+                    BytesWritten += output.Length;
+                    ChunksWritten++;
+                }
+                finally
+                {
+                    transformed?.Dispose();
+                }
+                if ((DateTime.Now - lastRuntimeAt).TotalSeconds >= 10)
+                {
+                    lastRuntimeAt = DateTime.Now;
+                    AppendRuntime(final: false);
+                }
+            }
+
+            private PooledRecordBuffer BuildSegmentOutputBuffer(ReadOnlyMemory<byte> broadBuffer, TsReadProbeSummary summary)
+            {
+                if (broadBuffer.Length < 188) return PooledRecordBuffer.Empty;
+                var source = broadBuffer.Span;
+                var packetCount = source.Length / 188;
+                var output = ArrayPool<byte>.Shared.Rent((packetCount + 64) * 188);
+                var outOffset = 0;
+
+                if (!Segment.CurrentServiceOnly)
+                {
+                    for (var i = 0; i < packetCount; i++)
+                    {
+                        var packetOffset = i * 188;
+                        var packet = source.Slice(packetOffset, 188);
+                        if (packet[0] != 0x47) continue;
+                        var pid = ((packet[1] & 0x1F) << 8) | packet[2];
+                        if (Segment.SaveSubtitles)
+                        {
+                            packet.CopyTo(output.AsSpan(outOffset, 188));
+                            outOffset += 188;
+                        }
+                        else
+                        {
+                            outOffset = AppendSubtitlePolicyPacket(packet, pid, summary, output, outOffset, filteredPmtNextContinuity);
+                        }
+                    }
+                    return new PooledRecordBuffer(output, outOffset, pooled: true);
+                }
+
+                if (!summary.RecordServiceScopeReady)
+                {
+                    ArrayPool<byte>.Shared.Return(output);
+                    return PooledRecordBuffer.Empty;
+                }
+
+                for (var i = 0; i < packetCount; i++)
+                {
+                    var packet = source.Slice(i * 188, 188);
+                    if (packet[0] != 0x47) continue;
+                    var pid = ((packet[1] & 0x1F) << 8) | packet[2];
+                    if (!ShouldWriteRecordServiceScopedPacket(pid, summary, Segment.SaveSubtitles)) continue;
+                    if (!Segment.SaveSubtitles && pid == summary.RecordTargetPmtPid)
+                    {
+                        outOffset = AppendSubtitlePolicyPacket(packet, pid, summary, output, outOffset, filteredPmtNextContinuity);
+                        continue;
+                    }
+                    if (!patWritten && pid != 0x0000)
+                    {
+                        var initialPat = BuildSingleServicePatPacket(summary, patContinuityCounter++ & 0x0F);
+                        if (initialPat.Length == 188)
+                        {
+                            initialPat.AsSpan().CopyTo(output.AsSpan(outOffset, 188));
+                            outOffset += 188;
+                            patWritten = true;
+                        }
+                    }
+                    if (pid == 0x0000)
+                    {
+                        var pat = BuildSingleServicePatPacket(summary, patContinuityCounter++ & 0x0F);
+                        if (pat.Length != 188) continue;
+                        pat.AsSpan().CopyTo(output.AsSpan(outOffset, 188));
+                        patWritten = true;
+                    }
+                    else
+                    {
+                        packet.CopyTo(output.AsSpan(outOffset, 188));
+                    }
+                    outOffset += 188;
+                }
+                return new PooledRecordBuffer(output, outOffset, pooled: true);
+            }
+
+            private void AppendRuntime(bool final)
+            {
+                if (string.IsNullOrWhiteSpace(Segment.RuntimeStatsPath)) return;
+                try
+                {
+                    var path = Path.GetFullPath(Segment.RuntimeStatsPath);
+                    var dir = Path.GetDirectoryName(path);
+                    if (!string.IsNullOrWhiteSpace(dir)) Directory.CreateDirectory(dir);
+                    var payload = new
+                    {
+                        at = DateTimeOffset.Now,
+                        verdict = final ? "CHAIN_SEGMENT_FINAL" : "CHAIN_SEGMENT_RECORDING",
+                        final,
+                        completeness = final ? "complete" : "partial",
+                        reservationId = Segment.ReservationId,
+                        bytesWritten = BytesWritten,
+                        packetsWritten = BytesWritten / 188,
+                        rawPackets = Quality.Packets,
+                        rawContinuityDrops = Quality.ContinuityDrops,
+                        rawContinuityErrors = Quality.ContinuityErrors,
+                        rawSyncErrors = Quality.SyncErrors,
+                        rawScrambledPackets = Quality.ScrambledPackets,
+                        outputPackets = Quality.Packets,
+                        outputContinuityDrops = Quality.ContinuityDrops,
+                        outputContinuityErrors = Quality.ContinuityErrors,
+                        outputSyncErrors = Quality.SyncErrors,
+                        outputScrambledPackets = Quality.ScrambledPackets,
+                        outputTargetMediaScrambledPackets = TargetMediaScrambledPackets,
+                        chunksWritten = ChunksWritten,
+                        sharedCapture = true,
+                        workerPid = Environment.ProcessId
+                    };
+                    File.AppendAllText(path, JsonSerializer.Serialize(payload, RuntimeOptions).ReplaceLineEndings(string.Empty) + Environment.NewLine, Encoding.UTF8);
+                }
+                catch { }
+            }
+
+            public async Task CloseAsync(string reason)
+            {
+                if (Closed) return;
+                Closed = true;
+                EndedAt = DateTime.Now;
+                await Stream.FlushAsync().ConfigureAwait(false);
+                await Stream.DisposeAsync().ConfigureAwait(false);
+                AppendRuntime(final: true);
+                if (string.IsNullOrWhiteSpace(Segment.ResultPath)) return;
+                try
+                {
+                    var resultPath = Path.GetFullPath(Segment.ResultPath);
+                    var dir = Path.GetDirectoryName(resultPath);
+                    if (!string.IsNullOrWhiteSpace(dir)) Directory.CreateDirectory(dir);
+                    var success = BytesWritten > 0 && Quality.SyncErrors == 0 && TargetMediaScrambledPackets == 0;
+                    var wrapper = new
+                    {
+                        success,
+                        exitCode = 0,
+                        recorderPid = Environment.ProcessId,
+                        message = $"TvAIrEpgRec continuous chain segment completed. reason={reason}",
+                        result = new
+                        {
+                            success,
+                            outputPath = Segment.OutputPath ?? string.Empty,
+                            startedAt = StartedAt.ToString("O"),
+                            endedAt = EndedAt?.ToString("O") ?? DateTime.Now.ToString("O"),
+                            bytesWritten = BytesWritten,
+                            packetsWritten = BytesWritten / 188,
+                            qualityVerdict = success ? "LIVE_CLEAR_TARGET_SERVICE_TS_OK" : "CHAIN_SEGMENT_OUTPUT_WARN",
+                            runtimeStatsPath = Segment.RuntimeStatsPath ?? string.Empty,
+                            runtimeStatsEmitted = ChunksWritten,
+                            rawPackets = Quality.Packets,
+                            rawSyncErrors = Quality.SyncErrors,
+                            rawTransportErrors = Quality.TransportErrorPackets,
+                            rawScrambledPackets = Quality.ScrambledPackets,
+                            rawContinuityErrors = Quality.ContinuityErrors,
+                            rawContinuityDrops = Quality.ContinuityDrops,
+                            outputPackets = Quality.Packets,
+                            outputSyncErrors = Quality.SyncErrors,
+                            outputTransportErrors = Quality.TransportErrorPackets,
+                            outputScrambledPackets = Quality.ScrambledPackets,
+                            outputTargetMediaScrambledPackets = TargetMediaScrambledPackets,
+                            outputContinuityErrors = Quality.ContinuityErrors,
+                            outputContinuityDrops = Quality.ContinuityDrops,
+                            message = "continuous_chain_segment_result"
+                        }
+                    };
+                    File.WriteAllText(resultPath, JsonSerializer.Serialize(wrapper, ResultOptions), Encoding.UTF8);
+                }
+                catch { }
+            }
+
+            public async ValueTask DisposeAsync()
+            {
+                await CloseAsync("capture_dispose").ConfigureAwait(false);
+            }
+        }
+
         private FileStream? stream;
         private readonly RecordingJob recording;
+        private readonly string? chainControlPath;
+        private readonly Dictionary<int, SegmentSink> chainSinks = new();
+        private DateTime lastControlReadAt = DateTime.MinValue;
+        private string lastControlVersionToken = string.Empty;
+        private ChainRecordingControl? cachedChainControl;
+        private DateTime? primaryCloseAt;
+        private ChainRecordingSegment? primarySegment;
+        private bool primaryClosed;
 
-        private RecordOutputContext(RecordingJob recording)
+        private RecordOutputContext(RecordingJob recording, string? chainControlPath)
         {
             this.recording = recording;
+            this.chainControlPath = chainControlPath;
         }
 
         public FileStream? Stream => stream;
+        public bool PrimaryWritable => stream is not null && !primaryClosed;
 
         public static async Task<RecordOutputContext?> OpenAsync(TsReadProbeSummary summary, Func<string, string, Task> progress)
         {
             if (!summary.RecordWriteEnabled)
-            {
                 return null;
-            }
 
             if (summary.Recording is null)
             {
@@ -2714,8 +2815,9 @@ internal static class BonDriverNativeProbe
                 return null;
             }
 
-            var context = new RecordOutputContext(summary.Recording);
+            var context = new RecordOutputContext(summary.Recording, summary.ChainControlPath);
             await context.OpenCoreAsync(summary, progress).ConfigureAwait(false);
+            await context.RefreshChainControlAsync(summary, progress, force: true).ConfigureAwait(false);
             return context;
         }
 
@@ -2731,7 +2833,8 @@ internal static class BonDriverNativeProbe
             summary.RecordOutputPath = path;
             summary.RecordReservationId = recording.ReservationId;
             summary.RecordTitle = recording.Title ?? string.Empty;
-            await progress("record_write_open", $"result=OK reservation=R{recording.ReservationId} title={SafeProgress(recording.Title)} start={recording.StartTime:yyyy-MM-dd HH:mm:ss} end={recording.EndTime:yyyy-MM-dd HH:mm:ss} path={path} share=Read mode=Create contract=one_worker_one_reservation_one_ts_one_quality_result rule=release_contract").ConfigureAwait(false);
+            WorkerPresentation.RecordingOpened(recording);
+            await progress("record_write_open", $"result=OK reservation=R{recording.ReservationId} title={SafeProgress(recording.Title)} start={recording.StartTime:yyyy-MM-dd HH:mm:ss} end={recording.EndTime:yyyy-MM-dd HH:mm:ss} path={path} share=Read mode=Create contract=continuous_capture_primary_sink rule=chain_continuous_capture_contract").ConfigureAwait(false);
         }
 
         private static string SafeProgress(string? value)
@@ -2741,23 +2844,201 @@ internal static class BonDriverNativeProbe
             return s.Length <= 80 ? s : s[..80] + "…";
         }
 
-
-        public async Task WriteAsync(byte[] buffer)
+        private async Task RefreshChainControlAsync(TsReadProbeSummary summary, Func<string, string, Task> progress, bool force = false)
         {
-            if (stream is null || buffer.Length == 0) return;
-            await stream.WriteAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(chainControlPath)) return;
+            var now = DateTime.Now;
+            if (!force && (now - lastControlReadAt).TotalMilliseconds < 200) return;
+            lastControlReadAt = now;
+            if (!TryResolveLatestChainControlSnapshot(chainControlPath, out _, out var versionToken)) return;
+            // Each control update is an immutable generation file. The worker only observes a generation
+            // after the file is completely written and closed, so it never races a replace/delete operation.
+            // OpenAt/CloseAt remain time-driven and are re-evaluated every 200ms from the cached snapshot.
+            if (force || cachedChainControl is null || !string.Equals(versionToken, lastControlVersionToken, StringComparison.Ordinal))
+            {
+                try
+                {
+                    cachedChainControl = JsonSerializer.Deserialize<ChainRecordingControl>(ReadLatestChainControlText(chainControlPath, out versionToken), ChainControlJsonOptions);
+                    lastControlVersionToken = versionToken;
+                }
+                catch (Exception ex)
+                {
+                    await progress("chain_capture_control", $"result=READ_NG path={chainControlPath} error={ex.GetType().Name}:{SafeProgress(ex.Message)} rule=chain_continuous_capture_contract").ConfigureAwait(false);
+                    return;
+                }
+            }
+
+            var control = cachedChainControl;
+            if (control?.ContinuousCapture != true || control.Segments.Count == 0) return;
+
+            foreach (var segment in control.Segments)
+            {
+                if (segment.ReservationId == recording.ReservationId)
+                {
+                    primaryCloseAt = segment.CloseAt;
+                    primarySegment = segment;
+                    continue;
+                }
+                if (string.IsNullOrWhiteSpace(segment.OutputPath)) continue;
+                if (chainSinks.TryGetValue(segment.ReservationId, out var existing))
+                {
+                    existing.UpdateDefinition(segment);
+                    if (!segment.Enabled && !existing.Closed)
+                    {
+                        await existing.CloseAsync("segment_disabled_by_host").ConfigureAwait(false);
+                        WorkerPresentation.RecordingClosed(segment.ReservationId);
+                        await progress("chain_capture_sink_close", $"result=OK reservation=R{segment.ReservationId} reason=segment_disabled_by_host bytes={existing.BytesWritten} physicalRetune=False rule=chain_continuous_capture_contract").ConfigureAwait(false);
+                    }
+                    continue;
+                }
+                if (!segment.Enabled) continue;
+                if (now < segment.OpenAt || now >= segment.CloseAt) continue;
+                try
+                {
+                    var sink = new SegmentSink(segment);
+                    chainSinks[segment.ReservationId] = sink;
+                    WorkerPresentation.RecordingOpened(segment);
+                    await progress("chain_capture_sink_open", $"result=OK reservation=R{segment.ReservationId} openAt={segment.OpenAt:yyyy-MM-dd HH:mm:ss.fff} closeAt={segment.CloseAt:yyyy-MM-dd HH:mm:ss.fff} path={segment.OutputPath} capturePid={Environment.ProcessId} physicalRetune=False rule=chain_continuous_capture_contract").ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    await progress("chain_capture_sink_open", $"result=NG reservation=R{segment.ReservationId} path={segment.OutputPath} error={ex.GetType().Name}:{SafeProgress(ex.Message)} rule=chain_continuous_capture_contract").ConfigureAwait(false);
+                }
+            }
         }
 
-        public async Task WriteAsync(ReadOnlyMemory<byte> buffer)
+        private async Task WritePrimarySegmentResultAsync(TsReadProbeSummary summary, string reason)
         {
-            if (stream is null || buffer.Length == 0) return;
-            await stream.WriteAsync(buffer).ConfigureAwait(false);
+            if (primarySegment is null || string.IsNullOrWhiteSpace(primarySegment.ResultPath)) return;
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(primarySegment.RuntimeStatsPath))
+                {
+                    var runtimePath = Path.GetFullPath(primarySegment.RuntimeStatsPath);
+                    var runtimeDir = Path.GetDirectoryName(runtimePath);
+                    if (!string.IsNullOrWhiteSpace(runtimeDir)) Directory.CreateDirectory(runtimeDir);
+                    var runtimePayload = new
+                    {
+                        at = DateTimeOffset.Now,
+                        verdict = "CHAIN_SEGMENT_FINAL",
+                        final = true,
+                        completeness = "complete",
+                        reservationId = recording.ReservationId,
+                        bytesWritten = summary.RecordBytesWritten,
+                        packetsWritten = summary.RecordBytesWritten / 188,
+                        rawPackets = summary.PacketsRead,
+                        rawContinuityDrops = summary.RawContinuityDrops,
+                        rawContinuityErrors = summary.RawContinuityErrors,
+                        rawSyncErrors = summary.SyncErrors,
+                        rawScrambledPackets = summary.ScrambledLikePackets,
+                        outputPackets = summary.OutputPacketsAnalyzed,
+                        outputContinuityDrops = summary.OutputContinuityDrops,
+                        outputContinuityErrors = summary.OutputContinuityErrors,
+                        outputSyncErrors = summary.OutputSyncErrors,
+                        outputScrambledPackets = summary.OutputScrambledLikePackets,
+                        outputTargetMediaScrambledPackets = summary.OutputTargetMediaScrambledPackets,
+                        chunksWritten = summary.RecordChunksWritten,
+                        sharedCapture = true,
+                        workerPid = Environment.ProcessId
+                    };
+                    var runtimeJson = JsonSerializer.Serialize(runtimePayload, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = false });
+                    await File.AppendAllTextAsync(runtimePath, runtimeJson.ReplaceLineEndings(string.Empty) + Environment.NewLine, Encoding.UTF8).ConfigureAwait(false);
+                }
+
+                var resultPath = Path.GetFullPath(primarySegment.ResultPath);
+                var resultDir = Path.GetDirectoryName(resultPath);
+                if (!string.IsNullOrWhiteSpace(resultDir)) Directory.CreateDirectory(resultDir);
+                var success = summary.RecordBytesWritten > 0 && summary.OutputSyncErrors == 0 && summary.OutputTargetMediaScrambledPackets == 0;
+                var wrapper = new
+                {
+                    success,
+                    exitCode = 0,
+                    recorderPid = Environment.ProcessId,
+                    message = $"TvAIrEpgRec continuous chain primary segment completed. reason={reason}",
+                    result = new
+                    {
+                        success,
+                        outputPath = primarySegment.OutputPath ?? summary.RecordOutputPath ?? string.Empty,
+                        startedAt = summary.RecordReadStartedAt?.ToString("O") ?? DateTimeOffset.Now.ToString("O"),
+                        endedAt = DateTimeOffset.Now.ToString("O"),
+                        bytesWritten = summary.RecordBytesWritten,
+                        packetsWritten = summary.RecordBytesWritten / 188,
+                        qualityVerdict = success ? "LIVE_CLEAR_TARGET_SERVICE_TS_OK" : "CHAIN_SEGMENT_OUTPUT_WARN",
+                        runtimeStatsPath = primarySegment.RuntimeStatsPath ?? string.Empty,
+                        runtimeStatsEmitted = summary.RecordChunksWritten,
+                        rawContinuityDrops = summary.RawContinuityDrops,
+                        rawContinuityErrors = summary.RawContinuityErrors,
+                        rawSyncErrors = summary.SyncErrors,
+                        rawScrambledPackets = summary.ScrambledLikePackets,
+                        outputContinuityDrops = summary.OutputContinuityDrops,
+                        outputContinuityErrors = summary.OutputContinuityErrors,
+                        outputSyncErrors = summary.OutputSyncErrors,
+                        outputScrambledPackets = summary.OutputScrambledLikePackets,
+                        outputTargetMediaScrambledPackets = summary.OutputTargetMediaScrambledPackets,
+                        message = "continuous_chain_primary_segment_result"
+                    }
+                };
+                var options = new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true };
+                await File.WriteAllTextAsync(resultPath, JsonSerializer.Serialize(wrapper, options), Encoding.UTF8).ConfigureAwait(false);
+            }
+            catch { }
+        }
+
+        private async Task UpdateSinkLifetimesAsync(TsReadProbeSummary summary, Func<string, string, Task> progress)
+        {
+            await RefreshChainControlAsync(summary, progress).ConfigureAwait(false);
+            var now = DateTime.Now;
+            if (!primaryClosed && primaryCloseAt.HasValue && now >= primaryCloseAt.Value && stream is not null)
+            {
+                await stream.FlushAsync().ConfigureAwait(false);
+                await stream.DisposeAsync().ConfigureAwait(false);
+                stream = null;
+                primaryClosed = true;
+                WorkerPresentation.RecordingClosed(recording.ReservationId);
+                await WritePrimarySegmentResultAsync(summary, "segment_close_time_reached").ConfigureAwait(false);
+                await progress("chain_capture_primary_sink_close", $"result=OK reservation=R{recording.ReservationId} closeAt={primaryCloseAt.Value:yyyy-MM-dd HH:mm:ss.fff} bytes={summary.RecordBytesWritten} packets={summary.OutputPacketsAnalyzed} drops={summary.OutputContinuityDrops} cc={summary.OutputContinuityErrors} sync={summary.OutputSyncErrors} scramble={summary.OutputScrambledLikePackets} targetScramble={summary.OutputTargetMediaScrambledPackets} captureContinues={chainSinks.Any(pair => !pair.Value.Closed)} physicalRetune=False rule=chain_continuous_capture_contract").ConfigureAwait(false);
+            }
+
+            foreach (var pair in chainSinks.ToArray())
+            {
+                if (pair.Value.Closed || now < pair.Value.Segment.CloseAt) continue;
+                await pair.Value.CloseAsync("segment_close_time_reached").ConfigureAwait(false);
+                WorkerPresentation.RecordingClosed(pair.Key);
+                await progress("chain_capture_sink_close", $"result=OK reservation=R{pair.Key} closeAt={pair.Value.Segment.CloseAt:yyyy-MM-dd HH:mm:ss.fff} bytes={pair.Value.BytesWritten} packets={pair.Value.Quality.Packets} drops={pair.Value.Quality.ContinuityDrops} cc={pair.Value.Quality.ContinuityErrors} sync={pair.Value.Quality.SyncErrors} scramble={pair.Value.Quality.ScrambledPackets} targetScramble={pair.Value.TargetMediaScrambledPackets} physicalRetune=False rule=chain_continuous_capture_contract").ConfigureAwait(false);
+            }
+        }
+
+        public async Task<int> WriteAsync(
+            ReadOnlyMemory<byte> primaryBuffer,
+            ReadOnlyMemory<byte> broadBuffer,
+            TsReadProbeSummary summary,
+            Func<string, string, Task> progress)
+        {
+            if (primaryBuffer.Length == 0 && broadBuffer.Length == 0) return 0;
+            await UpdateSinkLifetimesAsync(summary, progress).ConfigureAwait(false);
+            var primaryBytes = 0;
+            if (stream is not null && !primaryClosed)
+            {
+                await stream.WriteAsync(primaryBuffer).ConfigureAwait(false);
+                primaryBytes = primaryBuffer.Length;
+            }
+            foreach (var sink in chainSinks.Values)
+            {
+                if (sink.Closed) continue;
+                var now = DateTime.Now;
+                if (now < sink.Segment.OpenAt || now >= sink.Segment.CloseAt) continue;
+                await sink.WriteAsync(primaryBuffer, broadBuffer, recording, summary).ConfigureAwait(false);
+            }
+            return primaryBytes;
         }
 
         public async Task FlushAsync()
         {
-            if (stream is null) return;
-            await stream.FlushAsync().ConfigureAwait(false);
+            if (stream is not null) await stream.FlushAsync().ConfigureAwait(false);
+            foreach (var sink in chainSinks.Values)
+            {
+                if (!sink.Closed) await sink.Stream.FlushAsync().ConfigureAwait(false);
+            }
         }
 
         public async ValueTask DisposeAsync()
@@ -2767,7 +3048,53 @@ internal static class BonDriverNativeProbe
                 await stream.FlushAsync().ConfigureAwait(false);
                 await stream.DisposeAsync().ConfigureAwait(false);
                 stream = null;
+                WorkerPresentation.RecordingClosed(recording.ReservationId);
             }
+            foreach (var pair in chainSinks)
+            {
+                if (!pair.Value.Closed)
+                    WorkerPresentation.RecordingClosed(pair.Key);
+                await pair.Value.DisposeAsync().ConfigureAwait(false);
+            }
+            chainSinks.Clear();
+        }
+    }
+
+
+    private static bool TrySyncRecordReadDeadlineFromChainControl(string? chainControlPath, ref DateTimeOffset readDeadline)
+    {
+        if (string.IsNullOrWhiteSpace(chainControlPath))
+            return false;
+        try
+        {
+            var control = JsonSerializer.Deserialize<ChainRecordingControl>(
+                ReadLatestChainControlText(chainControlPath, out _),
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (control?.ContinuousCapture != true || control.Segments.Count == 0)
+                return false;
+            var maxClose = control.Segments
+                .Where(segment => segment.Enabled)
+                .Select(segment => segment.CloseAt)
+                .DefaultIfEmpty(DateTime.MinValue)
+                .Max();
+            if (maxClose == DateTime.MinValue)
+                return false;
+
+            // CHAIN_CAPTURE_DEADLINE_SINGLE_SOURCE:
+            // The immutable chain-control snapshot is authoritative in both directions. A removed/disabled
+            // downstream segment must shorten the physical read lifetime just as a newly appended segment
+            // extends it. Keeping the historical maximum here leaves a worker alive after the chain tail was
+            // cancelled. Invalid/transient snapshots are ignored by the catch path and preserve the last safe
+            // deadline until the next loop iteration.
+            var requested = new DateTimeOffset(maxClose).AddSeconds(1);
+            if (requested == readDeadline)
+                return false;
+            readDeadline = requested;
+            return true;
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -2776,13 +3103,12 @@ internal static class BonDriverNativeProbe
 
     private static async Task WriteRecordBufferAsync(RecordOutputContext? context, byte[] buffer, int length, TsReadProbeSummary summary, Func<string, string, Task> progress)
     {
-        if (context is null || context.Stream is null || !summary.RecordWriteEnabled || length <= 0)
+        if (context is null || !summary.RecordWriteEnabled || length <= 0)
         {
             return;
         }
 
         using var scopedOutputLease = new PooledRecordBufferLease();
-        var stream = context.Stream;
 
         byte[] writeBytes;
         int writeLength;
@@ -2874,7 +3200,12 @@ internal static class BonDriverNativeProbe
             writeLength = length;
         }
 
-        if (string.Equals(summary.Mode, "record", StringComparison.OrdinalIgnoreCase) && summary.TargetServiceId > 0)
+        var broadWriteBytes = writeBytes;
+        var broadWriteLength = writeLength;
+        var recordingPolicy = RecordingOutputPolicyContract.Resolve(summary.Recording);
+        var recordCurrentServiceOnly = recordingPolicy.CurrentServiceOnly;
+        var recordSaveSubtitles = recordingPolicy.SaveSubtitles;
+        if (string.Equals(summary.Mode, "record", StringComparison.OrdinalIgnoreCase) && summary.TargetServiceId > 0 && recordCurrentServiceOnly)
         {
             if (summary.RecordBytesWritten == 0 && !summary.RecordServiceScopeReady && summary.RecordReadStartedAt is DateTimeOffset recordStart)
             {
@@ -2889,18 +3220,30 @@ internal static class BonDriverNativeProbe
                     await progress("record_startup_fullts_fallback", $"result=ACTIVE elapsedSec={(int)elapsedSec} reason=target_service_scope_not_ready bytesRead={summary.BytesRead} chunksRead={summary.ChunksRead} scopeInputPackets={summary.RecordServiceScopeInputPackets} target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} rule=release_contract").ConfigureAwait(false);
                 }
             }
-            var scopedOutput = FilterRecordServiceScope(writeBytes, writeLength, summary);
+            var scopedOutput = FilterRecordServiceScope(writeBytes, writeLength, summary, recordSaveSubtitles);
             scopedOutputLease.Set(scopedOutput);
             writeBytes = scopedOutput.Buffer;
             writeLength = scopedOutput.Length;
             if (summary.RecordChunksWritten == 0 || summary.RecordChunksWritten % 1000 == 0)
             {
-                await progress("record_service_scope", $"enabled={summary.RecordServiceScopeEnabled} ready={summary.RecordServiceScopeReady} target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} targetPmt=0x{Math.Max(0, summary.RecordTargetPmtPid):X} pcr=0x{Math.Max(0, summary.RecordTargetPcrPid):X} streamPids={string.Join(',', summary.RecordTargetStreamPids.Select(x => "0x" + x.ToString("X")))} writtenServiceIds={string.Join(',', summary.RecordWrittenServiceIds)} excludedServiceIds={string.Join(',', summary.RecordExcludedServiceIds)} inputPackets={summary.RecordServiceScopeInputPackets} writtenPackets={summary.RecordServiceScopeWrittenPackets} droppedPackets={summary.RecordServiceScopeDroppedPackets} mediaPackets={summary.RecordServiceScopeMediaPackets} rule=release_contract").ConfigureAwait(false);
+                await progress("record_service_scope", $"enabled={summary.RecordServiceScopeEnabled} currentServiceOnly={recordCurrentServiceOnly} saveSubtitles={recordSaveSubtitles} ready={summary.RecordServiceScopeReady} target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} targetPmt=0x{Math.Max(0, summary.RecordTargetPmtPid):X} pcr=0x{Math.Max(0, summary.RecordTargetPcrPid):X} streamPids={string.Join(',', summary.RecordTargetStreamPids.Select(x => "0x" + x.ToString("X")))} writtenServiceIds={string.Join(',', summary.RecordWrittenServiceIds)} excludedServiceIds={string.Join(',', summary.RecordExcludedServiceIds)} inputPackets={summary.RecordServiceScopeInputPackets} writtenPackets={summary.RecordServiceScopeWrittenPackets} droppedPackets={summary.RecordServiceScopeDroppedPackets} mediaPackets={summary.RecordServiceScopeMediaPackets} rule=release_contract").ConfigureAwait(false);
             }
             if (writeLength <= 0)
             {
                 return;
             }
+        }
+        else if (string.Equals(summary.Mode, "record", StringComparison.OrdinalIgnoreCase) && !recordSaveSubtitles)
+        {
+            // Subtitle-off must never write an original PMT that still references subtitle ES PIDs.
+            // Hold the first output until every PAT-advertised PMT has been fully assembled and a
+            // CRC-correct subtitle-free PMT is available. This also covers multi-packet PMTs.
+            if (!AreSubtitleFilteredPmtsReady(summary)) return;
+            var subtitleFiltered = FilterRecordSubtitlePackets(writeBytes, writeLength, summary);
+            scopedOutputLease.Set(subtitleFiltered);
+            writeBytes = subtitleFiltered.Buffer;
+            writeLength = subtitleFiltered.Length;
+            if (writeLength <= 0) return;
         }
 
         if (string.Equals(summary.Mode, "record", StringComparison.OrdinalIgnoreCase)
@@ -2926,18 +3269,25 @@ internal static class BonDriverNativeProbe
             await progress("record_b25_startup_clear_gate", $"result=RELEASED suppressedChunks={summary.RecordB25StartupSuppressedChunks} suppressedPackets={summary.RecordB25StartupSuppressedPackets} suppressedScrambled={summary.RecordB25StartupSuppressedScrambledPackets} targetClear={startupProbe.TargetClearPackets} targetScrambled={startupProbe.TargetScrambledPackets} rule=release_contract").ConfigureAwait(false);
         }
 
-        await context.WriteAsync(writeBytes.AsMemory(0, writeLength)).ConfigureAwait(false);
-        summary.RecordBytesWritten += writeLength;
-        summary.RecordChunksWritten++;
-        AnalyzeRecordOutputBuffer(writeBytes.AsMemory(0, writeLength), summary);
-        DirectRecorderCompatibleResult.AppendRuntimeStatsSnapshot(summary, DateTimeOffset.Now, "RECORDING", final: false);
+        var primaryBytesWritten = await context.WriteAsync(
+            writeBytes.AsMemory(0, writeLength),
+            broadWriteBytes.AsMemory(0, broadWriteLength),
+            summary,
+            progress).ConfigureAwait(false);
+        if (primaryBytesWritten > 0)
+        {
+            summary.RecordBytesWritten += primaryBytesWritten;
+            summary.RecordChunksWritten++;
+            AnalyzeRecordOutputBuffer(writeBytes.AsMemory(0, primaryBytesWritten), summary);
+            DirectRecorderCompatibleResult.AppendRuntimeStatsSnapshot(summary, DateTimeOffset.Now, "RECORDING", final: false);
+        }
         if (summary.RecordChunksWritten == 1 || summary.RecordChunksWritten % 1000 == 0)
         {
             await progress("record_write_chunk", $"reservation=R{summary.RecordReservationId} title={summary.RecordTitle} outputPath={summary.RecordOutputPath} chunks={summary.RecordChunksWritten} bytesWritten={summary.RecordBytesWritten} outputPackets={summary.OutputPacketsAnalyzed} outputSyncErrors={summary.OutputSyncErrors} outputScrambled={summary.OutputScrambledLikePackets} externalB25Available={summary.ExternalB25Available} externalB25Loaded={summary.ExternalB25LoadedPath ?? "-"} externalB25DecodeCalls={summary.ExternalB25DecodeCalls} externalB25DecodeOk={summary.ExternalB25DecodeOk} externalB25Passthrough={summary.ExternalB25Passthrough} externalB25DecodeNg={summary.ExternalB25DecodeNg} externalB25BufferedEmpty={summary.ExternalB25BufferedEmpty} rawFallbackSuppressed={summary.ExternalB25RawFallbackSuppressed} serviceScopeReady={summary.RecordServiceScopeReady} targetPmt=0x{Math.Max(0, summary.RecordTargetPmtPid):X} targetStreams={string.Join(',', summary.RecordTargetStreamPids.Select(x => "0x" + x.ToString("X")))} mediaPackets={summary.RecordServiceScopeMediaPackets} rule=release_contract").ConfigureAwait(false);
         }
     }
 
-    private static PooledRecordBuffer FilterRecordServiceScope(byte[] buffer, int length, TsReadProbeSummary summary)
+    private static PooledRecordBuffer FilterRecordServiceScope(byte[] buffer, int length, TsReadProbeSummary summary, bool saveSubtitles = true)
     {
         summary.RecordServiceScopeEnabled = true;
         summary.RecordServiceScopeRule = "release_contract";
@@ -2947,7 +3297,7 @@ internal static class BonDriverNativeProbe
         // release_contract dropped non-target service payload while leaving the original multi-service PAT in place.
         // TVTest then opened the first PAT service and saw no usable video.  Keep the service filter, but
         // only start writing after the target PMT/ES set is known and rewrite PAT packets to a single target SID.
-        var output = ArrayPool<byte>.Shared.Rent((packetCount + 4) * 188);
+        var output = ArrayPool<byte>.Shared.Rent((packetCount + 64) * 188);
         var outOffset = 0;
 
         for (var i = 0; i < packetCount; i++)
@@ -2994,9 +3344,24 @@ internal static class BonDriverNativeProbe
                 }
             }
 
-            var write = ShouldWriteRecordServiceScopedPacket(pid, summary);
+            var write = ShouldWriteRecordServiceScopedPacket(pid, summary, saveSubtitles);
             if (write)
             {
+                if (!saveSubtitles && pid == summary.RecordTargetPmtPid)
+                {
+                    var before = outOffset;
+                    outOffset = AppendSubtitlePolicyPacket(new ReadOnlySpan<byte>(buffer, offset, 188), pid, summary, output, outOffset);
+                    if (outOffset > before)
+                    {
+                        summary.RecordServiceScopeWrittenPackets += (outOffset - before) / 188;
+                        summary.RecordServiceScopeTargetPmtPackets += (outOffset - before) / 188;
+                    }
+                    else
+                    {
+                        summary.RecordServiceScopeDroppedPackets++;
+                    }
+                    continue;
+                }
                 if (pid == 0x0000)
                 {
                     var pat = BuildSingleServicePatPacket(summary, TakeNextPatContinuity(summary));
@@ -3024,6 +3389,140 @@ internal static class BonDriverNativeProbe
             }
         }
 
+        return new PooledRecordBuffer(output, outOffset, pooled: true);
+    }
+
+    private static byte[] BuildSubtitleFilteredPmtSection(byte[] buffer, int sectionOffset, int sectionLength)
+    {
+        var totalLength = 3 + sectionLength;
+        if (sectionLength < 9 || sectionOffset < 0 || sectionOffset + totalLength > buffer.Length) return Array.Empty<byte>();
+        var sectionEnd = sectionOffset + totalLength;
+        var crcStart = sectionEnd - 4;
+        if (sectionOffset + 12 > crcStart) return Array.Empty<byte>();
+
+        var programInfoLength = ((buffer[sectionOffset + 10] & 0x0F) << 8) | buffer[sectionOffset + 11];
+        var esStart = sectionOffset + 12 + programInfoLength;
+        if (esStart > crcStart) return Array.Empty<byte>();
+
+        using var ms = new MemoryStream(totalLength);
+        ms.Write(buffer, sectionOffset, esStart - sectionOffset);
+        var pos = esStart;
+        while (pos + 5 <= crcStart)
+        {
+            var esInfoLength = ((buffer[pos + 3] & 0x0F) << 8) | buffer[pos + 4];
+            var descriptorStart = pos + 5;
+            var descriptorEnd = descriptorStart + esInfoLength;
+            if (descriptorEnd > crcStart) return Array.Empty<byte>();
+            if (!IsAribSubtitleEs(buffer, descriptorStart, descriptorEnd))
+            {
+                ms.Write(buffer, pos, 5 + esInfoLength);
+            }
+            pos = descriptorEnd;
+        }
+        if (pos != crcStart) return Array.Empty<byte>();
+
+        var withoutCrc = ms.ToArray();
+        var newSectionLength = withoutCrc.Length - 3 + 4;
+        if (newSectionLength < 9 || newSectionLength > 0x0FFF) return Array.Empty<byte>();
+        withoutCrc[1] = (byte)((withoutCrc[1] & 0xF0) | ((newSectionLength >> 8) & 0x0F));
+        withoutCrc[2] = (byte)(newSectionLength & 0xFF);
+
+        var result = new byte[withoutCrc.Length + 4];
+        Buffer.BlockCopy(withoutCrc, 0, result, 0, withoutCrc.Length);
+        var crc = MpegCrc32(result, 0, withoutCrc.Length);
+        result[^4] = (byte)((crc >> 24) & 0xFF);
+        result[^3] = (byte)((crc >> 16) & 0xFF);
+        result[^2] = (byte)((crc >> 8) & 0xFF);
+        result[^1] = (byte)(crc & 0xFF);
+        return result;
+    }
+
+    private static byte[] PacketizePmtSection(int pid, byte[] section, int firstContinuityCounter)
+    {
+        if (pid <= 0 || pid > 0x1FFF || section.Length == 0) return Array.Empty<byte>();
+        var firstCapacity = 183; // 184-byte payload minus pointer_field.
+        var remaining = Math.Max(0, section.Length - firstCapacity);
+        var packetCount = 1 + (remaining + 183) / 184;
+        var output = new byte[packetCount * 188];
+        var sectionOffset = 0;
+        for (var index = 0; index < packetCount; index++)
+        {
+            var packetOffset = index * 188;
+            Array.Fill(output, (byte)0xFF, packetOffset, 188);
+            output[packetOffset] = 0x47;
+            output[packetOffset + 1] = (byte)(((pid >> 8) & 0x1F) | (index == 0 ? 0x40 : 0x00));
+            output[packetOffset + 2] = (byte)(pid & 0xFF);
+            output[packetOffset + 3] = (byte)(0x10 | ((firstContinuityCounter + index) & 0x0F));
+            var payloadOffset = packetOffset + 4;
+            var capacity = 184;
+            if (index == 0)
+            {
+                output[payloadOffset++] = 0x00;
+                capacity--;
+            }
+            var take = Math.Min(capacity, section.Length - sectionOffset);
+            if (take > 0)
+            {
+                Buffer.BlockCopy(section, sectionOffset, output, payloadOffset, take);
+                sectionOffset += take;
+            }
+        }
+        return output;
+    }
+
+    private static int AppendSubtitlePolicyPacket(ReadOnlySpan<byte> packet, int pid, TsReadProbeSummary summary, byte[] output, int outOffset, Dictionary<int, int>? continuityState = null)
+    {
+        if (summary.RecordSubtitlePids.Contains(pid)) return outOffset;
+
+        if (summary.PmtPids.Contains(pid))
+        {
+            // Never emit a stale PMT that still references subtitle ES PIDs.  We suppress the original
+            // PMT packet train until AnalyzeTsBuffer has assembled a complete section, then publish a
+            // CRC-correct rewritten PMT at each subsequent payload-unit-start.  This works for PMTs that
+            // span multiple TS packets and keeps the output PSI internally consistent.
+            var payloadUnitStart = (packet[1] & 0x40) != 0;
+            if (!summary.RecordSubtitleFilteredPmtSections.TryGetValue(pid, out var section)) return outOffset;
+            if (!payloadUnitStart) return outOffset;
+            continuityState ??= summary.RecordFilteredPmtNextContinuity;
+            var continuity = continuityState.TryGetValue(pid, out var next)
+                ? next & 0x0F
+                : packet[3] & 0x0F;
+            var packetized = PacketizePmtSection(pid, section, continuity);
+            if (packetized.Length == 0) return outOffset;
+            if (outOffset + packetized.Length > output.Length) return outOffset;
+            Buffer.BlockCopy(packetized, 0, output, outOffset, packetized.Length);
+            continuityState[pid] = (continuity + (packetized.Length / 188)) & 0x0F;
+            return outOffset + packetized.Length;
+        }
+
+        if (outOffset + 188 > output.Length) return outOffset;
+        packet.CopyTo(output.AsSpan(outOffset, 188));
+        return outOffset + 188;
+    }
+
+    private static bool AreSubtitleFilteredPmtsReady(TsReadProbeSummary summary)
+    {
+        if (summary.PmtPids.Count == 0) return false;
+        foreach (var pid in summary.PmtPids)
+        {
+            if (!summary.RecordSubtitleFilteredPmtSections.ContainsKey(pid)) return false;
+        }
+        return true;
+    }
+
+    private static PooledRecordBuffer FilterRecordSubtitlePackets(byte[] buffer, int length, TsReadProbeSummary summary)
+    {
+        if (length < 188 || summary.RecordSubtitlePids.Count == 0) return new PooledRecordBuffer(buffer, length, pooled: false);
+        var packetCount = length / 188;
+        var output = ArrayPool<byte>.Shared.Rent((packetCount + 64) * 188);
+        var outOffset = 0;
+        for (var i = 0; i < packetCount; i++)
+        {
+            var offset = i * 188;
+            if (buffer[offset] != 0x47) continue;
+            var pid = ((buffer[offset + 1] & 0x1F) << 8) | buffer[offset + 2];
+            outOffset = AppendSubtitlePolicyPacket(new ReadOnlySpan<byte>(buffer, offset, 188), pid, summary, output, outOffset);
+        }
         return new PooledRecordBuffer(output, outOffset, pooled: true);
     }
 
@@ -3071,7 +3570,7 @@ internal static class BonDriverNativeProbe
         }
     }
 
-    private static bool ShouldWriteRecordServiceScopedPacket(int pid, TsReadProbeSummary summary)
+    private static bool ShouldWriteRecordServiceScopedPacket(int pid, TsReadProbeSummary summary, bool saveSubtitles = true)
     {
         if (!summary.RecordServiceScopeReady) return false;
         if (pid == 0x0000) return true;        // PAT rewritten to the target SID only.
@@ -3090,6 +3589,7 @@ internal static class BonDriverNativeProbe
 
         if (pid == summary.RecordTargetPmtPid) return true;
         if (pid == summary.RecordTargetPcrPid) return true;
+        if (!saveSubtitles && summary.RecordSubtitlePids.Contains(pid)) return false;
         if (summary.RecordTargetStreamPids.Contains(pid)) return true;
         return false;
     }
@@ -3181,9 +3681,71 @@ internal static class BonDriverNativeProbe
         return callIndex == 1 || callIndex % 1000 == 0 || (!ok && callIndex % 100 == 0) || (size == 0 && callIndex % 100 == 0);
     }
 
-    private static int RecordReadWaitMs(bool isRecordMode) => isRecordMode ? 10 : 100;
+    private readonly record struct TsDrainPolicy(bool HighThroughput, int WaitMs, int IdleDelayMs, bool BacklogImmediateDrain);
 
-    private static int RecordIdleDelayMs(bool isRecordMode) => isRecordMode ? 1 : 10;
+    // Canonical TS drain contract. Recording, normal EPG and PreRec EPG-check all consume
+    // the same BonDriver stream and therefore share one high-throughput drain policy. Keep the
+    // cadence and backlog rule in one value so pointer/buffer overloads cannot diverge.
+    private static TsDrainPolicy ResolveTsDrainPolicy(string? mode)
+    {
+        var normalized = mode?.Trim().ToLowerInvariant();
+        return normalized is "record" or "epg" or "epg-check"
+            ? new TsDrainPolicy(true, 10, 1, true)
+            : new TsDrainPolicy(false, 100, 10, false);
+    }
+
+    private readonly record struct TsVariantCapabilities(
+        bool SupportedContinuous,
+        bool IsPointer,
+        bool PsiMinimal,
+        bool TargetServiceEit,
+        bool EitMinimal,
+        bool AribDecode,
+        bool EpgNormalize,
+        bool LogoPid29Preserve);
+
+    // Canonical capability map for the common TS route. Mode-specific code consumes flags from
+    // here rather than repeating variant-name lists in multiple branches.
+    private static TsVariantCapabilities ResolveTsVariantCapabilities(string? variantName)
+    {
+        var variant = variantName?.Trim().ToLowerInvariant() ?? string.Empty;
+        var supported = variant is
+            "pointer-vtable6-ready-threshold-continuous" or "buffer-vtable7-ready-threshold-continuous" or
+            "pointer-vtable6-psi-minimal" or "buffer-vtable7-psi-minimal" or
+            "pointer-vtable6-eit-minimal-decode" or "buffer-vtable7-eit-minimal-decode" or
+            "pointer-vtable6-eit-target-service" or "buffer-vtable7-eit-target-service" or
+            "pointer-vtable6-eit-arib-decode" or "buffer-vtable7-eit-arib-decode" or
+            "pointer-vtable6-epg-normalize" or "pointer-vtable6-epg-normalize-gr-logo-opportunistic" or
+            "pointer-vtable6-epg-normalize-logo-pid29" or "buffer-vtable7-epg-normalize";
+        var isPointer = variant is
+            "pointer-vtable6-ready-threshold-continuous" or "pointer-vtable6-psi-minimal" or
+            "pointer-vtable6-eit-minimal-decode" or "pointer-vtable6-eit-target-service" or
+            "pointer-vtable6-eit-arib-decode" or "pointer-vtable6-epg-normalize" or
+            "pointer-vtable6-epg-normalize-gr-logo-opportunistic" or "pointer-vtable6-epg-normalize-logo-pid29";
+        var psiMinimal = variant is
+            "pointer-vtable6-psi-minimal" or "buffer-vtable7-psi-minimal" or
+            "pointer-vtable6-eit-minimal-decode" or "buffer-vtable7-eit-minimal-decode" or
+            "pointer-vtable6-eit-target-service" or "buffer-vtable7-eit-target-service" or
+            "pointer-vtable6-eit-arib-decode" or "buffer-vtable7-eit-arib-decode" or
+            "pointer-vtable6-epg-normalize" or "pointer-vtable6-epg-normalize-gr-logo-opportunistic" or
+            "pointer-vtable6-epg-normalize-logo-pid29" or "buffer-vtable7-epg-normalize";
+        var targetServiceEit = variant is
+            "pointer-vtable6-eit-target-service" or "buffer-vtable7-eit-target-service" or
+            "pointer-vtable6-eit-arib-decode" or "buffer-vtable7-eit-arib-decode" or
+            "pointer-vtable6-epg-normalize" or "pointer-vtable6-epg-normalize-gr-logo-opportunistic" or
+            "pointer-vtable6-epg-normalize-logo-pid29" or "buffer-vtable7-epg-normalize";
+        var eitMinimal = targetServiceEit || variant is "pointer-vtable6-eit-minimal-decode" or "buffer-vtable7-eit-minimal-decode";
+        var aribDecode = variant is
+            "pointer-vtable6-eit-arib-decode" or "buffer-vtable7-eit-arib-decode" or
+            "pointer-vtable6-epg-normalize" or "pointer-vtable6-epg-normalize-gr-logo-opportunistic" or
+            "pointer-vtable6-epg-normalize-logo-pid29" or "buffer-vtable7-epg-normalize";
+        var epgNormalize = variant is
+            "pointer-vtable6-epg-normalize" or "pointer-vtable6-epg-normalize-gr-logo-opportunistic" or
+            "pointer-vtable6-epg-normalize-logo-pid29" or "buffer-vtable7-epg-normalize";
+        return new TsVariantCapabilities(
+            supported, isPointer, psiMinimal, targetServiceEit, eitMinimal, aribDecode, epgNormalize,
+            variant == "pointer-vtable6-epg-normalize-logo-pid29");
+    }
 
     private static bool IsRecordStopRequested(TsReadProbeSummary summary)
     {
@@ -3563,67 +4125,20 @@ internal static class BonDriverNativeProbe
                         summary.Error = null;
                         await progress("tsvariant_summary", $"result=OK variant=ready-only getTsCalled=False bytes=0 packets=0 readyNonZero={summary.NonZeroReadyCountSamples}/{summary.ReadyCountSamples}").ConfigureAwait(false);
                     }
-                    else if (summary.Variant.Equals("pointer-vtable6-ready-threshold-continuous", StringComparison.OrdinalIgnoreCase)
-                             || summary.Variant.Equals("buffer-vtable7-ready-threshold-continuous", StringComparison.OrdinalIgnoreCase)
-                             || summary.Variant.Equals("pointer-vtable6-psi-minimal", StringComparison.OrdinalIgnoreCase)
-                             || summary.Variant.Equals("buffer-vtable7-psi-minimal", StringComparison.OrdinalIgnoreCase)
-                             || summary.Variant.Equals("pointer-vtable6-eit-minimal-decode", StringComparison.OrdinalIgnoreCase)
-                             || summary.Variant.Equals("buffer-vtable7-eit-minimal-decode", StringComparison.OrdinalIgnoreCase)
-                             || summary.Variant.Equals("pointer-vtable6-eit-target-service", StringComparison.OrdinalIgnoreCase)
-                             || summary.Variant.Equals("buffer-vtable7-eit-target-service", StringComparison.OrdinalIgnoreCase)
-                             || summary.Variant.Equals("pointer-vtable6-eit-arib-decode", StringComparison.OrdinalIgnoreCase)
-                             || summary.Variant.Equals("buffer-vtable7-eit-arib-decode", StringComparison.OrdinalIgnoreCase)
-                             || summary.Variant.Equals("pointer-vtable6-epg-normalize", StringComparison.OrdinalIgnoreCase)
-                             || summary.Variant.Equals("pointer-vtable6-epg-normalize-gr-logo-opportunistic", StringComparison.OrdinalIgnoreCase)
-                             || summary.Variant.Equals("pointer-vtable6-epg-normalize-logo-pid29", StringComparison.OrdinalIgnoreCase)
-                             || summary.Variant.Equals("buffer-vtable7-epg-normalize", StringComparison.OrdinalIgnoreCase))
+                    else if (ResolveTsVariantCapabilities(summary.Variant).SupportedContinuous)
                     {
-                        var isPointer = summary.Variant.Equals("pointer-vtable6-ready-threshold-continuous", StringComparison.OrdinalIgnoreCase)
-                                        || summary.Variant.Equals("pointer-vtable6-psi-minimal", StringComparison.OrdinalIgnoreCase)
-                                        || summary.Variant.Equals("pointer-vtable6-eit-minimal-decode", StringComparison.OrdinalIgnoreCase)
-                                        || summary.Variant.Equals("pointer-vtable6-eit-target-service", StringComparison.OrdinalIgnoreCase)
-                                        || summary.Variant.Equals("pointer-vtable6-eit-arib-decode", StringComparison.OrdinalIgnoreCase)
-                                        || summary.Variant.Equals("pointer-vtable6-epg-normalize", StringComparison.OrdinalIgnoreCase)
-                                        || summary.Variant.Equals("pointer-vtable6-epg-normalize-gr-logo-opportunistic", StringComparison.OrdinalIgnoreCase)
-                                        || summary.Variant.Equals("pointer-vtable6-epg-normalize-logo-pid29", StringComparison.OrdinalIgnoreCase);
-                        var isPsiMinimal = summary.Variant.Equals("pointer-vtable6-psi-minimal", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("buffer-vtable7-psi-minimal", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("pointer-vtable6-eit-minimal-decode", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("buffer-vtable7-eit-minimal-decode", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("pointer-vtable6-eit-target-service", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("buffer-vtable7-eit-target-service", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("pointer-vtable6-eit-arib-decode", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("buffer-vtable7-eit-arib-decode", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("pointer-vtable6-epg-normalize", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("pointer-vtable6-epg-normalize-gr-logo-opportunistic", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("pointer-vtable6-epg-normalize-logo-pid29", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("buffer-vtable7-epg-normalize", StringComparison.OrdinalIgnoreCase);
-                        var isTargetServiceEit = summary.Variant.Equals("pointer-vtable6-eit-target-service", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("buffer-vtable7-eit-target-service", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("pointer-vtable6-eit-arib-decode", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("buffer-vtable7-eit-arib-decode", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("pointer-vtable6-epg-normalize", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("pointer-vtable6-epg-normalize-gr-logo-opportunistic", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("pointer-vtable6-epg-normalize-logo-pid29", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("buffer-vtable7-epg-normalize", StringComparison.OrdinalIgnoreCase);
-                        var isEitMinimal = summary.Variant.Equals("pointer-vtable6-eit-minimal-decode", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("buffer-vtable7-eit-minimal-decode", StringComparison.OrdinalIgnoreCase)
-                                           || isTargetServiceEit;
+                        var variantCapabilities = ResolveTsVariantCapabilities(summary.Variant);
+                        var isPointer = variantCapabilities.IsPointer;
+                        var isPsiMinimal = variantCapabilities.PsiMinimal;
+                        var isTargetServiceEit = variantCapabilities.TargetServiceEit;
+                        var isEitMinimal = variantCapabilities.EitMinimal;
                         summary.PsiMinimalProbe = isPsiMinimal;
                         summary.EitMinimalDecodeProbe = isEitMinimal;
-                        var isAribDecode = summary.Variant.Equals("pointer-vtable6-eit-arib-decode", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("buffer-vtable7-eit-arib-decode", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("pointer-vtable6-epg-normalize", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("pointer-vtable6-epg-normalize-gr-logo-opportunistic", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("pointer-vtable6-epg-normalize-logo-pid29", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("buffer-vtable7-epg-normalize", StringComparison.OrdinalIgnoreCase);
-                        var isEpgNormalize = summary.Variant.Equals("pointer-vtable6-epg-normalize", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("pointer-vtable6-epg-normalize-gr-logo-opportunistic", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("pointer-vtable6-epg-normalize-logo-pid29", StringComparison.OrdinalIgnoreCase)
-                                           || summary.Variant.Equals("buffer-vtable7-epg-normalize", StringComparison.OrdinalIgnoreCase);
+                        var isAribDecode = variantCapabilities.AribDecode;
+                        var isEpgNormalize = variantCapabilities.EpgNormalize;
                         var isFullNormalEpgMode = string.Equals(summary.Mode, "epg", StringComparison.OrdinalIgnoreCase);
                         summary.EpgIntermediateModelProbe = isEpgNormalize;
-                        summary.EpgLogoPid29PreserveRequested = summary.Variant.Equals("pointer-vtable6-epg-normalize-logo-pid29", StringComparison.OrdinalIgnoreCase);
+                        summary.EpgLogoPid29PreserveRequested = variantCapabilities.LogoPid29Preserve;
                         summary.AribShortEventDecodeProbe = isAribDecode;
                         summary.TargetServiceEitPriorityProbe = isTargetServiceEit;
                         summary.TargetServiceEitWaitProbe = isTargetServiceEit;
@@ -3664,34 +4179,53 @@ internal static class BonDriverNativeProbe
                                 : isTargetServiceEit
                                     ? Math.Clamp(summary.ReadSeconds, 1, 30 * 60)
                                     : Math.Clamp(summary.ReadSeconds, 1, 15);
-                        var readDeadline = DateTimeOffset.Now.AddSeconds(readSecondsLimit);
+                        var isPreRecordEpgCheckMode = string.Equals(summary.Mode, "epg-check", StringComparison.OrdinalIgnoreCase);
+                        // PRE_REC_EXECUTION_DEADLINE_INVARIANT:
+                        // epg-check receives the exact Host-owned absolute hard deadline. Do not create a second
+                        // relative worker deadline from process/read start. The worker may observe target EIT but
+                        // cannot decide the PreRec terminal state.
+                        var readDeadline = isPreRecordEpgCheckMode && summary.PreRecordHardDeadlineUtc.HasValue
+                            ? summary.PreRecordHardDeadlineUtc.Value
+                            : DateTimeOffset.Now.AddSeconds(readSecondsLimit);
+                        // Chain-control is immutable-generation backed, but resolving its latest snapshot still
+                        // touches the filesystem. Poll the deadline at a bounded cadence rather than on every TS chunk.
+                        var nextChainDeadlineSyncAt = DateTimeOffset.MinValue;
                         // NORMAL_EPG_DURATION_INVARIANT:
                         // Full normal EPG uses the configured time budget as its sole capture-duration authority.
                         // A bitrate-dependent chunk cap shortens high-bitrate TS captures and creates a second,
                         // hidden duration rule. Record mode is also time/stop-signal governed. Short diagnostic
                         // variants keep their bounded chunk guard.
-                        var isPreRecordEpgCheckMode = string.Equals(summary.Mode, "epg-check", StringComparison.OrdinalIgnoreCase);
+                        var tsDrainPolicy = ResolveTsDrainPolicy(summary.Mode);
                         var maxChunks = isRecordModeForLimit || isFullNormalEpgMode || isPreRecordEpgCheckMode
                             ? long.MaxValue
                             : isTargetServiceEit ? Math.Max(200, readSecondsLimit * 120) : 200;
                         var callIndex = 0;
+                        var epgCheckTargetObservationLogged = false;
                         if (isRecordModeForLimit) summary.RecordReadStartedAt = DateTimeOffset.Now;
                         await using var recordStream = await OpenRecordOutputAsync(summary, progress).ConfigureAwait(false);
                         if (isPointer)
                         {
                             var getTs = Marshal.GetDelegateForFunctionPointer<GetTsStreamPtrDelegate>(getTsPtr6);
                             uint pendingRemain = 0;
-                            while (DateTimeOffset.Now < readDeadline && summary.ChunksRead < maxChunks && !IsRecordStopRequested(summary))
+                            while (summary.ChunksRead < maxChunks && !IsRecordStopRequested(summary))
                             {
+                                var loopNow = DateTimeOffset.Now;
+                                if (isRecordModeForLimit && loopNow >= nextChainDeadlineSyncAt)
+                                {
+                                    TrySyncRecordReadDeadlineFromChainControl(summary.ChainControlPath, ref readDeadline);
+                                    nextChainDeadlineSyncAt = loopNow.AddMilliseconds(200);
+                                }
+                                if (loopNow >= readDeadline)
+                                    break;
                                 callIndex++;
-                                if (isRecordModeForLimit && pendingRemain > 0)
+                                if (tsDrainPolicy.BacklogImmediateDrain && pendingRemain > 0)
                                 {
                                     waitResult = pendingRemain;
                                     ready = pendingRemain;
                                 }
                                 else
                                 {
-                                    waitResult = waitTs(driver, (uint)RecordReadWaitMs(isRecordModeForLimit));
+                                    waitResult = waitTs(driver, (uint)tsDrainPolicy.WaitMs);
                                     ready = getReady(driver);
                                 }
                                 summary.ReadyCountSamples++;
@@ -3703,7 +4237,7 @@ internal static class BonDriverNativeProbe
                                     {
                                         pendingRemain = 0;
                                     }
-                                    await Task.Delay(RecordIdleDelayMs(isRecordModeForLimit)).ConfigureAwait(false);
+                                    await Task.Delay(tsDrainPolicy.IdleDelayMs).ConfigureAwait(false);
                                     continue;
                                 }
 
@@ -3735,15 +4269,24 @@ internal static class BonDriverNativeProbe
                                     AnalyzeTsBuffer(buffer, copySize, summary);
                                     await WriteRecordBufferAsync(recordStream, buffer, copySize, summary, progress).ConfigureAwait(false);
                                     if (summary.RecordBytesWritten == 0) await TryRecoverRecordStartupZeroOutputAsync("ts_read_but_no_record_output").ConfigureAwait(false);
-                                    var exactPreRecordEventSeen = summary.ExpectedEventId > 0
+                                    var targetIdentityProven = summary.ExpectedEventId > 0
                                         && summary.ExpectedTargetEventSeen;
+                                    var exactPreRecordEventSeen = targetIdentityProven && summary.ExpectedTargetEventDirectSeen;
                                     var epgCheckReady = string.Equals(summary.Mode, "epg-check", StringComparison.OrdinalIgnoreCase)
-                                        ? (summary.ExpectedEventId > 0 ? exactPreRecordEventSeen : summary.TargetServiceEventsWithShortEvent >= summary.TargetServiceEventMin)
+                                        ? (summary.ExpectedEventId > 0 ? targetIdentityProven : summary.TargetServiceEventsWithShortEvent >= summary.TargetServiceEventMin)
                                         : summary.TargetServiceEventsWithShortEvent >= summary.TargetServiceEventMin;
                                     if (isTargetServiceEit && epgCheckReady)
                                     {
-                                        await progress("tsvariant_eit_target_service_found", $"result=OK target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} expectedEventId={summary.ExpectedEventId} exactEventSeen={exactPreRecordEventSeen} targetEvents={summary.TargetServiceEventsDecoded} targetShortEvent={summary.TargetServiceEventsWithShortEvent} targetEventsMin={summary.TargetServiceEventMin} targetEventsReached=True fullNormalEpgMode={isFullNormalEpgMode} call={callIndex} chunks={summary.ChunksRead}").ConfigureAwait(false);
-                                        if (!isFullNormalEpgMode) break;
+                                        if (!isPreRecordEpgCheckMode || !epgCheckTargetObservationLogged)
+                                        {
+                                            await progress("tsvariant_eit_target_service_found", $"result=OK target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} expectedEventId={summary.ExpectedEventId} targetIdentityProven={targetIdentityProven} targetEvidence={summary.ExpectedTargetEventEvidence} exactEventSeen={exactPreRecordEventSeen} targetEvents={summary.TargetServiceEventsDecoded} targetShortEvent={summary.TargetServiceEventsWithShortEvent} targetEventsMin={summary.TargetServiceEventMin} observedStart={summary.ObservedExpectedEventStart} observedEnd={summary.ObservedExpectedEventEnd} targetEventsReached=True fullNormalEpgMode={isFullNormalEpgMode} lifecycleOwner={(isPreRecordEpgCheckMode ? "host_prerec_execution" : "worker")} action={(isPreRecordEpgCheckMode ? "observe_only_keep_reading_until_host_stop_or_deadline" : "worker_may_complete")} call={callIndex} chunks={summary.ChunksRead}").ConfigureAwait(false);
+                                            if (isPreRecordEpgCheckMode) epgCheckTargetObservationLogged = true;
+                                        }
+                                        // PRE_REC_EXECUTION_OWNER_INVARIANT:
+                                        // epg-check worker observes transport/EIT only. It must not decide the
+                                        // PreRec terminal state or shorten the Host-owned deadline because it saw
+                                        // the expected event. The Host probe lifecycle is the sole target/terminal owner.
+                                        if (!isFullNormalEpgMode && !isPreRecordEpgCheckMode) break;
                                     }
                                     if (isTargetServiceEit && summary.TargetServiceEventsWithShortEvent > 0 && summary.TargetServiceEventsWithShortEvent < summary.TargetServiceEventMin && (callIndex == 1 || callIndex % 100 == 0))
                                     {
@@ -3756,7 +4299,7 @@ internal static class BonDriverNativeProbe
                                     await TryRecoverRecordStartupZeroOutputAsync("getts_empty_or_invalid").ConfigureAwait(false);
                                 }
 
-                                if (remain == 0) await Task.Delay(RecordIdleDelayMs(isRecordModeForLimit)).ConfigureAwait(false);
+                                if (remain == 0) await Task.Delay(tsDrainPolicy.IdleDelayMs).ConfigureAwait(false);
                             }
                         }
                         else
@@ -3767,17 +4310,25 @@ internal static class BonDriverNativeProbe
                             uint pendingRemain = 0;
                             try
                             {
-                                while (DateTimeOffset.Now < readDeadline && summary.ChunksRead < maxChunks && !IsRecordStopRequested(summary))
+                                while (summary.ChunksRead < maxChunks && !IsRecordStopRequested(summary))
                                 {
+                                    var loopNow = DateTimeOffset.Now;
+                                    if (isRecordModeForLimit && loopNow >= nextChainDeadlineSyncAt)
+                                    {
+                                        TrySyncRecordReadDeadlineFromChainControl(summary.ChainControlPath, ref readDeadline);
+                                        nextChainDeadlineSyncAt = loopNow.AddMilliseconds(200);
+                                    }
+                                    if (loopNow >= readDeadline)
+                                        break;
                                     callIndex++;
-                                    if (isRecordModeForLimit && pendingRemain > 0)
+                                    if (tsDrainPolicy.BacklogImmediateDrain && pendingRemain > 0)
                                     {
                                         waitResult = pendingRemain;
                                         ready = pendingRemain;
                                     }
                                     else
                                     {
-                                        waitResult = waitTs(driver, (uint)RecordReadWaitMs(isRecordModeForLimit));
+                                        waitResult = waitTs(driver, (uint)tsDrainPolicy.WaitMs);
                                         ready = getReady(driver);
                                     }
                                     summary.ReadyCountSamples++;
@@ -3789,7 +4340,7 @@ internal static class BonDriverNativeProbe
                                         {
                                             pendingRemain = 0;
                                         }
-                                        await Task.Delay(RecordIdleDelayMs(isRecordModeForLimit)).ConfigureAwait(false);
+                                        await Task.Delay(tsDrainPolicy.IdleDelayMs).ConfigureAwait(false);
                                         continue;
                                     }
 
@@ -3820,15 +4371,24 @@ internal static class BonDriverNativeProbe
                                         AnalyzeTsBuffer(buffer, copySize, summary);
                                         await WriteRecordBufferAsync(recordStream, buffer, copySize, summary, progress).ConfigureAwait(false);
                                         if (summary.RecordBytesWritten == 0) await TryRecoverRecordStartupZeroOutputAsync("ts_read_but_no_record_output").ConfigureAwait(false);
-                                        var exactPreRecordEventSeen = summary.ExpectedEventId > 0
+                                        var targetIdentityProven = summary.ExpectedEventId > 0
                                             && summary.ExpectedTargetEventSeen;
+                                        var exactPreRecordEventSeen = targetIdentityProven && summary.ExpectedTargetEventDirectSeen;
                                         var epgCheckReady = string.Equals(summary.Mode, "epg-check", StringComparison.OrdinalIgnoreCase)
-                                            ? (summary.ExpectedEventId > 0 ? exactPreRecordEventSeen : summary.TargetServiceEventsWithShortEvent >= summary.TargetServiceEventMin)
+                                            ? (summary.ExpectedEventId > 0 ? targetIdentityProven : summary.TargetServiceEventsWithShortEvent >= summary.TargetServiceEventMin)
                                             : summary.TargetServiceEventsWithShortEvent >= summary.TargetServiceEventMin;
                                         if (isTargetServiceEit && epgCheckReady)
                                         {
-                                            await progress("tsvariant_eit_target_service_found", $"result=OK target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} expectedEventId={summary.ExpectedEventId} exactEventSeen={exactPreRecordEventSeen} targetEvents={summary.TargetServiceEventsDecoded} targetShortEvent={summary.TargetServiceEventsWithShortEvent} targetEventsMin={summary.TargetServiceEventMin} targetEventsReached=True fullNormalEpgMode={isFullNormalEpgMode} call={callIndex} chunks={summary.ChunksRead}").ConfigureAwait(false);
-                                            if (!isFullNormalEpgMode) break;
+                                            if (!isPreRecordEpgCheckMode || !epgCheckTargetObservationLogged)
+                                            {
+                                                await progress("tsvariant_eit_target_service_found", $"result=OK target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} expectedEventId={summary.ExpectedEventId} targetIdentityProven={targetIdentityProven} targetEvidence={summary.ExpectedTargetEventEvidence} exactEventSeen={exactPreRecordEventSeen} targetEvents={summary.TargetServiceEventsDecoded} targetShortEvent={summary.TargetServiceEventsWithShortEvent} targetEventsMin={summary.TargetServiceEventMin} observedStart={summary.ObservedExpectedEventStart} observedEnd={summary.ObservedExpectedEventEnd} targetEventsReached=True fullNormalEpgMode={isFullNormalEpgMode} lifecycleOwner={(isPreRecordEpgCheckMode ? "host_prerec_execution" : "worker")} action={(isPreRecordEpgCheckMode ? "observe_only_keep_reading_until_host_stop_or_deadline" : "worker_may_complete")} call={callIndex} chunks={summary.ChunksRead}").ConfigureAwait(false);
+                                                if (isPreRecordEpgCheckMode) epgCheckTargetObservationLogged = true;
+                                            }
+                                            // PRE_REC_EXECUTION_OWNER_INVARIANT:
+                                            // epg-check worker observes transport/EIT only. It must not decide the
+                                            // PreRec terminal state or shorten the Host-owned deadline because it saw
+                                            // the expected event. The Host probe lifecycle is the sole target/terminal owner.
+                                            if (!isFullNormalEpgMode && !isPreRecordEpgCheckMode) break;
                                         }
                                     }
                                     else
@@ -3837,7 +4397,7 @@ internal static class BonDriverNativeProbe
                                         await TryRecoverRecordStartupZeroOutputAsync("getts_empty_or_invalid").ConfigureAwait(false);
                                     }
 
-                                    if (remain == 0) await Task.Delay(RecordIdleDelayMs(isRecordModeForLimit)).ConfigureAwait(false);
+                                    if (remain == 0) await Task.Delay(tsDrainPolicy.IdleDelayMs).ConfigureAwait(false);
                                 }
                             }
                             finally
@@ -3879,13 +4439,14 @@ internal static class BonDriverNativeProbe
                         var isEpgCheckMode = string.Equals(summary.CommonTsRoute?.Mode, "epg-check", StringComparison.OrdinalIgnoreCase)
                             || string.Equals(summary.Purpose, "mode_epg_check_after_directrecbridge_common_ts_route_facade_dbwrite_false", StringComparison.OrdinalIgnoreCase);
                         var baseTsReadOk = summary.BytesRead > 0 && summary.PacketsRead > 0 && summary.SyncErrors == 0;
-                        var exactPreRecordEventObserved = summary.ExpectedEventId <= 0
-                            || summary.ExpectedTargetEventSeen;
+                        // PRE_REC_EXECUTION_OWNER_INVARIANT:
+                        // Worker success describes transport/service observation health only. Exact expected-event
+                        // success/failure belongs exclusively to the Host PreRec lifecycle. This prevents a worker
+                        // observation from becoming a second terminal owner beside EpgCapture.
                         var epgCheckTargetOk = summary.TargetServiceEitPriorityOk
                             && string.Equals(summary.TargetServiceEitWaitResult, "TARGET_SEEN", StringComparison.OrdinalIgnoreCase)
                             && summary.EpgIntermediateModelOk
-                            && summary.TargetServiceIntermediateEventsBuilt >= Math.Max(1, summary.TargetServiceEventMin)
-                            && exactPreRecordEventObserved;
+                            && summary.TargetServiceIntermediateEventsBuilt >= Math.Max(1, summary.TargetServiceEventMin);
 
                         var isRecordMode = string.Equals(summary.Mode, "record", StringComparison.OrdinalIgnoreCase);
                         summary.TsReadOk = isRecordMode
@@ -3907,9 +4468,7 @@ internal static class BonDriverNativeProbe
                                 summary.Error = !baseTsReadOk
                                     ? $"EPG_CHECK_TS_READ_INCOMPLETE bytes={summary.BytesRead} packets={summary.PacketsRead} syncErrors={summary.SyncErrors}"
                                     : !summary.TargetServiceEitPriorityOk
-                                        ? $"TARGET_NOT_SEEN target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} targetEvents={summary.TargetServiceEventsDecoded} allEvents={summary.EitEventsDecoded} shortEvent={summary.TargetServiceEventsWithShortEvent} readSeconds={readSecondsLimit} targetEventsMin={summary.TargetServiceEventMin} chunks={summary.ChunksRead} calls={summary.GetTsCalls} serviceIdCounts={FormatIntCounts(summary.EitServiceIdCounts)} tripletCounts={FormatStringCounts(summary.EitTripletCounts, 16)} actualOther={FormatStringCounts(summary.EitActualOtherCounts, 16)}"
-                                        : !exactPreRecordEventObserved
-                                            ? $"TARGET_EVENT_NOT_SEEN target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} expectedEventId={summary.ExpectedEventId} expectedStart={summary.ExpectedEventStart} expectedEnd={summary.ExpectedEventEnd} targetEvents={summary.TargetServiceEventsDecoded} targetBuilt={summary.TargetServiceIntermediateEventsBuilt} readSeconds={readSecondsLimit}"
+                                        ? $"TARGET_SERVICE_EIT_NOT_SEEN target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} targetEvents={summary.TargetServiceEventsDecoded} allEvents={summary.EitEventsDecoded} shortEvent={summary.TargetServiceEventsWithShortEvent} readSeconds={readSecondsLimit} targetEventsMin={summary.TargetServiceEventMin} chunks={summary.ChunksRead} calls={summary.GetTsCalls} serviceIdCounts={FormatIntCounts(summary.EitServiceIdCounts)} tripletCounts={FormatStringCounts(summary.EitTripletCounts, 16)} actualOther={FormatStringCounts(summary.EitActualOtherCounts, 16)}"
                                         : !summary.EpgIntermediateModelOk
                                             ? $"EPG_CHECK_INTERMEDIATE_MODEL_NG target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} targetBuilt={summary.TargetServiceIntermediateEventsBuilt} targetEventsMin={summary.TargetServiceEventMin}"
                                             : $"EPG_CHECK_TARGET_EVENTS_NOT_ENOUGH target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} targetBuilt={summary.TargetServiceIntermediateEventsBuilt} targetEventsMin={summary.TargetServiceEventMin}";
@@ -3934,20 +4493,43 @@ internal static class BonDriverNativeProbe
                             {
                                 var flushBytes = flushed.Data;
                                 var flushLength = flushBytes.Length;
+                                var broadFlushBytes = flushBytes;
+                                var broadFlushLength = flushLength;
                                 using var flushScopedOutputLease = new PooledRecordBufferLease();
-                                if (string.Equals(summary.Mode, "record", StringComparison.OrdinalIgnoreCase) && summary.TargetServiceId > 0)
+                                var recordingPolicy = RecordingOutputPolicyContract.Resolve(summary.Recording);
+                                var recordCurrentServiceOnly = recordingPolicy.CurrentServiceOnly;
+                                var recordSaveSubtitles = recordingPolicy.SaveSubtitles;
+                                if (string.Equals(summary.Mode, "record", StringComparison.OrdinalIgnoreCase)
+                                    && summary.TargetServiceId > 0
+                                    && recordCurrentServiceOnly)
                                 {
-                                    var scopedOutput = FilterRecordServiceScope(flushBytes, flushLength, summary);
+                                    var scopedOutput = FilterRecordServiceScope(flushBytes, flushLength, summary, recordSaveSubtitles);
                                     flushScopedOutputLease.Set(scopedOutput);
                                     flushBytes = scopedOutput.Buffer;
                                     flushLength = scopedOutput.Length;
                                 }
-                                if (flushLength > 0)
+                                else if (string.Equals(summary.Mode, "record", StringComparison.OrdinalIgnoreCase)
+                                    && !recordSaveSubtitles
+                                    && AreSubtitleFilteredPmtsReady(summary))
+                                {
+                                    var subtitleFiltered = FilterRecordSubtitlePackets(flushBytes, flushLength, summary);
+                                    flushScopedOutputLease.Set(subtitleFiltered);
+                                    flushBytes = subtitleFiltered.Buffer;
+                                    flushLength = subtitleFiltered.Length;
+                                }
+                                if (flushLength > 0 || broadFlushLength > 0)
                                 {
                                     summary.ExternalB25FlushBytes += flushLength;
-                                    await recordStream.WriteAsync(flushBytes.AsMemory(0, flushLength)).ConfigureAwait(false);
-                                    summary.RecordBytesWritten += flushLength;
-                                    AnalyzeRecordOutputBuffer(flushBytes.AsMemory(0, flushLength), summary);
+                                    var primaryFlushBytesWritten = await recordStream.WriteAsync(
+                                        flushBytes.AsMemory(0, flushLength),
+                                        broadFlushBytes.AsMemory(0, broadFlushLength),
+                                        summary,
+                                        progress).ConfigureAwait(false);
+                                    if (primaryFlushBytesWritten > 0)
+                                    {
+                                        summary.RecordBytesWritten += primaryFlushBytesWritten;
+                                        AnalyzeRecordOutputBuffer(flushBytes.AsMemory(0, primaryFlushBytesWritten), summary);
+                                    }
                                 }
                             }
                             await progress("record_b25_flush", $"result={(flushed.Ok ? "OK" : "NG")} bytes={flushed.Data.Length} flushCalls={summary.ExternalB25FlushCalls} flushBytes={summary.ExternalB25FlushBytes} serviceScopeReady={summary.RecordServiceScopeReady} mediaPackets={summary.RecordServiceScopeMediaPackets} rule=release_contract").ConfigureAwait(false);
@@ -3960,7 +4542,7 @@ internal static class BonDriverNativeProbe
                             await MarkRecordShutdownStageAsync(summary, progress, "record_stream_flush_exit", "result=OK").ConfigureAwait(false);
                         }
 
-                        await progress("tsvariant_continuous_summary", $"result={(summary.BytesRead > 0 && summary.PacketsRead > 0 && summary.SyncErrors == 0 ? "OK" : "NG")} variant={summary.Variant} calls={summary.GetTsCalls} empty={summary.EmptyReads} bytes={summary.BytesRead} chunks={summary.ChunksRead} packets={summary.PacketsRead} syncErrors={summary.SyncErrors} tei={summary.TransportErrorPackets} scrambledLike={summary.ScrambledLikePackets} readyNonZero={summary.NonZeroReadyCountSamples}/{summary.ReadyCountSamples} threshold={summary.ReadyThreshold} reached={summary.ReadyThresholdReached} lastReady={summary.LastReadyCount} lastRemain={summary.LastRemain} readSecondsLimit={readSecondsLimit} maxChunks={maxChunks} externalB25Available={summary.ExternalB25Available} externalB25Loaded={summary.ExternalB25LoadedPath ?? "-"} externalB25DecodeCalls={summary.ExternalB25DecodeCalls} externalB25DecodeOk={summary.ExternalB25DecodeOk} externalB25Passthrough={summary.ExternalB25Passthrough} externalB25FlushBytes={summary.ExternalB25FlushBytes} cdtPid29In={summary.InputCdtPid29Packets} cdtPid29Out={summary.OutputCdtPid29Packets} logoPid29Preserve={summary.EpgLogoPid29PreserveRequested} rule=release_contract").ConfigureAwait(false);
+                        await progress("tsvariant_continuous_summary", $"result={(summary.BytesRead > 0 && summary.PacketsRead > 0 && summary.SyncErrors == 0 ? "OK" : "NG")} variant={summary.Variant} calls={summary.GetTsCalls} empty={summary.EmptyReads} bytes={summary.BytesRead} chunks={summary.ChunksRead} packets={summary.PacketsRead} syncErrors={summary.SyncErrors} tei={summary.TransportErrorPackets} scrambledLike={summary.ScrambledLikePackets} readyNonZero={summary.NonZeroReadyCountSamples}/{summary.ReadyCountSamples} threshold={summary.ReadyThreshold} reached={summary.ReadyThresholdReached} lastReady={summary.LastReadyCount} lastRemain={summary.LastRemain} readSecondsLimit={readSecondsLimit} hardDeadline={(summary.PreRecordHardDeadlineUtc?.ToString("O") ?? "-")} maxChunks={maxChunks} highThroughputTsDrain={tsDrainPolicy.HighThroughput} waitMs={tsDrainPolicy.WaitMs} idleDelayMs={tsDrainPolicy.IdleDelayMs} backlogImmediateDrain={tsDrainPolicy.BacklogImmediateDrain} externalB25Available={summary.ExternalB25Available} externalB25Loaded={summary.ExternalB25LoadedPath ?? "-"} externalB25DecodeCalls={summary.ExternalB25DecodeCalls} externalB25DecodeOk={summary.ExternalB25DecodeOk} externalB25Passthrough={summary.ExternalB25Passthrough} externalB25FlushBytes={summary.ExternalB25FlushBytes} cdtPid29In={summary.InputCdtPid29Packets} cdtPid29Out={summary.OutputCdtPid29Packets} logoPid29Preserve={summary.EpgLogoPid29PreserveRequested} rule=release_contract").ConfigureAwait(false);
                         if (isPsiMinimal)
                         {
                             await progress("tsvariant_psi_minimal_summary", $"result={(summary.PsiMinimalOk ? "OK" : "NG")} pat={summary.PatSeen}/{summary.PatSections} pmt={summary.PmtSeen}/{summary.PmtSections} sdt={summary.SdtSeen}/{summary.SdtSections} eit={summary.EitSeen}/{summary.EitSections} nitPackets={summary.NitPackets} pmtPids={string.Join(',', summary.PmtPids)} streamPids={string.Join(',', summary.StreamPids.Take(16))}").ConfigureAwait(false);
@@ -4354,6 +4936,13 @@ internal static class BonDriverNativeProbe
             {
                 var outputPid = ((packet[1] & 0x1F) << 8) | packet[2];
                 if (outputPid == 0x0029) summary.OutputCdtPid29Packets++;
+                // RECORDING_TARGET_MEDIA_SCRAMBLE_SINGLE_SOURCE:
+                // Overall output scramble remains a diagnostic for every written PID, but recording
+                // completion is determined only by target-service ES packets.  PSI/SI packets that
+                // carry a transient/non-target scrambling flag must not turn an otherwise clear target
+                // recording into Failed.
+                if ((packet[3] & 0xC0) != 0 && summary.RecordTargetStreamPids.Contains(outputPid))
+                    summary.OutputTargetMediaScrambledPackets++;
             }
             summary.RecordingQuality.Output.ObservePacket(packet);
         }
@@ -4385,6 +4974,7 @@ internal static class BonDriverNativeProbe
             if (pid == 0x0010) summary.NitPackets++;
             if (pid == 0x0011) summary.SdtPackets++;
             if (pid == 0x0012) summary.EitPackets++;
+            if (pid == 0x0014) summary.TdtTotPackets++;
             if (summary.PmtPids.Contains(pid)) summary.PmtPackets++;
 
             var hasPayload = (buffer[offset + 3] & 0x10) != 0;
@@ -4406,7 +4996,7 @@ internal static class BonDriverNativeProbe
             // path previously parsed only payload-unit-start packets and therefore never learned the
             // target ES PIDs when a PMT continued in the next packet. Use the common section assembler
             // for every PSI/SI PID that owns runtime routing decisions.
-            if (pid == 0x0000 || pid == 0x0010 || pid == 0x0011 || pid == 0x0012 || summary.PmtPids.Contains(pid))
+            if (pid == 0x0000 || pid == 0x0010 || pid == 0x0011 || pid == 0x0012 || pid == 0x0014 || summary.PmtPids.Contains(pid))
             {
                 ParsePsiSectionsWithAssembly(buffer, payloadOffset, offset + 188, pid, payloadUnitStart, summary);
             }
@@ -4542,6 +5132,31 @@ internal static class BonDriverNativeProbe
 
         var sectionEnd = sectionOffset + totalLength;
 
+        if (pid == 0x0014 && (tableId == 0x70 || tableId == 0x73))
+        {
+            // ARIB TDT/TOT carries the broadcast clock as MJD + BCD. Observe it at
+            // the TS-runtime boundary so later file parsing time is never mixed into
+            // the measured clock delta. Every valid observation refreshes the worker's
+            // latest broadcast-time evidence. The Host consumes that evidence to refresh
+            // the PreRec-only BroadcastTimeReference; Windows/system clock, reservation
+            // time, recording time, EPG time and wake plans are never mutated here.
+            if (sectionOffset + 8 <= sectionEnd)
+            {
+                var broadcastTime = DecodeAribMjdBcd(Convert.ToHexString(buffer, sectionOffset + 3, 5));
+                if (broadcastTime.HasValue)
+                {
+                    var systemObservedAt = DateTimeOffset.Now;
+                    summary.BroadcastTimeObserved = true;
+                    summary.BroadcastTimeObservationCount++;
+                    summary.BroadcastTimeSourceTableId = tableId;
+                    summary.BroadcastTimeValue = broadcastTime.Value;
+                    summary.BroadcastTimeSystemObservedAt = systemObservedAt;
+                    summary.BroadcastTimeOffsetMilliseconds = (long)Math.Round((broadcastTime.Value - systemObservedAt).TotalMilliseconds);
+                }
+            }
+            return;
+        }
+
         if (pid == 0x0000 && tableId == 0x00)
         {
             summary.PatSeen = true;
@@ -4563,6 +5178,19 @@ internal static class BonDriverNativeProbe
                         summary.RecordTargetStreamPids.Clear();
                         summary.RecordServiceScopeReady = false;
                     }
+                }
+
+                // These result lists describe the effective recording policy, not merely PAT discovery.
+                // Full-TS mode writes every service carried by the transport stream; service-scope mode
+                // writes only the target SID. Keeping the diagnostics policy-aware prevents an OFF setting
+                // from being reported as if non-target services had actually been discarded.
+                var currentServiceOnly = RecordingOutputPolicyContract.Resolve(summary.Recording).CurrentServiceOnly;
+                if (!currentServiceOnly)
+                {
+                    AddUnique(summary.RecordWrittenServiceIds, serviceId);
+                }
+                else if (serviceId == summary.TargetServiceId)
+                {
                     AddUnique(summary.RecordWrittenServiceIds, serviceId);
                 }
                 else if (summary.TargetServiceId > 0)
@@ -4588,10 +5216,21 @@ internal static class BonDriverNativeProbe
             {
                 var streamPid = ((buffer[pos + 1] & 0x1F) << 8) | buffer[pos + 2];
                 var esInfoLength = ((buffer[pos + 3] & 0x0F) << 8) | buffer[pos + 4];
+                var descriptorStart = pos + 5;
+                var descriptorEnd = Math.Min(entriesEnd, descriptorStart + esInfoLength);
+                var isSubtitle = IsAribSubtitleEs(buffer, descriptorStart, descriptorEnd);
                 AddUnique(summary.StreamPids, streamPid);
+                if (isSubtitle) AddUnique(summary.RecordSubtitlePids, streamPid);
                 if (targetStreamPids is not null) AddUnique(targetStreamPids, streamPid);
                 pos += 5 + esInfoLength;
             }
+
+            var subtitleFilteredPmt = BuildSubtitleFilteredPmtSection(buffer, sectionOffset, sectionLength);
+            if (subtitleFilteredPmt.Length > 0)
+            {
+                summary.RecordSubtitleFilteredPmtSections[pid] = subtitleFilteredPmt;
+            }
+
             if (targetStreamPids is not null)
             {
                 summary.RecordTargetPmtPid = pid;
@@ -4613,15 +5252,43 @@ internal static class BonDriverNativeProbe
         {
             summary.EitSeen = true;
             summary.EitSections++;
-            ParseEitEvents(buffer, sectionOffset, sectionEnd, tableId, sectionLength, summary);
+
+            // RECORDING_LIVE_EIT_CRC_BOUNDARY:
+            // 録画Followのlive p/f Evidenceだけは、section全体のMPEG-2 CRCが正常な場合に限って採用する。
+            // 既存のminimal EIT観測/EPG解析は変更せず、壊れた単発sectionが録画終了時刻正本へ昇格する経路だけを遮断する。
+            var eitSectionCrcValid = MpegCrc32(buffer, sectionOffset, 3 + sectionLength) == 0;
+            ParseEitEvents(buffer, sectionOffset, sectionEnd, tableId, sectionLength, eitSectionCrcValid, summary);
         }
     }
 
 
-    private static void ParseEitEvents(byte[] buffer, int sectionOffset, int sectionEnd, int tableId, int sectionLength, TsReadProbeSummary summary)
+    private static bool IsAribSubtitleEs(byte[] buffer, int start, int end)
+    {
+        // ARIB STD-B24 caption/superimpose streams carry data_component_descriptor (0xFD).
+        // 0x0008 = caption, 0x0012 = superimpose. Data-carousel component IDs are intentionally untouched.
+        var pos = start;
+        while (pos + 2 <= end)
+        {
+            var tag = buffer[pos];
+            var len = buffer[pos + 1];
+            var next = pos + 2 + len;
+            if (next > end) break;
+            if (tag == 0xFD && len >= 2)
+            {
+                var componentId = (buffer[pos + 2] << 8) | buffer[pos + 3];
+                if (componentId is 0x0008 or 0x0012) return true;
+            }
+            pos = next;
+        }
+        return false;
+    }
+
+    private static void ParseEitEvents(byte[] buffer, int sectionOffset, int sectionEnd, int tableId, int sectionLength, bool sectionCrcValid, TsReadProbeSummary summary)
     {
         if (sectionOffset + 14 > sectionEnd) return;
         var serviceId = (buffer[sectionOffset + 3] << 8) | buffer[sectionOffset + 4];
+        var currentNextIndicator = buffer[sectionOffset + 5] & 0x01;
+        var sectionNumber = buffer[sectionOffset + 6];
         var transportStreamId = (buffer[sectionOffset + 8] << 8) | buffer[sectionOffset + 9];
         var originalNetworkId = (buffer[sectionOffset + 10] << 8) | buffer[sectionOffset + 11];
         Increment(summary.EitServiceIdCounts, serviceId);
@@ -4636,6 +5303,7 @@ internal static class BonDriverNativeProbe
         }
         var eventsEnd = Math.Min(sectionOffset + 3 + sectionLength - 4, sectionEnd);
         var pos = sectionOffset + 14;
+        var livePresentCaptured = false;
         while (pos + 12 <= eventsEnd)
         {
             var eventId = (buffer[pos] << 8) | buffer[pos + 1];
@@ -4710,6 +5378,15 @@ internal static class BonDriverNativeProbe
                         }
                     }
                 }
+                if (tag == EitEventGroupContract.DescriptorTag
+                    && EitEventGroupContract.TryParse(buffer.AsSpan(body, len), out var groupInfo)
+                    && groupInfo.IsCommon)
+                {
+                    foreach (var reference in groupInfo.References)
+                    {
+                        if (!ev.CommonReferences.Contains(reference)) ev.CommonReferences.Add(reference);
+                    }
+                }
                 d = next;
             }
 
@@ -4717,20 +5394,107 @@ internal static class BonDriverNativeProbe
             if (ev.ShortEventDescriptorSeen) summary.EitEventsWithShortEvent++;
             if (ev.ShortEventDecoded) summary.EitEventsWithDecodedShortEvent++;
             if (summary.EitEvents.Count < 12) summary.EitEvents.Add(ev);
+
+            // PRE_REC_NORMALIZED_IDENTITY_INVARIANT:
+            // A target reservation may be represented by another service event through the
+            // broadcast-declared COMMON EventGroup relation. This is explicit PSI/SI evidence,
+            // not SID/time/title inference. Preserve the reservation's own SID/EID/time identity.
+            if (!summary.ExpectedTargetEventSeen
+                && summary.ExpectedEventId > 0
+                && originalNetworkId == summary.TargetOriginalNetworkId
+                && transportStreamId == summary.TargetTransportStreamId
+                && ev.CommonReferences.Any(r => r.ServiceId == summary.TargetServiceId && r.EventId == summary.ExpectedEventId))
+            {
+                summary.ExpectedTargetEventSeen = true;
+                summary.ExpectedTargetEventEvidence = "event_group_common";
+                summary.ObservedExpectedEventStart = summary.ExpectedEventStart;
+                summary.ObservedExpectedEventEnd = summary.ExpectedEventEnd;
+            }
+
             if (IsTargetEitEvent(summary, originalNetworkId, transportStreamId, serviceId))
             {
                 summary.TargetServiceEventsDecoded++;
                 if (ev.ShortEventDescriptorSeen) summary.TargetServiceEventsWithShortEvent++;
                 if (ev.ShortEventDecoded) summary.TargetServiceEventsWithDecodedShortEvent++;
                 foreach (var tag in ev.DescriptorTags) Increment(summary.TargetServiceDescriptorTagCounts, tag);
+
+                // RECORDING_LIVE_PRESENT_IDENTITY_INVARIANT:
+                // EIT p/f actual (0x4E) の section_number=0 だけを「現在放送中(present)」の正本として保持する。
+                // following(section=1)やschedule EITをpresent継続判定へ混ぜない。current_next_indicator=1も必須。
+                if (sectionCrcValid && tableId == 0x4E && sectionNumber == 0 && currentNextIndicator == 1 && !livePresentCaptured)
+                {
+                    var presentStart = DecodeAribMjdBcd(ev.StartTimeBcd);
+                    var presentDuration = DecodeDurationSeconds(ev.DurationBcd);
+                    if (presentStart is not null && presentDuration > 0)
+                    {
+                        var observedAt = DateTimeOffset.Now;
+                        var presentEnd = presentStart.Value.AddSeconds(presentDuration);
+                        if (IsObservedInsidePresentInterval(presentStart.Value, presentEnd, observedAt))
+                        {
+                            summary.LivePresentEventId = ev.EventId;
+                            summary.LivePresentEventStart = presentStart.Value.ToString("O");
+                            summary.LivePresentEventEnd = presentEnd.ToString("O");
+                            summary.LivePresentEventRunningStatus = ev.RunningStatus;
+                            summary.LivePresentEventTableId = tableId;
+                            summary.LivePresentEventSectionNumber = sectionNumber;
+                            summary.LivePresentEventCurrentNextIndicator = currentNextIndicator;
+                            summary.LivePresentEventObservedAt = observedAt;
+                            livePresentCaptured = true;
+                        }
+                    }
+                }
+
                 if (summary.ExpectedEventId > 0 && ev.EventId == summary.ExpectedEventId)
                 {
                     summary.ExpectedTargetEventSeen = true;
+                    summary.ExpectedTargetEventDirectSeen = true;
+                    summary.ExpectedTargetEventEvidence = "direct_identity";
+                    var observedExpectedStart = DecodeAribMjdBcd(ev.StartTimeBcd);
+                    var observedExpectedDuration = DecodeDurationSeconds(ev.DurationBcd);
+                    if (observedExpectedStart is not null && observedExpectedDuration > 0)
+                    {
+                        summary.ObservedExpectedEventStart = observedExpectedStart.Value.ToString("O");
+                        summary.ObservedExpectedEventEnd = observedExpectedStart.Value.AddSeconds(observedExpectedDuration).ToString("O");
+                    }
+
+                    // RECORDING_LIVE_EIT_FOLLOW_INVARIANT:
+                    // 正式な時刻延長根拠も、同じ録画workerが受信したcurrent EIT p/f presentだけに限定する。
+                    // schedule/following由来の時刻をlive録画延長へ流さない。
+                    if (sectionCrcValid && tableId == 0x4E && sectionNumber == 0 && currentNextIndicator == 1)
+                    {
+                        var liveStart = DecodeAribMjdBcd(ev.StartTimeBcd);
+                        var liveDuration = DecodeDurationSeconds(ev.DurationBcd);
+                        if (liveStart is not null && liveDuration > 0)
+                        {
+                            var observedAt = DateTimeOffset.Now;
+                            var liveEnd = liveStart.Value.AddSeconds(liveDuration);
+                            if (IsObservedInsidePresentInterval(liveStart.Value, liveEnd, observedAt))
+                            {
+                                summary.LiveExpectedEventStart = liveStart.Value.ToString("O");
+                                summary.LiveExpectedEventEnd = liveEnd.ToString("O");
+                                summary.LiveExpectedEventRunningStatus = ev.RunningStatus;
+                                summary.LiveExpectedEventTableId = tableId;
+                                summary.LiveExpectedEventSectionNumber = sectionNumber;
+                                summary.LiveExpectedEventCurrentNextIndicator = currentNextIndicator;
+                                summary.LiveExpectedEventObservedAt = observedAt;
+                            }
+                        }
+                    }
                 }
                 if (summary.TargetServiceEitEvents.Count < 12) summary.TargetServiceEitEvents.Add(ev);
             }
             pos = descEnd;
         }
+    }
+
+    private static bool IsObservedInsidePresentInterval(DateTimeOffset start, DateTimeOffset end, DateTimeOffset observedAt)
+    {
+        // EIT p/f actual section=0 は「present」なので、観測時刻を含まない時刻情報をlive Evidenceとして扱わない。
+        // 数秒の送出/受信/スケジューリング差だけを許容し、日付化け・MJD破損・途中section混入を正本化しない。
+        var tolerance = TimeSpan.FromMinutes(2);
+        return end > start
+            && start <= observedAt.Add(tolerance)
+            && end >= observedAt.Subtract(tolerance);
     }
 
     private static bool IsTargetEitEvent(TsReadProbeSummary summary, int originalNetworkId, int transportStreamId, int serviceId)
@@ -4943,10 +5707,17 @@ internal sealed class WorkerProgress
     public bool? TsReadStarted { get; set; }
     public bool? TargetServiceConfirmed { get; set; }
     public bool? ScopeReady { get; set; }
+    public bool? CurrentServiceOnly { get; set; }
     public long? BytesRead { get; set; }
     public long? BytesWritten { get; set; }
     public long? PacketsWritten { get; set; }
     public long? MediaPackets { get; set; }
+    public bool? BroadcastTimeObserved { get; set; }
+    public int? BroadcastTimeObservationCount { get; set; }
+    public int? BroadcastTimeSourceTableId { get; set; }
+    public DateTimeOffset? BroadcastTimeValue { get; set; }
+    public DateTimeOffset? BroadcastTimeSystemObservedAt { get; set; }
+    public long? BroadcastTimeOffsetMilliseconds { get; set; }
     public string? FailureCode { get; set; }
     public string? FailureDetail { get; set; }
 }
@@ -4996,10 +5767,13 @@ internal sealed class DirectRecorderCompatibleResult
     public long OutputSyncErrors { get; set; }
     public long OutputTransportErrors { get; set; }
     public long OutputScrambledPackets { get; set; }
+    public long OutputTargetMediaScrambledPackets { get; set; }
     public long OutputContinuityErrors { get; set; }
     public long OutputContinuityDrops { get; set; }
     public bool RecordServiceScopeEnabled { get; set; }
     public bool RecordServiceScopeReady { get; set; }
+    public bool CurrentServiceOnly { get; set; }
+    public bool SaveSubtitles { get; set; }
     public int TargetServiceId { get; set; }
     public int TargetPmtPid { get; set; }
     public int TargetPcrPid { get; set; }
@@ -5086,6 +5860,7 @@ internal sealed class DirectRecorderCompatibleResult
                 outputSameCcContentMismatches = summary.OutputSameCcContentMismatches,
                 outputSyncErrors = summary.OutputSyncErrors,
                 outputScrambledPackets = summary.OutputScrambledLikePackets,
+                outputTargetMediaScrambledPackets = summary.OutputTargetMediaScrambledPackets,
                 rawTransportErrors = summary.TransportErrorPackets,
                 outputTransportErrors = summary.OutputTransportErrorPackets,
                 rawDuplicatePackets = summary.RawDuplicatePackets,
@@ -5096,7 +5871,25 @@ internal sealed class DirectRecorderCompatibleResult
                 chunksWritten = summary.RecordChunksWritten,
                 recordServiceScopeEnabled = summary.RecordServiceScopeEnabled,
                 recordServiceScopeReady = summary.RecordServiceScopeReady,
+                targetOriginalNetworkId = summary.TargetOriginalNetworkId,
+                targetTransportStreamId = summary.TargetTransportStreamId,
                 targetServiceId = summary.TargetServiceId,
+                expectedEventId = summary.ExpectedEventId,
+                liveExpectedEventStart = summary.LiveExpectedEventStart,
+                liveExpectedEventEnd = summary.LiveExpectedEventEnd,
+                liveExpectedEventRunningStatus = summary.LiveExpectedEventRunningStatus,
+                liveExpectedEventTableId = summary.LiveExpectedEventTableId,
+                liveExpectedEventSectionNumber = summary.LiveExpectedEventSectionNumber,
+                liveExpectedEventCurrentNextIndicator = summary.LiveExpectedEventCurrentNextIndicator,
+                liveExpectedEventObservedAt = summary.LiveExpectedEventObservedAt,
+                livePresentEventId = summary.LivePresentEventId,
+                livePresentEventStart = summary.LivePresentEventStart,
+                livePresentEventEnd = summary.LivePresentEventEnd,
+                livePresentEventRunningStatus = summary.LivePresentEventRunningStatus,
+                livePresentEventTableId = summary.LivePresentEventTableId,
+                livePresentEventSectionNumber = summary.LivePresentEventSectionNumber,
+                livePresentEventCurrentNextIndicator = summary.LivePresentEventCurrentNextIndicator,
+                livePresentEventObservedAt = summary.LivePresentEventObservedAt,
                 targetPmtPid = summary.RecordTargetPmtPid,
                 targetPcrPid = summary.RecordTargetPcrPid,
                 targetStreamPids = summary.RecordTargetStreamPids,
@@ -5121,6 +5914,7 @@ internal sealed class DirectRecorderCompatibleResult
 
     public static DirectRecorderCompatibleResult FromTsReadProbe(TvAIrEpgRecJob? job, TsReadProbeSummary summary, DateTimeOffset startedAt, DateTimeOffset endedAt)
     {
+        var recordingPolicy = RecordingOutputPolicyContract.Resolve(summary.Recording);
         var bytesWritten = summary.RecordBytesWritten;
         if (bytesWritten <= 0 && !string.IsNullOrWhiteSpace(summary.RecordOutputPath) && File.Exists(summary.RecordOutputPath))
         {
@@ -5148,7 +5942,7 @@ internal sealed class DirectRecorderCompatibleResult
                       && summary.TsReadStarted
                       && summary.SyncErrors == 0
                       && outputSyncErrors == 0
-                      && outputScrambledPackets == 0
+                      && summary.OutputTargetMediaScrambledPackets == 0
                       && summary.RecordB25RuntimeRecoveryFailed == 0
                       && (!summary.RecordServiceScopeEnabled || (summary.RecordServiceScopeReady && summary.RecordServiceScopeMediaPackets > 0));
         var verdict = success
@@ -5157,8 +5951,8 @@ internal sealed class DirectRecorderCompatibleResult
                 ? "TARGET_SERVICE_SCOPE_NOT_READY"
                 : summary.RecordB25RuntimeRecoveryFailed > 0
                 ? "B25_RUNTIME_RECOVERY_FAILED_TARGET_MEDIA_SUPPRESSED"
-                : bytesWritten > 0 && outputScrambledPackets > 0
-                ? "LIVE_TS_WRITTEN_OUTPUT_SCRAMBLED"
+                : bytesWritten > 0 && summary.OutputTargetMediaScrambledPackets > 0
+                ? "LIVE_TS_WRITTEN_TARGET_MEDIA_SCRAMBLED"
                 : bytesWritten > 0 && summary.ExternalB25RawFallbackSuppressed > 0
                     ? "LIVE_TS_WRITTEN_B25_BUFFERED_WITH_SUPPRESSED_RAW"
                     : "TVAIREPGREC_RECORD_RUNTIME_NG";
@@ -5216,12 +6010,15 @@ internal sealed class DirectRecorderCompatibleResult
             OutputSyncErrors = outputSyncErrors,
             OutputTransportErrors = outputTransportErrors,
             OutputScrambledPackets = outputScrambledPackets,
+            OutputTargetMediaScrambledPackets = summary.OutputTargetMediaScrambledPackets,
             OutputContinuityErrors = summary.OutputContinuityErrors,
             // Output continuity is measured after service selection/B25 processing, on the exact packets
             // written to the recording file. Startup suppression remains a separate startup diagnostic.
             OutputContinuityDrops = summary.OutputContinuityDrops,
             RecordServiceScopeEnabled = summary.RecordServiceScopeEnabled,
             RecordServiceScopeReady = summary.RecordServiceScopeReady,
+            CurrentServiceOnly = recordingPolicy.CurrentServiceOnly,
+            SaveSubtitles = recordingPolicy.SaveSubtitles,
             TargetServiceId = summary.TargetServiceId,
             TargetPmtPid = summary.RecordTargetPmtPid,
             TargetPcrPid = summary.RecordTargetPcrPid,
@@ -5233,8 +6030,8 @@ internal sealed class DirectRecorderCompatibleResult
             ServiceScopeDroppedPackets = summary.RecordServiceScopeDroppedPackets,
             ServiceScopeMediaPackets = summary.RecordServiceScopeMediaPackets,
             Message = success
-                ? $"TvAIrEpgRec record runtime completed. target service scope is active where target SID is available; bytesWritten={bytesWritten} packetsWritten={packetsWritten} outputScrambled={outputScrambledPackets} targetSid={summary.TargetServiceId} scopeReady={summary.RecordServiceScopeReady} writtenServiceIds={string.Join(',', summary.RecordWrittenServiceIds)} excludedServiceIds={string.Join(',', summary.RecordExcludedServiceIds)} startupRecovery={summary.RecordStartupRecoveryAction}/{summary.RecordStartupRecoveryResult} fallbackFullTsBytes={summary.RecordStartupFallbackFullTsBytes} b25={summary.ExternalB25ProbeResult}"
-                : $"TvAIrEpgRec record runtime failed or needs investigation. opened={summary.RecordOutputOpened} bytesWritten={bytesWritten} packetsWritten={packetsWritten} open={summary.OpenTunerOk} setChannel={summary.SetChannelOk} tsStarted={summary.TsReadStarted} rawSyncErrors={summary.SyncErrors} outputSyncErrors={outputSyncErrors} outputScrambled={outputScrambledPackets} targetSid={summary.TargetServiceId} scopeReady={summary.RecordServiceScopeReady} mediaPackets={summary.RecordServiceScopeMediaPackets} startupRecovery={summary.RecordStartupRecoveryAction}/{summary.RecordStartupRecoveryResult} fallbackFullTsBytes={summary.RecordStartupFallbackFullTsBytes} rawFallbackSuppressed={summary.ExternalB25RawFallbackSuppressed} error={summary.Error}"
+                ? $"TvAIrEpgRec record runtime completed. policy={(recordingPolicy.CurrentServiceOnly ? "current_service_only" : "all_services")} saveSubtitles={recordingPolicy.SaveSubtitles} bytesWritten={bytesWritten} packetsWritten={packetsWritten} outputScrambled={outputScrambledPackets} targetMediaScrambled={summary.OutputTargetMediaScrambledPackets} targetSid={summary.TargetServiceId} scopeReady={summary.RecordServiceScopeReady} writtenServiceIds={string.Join(',', summary.RecordWrittenServiceIds)} excludedServiceIds={string.Join(',', summary.RecordExcludedServiceIds)} subtitlePids={string.Join(',', summary.RecordSubtitlePids)} rewrittenPmts={string.Join(',', summary.RecordSubtitleFilteredPmtSections.Keys.OrderBy(x => x).Select(x => "0x" + x.ToString("X")))} startupRecovery={summary.RecordStartupRecoveryAction}/{summary.RecordStartupRecoveryResult} fallbackFullTsBytes={summary.RecordStartupFallbackFullTsBytes} b25={summary.ExternalB25ProbeResult}"
+                : $"TvAIrEpgRec record runtime failed or needs investigation. opened={summary.RecordOutputOpened} bytesWritten={bytesWritten} packetsWritten={packetsWritten} open={summary.OpenTunerOk} setChannel={summary.SetChannelOk} tsStarted={summary.TsReadStarted} rawSyncErrors={summary.SyncErrors} outputSyncErrors={outputSyncErrors} outputScrambled={outputScrambledPackets} targetMediaScrambled={summary.OutputTargetMediaScrambledPackets} targetSid={summary.TargetServiceId} scopeReady={summary.RecordServiceScopeReady} mediaPackets={summary.RecordServiceScopeMediaPackets} startupRecovery={summary.RecordStartupRecoveryAction}/{summary.RecordStartupRecoveryResult} fallbackFullTsBytes={summary.RecordStartupFallbackFullTsBytes} rawFallbackSuppressed={summary.ExternalB25RawFallbackSuppressed} error={summary.Error}"
         };
     }
 

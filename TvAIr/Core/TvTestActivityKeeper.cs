@@ -369,7 +369,7 @@ public sealed class TvTestActivityKeeper
                 // VIEWER_TITLE_WINDOW_WAIT_INVARIANT:
                 // TVTest所有PIDのウィンドウ生成完了だけを待つ。同期Sleepでworker threadを占有しない。
                 // ウィンドウを検出した時点で即時終了し、最大2秒という従来の探索上限は変更しない。
-                // この待機条件・上限・所有PID限定を変更する場合は、開発者の明示承認を先に得ること。
+                // 待機条件・上限・所有PID限定はActivityKeeperの不変条件として維持する。
                 await Task.Delay(100, cancellationToken).ConfigureAwait(false);
             }
         }

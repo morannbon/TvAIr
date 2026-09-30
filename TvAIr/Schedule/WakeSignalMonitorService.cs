@@ -201,7 +201,7 @@ public sealed class WakeSignalMonitorService : BackgroundService
             _systemEpgHandoffScheduledStart = coverage.ScheduledStart;
             _systemEpgHandoffDeadline = deadline;
             _log.Add("SYSTEM_EPG_WAKE_HANDOFF", "ACQUIRED",
-                $"result=ACQUIRED slotId={Safe(signal.SlotId)} scheduledStart={coverage.ScheduledStart:O} deadline={deadline:O} release=scheduled_daily_power_owner_or_deadline_or_plan_change scope=SYSTEM_EPG_only rule=scheduled_epg_wake_power_handoff_contract");
+                $"result=ACQUIRED slotId={Safe(signal.SlotId)} scheduledStart={coverage.ScheduledStart:O} deadline={deadline:O} release=scheduled_daily_power_owner_or_deadline scope=SYSTEM_EPG_only rule=scheduled_epg_wake_power_handoff_contract");
         }
     }
 
@@ -218,14 +218,12 @@ public sealed class WakeSignalMonitorService : BackgroundService
                 return;
             }
 
-            var currentCoverage = ReadSystemEpgCoverage(_systemEpgHandoffSlotId);
-            if (currentCoverage is null
-                || currentCoverage.ScheduledStart != _systemEpgHandoffScheduledStart)
-            {
-                ReleaseSystemEpgWakeHandoffLocked("active_wake_plan_changed");
-                return;
-            }
-
+            // Once a SYSTEM_EPG wake signal has been accepted, this lease bridges the
+            // machine from wake-up to the scheduled daily EPG owner.  The wake-task
+            // projection may legitimately be rebuilt after wake (for example because
+            // the just-fired task disappears from the next desired plan), so plan-file
+            // changes are not a terminal condition for this already-acquired handoff.
+            // Only the scheduled daily owner or the bounded deadline may release it.
             if (DateTime.Now >= _systemEpgHandoffDeadline)
                 ReleaseSystemEpgWakeHandoffLocked("deadline_elapsed_without_scheduled_run");
         }

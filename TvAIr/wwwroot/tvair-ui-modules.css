@@ -50,6 +50,26 @@ tr:nth-child(even),.row-alt{background:color-mix(in srgb,var(--tvair-module-pane
   --tvair-guide-col-w:120px;
   --tvair-guide-time-w:24px;
   --tvair-guide-head-h:24px;
+  /* ProgramGuide / ProgramCell geometry single source. Theme owns palette; this module owns dimensions. */
+  --prog-padding-v:3px;
+  --prog-padding-h:4px;
+  --prog-title-font-size:11px;
+  --prog-title-lh:1.35;
+  --prog-time-font-size:11px;
+  --prog-time-lh:1.25;
+  --prog-desc-font-size:10px;
+  --prog-desc-lh:16px;
+  --prog-title-outline-gap-rate:.7;
+  --prog-title-outline-gap:calc(var(--prog-desc-lh) * var(--prog-title-outline-gap-rate));
+  --prog-desc-fit-safe:6px;
+  --prog-desc-safe:9px;
+  --prog-footer-pad-top:3px;
+  --prog-footer-pad-bottom:2px;
+  --prog-btn-gap:3px;
+  --prog-btn-h:20px;
+  --prog-btn-min-w:42px;
+  --prog-cell-btn-pad-x:6px;
+  --tvair-program-action-guide-width:calc((var(--tvair-guide-col-w) - (2 * var(--prog-padding-h)) - var(--prog-btn-gap)) / 2);
   --tvair-nav-bg:var(--tvair-bg-c);
   --tvair-nav-border:var(--tvair-border-a);
   --tvair-nav-item-bg:var(--tvair-bg-b);
@@ -918,6 +938,20 @@ body.tvair-non-program-page table tr:where(.g-news,.genre-news,.g-sports,.genre-
 :root{
   --tvair-text-cell-line-height:1.35;
   --tvair-control-text-line-height:1;
+  /* ButtonGeometrySingleSource: all TvAIr-owned buttons consume role geometry from these tokens. */
+  --tvair-button-radius:2px;
+  --tvair-button-font-compact:11px;
+  --tvair-button-font-standard:12px;
+  --tvair-button-h-row-action:22px;
+  --tvair-button-h-compact:20px;
+  --tvair-button-h-standard:24px;
+  --tvair-button-h-large:28px;
+  --tvair-button-h-dialog-action:26px;
+  --tvair-button-pad-x-row-action:10px;
+  --tvair-button-pad-x-compact:8px;
+  --tvair-button-pad-x-standard:12px;
+  --tvair-button-pad-x-dialog-action:13px;
+  --tvair-button-list-action-min-width:70px;
 }
 
 /* Universal vertical centering for table-like text surfaces. */
@@ -1020,7 +1054,7 @@ body.tvair-guide-page .prog{
   flex-direction:column;
   justify-content:flex-start;
   align-items:stretch;
-  min-height:var(--tvair-programcell-frame-min-h,90px);
+  min-height:var(--tvair-program-guide-frame-min-height);
   padding:var(--prog-padding-v) var(--prog-padding-h);
   border:0;
   border-top:1px solid var(--tvair-role-table-row-border);
@@ -1169,18 +1203,17 @@ body.tvair-guide-page .prog-btns{
   margin:0;
 }
 body.tvair-guide-page .prog-btn-grid{
-  display:grid;
-  grid-template-columns:minmax(0,1fr) minmax(0,1fr);
-  grid-auto-rows:var(--prog-btn-h);
-  column-gap:var(--prog-btn-gap);
-  align-items:stretch;
-  justify-items:stretch;
+  display:flex;
+  align-items:flex-start;
+  justify-content:flex-start;
+  gap:var(--prog-btn-gap);
   width:100%;
   max-width:100%;
   min-width:0;
   height:var(--prog-btn-h);
   min-height:var(--prog-btn-h);
   max-height:var(--prog-btn-h);
+  overflow:hidden;
 }
 body.tvair-guide-page .prog-btn-chain-row{
   display:flex;
@@ -1314,10 +1347,12 @@ body.tvair-guide-page .prog.epg-gap .prog-desc{
 
 .tvair-action-button.program-cell-action-btn--list-context,
 body.tvair-keyword-page .tvair-action-button.program-cell-action-btn--list-context{
-  min-width:var(--tvair-reservation-action-button-min-width,64px);
+  min-width:var(--tvair-button-list-action-min-width);
   max-width:100%;
-  height:20px;
-  padding:0 8px;
+  height:var(--tvair-button-h-row-action);
+  padding:0 var(--tvair-button-pad-x-row-action);
+  border-radius:var(--tvair-button-radius);
+  font-size:var(--tvair-button-font-compact);
   line-height:1;
 }
 
@@ -2042,7 +2077,7 @@ body.tvair-settings-frame #epg-panel{display:none;}
 /* ── EPGパネルボタン ── */
 
 /* ── 設定モーダル: 再起動ボタン ── */
-#cfg-restart-btn{display:none;background:var(--tvair-warning-a);color:var(--tvair-theme-text-inverse);border:none;padding:6px 14px;border-radius:2px;cursor:pointer;font-size:12px;font-family:'Meiryo','メイリオ',sans-serif}
+#cfg-restart-btn{display:none;background:var(--tvair-warning-a);color:var(--tvair-theme-text-inverse);border:none;min-height:var(--tvair-button-h-dialog-action);padding:6px var(--tvair-button-pad-x-standard);border-radius:var(--tvair-button-radius);cursor:pointer;font-size:var(--tvair-button-font-standard);font-family:'Meiryo','メイリオ',sans-serif}
 
 /* ── Wakeステータス ── */
 .wake-status-wrap{font-size:12px;padding:6px 0;color:var(--tvair-theme-text-main)}
@@ -2248,23 +2283,16 @@ body.tvair-guide-page .cfg-genre-palette-close{font-size:12px;border:0;backgroun
   opacity:1;
   filter:none;
 }
-body.tvair-guide-page .prog .tvair-program-action-control.prog-btn-slot-primary{
-  grid-column:1;
-  width:100%;
-  min-width:0;
-  max-width:100%;
-}
-body.tvair-guide-page .prog .tvair-program-action-control.prog-btn-slot-state{
-  grid-column:2;
-  width:100%;
-  min-width:0;
-  max-width:100%;
-}
+body.tvair-guide-page .prog .tvair-program-action-control.prog-btn-slot-primary,
+body.tvair-guide-page .prog .tvair-program-action-control.prog-btn-slot-state,
 body.tvair-guide-page .prog .tvair-program-action-control.prog-btn-slot-chain{
-  width:calc((100% - var(--prog-btn-gap)) / 2);
-  min-width:0;
-  max-width:calc((100% - var(--prog-btn-gap)) / 2);
+  flex:0 0 auto;
   align-self:flex-start;
+  width:auto;
+  min-width:var(--prog-btn-min-w);
+  max-width:100%;
+  padding-left:var(--prog-cell-btn-pad-x);
+  padding-right:var(--prog-cell-btn-pad-x);
 }
 body.tvair-reservation-page .reservation-action-slot .tvair-program-action-control{
   width:var(--tvair-program-action-guide-width);
@@ -2444,7 +2472,7 @@ body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-bon-cell select{w
 body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-wave-cell select,
 body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-role-cell select{margin-left:auto;margin-right:auto;text-align:center;text-align-last:center;}
 body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-action-cell{vertical-align:middle;}
-body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-delete-button[data-action-role="settings-tuner-delete"]{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;min-height:20px;padding:2px 8px;border-radius:2px;font-size:11px;font-weight:700;line-height:1.15;white-space:nowrap;cursor:pointer;font-family:"Meiryo","メイリオ",sans-serif;background:var(--tvair-action-cancel-bg);color:var(--tvair-action-cancel-fg);border:1px solid var(--tvair-action-cancel-border);box-shadow:none;appearance:none;-webkit-appearance:none;}
+body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-delete-button[data-action-role="settings-tuner-delete"]{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;min-height:var(--tvair-button-h-compact);padding:2px var(--tvair-button-pad-x-compact);border-radius:var(--tvair-button-radius);font-size:var(--tvair-button-font-compact);font-weight:700;line-height:1.15;white-space:nowrap;cursor:pointer;font-family:"Meiryo","メイリオ",sans-serif;background:var(--tvair-action-cancel-bg);color:var(--tvair-action-cancel-fg);border:1px solid var(--tvair-action-cancel-border);box-shadow:none;appearance:none;-webkit-appearance:none;}
 body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-delete-button[data-action-role="settings-tuner-delete"]:hover{background:var(--tvair-action-cancel-hover-bg);}
 
 /* release_contract Program/search result state labels are state, not action. */
@@ -2452,10 +2480,11 @@ body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-delete-button[dat
   display:inline-flex;
   align-items:center;
   justify-content:center;
-  min-height:20px;
-  padding:0 8px;
+  min-width:var(--tvair-button-list-action-min-width);
+  min-height:var(--tvair-button-h-row-action);
+  padding:0 var(--tvair-button-pad-x-compact);
   box-sizing:border-box;
-  font-size:11px;
+  font-size:var(--tvair-button-font-compact);
   font-weight:700;
   line-height:1.15;
   white-space:nowrap;

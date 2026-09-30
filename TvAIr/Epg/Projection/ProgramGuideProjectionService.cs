@@ -1,5 +1,6 @@
 ﻿using System.Diagnostics;
 using TvAIr.Core;
+using TvAIr.Epg;
 
 namespace TvAIr.Epg.Projection;
 
@@ -13,14 +14,27 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
     private readonly DbProgramEventSource _dbSource;
     private readonly ExternalEpgSourceStore _externalStore;
     private readonly LogRepository _log;
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+    private readonly EpgCoverageAttributionDiagnosticStore _coverageAttribution;
+#endif
     private readonly object _fullSnapshotGate = new();
     private FullMergedSnapshot? _fullSnapshot;
 
-    public ProgramGuideProjectionService(DbProgramEventSource dbSource, ExternalEpgSourceStore externalStore, LogRepository log)
+    public ProgramGuideProjectionService(
+        DbProgramEventSource dbSource,
+        ExternalEpgSourceStore externalStore,
+        LogRepository log
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        , EpgCoverageAttributionDiagnosticStore coverageAttribution
+#endif
+        )
     {
         _dbSource = dbSource;
         _externalStore = externalStore;
         _log = log;
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        _coverageAttribution = coverageAttribution;
+#endif
     }
 
     public IReadOnlyList<ProjectedProgramEvent> ProjectCommittedDbEvents(IReadOnlyList<EpgEvent> committedEvents)
@@ -277,6 +291,32 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
 
         var overlayFragments = 0;
         var overlayFullyCovered = 0;
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        var overlayAttribution = new Dictionary<string, int>(StringComparer.Ordinal);
+        var overlayAttributionSamples = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        var unobservedByTs = new Dictionary<string, int>(StringComparer.Ordinal);
+        var unobservedByService = new Dictionary<string, int>(StringComparer.Ordinal);
+        var unobservedByDate = new Dictionary<string, int>(StringComparer.Ordinal);
+        var unobservedByServiceObservation = new Dictionary<string, int>(StringComparer.Ordinal);
+        var unobservedTodayDetails = new List<string>();
+        static string LogToken(string? value, int maxLength = 96)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return "-";
+            var normalized = value.Replace('\r', ' ').Replace('\n', ' ').Replace('|', '／').Replace('[', '（').Replace(']', '）');
+            return normalized.Length <= maxLength ? normalized : normalized[..maxLength] + "…";
+        }
+        void Attribute(string reason, ExternalEpgEvent external, int segments)
+        {
+            overlayAttribution[reason] = overlayAttribution.GetValueOrDefault(reason) + segments;
+            if (!overlayAttributionSamples.TryGetValue(reason, out var samples))
+            {
+                samples = new List<string>();
+                overlayAttributionSamples[reason] = samples;
+            }
+            if (samples.Count < 6)
+                samples.Add($"{external.NetworkId}/{external.TransportStreamId}/{external.ServiceId}/{external.EventId}");
+        }
+#endif
         foreach (var external in unmatchedExternal)
         {
             if (rangeFrom is not null && rangeTo is not null
@@ -312,6 +352,52 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
 
             overlayOnly += segments.Count;
             overlayFragments += segments.Count(e => e.IsTimelineFragment);
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+            var coverage = _coverageAttribution.Lookup(external.NetworkId, external.TransportStreamId, external.ServiceId, external.EventId, external.Start, external.DurationSeconds);
+            var hasDbIdentity = directDbByIdentity.ContainsKey(EventIdentity(external.NetworkId, external.TransportStreamId, external.ServiceId, external.EventId));
+            var reason = hasDbIdentity ? "db_identity_present_broadcast_mismatch"
+                : !coverage.AttributionAvailable ? "capture_attribution_unavailable"
+                : coverage.OtherInserted ? "other_inserted_but_overlay_only"
+                : coverage.OtherSupplementCandidate ? "other_candidate_not_inserted"
+                : coverage.OtherObserved && !coverage.OtherConfiguredResolved ? "other_observed_service_unresolved"
+                : coverage.OtherConfiguredResolved && !coverage.OtherBasicAuthority ? "other_resolved_without_basic_authority"
+                : coverage.OtherBasicAuthority ? "other_basic_observed_not_candidate"
+                : coverage.ActualObserved && !coverage.ActualCommitCandidate ? "actual_observed_dropped_before_commit_candidate"
+                : coverage.ActualCommitCandidate && !coverage.ActualPresentAfterCommit ? "actual_commit_candidate_missing_after_commit"
+                : coverage.ActualPresentAfterCommit ? "actual_present_after_commit_but_projection_unmatched"
+                : coverage.ActualObserved ? "actual_observed_unclassified"
+                : coverage.OtherObserved ? "other_observed_unclassified"
+                : "not_observed_in_latest_epg_capture";
+            if (segments.Any(e => e.IsTimelineFragment))
+                reason += "+timeline_fragment";
+            Attribute(reason, external, segments.Count);
+            if (reason.StartsWith("not_observed_in_latest_epg_capture", StringComparison.Ordinal))
+            {
+                var segmentCount = segments.Count;
+                var tsKey = $"{external.NetworkId}/{external.TransportStreamId}";
+                unobservedByTs[tsKey] = unobservedByTs.GetValueOrDefault(tsKey) + segmentCount;
+                var serviceObservation = _coverageAttribution.LookupService(external.NetworkId, external.TransportStreamId, external.ServiceId);
+                var serviceClass = serviceObservation.ActualObserved || serviceObservation.OtherObserved
+                    ? $"service_seen_actual={serviceObservation.ActualObserved}_other={serviceObservation.OtherObserved}_actualTables={serviceObservation.ActualTableIds}_otherTables={serviceObservation.OtherTableIds}"
+                    : "service_not_seen_in_capture";
+                unobservedByServiceObservation[serviceClass] = unobservedByServiceObservation.GetValueOrDefault(serviceClass) + segmentCount;
+                var serviceName = string.IsNullOrWhiteSpace(external.ServiceName) ? "-" : external.ServiceName.Replace(',', ' ').Replace('[', '(').Replace(']', ')');
+                var serviceKey = $"{external.NetworkId}/{external.TransportStreamId}/{external.ServiceId}:{serviceName}:actual={serviceObservation.ActualEventCount}:other={serviceObservation.OtherEventCount}:actualTables={serviceObservation.ActualTableIds}:otherTables={serviceObservation.OtherTableIds}";
+                unobservedByService[serviceKey] = unobservedByService.GetValueOrDefault(serviceKey) + segmentCount;
+                var dateKey = external.Start.ToString("yyyy-MM-dd");
+                unobservedByDate[dateKey] = unobservedByDate.GetValueOrDefault(dateKey) + segmentCount;
+                if (external.Start.Date == DateTime.Now.Date)
+                {
+                    var parts = string.Join("~", segments.Select(segment => $"{segment.Start:HH:mm:ss}-{segment.End:HH:mm:ss}{(segment.IsTimelineFragment ? ":fragment" : string.Empty)}"));
+                    unobservedTodayDetails.Add(
+                        $"id={external.NetworkId}/{external.TransportStreamId}/{external.ServiceId}/{external.EventId}" +
+                        $"|service={LogToken(external.ServiceName, 48)}|title={LogToken(external.Title)}" +
+                        $"|broadcast={external.Start:HH:mm:ss}-{external.End:HH:mm:ss}|segments={segmentCount}|parts={parts}" +
+                        $"|actual={serviceObservation.ActualEventCount}:{serviceObservation.ActualTableIds}" +
+                        $"|other={serviceObservation.OtherEventCount}:{serviceObservation.OtherTableIds}|reason={reason}");
+                }
+            }
+#endif
             result.AddRange(segments);
         }
 
@@ -320,6 +406,25 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
         elapsed.Stop();
         log.Add("PROGRAM_GUIDE_PROJECTION_MERGE", "ExternalEpg",
             $"result=OK route={route} dbEvents={dbEvents.Count} externalEvents={externalEvents.Count} dbWithOverlay={dbWithOverlay} overlayOnly={overlayOnly} directDbPromoted={directDbPromoted} externalSuppressedByDbIdentity={externalSuppressedByDbIdentity} overlayFragments={overlayFragments} overlayFullyCovered={overlayFullyCovered} directDbLookupKeys={directDbLookupKeys} directDbLookupRows={directDbLookupRows} merged={merged.Count} elapsedMs={elapsed.ElapsedMilliseconds} matchStrategy=request_local_identity_index directDbStrategy=batched_event_identity_lookup target=runtime_projection rule=program_guide_projection_contract");
+        if (overlayOnly > 0)
+        {
+            var breakdown = string.Join(",", overlayAttribution.OrderByDescending(x => x.Value).ThenBy(x => x.Key).Select(x => $"{x.Key}:{x.Value}"));
+            var samples = string.Join(" | ", overlayAttributionSamples.OrderBy(x => x.Key).Select(x => $"{x.Key}=[{string.Join(",", x.Value)}]"));
+            log.Add("EPG_OVERLAY_GAP_ATTRIBUTION", "ExternalEpg",
+                $"result=OBSERVED route={route} overlayOnly={overlayOnly} runId={_coverageAttribution.CurrentRunId} breakdown=[{breakdown}] samples=[{samples}] identity=onid_tsid_sid_eventId_start_duration mutation=none dbWrite=none projectionWrite=none schedulerWindow=unchanged workerCeiling=unchanged rule=epg_overlay_gap_attribution_v122");
+            if (unobservedByTs.Count > 0)
+            {
+                static string Top(Dictionary<string, int> source, int limit)
+                    => string.Join(",", source.OrderByDescending(x => x.Value).ThenBy(x => x.Key).Take(limit).Select(x => $"{x.Key}:{x.Value}"));
+                log.Add("EPG_OVERLAY_UNOBSERVED_BREAKDOWN", "ExternalEpg",
+                    $"result=OBSERVED runId={_coverageAttribution.CurrentRunId} total={unobservedByTs.Values.Sum()} byTs=[{Top(unobservedByTs, 20)}] byService=[{Top(unobservedByService, 30)}] byDate=[{Top(unobservedByDate, 16)}] serviceObservation=[{Top(unobservedByServiceObservation, 16)}] externalTableId=unavailable comparisonTableIds=tvair_observed_service_tables mutation=none dbWrite=none projectionWrite=none schedulerWindow=unchanged workerCeiling=unchanged rule=epg_overlay_unobserved_breakdown_v122");
+                if (unobservedTodayDetails.Count > 0)
+                {
+                    log.Add("EPG_OVERLAY_UNOBSERVED_D0_DETAIL", "ExternalEpg",
+                        $"result=OBSERVED date={DateTime.Now:yyyy-MM-dd} segmentTotal={unobservedByDate.GetValueOrDefault(DateTime.Now.ToString("yyyy-MM-dd"))} eventCandidates={unobservedTodayDetails.Count} details=[{string.Join(" || ", unobservedTodayDetails)}] identity=onid_tsid_sid_eventId_start_duration classification=diagnostic_only mutation=none dbWrite=none projectionWrite=none schedulerWindow=unchanged workerCeiling=unchanged rule=epg_overlay_unobserved_d0_detail_v122");
+                }
+            }
+        }
 #endif
         return merged;
     }

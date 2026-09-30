@@ -79,6 +79,7 @@ public sealed class Database
                 start_time              TEXT    NOT NULL,
                 end_time                TEXT    NOT NULL,
                 updated_at              TEXT    NOT NULL DEFAULT '',
+                other_schedule_seen      INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (network_id, transport_stream_id, service_id, event_id)
             );
 
@@ -200,9 +201,19 @@ public sealed class Database
                 end_time        TEXT    NOT NULL DEFAULT '23:59',
                 sort_order      INTEGER NOT NULL DEFAULT 0,
                 expires_on      TEXT    NOT NULL DEFAULT '',
+                record_current_service_only INTEGER NOT NULL DEFAULT 1,
+                record_subtitles INTEGER NOT NULL DEFAULT 1,
                 enabled         INTEGER NOT NULL DEFAULT 1,
                 created_at      TEXT    NOT NULL DEFAULT '',
                 updated_at      TEXT    NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS reservation_recording_options (
+                reservation_id       INTEGER PRIMARY KEY,
+                current_service_only INTEGER NOT NULL DEFAULT 1,
+                save_subtitles       INTEGER NOT NULL DEFAULT 1,
+                created_at           TEXT    NOT NULL DEFAULT '',
+                FOREIGN KEY(reservation_id) REFERENCES reservations(id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS keyword_cancel_once (
@@ -398,6 +409,7 @@ public sealed class Database
         EnsureColumn(con, "epg_events", "raw_short_event_descriptor", "TEXT NOT NULL DEFAULT ''");
         EnsureColumn(con, "epg_events", "raw_extended_event_descriptor", "TEXT NOT NULL DEFAULT ''");
         EnsureColumn(con, "epg_events", "raw_content_descriptor", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(con, "epg_events", "other_schedule_seen", "INTEGER NOT NULL DEFAULT 0");
 
         // 実行時ストアの不足カラムを補う。DBファイル自体の持ち越しは前提にしない。
         EnsureColumn(con, "reservations", "network_id",          "INTEGER NOT NULL DEFAULT 0");
@@ -523,6 +535,8 @@ public sealed class Database
         EnsureColumn(con, "keyword_rules", "end_time",        "TEXT NOT NULL DEFAULT '23:59'");
         EnsureColumn(con, "keyword_rules", "sort_order",      "INTEGER NOT NULL DEFAULT 0");
         EnsureColumn(con, "keyword_rules", "expires_on",      "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(con, "keyword_rules", "record_current_service_only", "INTEGER NOT NULL DEFAULT 1");
+        EnsureColumn(con, "keyword_rules", "record_subtitles", "INTEGER NOT NULL DEFAULT 1");
 
         using (var fillSort = con.CreateCommand())
         {

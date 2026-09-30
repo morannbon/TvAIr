@@ -17,14 +17,33 @@ public sealed record EpgCaptureCommitResult(
     EpgUpsertResult Upsert,
     EpgStaleRetireStats StaleRetire);
 
+public sealed record EpgRetiredEventIdentity(
+    ushort NetworkId,
+    ushort TransportStreamId,
+    ushort ServiceId,
+    ushort EventId,
+    DateTime Start,
+    DateTime End);
+
+
+public sealed record EpgObservedTimingPromotionResult(
+    bool Found,
+    bool Changed,
+    DateTime? PreviousStart,
+    DateTime? PreviousEnd,
+    DateTime? CurrentStart,
+    DateTime? CurrentEnd,
+    long ProjectionRevision);
+
 public sealed record EpgStaleRetireStats(
     int Services,
     int IncomingEvents,
     int DeletedRows,
     DateTime? ScopeStart,
-    DateTime? ScopeEnd)
+    DateTime? ScopeEnd,
+    IReadOnlyList<EpgRetiredEventIdentity> RetiredEvents)
 {
-    public static readonly EpgStaleRetireStats Empty = new(0, 0, 0, null, null);
+    public static readonly EpgStaleRetireStats Empty = new(0, 0, 0, null, null, Array.Empty<EpgRetiredEventIdentity>());
 }
 
 /// <summary>
@@ -49,6 +68,90 @@ public sealed class EpgStore
 
     // ─── 書き込み ────────────────────────────────────────────────
 
+    /// <summary>
+    /// PreRec等の短時間観測で、既存DB EventIdentityの時刻だけを最新の放送時刻へ昇格する。
+    /// mini-probeを通常EPG取得として扱わないため、新規row作成・descriptor/title更新・stale retireは行わない。
+    /// </summary>
+    public EpgObservedTimingPromotionResult PromoteObservedEventTiming(
+        ushort networkId,
+        ushort transportStreamId,
+        ushort serviceId,
+        ushort eventId,
+        DateTime observedStart,
+        DateTime observedEnd)
+    {
+        if (networkId == 0 || transportStreamId == 0 || serviceId == 0 || eventId == 0 || observedEnd <= observedStart)
+            return new EpgObservedTimingPromotionResult(false, false, null, null, null, null, ProjectionRevision);
+
+        using var con = db.Open();
+        using var tx = con.BeginTransaction();
+
+        DateTime? previousStart = null;
+        DateTime? previousEnd = null;
+        using (var read = con.CreateCommand())
+        {
+            read.Transaction = tx;
+            read.CommandText = """
+                SELECT start_time, end_time
+                FROM epg_events
+                WHERE network_id = $nid AND transport_stream_id = $tsid
+                  AND service_id = $sid AND event_id = $eid
+                LIMIT 1;
+                """;
+            read.Parameters.AddWithValue("$nid", (int)networkId);
+            read.Parameters.AddWithValue("$tsid", (int)transportStreamId);
+            read.Parameters.AddWithValue("$sid", (int)serviceId);
+            read.Parameters.AddWithValue("$eid", (int)eventId);
+            using var reader = read.ExecuteReader();
+            if (!reader.Read())
+            {
+                tx.Commit();
+                return new EpgObservedTimingPromotionResult(false, false, null, null, null, null, ProjectionRevision);
+            }
+
+            previousStart = DateTime.Parse(reader.GetString(0));
+            previousEnd = DateTime.Parse(reader.GetString(1));
+        }
+
+        var changed = previousStart != observedStart || previousEnd != observedEnd;
+        if (changed)
+        {
+            using var update = con.CreateCommand();
+            update.Transaction = tx;
+            update.CommandText = """
+                UPDATE epg_events
+                SET start_time = $start,
+                    end_time = $end,
+                    duration_seconds = $duration,
+                    updated_at = $updatedAt
+                WHERE network_id = $nid AND transport_stream_id = $tsid
+                  AND service_id = $sid AND event_id = $eid;
+                """;
+            update.Parameters.AddWithValue("$start", observedStart.ToString("O"));
+            update.Parameters.AddWithValue("$end", observedEnd.ToString("O"));
+            update.Parameters.AddWithValue("$duration", Math.Max(0, (int)Math.Round((observedEnd - observedStart).TotalSeconds)));
+            update.Parameters.AddWithValue("$updatedAt", DateTime.Now.ToString("O"));
+            update.Parameters.AddWithValue("$nid", (int)networkId);
+            update.Parameters.AddWithValue("$tsid", (int)transportStreamId);
+            update.Parameters.AddWithValue("$sid", (int)serviceId);
+            update.Parameters.AddWithValue("$eid", (int)eventId);
+            update.ExecuteNonQuery();
+        }
+
+        tx.Commit();
+        if (changed)
+            Interlocked.Increment(ref projectionRevision);
+
+        return new EpgObservedTimingPromotionResult(
+            true,
+            changed,
+            previousStart,
+            previousEnd,
+            observedStart,
+            observedEnd,
+            ProjectionRevision);
+    }
+
     /// <summary>イベント一覧を UPSERT する。</summary>
     public EpgUpsertResult Upsert(IEnumerable<EpgEvent> events)
     {
@@ -67,14 +170,15 @@ public sealed class EpgStore
     /// </summary>
     public EpgCaptureCommitResult CommitCapture(
         IEnumerable<EpgEvent> upsertEvents,
-        IEnumerable<EpgEvent>? retireEvents)
+        IEnumerable<EpgEvent>? retireEvents,
+        IEnumerable<EpgEvent>? preserveEvents = null)
     {
         using var con = db.Open();
         using var tx = con.BeginTransaction();
         var upsert = UpsertCore(con, tx, upsertEvents);
         var staleRetire = retireEvents is null
             ? EpgStaleRetireStats.Empty
-            : RetireStaleEventsForCapturedScopeCore(con, tx, retireEvents);
+            : RetireStaleEventsForCapturedScopeCore(con, tx, retireEvents, preserveEvents ?? upsertEvents);
         tx.Commit();
         if (upsert.Count > 0 || staleRetire.DeletedRows > 0)
             Interlocked.Increment(ref projectionRevision);
@@ -109,7 +213,12 @@ public sealed class EpgStore
                 $dur, $start, $end, $updAt)
             ON CONFLICT(network_id, transport_stream_id, service_id, event_id) DO UPDATE SET
                 service_name = excluded.service_name,
-                title = excluded.title,
+                -- Preserve the last valid short_event_descriptor.event_name when a later
+                -- partial/body-only observation carries no title. Never synthesize a title.
+                title = CASE
+                    WHEN excluded.title <> '' THEN excluded.title
+                    ELSE epg_events.title
+                END,
                 description = excluded.description,
                 genre = excluded.genre,
                 genre_codes = excluded.genre_codes,
@@ -117,7 +226,12 @@ public sealed class EpgStore
                 section_number = excluded.section_number,
                 version_number = excluded.version_number,
                 raw_descriptor_loop = excluded.raw_descriptor_loop,
-                raw_short_event_descriptor = excluded.raw_short_event_descriptor,
+                -- short_event_descriptor.event_name is the canonical title source.
+                -- A later partial/body-only observation must never erase a previously observed 0x4D descriptor.
+                raw_short_event_descriptor = CASE
+                    WHEN excluded.raw_short_event_descriptor <> '' THEN excluded.raw_short_event_descriptor
+                    ELSE epg_events.raw_short_event_descriptor
+                END,
                 raw_extended_event_descriptor = excluded.raw_extended_event_descriptor,
                 raw_content_descriptor = excluded.raw_content_descriptor,
                 duration_seconds = excluded.duration_seconds,
@@ -189,7 +303,8 @@ public sealed class EpgStore
     private static EpgStaleRetireStats RetireStaleEventsForCapturedScopeCore(
         SqliteConnection con,
         SqliteTransaction tx,
-        IEnumerable<EpgEvent> capturedEvents)
+        IEnumerable<EpgEvent> capturedEvents,
+        IEnumerable<EpgEvent> preserveEvents)
     {
         // Stale retirement is an identity/time-range operation only. Do not normalize or
         // mutate the caller-owned event instances here; the same capture objects are still
@@ -199,54 +314,128 @@ public sealed class EpgStore
             .ToList();
         if (normalized.Count == 0) return EpgStaleRetireStats.Empty;
 
+        var preserveByService = preserveEvents
+            .Where(e => e.NetworkId != 0 && e.TransportStreamId != 0 && e.ServiceId != 0)
+            .GroupBy(e => new { e.NetworkId, e.TransportStreamId, e.ServiceId })
+            .ToDictionary(
+                g => (g.Key.NetworkId, g.Key.TransportStreamId, g.Key.ServiceId),
+                g => g.Select(e => e.EventId).Distinct().ToHashSet());
+
         var groups = normalized
             .GroupBy(e => new { e.NetworkId, e.TransportStreamId, e.ServiceId })
             .ToList();
 
         var deleted = 0;
+        var retiredEvents = new List<EpgRetiredEventIdentity>();
         DateTime? scopeStart = null;
         DateTime? scopeEnd = null;
 
         foreach (var g in groups)
         {
-            var ids = g.Select(e => e.EventId).Distinct().OrderBy(x => x).ToList();
+            var key = (g.Key.NetworkId, g.Key.TransportStreamId, g.Key.ServiceId);
+            var ids = preserveByService.TryGetValue(key, out var preserveIds)
+                ? preserveIds.OrderBy(x => x).ToList()
+                : g.Select(e => e.EventId).Distinct().OrderBy(x => x).ToList();
             if (ids.Count == 0) continue;
 
-            var start = g.Min(e => e.Start);
-            var end = g.Max(e => e.End);
-            if (end <= start) continue;
+            var authorityIntervals = g
+                .Where(e => e.End > e.Start)
+                .Select(e => (e.Start, e.End))
+                .Distinct()
+                .OrderBy(x => x.Start)
+                .ThenBy(x => x.End)
+                .ToList();
+            if (authorityIntervals.Count == 0) continue;
 
+            var start = authorityIntervals.Min(x => x.Start);
+            var end = authorityIntervals.Max(x => x.End);
             scopeStart = !scopeStart.HasValue || start < scopeStart.Value ? start : scopeStart;
             scopeEnd = !scopeEnd.HasValue || end > scopeEnd.Value ? end : scopeEnd;
 
-            using var cmd = con.CreateCommand();
-            cmd.Transaction = tx;
-            var idParams = new List<string>();
-            for (var i = 0; i < ids.Count; i++)
+            // A complete current Basic-schedule snapshot is the sole existence authority for
+            // the intervals it explicitly occupies. Present/following, extended schedule and
+            // schedule-other observations may enrich an identity, but they must not veto a
+            // generation change that Basic EIT has already made authoritative.
+            //
+            // Therefore an older identity is retired whenever it overlaps an authoritative
+            // Basic interval and is not one of the Basic identities preserved for this service.
+            // other_schedule_seen is intentionally not a veto here: it is only evidence that an
+            // auxiliary table observed the row during the run, not authority that the row still
+            // exists after Basic EIT moved the service to another EID.
+            foreach (var interval in authorityIntervals)
             {
-                var name = $"$eid{i}";
-                idParams.Add(name);
-                cmd.Parameters.AddWithValue(name, (int)ids[i]);
-            }
+                var idParams = new List<string>();
+                for (var i = 0; i < ids.Count; i++)
+                    idParams.Add($"$eid{i}");
 
-            cmd.CommandText = $"""
-                DELETE FROM epg_events
-                WHERE network_id = $nid
-                  AND transport_stream_id = $tsid
-                  AND service_id = $sid
-                  AND end_time > $scopeStart
-                  AND start_time < $scopeEnd
-                  AND event_id NOT IN ({string.Join(",", idParams)});
-                """;
-            cmd.Parameters.AddWithValue("$nid", (int)g.Key.NetworkId);
-            cmd.Parameters.AddWithValue("$tsid", (int)g.Key.TransportStreamId);
-            cmd.Parameters.AddWithValue("$sid", (int)g.Key.ServiceId);
-            cmd.Parameters.AddWithValue("$scopeStart", start.ToString("O"));
-            cmd.Parameters.AddWithValue("$scopeEnd", end.ToString("O"));
-            deleted += cmd.ExecuteNonQuery();
+                using (var select = con.CreateCommand())
+                {
+                    select.Transaction = tx;
+                    select.CommandText = $"""
+                        SELECT network_id, transport_stream_id, service_id, event_id, start_time, end_time
+                        FROM epg_events
+                        WHERE network_id = $nid
+                          AND transport_stream_id = $tsid
+                          AND service_id = $sid
+                          AND end_time > $authorityStart
+                          AND start_time < $authorityEnd
+                          AND event_id NOT IN ({string.Join(",", idParams)});
+                        """;
+                    select.Parameters.AddWithValue("$nid", (int)g.Key.NetworkId);
+                    select.Parameters.AddWithValue("$tsid", (int)g.Key.TransportStreamId);
+                    select.Parameters.AddWithValue("$sid", (int)g.Key.ServiceId);
+                    select.Parameters.AddWithValue("$authorityStart", interval.Start.ToString("O"));
+                    select.Parameters.AddWithValue("$authorityEnd", interval.End.ToString("O"));
+                    for (var i = 0; i < ids.Count; i++)
+                        select.Parameters.AddWithValue($"$eid{i}", (int)ids[i]);
+
+                    using var reader = select.ExecuteReader();
+                    while (reader.Read())
+                    {
+                        if (!DateTime.TryParse(reader.GetString(4), out var retiredStart) ||
+                            !DateTime.TryParse(reader.GetString(5), out var retiredEnd))
+                            continue;
+                        retiredEvents.Add(new EpgRetiredEventIdentity(
+                            (ushort)reader.GetInt32(0),
+                            (ushort)reader.GetInt32(1),
+                            (ushort)reader.GetInt32(2),
+                            (ushort)reader.GetInt32(3),
+                            retiredStart,
+                            retiredEnd));
+                    }
+                }
+
+                using var cmd = con.CreateCommand();
+                cmd.Transaction = tx;
+                cmd.CommandText = $"""
+                    DELETE FROM epg_events
+                    WHERE network_id = $nid
+                      AND transport_stream_id = $tsid
+                      AND service_id = $sid
+                      AND end_time > $authorityStart
+                      AND start_time < $authorityEnd
+                      AND event_id NOT IN ({string.Join(",", idParams)});
+                    """;
+                cmd.Parameters.AddWithValue("$nid", (int)g.Key.NetworkId);
+                cmd.Parameters.AddWithValue("$tsid", (int)g.Key.TransportStreamId);
+                cmd.Parameters.AddWithValue("$sid", (int)g.Key.ServiceId);
+                cmd.Parameters.AddWithValue("$authorityStart", interval.Start.ToString("O"));
+                cmd.Parameters.AddWithValue("$authorityEnd", interval.End.ToString("O"));
+                for (var i = 0; i < ids.Count; i++)
+                    cmd.Parameters.AddWithValue($"$eid{i}", (int)ids[i]);
+                deleted += cmd.ExecuteNonQuery();
+            }
         }
 
-        return new EpgStaleRetireStats(groups.Count, normalized.Count, deleted, scopeStart, scopeEnd);
+        var retired = retiredEvents
+            .Distinct()
+            .OrderBy(e => e.Start)
+            .ThenBy(e => e.NetworkId)
+            .ThenBy(e => e.TransportStreamId)
+            .ThenBy(e => e.ServiceId)
+            .ThenBy(e => e.EventId)
+            .ToArray();
+        return new EpgStaleRetireStats(groups.Count, normalized.Count, deleted, scopeStart, scopeEnd, retired);
     }
 
     private static EpgEvent NormalizeEventForStorage(EpgEvent source)
@@ -277,6 +466,102 @@ public sealed class EpgStore
             End = source.End,
             UpdatedAt = source.UpdatedAt
         };
+    }
+
+
+    /// <summary>
+    /// 通常EPG run開始時にschedule-otherの補助観測印を解除する。
+    /// この印は存在authorityではなく診断/補助観測状態だけを表し、Basic scheduleの世代交代を拒否しない。
+    /// EPG cache上の補助印だけを更新し、番組投影世代は進めない。
+    /// </summary>
+    public int ResetOtherScheduleSeen()
+    {
+        using var con = db.Open();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = "UPDATE epg_events SET other_schedule_seen = 0 WHERE other_schedule_seen <> 0;";
+        return cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// current normal EPG runでschedule-otherにより再確認された既存identityへ補助観測印を付ける。
+    /// 番組本文は変更せず、Basic scheduleの存在/世代authorityにも昇格させない。
+    /// </summary>
+    public int MarkOtherScheduleSeen(IEnumerable<(ushort NetworkId, ushort TransportStreamId, ushort ServiceId, ushort EventId)> keys)
+    {
+        var distinct = keys.Distinct().ToArray();
+        if (distinct.Length == 0) return 0;
+
+        using var con = db.Open();
+        using var tx = con.BeginTransaction();
+        using var cmd = con.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = """
+            UPDATE epg_events
+            SET other_schedule_seen = 1
+            WHERE network_id = $nid
+              AND transport_stream_id = $tsid
+              AND service_id = $sid
+              AND event_id = $eid;
+            """;
+        var pNid = cmd.Parameters.Add("$nid", SqliteType.Integer);
+        var pTsid = cmd.Parameters.Add("$tsid", SqliteType.Integer);
+        var pSid = cmd.Parameters.Add("$sid", SqliteType.Integer);
+        var pEid = cmd.Parameters.Add("$eid", SqliteType.Integer);
+        var updated = 0;
+        foreach (var key in distinct)
+        {
+            pNid.Value = (int)key.NetworkId;
+            pTsid.Value = (int)key.TransportStreamId;
+            pSid.Value = (int)key.ServiceId;
+            pEid.Value = (int)key.EventId;
+            updated += cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+        return updated;
+    }
+
+    /// <summary>
+    /// schedule-other由来のmissing identityを補助イベントとして追加する。
+    /// 呼出側は既存identityを除外してから渡すためactual行の本文は上書きせず、
+    /// other_schedule_seenは補助観測印に限定しBasic scheduleの世代authorityを上書きしない。
+    /// </summary>
+    public EpgUpsertResult UpsertOtherScheduleSupplement(IEnumerable<EpgEvent> events)
+    {
+        var list = events.ToList();
+        if (list.Count == 0)
+            return new EpgUpsertResult(0, new EpgUpsertStorageStats(0, 0, 0, 0));
+
+        using var con = db.Open();
+        using var tx = con.BeginTransaction();
+        var result = UpsertCore(con, tx, list);
+
+        using var cmd = con.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = """
+            UPDATE epg_events
+            SET other_schedule_seen = 1
+            WHERE network_id = $nid
+              AND transport_stream_id = $tsid
+              AND service_id = $sid
+              AND event_id = $eid;
+            """;
+        var pNid = cmd.Parameters.Add("$nid", SqliteType.Integer);
+        var pTsid = cmd.Parameters.Add("$tsid", SqliteType.Integer);
+        var pSid = cmd.Parameters.Add("$sid", SqliteType.Integer);
+        var pEid = cmd.Parameters.Add("$eid", SqliteType.Integer);
+        foreach (var ev in list)
+        {
+            pNid.Value = (int)ev.NetworkId;
+            pTsid.Value = (int)ev.TransportStreamId;
+            pSid.Value = (int)ev.ServiceId;
+            pEid.Value = (int)ev.EventId;
+            cmd.ExecuteNonQuery();
+        }
+
+        tx.Commit();
+        if (result.Count > 0)
+            Interlocked.Increment(ref projectionRevision);
+        return result;
     }
 
     // ─── 読み取り ────────────────────────────────────────────────

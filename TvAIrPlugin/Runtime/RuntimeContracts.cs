@@ -1,4 +1,4 @@
-﻿using TvAIrPlugin.Assets;
+using TvAIrPlugin.Assets;
 using TvAIrPlugin.Bridge;
 using TvAIrPlugin.Data;
 using TvAIrPlugin.Events;
@@ -102,6 +102,19 @@ public enum RuntimeUiKind
     ToolWindow
 }
 
+/// <summary>
+/// Runtime UIのTheme更新方式。
+/// HostRerenderは従来どおりHostがRuntimeUiRenderContextを再生成してsurfaceを再描画する。
+/// HotApplyはHost正本のTheme payloadを既存DOMへ通知し、PluginがTheme presentationだけを同期適用する。
+/// PluginはRuntimeThemeEventName listener登録後にHost browser runtimeへClientReadyを明示しなければならない。
+/// HostはClientReady前を失敗扱いせずlatest ThemeをPENDING保持し、ClientReady後に実dispatchして失敗した場合だけHostRerenderへfallbackできる。
+/// </summary>
+public enum RuntimeUiThemeUpdateMode
+{
+    HostRerender = 0,
+    HotApply = 1
+}
+
 public sealed record RuntimeUiDefinition
 {
     public required string UiDefinitionId { get; init; }
@@ -111,12 +124,25 @@ public sealed record RuntimeUiDefinition
     public string SurfaceDefinitionId { get; init; } = string.Empty;
     public IReadOnlyList<string> AssetPaths { get; init; } = Array.Empty<string>();
     public IReadOnlyList<string> SupportedActions { get; init; } = Array.Empty<string>();
+    /// <summary>
+    /// Theme変更時のRuntime UI更新方式。既存Plugin互換のため既定値はHostRerender。
+    /// HotApplyはPluginが正式Runtime Theme eventを同期処理し、Theme presentationだけを更新できる場合のみ宣言する。
+    /// </summary>
+    public RuntimeUiThemeUpdateMode ThemeUpdateMode { get; init; } = RuntimeUiThemeUpdateMode.HostRerender;
+    /// <summary>
+    /// HotApply UI専用の宣言済みJavaScript asset logical path。
+    /// HostはPlugin Render HTML内のscriptを実行せず、descriptor.Assetsに宣言されたこの1 assetだけを
+    /// Host shellから同一origin scriptとして明示ロードする。HostRerenderでは空文字列にする。
+    /// </summary>
+    public string ThemeHotApplyScriptPath { get; init; } = string.Empty;
 }
 
 public sealed class RuntimeUiRenderContext
 {
     public const string RuntimeHoverEventName = "tvair-runtime-hover";
     public const string RuntimeHoverKeyAttribute = "data-tvair-hover-key";
+    public const string RuntimeThemeEventName = "tvair-runtime-theme";
+    public const string RuntimeThemeClientReadyFunction = "TvAIrTheme.registerHotApplyClientReady";
 
     public required string PluginId { get; init; }
     public required string UiDefinitionId { get; init; }
@@ -125,6 +151,30 @@ public sealed class RuntimeUiRenderContext
     public bool IsClosedNetwork { get; init; } = true;
     public string HostSelectedTheme { get; init; } = "current";
     public string HostEffectiveTheme { get; init; } = "light";
+    /// <summary>Host process generation identifier. Pair with HostThemeRevision across Host restarts.</summary>
+    public string HostThemeGeneration { get; init; } = string.Empty;
+    // Monotonic Host-owned revision within HostThemeGeneration for the selected/effective theme supplied to this render.
+    // Runtime UI must not poll or infer theme state. HostRerender surfaces are re-rendered by Host;
+    // HotApply surfaces receive RuntimeThemeEventName and must acknowledge synchronous presentation application.
+    public long HostThemeRevision { get; init; }
+    // Host-owned lifecycle contract for applying a new ThemeContract to already visible Runtime UI.
+    // Plugins consume the render context only; page/tool-window refresh, dedupe and interaction-state preservation are Host responsibilities.
+    public IReadOnlyDictionary<string, string> ThemeRefreshContract { get; init; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    /// <summary>
+    /// このRuntime UIが宣言したTheme更新方式。
+    /// HostRerenderは従来契約、HotApplyはRuntimeThemeEventNameでHost正本payloadを受け取る。
+    /// </summary>
+    public RuntimeUiThemeUpdateMode ThemeUpdateMode { get; init; } = RuntimeUiThemeUpdateMode.HostRerender;
+    /// <summary>
+    /// Host-owned Theme hot-apply契約。HotApply PluginのTheme handlerはRuntimeUiDefinition.ThemeHotApplyScriptPathで
+    /// 宣言した埋め込みJavaScript assetとしてHost shellから読み込まれる。Plugin Render HTML内scriptは実行されない。
+    /// handlerはRuntimeThemeEventName listener登録後にRuntimeThemeClientReadyFunctionを1回以上呼び、
+    /// Host browser runtimeへClientReadyを明示する。
+    /// ClientReady前はHostがlatest ThemeをPENDING保持し、Theme eventをdispatchしない。
+    /// ClientReady後の実dispatchではdetail.acknowledge(true[, reason])をdispatch終了までに呼び出す。
+    /// ClientReady後に実dispatchしたにもかかわらずacknowledgeされない/falseの場合だけHostはfull rerenderへfallbackする。
+    /// </summary>
+    public IReadOnlyDictionary<string, string> ThemeUpdateContract { get; init; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     // Host-owned generic theme roles for Runtime UI. Plugins must consume semantic state pairs
     // (normal/hover, selected/selectedHover, disabled, primary/secondary/danger actions) rather
     // than invent plugin-specific colors. A generic hover must never replace selected, checked,
@@ -431,6 +481,7 @@ public interface ITvAirPluginRuntimeContext
     global::TvAIrPlugin.ITvAirLogsApi Logs { get; }
     global::TvAIrPlugin.ITvAirPluginsApi Plugins { get; }
     global::TvAIrPlugin.ITvAirExternalLookupApi ExternalLookup { get; }
+    global::TvAIrPlugin.ITvAirInternetAccessApi InternetAccess { get; }
 }
 
 public interface ITvAirRuntimeCapabilityPlugin

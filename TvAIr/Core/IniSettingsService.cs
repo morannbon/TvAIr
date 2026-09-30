@@ -41,6 +41,8 @@ public sealed class IniSettingsService
     public int    EpgPreRecordMinutes       { get; private set; } = SettingsDefaults.EpgPreRecordMinutes;
     public bool   LaterProgramPriority  { get; private set; } = SettingsDefaults.LaterProgramPriority;
     public bool   PseudoContinuousRecording      { get; private set; } = SettingsDefaults.PseudoContinuousRecording;
+    /// <summary>現行のユーザー明示チェーン機能有効状態。PseudoContinuousRecordingはINI互換キーとしてのみ残す。</summary>
+    public bool   UserChainRecordingEnabled => ChainReservationContract.IsFeatureEnabled(LaterProgramPriority, PseudoContinuousRecording);
     public int    PreStartMarginSeconds { get; private set; } = SettingsDefaults.PreStartMarginSeconds;
     public int    PostEndMarginSeconds  { get; private set; } = SettingsDefaults.PostEndMarginSeconds;
     public int    WakeMinutesBefore     { get; private set; } = SettingsDefaults.WakeMinutesBefore;
@@ -133,6 +135,31 @@ public sealed class IniSettingsService
     }
 
     // ── 読み込み ────────────────────────────────────────────────────
+    internal static int ResolvePersistedPort(string baseDirectory, int fallbackPort)
+    {
+        var iniPath = Path.Combine(baseDirectory, "TvAIr.ini");
+        if (!File.Exists(iniPath))
+            return SettingsDefaults.NormalizePort(fallbackPort);
+
+        var values = ReadIniValues(iniPath);
+        return SettingsDefaults.NormalizePort(GetInt(values, "Port", fallbackPort));
+    }
+
+    private static Dictionary<string, string> ReadIniValues(string iniPath)
+    {
+        var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var raw in File.ReadAllLines(iniPath))
+        {
+            var line = raw.Trim();
+            if (line.StartsWith(';') || line.StartsWith('#') || !line.Contains('=')) continue;
+            var eq = line.IndexOf('=');
+            var key = line[..eq].Trim();
+            var val = line[(eq + 1)..].Trim();
+            dict[key] = val;
+        }
+        return dict;
+    }
+
     private void Load()
     {
         if (!File.Exists(_iniPath))
@@ -141,16 +168,7 @@ public sealed class IniSettingsService
             return;
         }
 
-        var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var raw in File.ReadAllLines(_iniPath))
-        {
-            var line = raw.Trim();
-            if (line.StartsWith(';') || line.StartsWith('#') || !line.Contains('=')) continue;
-            var eq  = line.IndexOf('=');
-            var key = line[..eq].Trim();
-            var val = line[(eq + 1)..].Trim();
-            dict[key] = val;
-        }
+        var dict = ReadIniValues(_iniPath);
 
         TvTestExecutablePath = NormalizePathValue(Get(dict, "TvTestExecutablePath", TvTestExecutablePath));
         BonDriverDirectory   = NormalizePathValue(Get(dict, "BonDriverDirectory",   BonDriverDirectory));
@@ -195,7 +213,7 @@ public sealed class IniSettingsService
         UserLogDetailRecordingQuality = GetBoolMigratingLegacy(dict, "UserLogDetailRecordingQuality", "UserLogShowQuality", UserLogDetailRecordingQuality);
         UserLogDetailStateChange = GetBoolMigratingLegacy(dict, "UserLogDetailStateChange", "UserLogShowStateChange", UserLogDetailStateChange);
         UserLogDetailEndOrFailureReason = GetBoolMigratingLegacy(dict, "UserLogDetailEndOrFailureReason", "UserLogShowReason", UserLogDetailEndOrFailureReason);
-        ThemeGenrePalettes = LoadThemeGenrePalettes(dict);
+        ThemeGenrePalettes = LoadThemeGenrePalettes(dict, out var genrePaletteSchemaMigrationNeeded);
 
         // EPG worker launch policy
         EpgUseBelowNormalPriority = GetBool(dict, "EpgUseBelowNormalPriority", EpgUseBelowNormalPriority);
@@ -250,6 +268,8 @@ public sealed class IniSettingsService
         }
 
         NormalizeTunerDeviceNumbers();
+        if (genrePaletteSchemaMigrationNeeded)
+            PersistCanonicalGenrePaletteSchema();
         PersistMissingTunerMetadata();
     }
 
@@ -498,7 +518,8 @@ public sealed class IniSettingsService
             $"EpgDisableImmediateRetry  = {(EpgDisableImmediateRetry ? "true" : "false")}",
             "",
             "[UiGenreColors]",
-            "; release_contract: ジャンル色はテーマ連動。LightはTvRock標準色、Darkはダークテーマ専用色。",
+            "; ジャンル色はSettingsDefaultsのテーマ共通正本から投影し、schema更新時だけ一度移行する。",
+            $"GenrePaletteSchemaVersion = {SettingsDefaults.GenrePaletteSchemaVersion}",
         });
 
         foreach (var kv in ThemeGenrePalettes["light"].OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase))
@@ -724,6 +745,7 @@ public sealed class IniSettingsService
         UserLogDetailEndOrFailureReason = UserLogDetailEndOrFailureReason,
         ThemeGenrePalettes = CloneThemeGenrePalettes(ThemeGenrePalettes),
         DefaultThemeGenrePalettes = SettingsDefaults.CreateDefaultThemeGenrePalettes(),
+        ThemeGenrePresetColors = SettingsDefaults.CreateThemeGenrePresetColors(),
 
         // EPG worker launch policy
         EpgUseBelowNormalPriority = EpgUseBelowNormalPriority,
@@ -795,6 +817,7 @@ public sealed class IniSettingsService
             TaskHasPassword = current.TaskHasPassword,
             TaskPasswordLength = current.TaskPasswordLength,
             DefaultThemeGenrePalettes = current.DefaultThemeGenrePalettes,
+            ThemeGenrePresetColors = current.ThemeGenrePresetColors,
             BonDriverList = current.BonDriverList,
             IsFirstRun = current.IsFirstRun
         };
@@ -927,48 +950,79 @@ public sealed class IniSettingsService
     }
 
 
-    private static readonly IReadOnlyList<Dictionary<string, string>> LegacyDarkGenreDefaults = new[]
+    // THEME_GENRE_PALETTE_SCHEMA_MIGRATION_CONTRACT
+    // v2 intentionally ends the pre-canonical palette era. Unversioned/v1 palettes may contain old index mappings,
+    // partial standard migrations, or theme-local defaults that cannot be distinguished safely from user intent.
+    // They are reset exactly once to SettingsDefaults, then v2 persists and all subsequent user customization is preserved.
+    private static Dictionary<string, Dictionary<string, string>> LoadThemeGenrePalettes(
+        Dictionary<string, string> dict,
+        out bool schemaMigrationNeeded)
     {
-        // 旧標準ダーク配色を互換判定用に保持する。利用者が標準値のまま使っている場合だけ、
-        // 録画中・予約済みの状態色と近かったドラマ色を現行の標準配色へ移行する。
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["g-news"] = "#1f5a45", ["g-sports"] = "#245c7a", ["g-info"] = "#2d6f61", ["g-drama"] = "#6b3341", ["g-music"] = "#286b78",
-            ["g-variety"] = "#6b5a24", ["g-movie"] = "#563a73", ["g-anime"] = "#394f95", ["g-docu"] = "#3f5366", ["g-other"] = "#4a5058",
-        },
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["g-news"] = "#2f6b3f", ["g-sports"] = "#7a3a63", ["g-info"] = "#2f6540", ["g-drama"] = "#7a3c3c", ["g-music"] = "#2f6878",
-            ["g-variety"] = "#756d2f", ["g-movie"] = "#2f6d66", ["g-anime"] = "#55579a", ["g-docu"] = "#56616d", ["g-other"] = "#4b5563",
-        },
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["g-news"] = "#244c3a", ["g-sports"] = "#204b63", ["g-info"] = "#2f5e46", ["g-drama"] = "#5a2a32", ["g-music"] = "#284e5a",
-            ["g-variety"] = "#5a4a22", ["g-movie"] = "#4d365e", ["g-anime"] = "#343f73", ["g-docu"] = "#2f465a", ["g-other"] = "#3f4248",
-        },
-    };
+        schemaMigrationNeeded = !dict.TryGetValue("GenrePaletteSchemaVersion", out var versionRaw)
+            || !int.TryParse(versionRaw, out var version)
+            || version < SettingsDefaults.GenrePaletteSchemaVersion;
 
-    private static bool IsLegacyDarkGenreDefault(Dictionary<string, string> colors)
-        => LegacyDarkGenreDefaults.Any(legacy => legacy.Keys.All(key => colors.TryGetValue(key, out var v) && string.Equals(v, legacy[key], StringComparison.OrdinalIgnoreCase)));
+        if (schemaMigrationNeeded)
+            return SettingsDefaults.CreateDefaultThemeGenrePalettes();
 
-    private static Dictionary<string, string> MigrateDarkGenreDefault(Dictionary<string, string> colors)
-        => IsLegacyDarkGenreDefault(colors) ? SettingsDefaults.CreateDarkGenreColors() : colors;
-
-    private static Dictionary<string, Dictionary<string, string>> LoadThemeGenrePalettes(Dictionary<string, string> dict)
-    {
         var palettes = SettingsDefaults.CreateDefaultThemeGenrePalettes();
         foreach (var key in palettes["light"].Keys.ToList())
         {
             if (dict.TryGetValue($"GenreColor_Light_{key}", out var lightRaw))
                 palettes["light"][key] = NormalizeGenreColor(lightRaw, palettes["light"][key]);
-            else if (dict.TryGetValue($"GenreColor_{key}", out var legacyRaw))
-                palettes["light"][key] = NormalizeGenreColor(legacyRaw, palettes["light"][key]);
-
             if (dict.TryGetValue($"GenreColor_Dark_{key}", out var darkRaw))
                 palettes["dark"][key] = NormalizeGenreColor(darkRaw, palettes["dark"][key]);
         }
-        palettes["dark"] = MigrateDarkGenreDefault(palettes["dark"]);
         return palettes;
+    }
+
+    private void PersistCanonicalGenrePaletteSchema()
+    {
+        if (!File.Exists(_iniPath)) return;
+
+        var lines = File.ReadAllLines(_iniPath).ToList();
+        static bool IsPaletteKeyLine(string raw)
+        {
+            var line = raw.Trim();
+            if (line.StartsWith(';') || line.StartsWith('#') || !line.Contains('=')) return false;
+            var key = line[..line.IndexOf('=')].Trim();
+            return key.Equals("GenrePaletteSchemaVersion", StringComparison.OrdinalIgnoreCase)
+                || key.StartsWith("GenreColor_Light_", StringComparison.OrdinalIgnoreCase)
+                || key.StartsWith("GenreColor_Dark_", StringComparison.OrdinalIgnoreCase)
+                || key.StartsWith("GenreColor_g-", StringComparison.OrdinalIgnoreCase);
+        }
+
+        lines.RemoveAll(line => IsPaletteKeyLine(line));
+
+        var sectionIndex = lines.FindIndex(line => string.Equals(line.Trim(), "[UiGenreColors]", StringComparison.OrdinalIgnoreCase));
+        if (sectionIndex < 0)
+        {
+            if (lines.Count > 0 && !string.IsNullOrWhiteSpace(lines[^1])) lines.Add(string.Empty);
+            lines.Add("[UiGenreColors]");
+            lines.Add("; ジャンル色はSettingsDefaultsのテーマ共通正本から投影し、schema更新時だけ一度移行する。");
+            sectionIndex = lines.Count - 2;
+        }
+
+        var insertAt = sectionIndex + 1;
+        while (insertAt < lines.Count)
+        {
+            var trimmed = lines[insertAt].Trim();
+            if (trimmed.StartsWith('[') && trimmed.EndsWith(']')) break;
+            insertAt++;
+        }
+
+        var canonical = SettingsDefaults.CreateDefaultThemeGenrePalettes();
+        var payload = new List<string>
+        {
+            $"GenrePaletteSchemaVersion = {SettingsDefaults.GenrePaletteSchemaVersion}",
+        };
+        payload.AddRange(canonical["light"].OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(kv => $"GenreColor_Light_{kv.Key} = {kv.Value}"));
+        payload.AddRange(canonical["dark"].OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(kv => $"GenreColor_Dark_{kv.Key} = {kv.Value}"));
+
+        lines.InsertRange(insertAt, payload);
+        WriteIniAtomically(lines);
     }
 
     private static Dictionary<string, string> NormalizeGenreColorMap(Dictionary<string, string>? input, Dictionary<string, string> fallback)
@@ -1194,6 +1248,7 @@ public sealed class WebSettingsDto : WebSettingsValuesDto
     public bool TaskHasPassword { get; set; } = false;
     public int TaskPasswordLength { get; set; } = 0;
     public Dictionary<string, Dictionary<string, string>> DefaultThemeGenrePalettes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, List<string>> ThemeGenrePresetColors { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public List<string> BonDriverList { get; set; } = new();
     public bool IsFirstRun { get; set; } = false;
 }
@@ -1216,6 +1271,7 @@ public sealed class IniSettingsDto : IniSettingsValuesDto
     public bool TaskHasPassword { get; set; } = false;
     public int TaskPasswordLength { get; set; } = 0;
     public Dictionary<string, Dictionary<string, string>> DefaultThemeGenrePalettes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, List<string>> ThemeGenrePresetColors { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public List<string> BonDriverList { get; set; } = new();
     public bool IsFirstRun { get; set; } = false;
 }

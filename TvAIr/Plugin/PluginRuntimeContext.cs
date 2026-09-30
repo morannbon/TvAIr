@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
@@ -84,6 +84,7 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
         Logs = hostApis.Logs;
         Plugins = hostApis.Plugins;
         ExternalLookup = hostApis.ExternalLookup;
+        InternetAccess = hostApis.InternetAccess;
     }
 
     private readonly PluginRuntimeManager _runtimeManager;
@@ -130,6 +131,7 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
     public ITvAirLogsApi Logs { get; }
     public ITvAirPluginsApi Plugins { get; }
     public ITvAirExternalLookupApi ExternalLookup { get; }
+    public ITvAirInternetAccessApi InternetAccess { get; }
 
 
     private sealed class RuntimePathPickerApi : ITvAirPathPickerApi
