@@ -1,4 +1,4 @@
-/* release_contract gr-cdt-data-module-logo-save-bscs-no-deep: Wakeタスク起動時は --wake-task を単一インスタンス合流シグナルとして扱い、既存TvAIrがいる場合は本体二重起動せず signal ファイルを書いて終了する。 */
+﻿/* release_contract gr-cdt-data-module-logo-save-bscs-no-deep: Wakeタスク起動時は --wake-task を単一インスタンス合流シグナルとして扱い、既存TvAIrがいる場合は本体二重起動せず signal ファイルを書いて終了する。 */
 /* TvAIrEpgRecの表示ON/OFFを含む起動ポリシーは共通ヘルパーで管理する。 */
 /* release_contract wake-plan-hash-trigger-limit: limit Wake task rebuild triggers by in-process plan hash and periodic validation. */
 /* release_contract wake-task-nochange-skip: skip full Wake task delete/register when the desired plan is unchanged and existing managed tasks match. */
@@ -234,6 +234,24 @@ var iniSettings = new IniSettingsService(
     AppContext.BaseDirectory,
     firstRunAppSettings.DataDirectory,
     firstRunAppSettings.Port);
+
+// SETTINGS_TWO_PHASE_MIGRATION_RESTART_BARRIER
+// 1回目は現行キーを追加した直後に終了する。DB/予約/EPG/割当等のサービスはまだ生成・実行しない。
+if (iniSettings.SettingsMigrationRestartRequired)
+{
+    try
+    {
+        System.Windows.Forms.MessageBox.Show(
+            "設定ファイルを更新しました。\r\n" +
+            "更新を完了するため、TvAIrを再起動してください。",
+            "TvAIr - 設定更新",
+            System.Windows.Forms.MessageBoxButtons.OK,
+            System.Windows.Forms.MessageBoxIcon.Information);
+    }
+    catch { }
+    return;
+}
+
 builder.Services.AddSingleton(iniSettings);
 builder.Services.AddSingleton<NetworkAccessSecurity>();
 builder.Services.AddSingleton<PluginInternetAccessPermissionStore>();
@@ -357,6 +375,7 @@ builder.Services.AddSingleton<Database>(_ =>
 
 // ─── チャンネル ──────────────────────────────────────────────────
 builder.Services.AddSingleton<ChannelFileLoader>();
+builder.Services.AddSingleton<ChannelServiceAccessPolicy>();
 builder.Services.AddSingleton<TvTestActivityKeeper>();
 
 // ─── チューナー ──────────────────────────────────────────────────
@@ -441,6 +460,7 @@ builder.Services.AddSingleton<EpgScheduler>(sp =>
         sp.GetRequiredService<ReservationStore>(),
         sp.GetRequiredService<IReadOnlyList<TunerProfile>>(),
         sp.GetRequiredService<ChannelFileLoader>(),
+        sp.GetRequiredService<ChannelServiceAccessPolicy>(),
         sp.GetRequiredService<IProgramEventSource>(),
         sp.GetRequiredService<TunerPool>(),
         sp.GetRequiredService<LogRepository>(),
@@ -467,7 +487,8 @@ builder.Services.AddSingleton<TaskSchedulerService>(sp =>
         sp.GetRequiredService<IReadOnlyList<TunerProfile>>(),
         sp.GetRequiredService<LogRepository>(),
         sp.GetRequiredService<UserEventLogService>(),
-        sp.GetRequiredService<EpgScheduler>()));
+        sp.GetRequiredService<EpgScheduler>(),
+        sp.GetRequiredService<ChannelServiceAccessPolicy>()));
 
 // ─── スタートアップ（Windows標準ログオンタスク） ─────────────────
 builder.Services.AddSingleton<WindowsAutoStartService>(sp =>
@@ -486,7 +507,7 @@ builder.Services.AddSingleton<ReservationScheduler>(sp =>
         sp.GetRequiredService<LogRepository>(),
         sp.GetRequiredService<TaskSchedulerService>(),
         sp.GetRequiredService<ReservationAllocationRouteService>(),
-        sp.GetRequiredService<ChannelFileLoader>(),
+        sp.GetRequiredService<ChannelServiceAccessPolicy>(),
         sp.GetRequiredService<IProgramEventSource>(),
         sp.GetRequiredService<EpgCapture>(),
         sp.GetRequiredService<EpgStore>(),
@@ -603,8 +624,8 @@ if (wakeInvocation.IsWakeTask)
 
 
 // TvAIr release_contract cache guard:
-// UI差分更新を維持しつつ、ブラウザが更新前のindex.html/JS状態を保持して
-// チェーン候補判定だけ遅れて復帰する問題を避ける。
+// UI差分更新とHost側のチェーン操作可否判定を同一世代で反映するため、
+// index.html/JSはHost更新後に古いブラウザキャッシュへ戻さない。
 app.Use(async (context, next) =>
 {
     context.Response.Headers["X-Content-Type-Options"] = "nosniff";
@@ -826,7 +847,7 @@ app.MapGet("/network-login", (HttpContext context) =>
     context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'self'; base-uri 'none'";
     var html = $$$"""
 <!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>TvAIr 接続</title><link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.2"></head><body class="tvair-generated-login"><main><h1>TvAIrへ接続</h1><form id="login"><label for="password">接続用パスワード</label><input id="password" type="password" autocomplete="current-password" required minlength="12"><button type="submit">接続</button><div id="message" class="message" role="status"></div></form></main>
+<title>TvAIr 接続</title><link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.3"></head><body class="tvair-generated-login"><main><h1>TvAIrへ接続</h1><form id="login"><label for="password">接続用パスワード</label><input id="password" type="password" autocomplete="current-password" required minlength="12"><button type="submit">接続</button><div id="message" class="message" role="status"></div></form></main>
 <script>
 const form=document.getElementById('login'),password=document.getElementById('password'),message=document.getElementById('message');
 form.addEventListener('submit',async e=>{e.preventDefault();message.textContent='確認しています…';try{const r=await fetch('/api/network-auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:password.value}),credentials:'same-origin'});const j=await r.json().catch(()=>({}));if(!r.ok){message.textContent=j.message||'接続できませんでした。';return;}location.replace({{{returnUrlJson}}});}catch{message.textContent='接続できませんでした。';}});
@@ -857,7 +878,7 @@ lifecycleLog.Add("APP_LIFECYCLE", "START",
      $"TvAIr start version={GetTvAIrAppVersion()} baseDir={AppContext.BaseDirectory}");
 EmitTvAIrRuntimeIdentityAudit(lifecycleLog);
 EmitTvAIrEpgRecRuntimePrerequisiteAudit(lifecycleLog, effectiveTvTestSettings);
-TvTestProcessAuditor.Capture(lifecycleLog, "APP_START", emitLegacyEvents: true);
+TvTestProcessAuditor.Capture(lifecycleLog, "APP_START");
 // 管理外TVTestは監視・保護・割当判断の対象外。起動時監査はTvAIr管理プロセスだけを扱う。
 RunTvAIrEpgRecStartupOrphanSafety(lifecycleLog);
 try
@@ -981,13 +1002,13 @@ app.MapGet("/api/plugins/manifests", (PluginRegistry registry) =>
     var descriptors = registry.GetRuntimePlugins()
         .Select(p => p.Descriptor)
         .ToList();
-    return Results.Ok(new { descriptors, source = "runtime.descriptor", legacyManifestSupported = false });
+    return Results.Ok(new { descriptors, source = "runtime.descriptor" });
 });
 
 app.MapGet("/api/plugins/menu-actions", (PluginDefaultMenuActionService menuActions) =>
 {
     var actions = menuActions.ResolveActions("api");
-    return Results.Ok(new { actions, contract = PluginDefaultMenuActionService.ContractVersion, projection = "menu_model_hamburger_context_page", legacyMenuFallbackSupported = false });
+    return Results.Ok(new { actions, contract = PluginDefaultMenuActionService.ContractVersion, projection = "menu_model_hamburger_context_page" });
 });
 
 app.MapGet("/plugin-menu/{routeSegment}", (string routeSegment, string? source, HttpRequest http, PluginRegistry registry, PluginDefaultMenuActionService menuActions, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, PluginBoundaryGate boundaryGate, LogRepository log) =>
@@ -1937,7 +1958,7 @@ static IResult RenderPluginWindowHost(string windowId, HttpRequest http, PluginW
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{title}}</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.2">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.3">
 </head>
 <body class="tvair-plugin-window-page">
 <div class="{{hostClass}}" data-window-id="{{encodedWindowId}}" data-window-revision="{{initialRevision}}" data-tool-host="{{toolHost.ToString().ToLowerInvariant()}}">
@@ -2334,10 +2355,10 @@ static IResult RenderPluginVersionInfoPage(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-notification.css?v=1.2.2">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.2.3">
 </head>
 <body>
-<script src="/tvair-notification.js?v=1.2.2"></script>
+<script src="/tvair-notification.js?v=1.2.3"></script>
 <script>
 document.addEventListener('DOMContentLoaded',function(){
   if(window.TvAIrNotify){ TvAIrNotify({ title:'{{safeTitle}}', message:'{{safeVersion}}', onOk:function(){ location.replace('{{safeReturn}}'); } }); }
@@ -2391,7 +2412,7 @@ static IResult RenderPluginDefaultMenuInfo(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeName}} 情報</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.2">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.3">
 </head>
 <body class="tvair-plugin-info-page"><div class="card"><h1>{{safeName}} 情報</h1><div class="row"><div class="k">Version</div><div class="v">{{safeVersion}}</div></div><div class="row"><div class="k">Route</div><div class="v">{{safeRoute}}</div></div><div class="row"><div class="k">Action</div><div class="v">{{safeKind}}</div></div><p>{{safeDescription}}</p><a class="button" href="/">番組表へ戻る</a></div></body>
 </html>
@@ -2412,7 +2433,7 @@ static IResult PluginHtmlMessage(string title, string message, int statusCode, s
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.2">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.3">
 </head>
 <body class="tvair-message-page"><div class="card"><h1>{{safeTitle}}</h1><p>{{safeMessage}}</p><a class="button" href="{{safeHref}}">{{safeLinkText}}</a></div></body>
 </html>
@@ -2472,7 +2493,7 @@ static string BuildPluginFloatingButtonsHtml(RuntimeUiRenderContext context, str
     if (normalized.Length == 0) return string.Empty;
 
     var sb = new System.Text.StringBuilder();
-    sb.Append("<link rel=\"stylesheet\" href=\"/tvair-generated-surfaces.css?v=1.2.2\">");
+    sb.Append("<link rel=\"stylesheet\" href=\"/tvair-generated-surfaces.css?v=1.2.3\">");
 
     foreach (var group in normalized.GroupBy(x => x.Item.Position))
     {
@@ -3502,16 +3523,16 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; media-src 'self' data:">
 <title>{{{{safeTitle}}}} - TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.2">
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.2">
-<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.2.2">
-<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.2">
-<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.2.2">
-<link rel="stylesheet" href="/tvair-notification.css?v=1.2.2">
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.2">
-<link rel="stylesheet" href="/tvair-settings-host.css?v=1.2.2">
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.3">
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.3">
+<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.2.3">
+<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.3">
+<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.2.3">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.2.3">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.3">
+<link rel="stylesheet" href="/tvair-settings-host.css?v=1.2.3">
 {{{{developerThemeDiagnosticScript}}}}
-<script src="/tvair-theme.js?v=1.2.2"></script>
+<script src="/tvair-theme.js?v=1.2.3"></script>
 </head>
 <body class="tvair-non-program-page tvair-plugin-shell-page {{{{themeClass}}}}{{{{contentOnlyClass}}}}" data-plugin-route="{{{{safeRoute}}}}" data-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme="{{{{safeSelectedTheme}}}}" data-tvair-selected-theme="{{{{safeSelectedTheme}}}}" data-tvair-effective-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme-generation="{{{{safeThemeGeneration}}}}" data-tvair-theme-revision="{{{{themeRevision}}}}" data-tvair-theme-scope="all" data-tvair-theme-update-mode="{{{{themeUpdateModeToken}}}}">
 <div id="nav">
@@ -3533,11 +3554,11 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
   </main>
 </div>
 {{{{themeHotApplyScriptTag}}}}
-<script src="/tvair-notification.js?v=1.2.2"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.2"></script>
-<script src="/tvair-safe-event-host.js?v=1.2.2"></script>
-<script src="/tvair-menu-spine.js?v=1.2.2"></script>
-<script src="/tvair-settings-host.js?v=1.2.2"></script>
+<script src="/tvair-notification.js?v=1.2.3"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.3"></script>
+<script src="/tvair-safe-event-host.js?v=1.2.3"></script>
+<script src="/tvair-menu-spine.js?v=1.2.3"></script>
+<script src="/tvair-settings-host.js?v=1.2.3"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -3835,17 +3856,17 @@ static string BuildPluginToolWindowContentHtml(string title, string route, strin
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; media-src 'self' data:">
 <title>{{safeTitle}} - TvAIr Tool Window</title>
-<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.2">
+<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.3">
 {{developerThemeDiagnosticScript}}
-<script src="/tvair-theme.js?v=1.2.2"></script>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.2">
+<script src="/tvair-theme.js?v=1.2.3"></script>
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.3">
 {{pluginHead}}
 </head>
 <body class="tvair-plugin-toolwindow-content-only {{themeClass}}" data-plugin-route="{{safeRoute}}" data-theme="{{safeEffectiveTheme}}" data-tvair-theme="{{safeSelectedTheme}}" data-tvair-selected-theme="{{safeSelectedTheme}}" data-tvair-effective-theme="{{safeEffectiveTheme}}" data-tvair-theme-generation="{{safeThemeGeneration}}" data-tvair-theme-revision="{{themeRevision}}" data-tvair-theme-scope="all" data-tvair-theme-update-mode="{{themeUpdateModeToken}}" data-tvair-host-kind="winforms_webbrowser_fallback_direct_content" data-tvair-toolwindow-contract="release_contract">
 <div class="tvair-toolwindow-content-root">
 {{pluginContent}}
 </div>
-<script src="/tvair-safe-event-host.js?v=1.2.2"></script>
+<script src="/tvair-safe-event-host.js?v=1.2.3"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -4687,7 +4708,7 @@ app.MapPost("/api/chain-reservation-candidates", (ChainCandidatePreviewRequest r
     var reservations = store.GetAll()
         .Where(r => r.Source != ReservationSource.Epg)
         .ToList();
-    var featureEnabled = ChainReservationContract.IsFeatureEnabled(request.LaterProgramPriorityEnabled, request.PseudoContinuousRecordingEnabled);
+    var featureEnabled = ChainReservationContract.IsFeatureEnabled(request.LaterProgramPriorityEnabled, request.ChainRecordingEnabled);
     var now = DateTime.Now;
     var candidates = new List<object>();
     var checkedCount = 0;
@@ -5173,7 +5194,7 @@ app.MapPost("/api/epg/cancel", (HttpRequest request, EpgScheduler scheduler) =>
 });
 
 // 番組表データ取得（日付指定）
-app.MapGet("/api/epg/events", (string? date, EpgStore store, ReservationStore reservations, ChannelFileLoader channelLoader, LogRepository log, IProgramEventSource programEvents, HttpResponse response) =>
+app.MapGet("/api/epg/events", (string? date, EpgStore store, ReservationStore reservations, ChannelServiceAccessPolicy serviceAccess, LogRepository log, IProgramEventSource programEvents, HttpResponse response) =>
 {
 #if TVAIR_DEVELOPER_DIAGNOSTICS
     var requestStopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -5192,8 +5213,10 @@ app.MapGet("/api/epg/events", (string? date, EpgStore store, ReservationStore re
     var displayDate = dayStart.ToString("M月d日・dddd",
         System.Globalization.CultureInfo.GetCultureInfo("ja-JP"));
 
-    var channels = BuildCurrentProgramGuideChannels(channelLoader);
+    var access = serviceAccess.Capture();
+    var channels = access.ActiveTargets.ToList();
     var events = programEvents.GetByRange(dayStart, dayEnd)
+        .Where(e => access.IsOperational(e.NetworkId, e.TransportStreamId, e.ServiceId))
         .ToList();
 
     var chOrder = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -5273,9 +5296,9 @@ app.MapGet("/api/epg/events", (string? date, EpgStore store, ReservationStore re
 app.MapGet("/api/epg/event", (
     ushort networkId, ushort tsId, ushort serviceId, ushort eventId,
     IProgramEventSource programEvents,
-    ChannelFileLoader channelLoader) =>
+    ChannelServiceAccessPolicy serviceAccess) =>
 {
-    if (!BuildProgramGuideChannelServiceKeySet(BuildCurrentProgramGuideChannels(channelLoader))
+    if (!BuildProgramGuideChannelServiceKeySet(BuildCurrentProgramGuideChannels(serviceAccess))
         .Contains(ProgramGuideServiceKey3(networkId, tsId, serviceId)))
         return Results.NotFound();
     var ev = programEvents.GetByEventKey(networkId, tsId, serviceId, eventId);
@@ -5287,15 +5310,15 @@ app.MapGet("/api/epg/search", (
     string?  q,            // キーワード
     bool?    desc,         // 説明文も検索
     string?  services,     // 局identity NID:TSID:SID カンマ区切り
-    string?  sids,         // 旧互換: SID カンマ区切り。一意に現在局へ解決できる場合のみ使用
     string?  dow,          // 曜日 カンマ区切り (0=日〜6=土)
     int?     timeFrom,     // 開始時間 (0〜23)
     int?     timeTo,       // 終了時間 (1〜24)
     string?  dateFrom,     // 期間開始 yyyy-MM-dd
     string?  dateTo,       // 期間終了 yyyy-MM-dd
     IProgramEventSource programEvents,
-    ChannelFileLoader channelLoader) =>
+    ChannelServiceAccessPolicy serviceAccess) =>
 {
+    var access = serviceAccess.Capture();
     var serviceKeys = new HashSet<ServiceIdentityContract.Key>();
     foreach (var token in (services ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
     {
@@ -5312,35 +5335,15 @@ app.MapGet("/api/epg/search", (
     var to   = DateOnly.TryParse(dateTo,   out var dt)
         ? dt.ToDateTime(TimeOnly.MaxValue) : (DateTime?)null;
 
-    var channels = BuildCurrentProgramGuideChannels(channelLoader);
-    foreach (var token in (sids ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-    {
-        if (!ushort.TryParse(token, out var legacySid))
-            return Results.BadRequest(new { message = $"旧形式の対象局SIDが不正です: {token}" });
-
-        var matches = channels
-            .Where(ch => ch.ServiceId == legacySid)
-            .Select(ServiceIdentityContract.From)
-            .Distinct()
-            .Take(2)
-            .ToList();
-        if (matches.Count != 1)
-            return Results.BadRequest(new
-            {
-                message = matches.Count == 0
-                    ? $"旧形式の対象局 SID={legacySid} を現在の局情報から一意に解決できません。"
-                    : $"旧形式の対象局 SID={legacySid} は複数局に一致します。NID:TSID:SIDで指定してください。"
-            });
-        serviceKeys.Add(matches[0]);
-    }
-
+    var channels = access.ActiveTargets.ToList();
     var daySet = days?.ToHashSet();
     var keyword = (q ?? string.Empty).Trim();
     var searchFrom = from ?? DateTime.Now;
     var searchTo = to ?? searchFrom.AddDays(14);
 
     IEnumerable<ProjectedProgramEvent> query = programEvents.GetByRange(searchFrom, searchTo)
-        .Where(e => e.End >= DateTime.Now);
+        .Where(e => e.End >= DateTime.Now)
+        .Where(e => access.IsOperational(e.NetworkId, e.TransportStreamId, e.ServiceId));
 
     if (serviceKeys.Count > 0)
         query = query.Where(e => serviceKeys.Contains(new ServiceIdentityContract.Key(e.NetworkId, e.TransportStreamId, e.ServiceId)));
@@ -5398,8 +5401,9 @@ app.MapGet("/api/epg/search", (
 app.MapGet("/api/epg/tagged", (
     string kind,
     IProgramEventSource programEvents,
-    ChannelFileLoader channelLoader) =>
+    ChannelServiceAccessPolicy serviceAccess) =>
 {
+    var access = serviceAccess.Capture();
     var now = DateTime.Now;
     var to = now.AddDays(7);
     // The tagged candidate lists use the same seven-day window over the canonical
@@ -5408,6 +5412,7 @@ app.MapGet("/api/epg/tagged", (
     // instead of rebuilding the DB + External EPG merge for each tagged tab read.
     var events = programEvents.GetAll()
         .Where(e => e.End > now && e.Start < to)
+        .Where(e => access.IsOperational(e.NetworkId, e.TransportStreamId, e.ServiceId))
         .ToList();
 
     Func<ProjectedProgramEvent, bool> match = kind?.ToLowerInvariant() switch
@@ -5425,7 +5430,7 @@ app.MapGet("/api/epg/tagged", (
         _ => _ => false
     };
 
-    var channels = BuildCurrentProgramGuideChannels(channelLoader);
+    var channels = access.ActiveTargets.ToList();
     var chOrder = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
     for (var i = 0; i < channels.Count; i++)
     {
@@ -5740,8 +5745,8 @@ app.MapGet("/api/recording-quality/logs", (int? count, LogRepository log) =>
         "REC_QUALITY_RESULT",
         "REC_QUALITY_CORRELATION",
         "REC_DROP_TIMELINE_SUMMARY",
-        "DIRECT_RECORDER_RUNTIME_STATS",
-        "DIRECT_RECORDER_FINAL_STATUS",
+        "RECORDING_WORKER_RUNTIME_STATS",
+        "RECORDING_WORKER_FINAL_STATUS",
         "REC_TS_VERIFY"
     };
 
@@ -6096,7 +6101,7 @@ app.MapGet("/api/reservations", (ReservationPresentationService presenter, LogRe
 // therefore an invalid recovery path for stale UI state.
 
 // 予約追加（番組表からの直接予約）
-app.MapPost("/api/reservations", (HttpRequest request, Reservation r, ReservationStore store, ReservationPresentationService presentation, IProgramEventSource programEvents, ReservationProjectionMetadataStore projectionMetadataStore, ChannelFileLoader channelLoader, ReservationAllocationRouteService allocationRoute, PluginTypedEventHub typedEvents, LogRepository log) =>
+app.MapPost("/api/reservations", (HttpRequest request, Reservation r, ReservationStore store, ReservationPresentationService presentation, IProgramEventSource programEvents, ReservationProjectionMetadataStore projectionMetadataStore, ChannelServiceAccessPolicy serviceAccess, ReservationAllocationRouteService allocationRoute, PluginTypedEventHub typedEvents, LogRepository log) =>
 {
     try
     {
@@ -6126,19 +6131,22 @@ app.MapPost("/api/reservations", (HttpRequest request, Reservation r, Reservatio
         var requestEvent = projectedEvent?.ToEpgEvent() ?? (r.EventId == 0 ? null : programEvents.GetByEventKey(r.NetworkId, r.TransportStreamId, r.ServiceId, r.EventId)?.ToEpgEvent());
         var routeSource = r.Source == ReservationSource.Immediate ? "ImmediateReservation" : "ManualReservation";
 
-        // ChannelArgument はフロントや既存DBの値を信用せず、現在の .ch2 から常に再解決する。
-        // BS/CS の /chspace /ch は TVTest の現在チャンネル一覧と一致している必要がある。
-        var ch = channelLoader.Load().Targets
-            .FirstOrDefault(t =>
-                t.OriginalNetworkId   == r.NetworkId &&
-                t.TransportStreamId   == r.TransportStreamId &&
-                t.ServiceId           == r.ServiceId);
-        if (ch is not null)
+        // User-facing reservation entry shares the Host-wide service-access SSOT with
+        // ProgramGuide/search/Plugin APIs/recording launch. EPG may retain disabled services,
+        // but no operational reservation may be created for a service that TVTest disables or
+        // that cannot currently resolve to the ChSet route.
+        var serviceSnapshot = serviceAccess.Capture();
+        var ch = serviceSnapshot.ResolveOperationalTarget(r.NetworkId, r.TransportStreamId, r.ServiceId);
+        if (ch is null)
         {
-            r.ChannelArgument = ch.ChannelArgument;
-            if (string.IsNullOrWhiteSpace(r.ServiceName))
-                r.ServiceName = ch.Name;
+            var eligibility = serviceSnapshot.GetEligibility(r.NetworkId, r.TransportStreamId, r.ServiceId);
+            log.Add("SERVICE_ACCESS_POLICY", sourceText,
+                $"result=REJECT operation=reservation_add nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eligibility={eligibility} reason={serviceSnapshot.GetRejectReason(r.NetworkId, r.TransportStreamId, r.ServiceId)} rule=service_access_single_source_contract");
+            return Results.Conflict(new { message = "TVTestで有効なサービスとして利用できないため予約できません。", eligibility = eligibility.ToString() });
         }
+        r.ChannelArgument = ch.ChannelArgument;
+        if (string.IsNullOrWhiteSpace(r.ServiceName))
+            r.ServiceName = ch.Name;
 
         // フロントからUTC('Z'サフィックス)で来るstartTime/endTimeをローカル時刻に統一
         r.StartTime = r.StartTime.ToLocalTime();
@@ -6265,7 +6273,7 @@ app.MapPost("/api/reservations", (HttpRequest request, Reservation r, Reservatio
 
 
 // ユーザー明示チェーン予約（番組表の緑「チェーン」ボタンからのみ使用）
-app.MapPost("/api/reservations/chain", (HttpRequest request, Reservation r, ReservationStore store, IProgramEventSource programEvents, ReservationProjectionMetadataStore projectionMetadataStore, ChannelFileLoader channelLoader, ReservationAllocationRouteService allocationRoute, IniSettingsService ini, PluginTypedEventHub typedEvents, LogRepository log, UserEventLogService userEvents) =>
+app.MapPost("/api/reservations/chain", (HttpRequest request, Reservation r, ReservationStore store, IProgramEventSource programEvents, ReservationProjectionMetadataStore projectionMetadataStore, ChannelServiceAccessPolicy serviceAccess, ReservationAllocationRouteService allocationRoute, IniSettingsService ini, PluginTypedEventHub typedEvents, LogRepository log, UserEventLogService userEvents) =>
 {
     using var eventScope = typedEvents.BeginOutboxScope(out var commitEvents);
     try
@@ -6356,17 +6364,18 @@ app.MapPost("/api/reservations/chain", (HttpRequest request, Reservation r, Rese
         r.TunerName = predecessorTuner;
         r.UserChainRootId = predecessor.UserChainRootId ?? predecessor.Id;
 
-        var ch = channelLoader.Load().Targets
-            .FirstOrDefault(t =>
-                t.OriginalNetworkId   == r.NetworkId &&
-                t.TransportStreamId   == r.TransportStreamId &&
-                t.ServiceId           == r.ServiceId);
-        if (ch is not null)
+        var serviceSnapshot = serviceAccess.Capture();
+        var ch = serviceSnapshot.ResolveOperationalTarget(r.NetworkId, r.TransportStreamId, r.ServiceId);
+        if (ch is null)
         {
-            r.ChannelArgument = ch.ChannelArgument;
-            if (string.IsNullOrWhiteSpace(r.ServiceName))
-                r.ServiceName = ch.Name;
+            var eligibility = serviceSnapshot.GetEligibility(r.NetworkId, r.TransportStreamId, r.ServiceId);
+            log.Add("SERVICE_ACCESS_POLICY", "UserChain",
+                $"result=REJECT operation=chain_reservation_add nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eligibility={eligibility} reason={serviceSnapshot.GetRejectReason(r.NetworkId, r.TransportStreamId, r.ServiceId)} rule=service_access_single_source_contract");
+            return Results.Conflict(new { message = "TVTestで有効なサービスとして利用できないためチェーン予約できません。", eligibility = eligibility.ToString() });
         }
+        r.ChannelArgument = ch.ChannelArgument;
+        if (string.IsNullOrWhiteSpace(r.ServiceName))
+            r.ServiceName = ch.Name;
 
         var chainExecutionMode = "ContinuousChainCapture";
 
@@ -6766,7 +6775,6 @@ app.MapGet("/api/keyword-rules", (ReservationStore store, KeywordMatcher matcher
         r.Pattern,
         r.ExcludePattern,
         r.UseRegex,
-        r.SearchFields,
         r.SearchTitle,
         r.SearchOutline,
         r.SearchDetail,
@@ -6801,7 +6809,6 @@ app.MapGet("/api/keyword-rules/export", (ReservationStore store) =>
             Pattern = r.Pattern,
             ExcludePattern = r.ExcludePattern,
             UseRegex = r.UseRegex,
-            SearchFields = r.SearchFields,
             SearchTitle = r.SearchTitle,
             SearchOutline = r.SearchOutline,
             SearchDetail = r.SearchDetail,
@@ -6833,7 +6840,7 @@ app.MapGet("/api/keyword-rules/export", (ReservationStore store) =>
     return Results.File(bytes, "application/json; charset=utf-8", fileName);
 });
 
-app.MapPost("/api/keyword-rules/import", async (HttpRequest request, ReservationStore store, KeywordMatcher matcher, ReservationAllocationRouteService allocationRoute, LogRepository log, ChannelFileLoader channelLoader) =>
+app.MapPost("/api/keyword-rules/import", async (HttpRequest request, ReservationStore store, KeywordMatcher matcher, ReservationAllocationRouteService allocationRoute, LogRepository log) =>
 {
     if (!request.HasFormContentType)
         return Results.BadRequest(new { message = "インポートファイルを指定してください。" });
@@ -6873,7 +6880,7 @@ app.MapPost("/api/keyword-rules/import", async (HttpRequest request, Reservation
     var nextId = Math.Max(ordered.Count, ordered.Where(r => r.Id > 0).DefaultIfEmpty(new KeywordRule { Id = 0 }).Max(r => r.Id)) + 1;
     for (var i = 0; i < ordered.Count; i++)
     {
-        var serviceIdentityError = NormalizeKeywordRule(ordered[i], channelLoader);
+        var serviceIdentityError = NormalizeKeywordRule(ordered[i]);
         if (serviceIdentityError is not null)
             return Results.BadRequest(new { message = $"{i + 1}件目: {serviceIdentityError}" });
         ordered[i].SortOrder = i + 1;
@@ -6941,9 +6948,9 @@ app.MapGet("/api/keyword-rule-reservations", (ReservationPresentationService pre
     }
 });
 
-app.MapPost("/api/keyword-rules", (KeywordRule r, ReservationStore store, ReservationAllocationRouteService allocationRoute, LogRepository log, ChannelFileLoader channelLoader) =>
+app.MapPost("/api/keyword-rules", (KeywordRule r, ReservationStore store, ReservationAllocationRouteService allocationRoute, LogRepository log) =>
 {
-    var serviceIdentityError = NormalizeKeywordRule(r, channelLoader);
+    var serviceIdentityError = NormalizeKeywordRule(r);
     if (serviceIdentityError is not null) return Results.BadRequest(new { message = serviceIdentityError });
     var err = ValidateKeywordRule(r);
     if (err is not null) return Results.BadRequest(new { message = err });
@@ -6965,9 +6972,9 @@ app.MapPost("/api/keyword-rules", (KeywordRule r, ReservationStore store, Reserv
     return Results.Ok(new { id, message = "自動検索予約ルールを登録しました。" });
 });
 
-app.MapPost("/api/keyword-rules/preview", (KeywordRule r, KeywordMatcher matcher, ChannelFileLoader channelLoader) =>
+app.MapPost("/api/keyword-rules/preview", (KeywordRule r, KeywordMatcher matcher) =>
 {
-    var serviceIdentityError = NormalizeKeywordRule(r, channelLoader);
+    var serviceIdentityError = NormalizeKeywordRule(r);
     if (serviceIdentityError is not null) return Results.BadRequest(new { message = serviceIdentityError });
     var err = ValidateKeywordRule(r);
     if (err is not null) return Results.BadRequest(new { message = err });
@@ -6995,9 +7002,9 @@ app.MapPost("/api/keyword-rules/preview", (KeywordRule r, KeywordMatcher matcher
     });
 });
 
-app.MapPut("/api/keyword-rules/{id}", (int id, KeywordRule r, ReservationStore store, KeywordMatcher matcher, ReservationAllocationRouteService allocationRoute, LogRepository log, ChannelFileLoader channelLoader) =>
+app.MapPut("/api/keyword-rules/{id}", (int id, KeywordRule r, ReservationStore store, KeywordMatcher matcher, ReservationAllocationRouteService allocationRoute, LogRepository log) =>
 {
-    var serviceIdentityError = NormalizeKeywordRule(r, channelLoader);
+    var serviceIdentityError = NormalizeKeywordRule(r);
     if (serviceIdentityError is not null) return Results.BadRequest(new { message = serviceIdentityError });
     var err = ValidateKeywordRule(r);
     if (err is not null) return Results.BadRequest(new { message = err });
@@ -7034,7 +7041,7 @@ app.MapPut("/api/keyword-rules/{id}", (int id, KeywordRule r, ReservationStore s
         rule = updatedRule is null ? null : new
         {
             updatedRule.Id, updatedRule.Name, updatedRule.Pattern, updatedRule.ExcludePattern,
-            updatedRule.UseRegex, updatedRule.SearchFields, updatedRule.SearchTitle,
+            updatedRule.UseRegex, updatedRule.SearchTitle,
             updatedRule.SearchOutline, updatedRule.SearchDetail, updatedRule.SearchCast,
             updatedRule.TargetGenres, updatedRule.TargetServices, updatedRule.TargetDays,
             updatedRule.UseTimeRange, updatedRule.StartTime, updatedRule.EndTime,
@@ -7070,7 +7077,7 @@ app.MapPost("/api/keyword-rules/reorder", (KeywordRuleOrderRequest req, Reservat
 app.MapDelete("/api/keyword-rules/{id}", (int id, ReservationStore store, ReservationAllocationRouteService allocationRoute, LogRepository log) =>
 {
     // ルール削除時は、ルール本体削除だけで終わらせず、
-    // 旧ルール由来予約の解放→再マッチング→共通割当再評価まで必ず通す。
+    // 関連予約の解放→再マッチング→共通割当再評価まで必ず通す。
     // さらに前後の件数をログに残し、画面側の誤認と切り分けやすくする。
     var beforeCount = store.GetKeywordRules().Count;
     var removed = store.DeleteScheduledByRuleId(id);
@@ -7115,9 +7122,8 @@ string? ValidateKeywordRule(KeywordRule r)
     return null;
 }
 
-string? NormalizeKeywordRule(KeywordRule r, ChannelFileLoader channelLoader)
+string? NormalizeKeywordRule(KeywordRule r)
 {
-    r.SearchFields = "title";
     r.Pattern = r.Pattern?.Trim() ?? "";
     r.ExcludePattern = r.ExcludePattern?.Trim() ?? "";
 
@@ -7127,16 +7133,6 @@ string? NormalizeKeywordRule(KeywordRule r, ChannelFileLoader channelLoader)
     }
     else
     {
-        IReadOnlyList<ChannelTarget> targets;
-        try
-        {
-            targets = channelLoader.Load().Targets.ToList();
-        }
-        catch (Exception ex)
-        {
-            return $"対象局の現在情報を読み取れません: {ex.GetType().Name}";
-        }
-
         var normalized = new List<string>();
         foreach (var token in (r.TargetServices ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
@@ -7146,24 +7142,7 @@ string? NormalizeKeywordRule(KeywordRule r, ChannelFileLoader channelLoader)
                 continue;
             }
 
-            // Legacy keyword-rule compatibility: SID-only rows may be migrated only when the
-            // current channel metadata resolves that SID to exactly one service identity.
-            // Ambiguous or malformed values must not be newly persisted as service identity.
-            if (!ushort.TryParse(token, out var legacySid))
-                return $"対象局の識別子が不正です: {token}";
-
-            var matches = targets
-                .Where(t => t.ServiceId == legacySid)
-                .Select(ServiceIdentityContract.From)
-                .Distinct()
-                .Take(2)
-                .ToList();
-            if (matches.Count != 1)
-                return matches.Count == 0
-                    ? $"旧形式の対象局 SID={legacySid} を現在の局情報から一意に解決できません。対象局を選び直してください。"
-                    : $"旧形式の対象局 SID={legacySid} は複数局に一致します。対象局を選び直してください。";
-
-            normalized.Add(matches[0].ToString());
+            return $"対象局の識別子が不正です: {token}";
         }
 
         r.TargetServices = string.Join(",", normalized.Distinct(StringComparer.Ordinal));
@@ -7701,7 +7680,7 @@ app.Lifetime.ApplicationStopped.Register(() =>
 });
 
 
-// Compatibility endpoint. Windows/current effective-theme resolution is owned by HostThemeStateContract.
+// Windows/current effective-theme resolution is owned by HostThemeStateContract.
 app.MapGet("/api/system-theme", () =>
 {
     var effective = HostThemeStateContract.ResolveWindowsEffectiveTheme();
@@ -7764,8 +7743,8 @@ static string ProgramGuideServiceKey3(ushort networkId, ushort transportStreamId
 static string ProgramGuideChannelServiceKey(ChannelTarget ch)
     => ProgramGuideServiceKey3(ch.OriginalNetworkId, ch.TransportStreamId, ch.ServiceId);
 
-static IReadOnlyList<ChannelTarget> BuildCurrentProgramGuideChannels(ChannelFileLoader channelLoader)
-    => channelLoader.Load().Targets.ToList();
+static IReadOnlyList<ChannelTarget> BuildCurrentProgramGuideChannels(ChannelServiceAccessPolicy serviceAccess)
+    => serviceAccess.Capture().ActiveTargets.ToList();
 
 static HashSet<string> BuildProgramGuideChannelServiceKeySet(IEnumerable<ChannelTarget> channels)
     => channels.Select(ProgramGuideChannelServiceKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -7783,9 +7762,8 @@ static ProgramGuideEpgEventDto NormalizeProgramGuideEventForDisplay(EpgEvent e, 
 
 static ProgramGuideEpgEventDto NormalizeProgramGuideEventForDisplayWithCellText(EpgEvent e, IReadOnlyDictionary<string, string>? serviceDisplayNameByKey, ProgramGuideCellText cellText)
 {
-    // release_contract: ProgramGuideの廃止済みbody routeは再導入しない。
-    // 番組表セル/API投影はDB raw descriptorから作ったCellTextを正本にする。
-    // 番組表セル本文は現在のCellText正本だけから生成する。
+    // release_contract: 番組表セル/API投影の本文正本はDB raw descriptorから作ったCellText。
+    // 番組表セル本文はCellTextだけから生成する。
     var displayServiceName = serviceDisplayNameByKey is not null
         && serviceDisplayNameByKey.TryGetValue(ProgramGuideServiceKey3(e.NetworkId, e.TransportStreamId, e.ServiceId), out var currentName)
         && !string.IsNullOrWhiteSpace(currentName)
@@ -8257,6 +8235,10 @@ static ProjectedProgramEvent CloneProjectedProgramGuideTimelineEvent(ProjectedPr
         GenreCodes = source.GenreCodes,
         DbEventExists = source.DbEventExists,
         DbEvent = source.DbEvent,
+        DbTableId = source.DbTableId,
+        DbSectionNumber = source.DbSectionNumber,
+        DbVersionNumber = source.DbVersionNumber,
+        DbUpdatedAt = source.DbUpdatedAt,
         SourceKind = source.SourceKind,
         SourcePluginId = source.SourcePluginId,
         SourceEventKey = source.SourceEventKey,
@@ -8305,9 +8287,9 @@ static ProgramGuideEpgEventDto NormalizeProjectedProgramGuideEventForDisplayWith
         false,
         null,
         string.Empty,
-        e.DbEvent?.TableId ?? 0,
-        e.DbEvent?.SectionNumber ?? 0,
-        e.DbEvent?.VersionNumber ?? 0,
+        e.DbEvent?.TableId ?? e.DbTableId,
+        e.DbEvent?.SectionNumber ?? e.DbSectionNumber,
+        e.DbEvent?.VersionNumber ?? e.DbVersionNumber,
         e.DbEvent?.RawShortEventDescriptorHex ?? string.Empty,
         e.DbEvent?.RawExtendedEventDescriptorHex ?? string.Empty,
         e.DbEvent?.RawDescriptorLoopHex ?? string.Empty,
@@ -8329,16 +8311,13 @@ static ProgramGuideCellText BuildProjectedProgramGuideCellText(ProjectedProgramE
     var title = FirstProjectedText(e.Title, e.DbEvent is null ? null : EpgProjection.Title(e.DbEvent));
     var outline = FirstProjectedText(e.ShortText, e.DbEvent is null ? null : EpgProjection.ShortText(e.DbEvent));
     var detail = FirstProjectedText(e.ExtendedText);
-    if (detail.Length == 0 && e.CellText.Length > 0)
-        detail = e.CellText;
+    var items = FirstProjectedText(e.ExtendedItems);
 
     return new ProgramGuideCellText(
         title,
         outline,
         detail,
-        string.Empty,
-        e.DbEvent?.RawShortEventDescriptorHex ?? string.Empty,
-        e.DbEvent?.RawExtendedEventDescriptorHex ?? string.Empty,
+        items,
         e.DbEventExists ? "db.raw_descriptor.with_external_projection" : "external_epg.projected_event");
 }
 
@@ -8583,7 +8562,7 @@ file sealed record ChainCandidateEventFrame(
 
 file sealed record ChainCandidatePreviewRequest(
     bool LaterProgramPriorityEnabled,
-    bool PseudoContinuousRecordingEnabled,
+    bool ChainRecordingEnabled,
     IReadOnlyList<ChainCandidateEventFrame>? Events);
 
 file sealed record NetworkLoginRequest(string? Password);

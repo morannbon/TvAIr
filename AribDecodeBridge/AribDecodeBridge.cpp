@@ -1,9 +1,4 @@
 // AribDecodeBridge.cpp
-// static wstring廃止 → 固定wchar_tバッファ方式
-// JIS→SJIS→CP932変換、外部コードページ依存なし
-// HandleAddSym default を □(U+25A1) に変更（JIS誤変換バグ修正）。
-// ARIB STD-B24 AddSym 全テーブル追加（90〜94区）。
-// 外字テーブル追加（85/86区）。LibISDB KanjiTable1/2 準拠。BMP外はサロゲートペア。
 
 #include <windows.h>
 #include "AribDecodeBridge.h"

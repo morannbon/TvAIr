@@ -1,5 +1,6 @@
 ﻿using Microsoft.Extensions.Hosting;
 using TvAIr.Core;
+using TvAIr.Channel;
 using TvAIr.Epg.Projection;
 using TvAIr.Plugin;
 using TvAIrPlugin;
@@ -17,6 +18,7 @@ public sealed class ViewerReservationScheduler : BackgroundService
     private static readonly TimeSpan MissedExecutionTolerance = TimeSpan.FromSeconds(30);
     private readonly ViewerReservationStore _store;
     private readonly IProgramEventSource _programEvents;
+    private readonly ChannelServiceAccessPolicy _serviceAccess;
     private readonly ViewerOperationPreemptionHub _preemption;
     private readonly ViewerOperationService _viewerOperations;
     private readonly PluginTypedEventHub _typedEvents;
@@ -26,6 +28,7 @@ public sealed class ViewerReservationScheduler : BackgroundService
     public ViewerReservationScheduler(
         ViewerReservationStore store,
         IProgramEventSource programEvents,
+        ChannelServiceAccessPolicy serviceAccess,
         ViewerOperationPreemptionHub preemption,
         ViewerOperationService viewerOperations,
         PluginTypedEventHub typedEvents,
@@ -33,6 +36,7 @@ public sealed class ViewerReservationScheduler : BackgroundService
     {
         _store = store;
         _programEvents = programEvents;
+        _serviceAccess = serviceAccess;
         _preemption = preemption;
         _viewerOperations = viewerOperations;
         _typedEvents = typedEvents;
@@ -98,6 +102,13 @@ public sealed class ViewerReservationScheduler : BackgroundService
 
     private void ExecuteDue(ViewerReservationRecord row, DateTimeOffset now)
     {
+        var access = _serviceAccess.Capture();
+        if (!access.IsOperational(row.NetworkId, row.TransportStreamId, row.ServiceId))
+        {
+            Fail(row, "serviceUnavailable", access.GetRejectReason(row.NetworkId, row.TransportStreamId, row.ServiceId));
+            return;
+        }
+
         // Exact EventIdentity is mandatory. Never replace by service/time/title similarity.
         var projected = _programEvents.GetByEventKey(row.NetworkId, row.TransportStreamId, row.ServiceId, row.EventId);
         if (projected is null)

@@ -33,16 +33,11 @@ public static class ProgramEventProjectionGuard
         if (!EpgTitleProjectionGuard.IsSafeTitleForCandidate(ev.Title, out reason))
             return false;
 
+        // DbEventExists is the persisted-identity authority.  Long-lived merged snapshots
+        // intentionally detach the heavy raw EpgEvent object after descriptor semantics have
+        // already been projected, so DbEvent == null is not an unsafe state by itself.
         if (ev.DbEventExists || ev.DbEvent is not null)
-        {
-            if (ev.DbEvent is null)
-            {
-                reason = "db_event_missing";
-                return false;
-            }
-
             return true;
-        }
 
         if (string.Equals(ev.ProjectionState, ProjectedEventStates.OverlayOnly, StringComparison.OrdinalIgnoreCase)
             || string.Equals(ev.SourceKind, ProjectedEventSourceKinds.ExternalEpg, StringComparison.OrdinalIgnoreCase))

@@ -1,27 +1,27 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 
 <html lang="ja">
 <head>
-<!-- TvAIr-UI-Version: 1.2.2 -->
+<!-- TvAIr-UI-Version: 1.2.3 -->
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.2"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.2"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.3"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.3"/>
 
-<link href="/tvair-ui-foundation.css?v=1.2.2" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.2" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.2" rel="stylesheet"/>
-<link href="/tvair-epg-panel.css?v=1.2.2" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.2" rel="stylesheet"/>
-<link href="/tvair-settings-host.css?v=1.2.2" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.2.3" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.3" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.3" rel="stylesheet"/>
+<link href="/tvair-epg-panel.css?v=1.2.3" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.3" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.3" rel="stylesheet"/>
 
-<script src="/tvair-theme.js?v=1.2.2"></script>
-<script src="/tvair-page-view-state.js?v=1.2.2"></script>
-<script src="/tvair-action-button-state.js?v=1.2.2"></script>
-<script src="/tvair-reservation-action-state.js?v=1.2.2"></script>
-<script>var TVA_IR_UI_VERSION="1.2.2";</script>
-<script src="/genre-shared.js?v=1.2.2"></script>
+<script src="/tvair-theme.js?v=1.2.3"></script>
+<script src="/tvair-page-view-state.js?v=1.2.3"></script>
+<script src="/tvair-action-button-state.js?v=1.2.3"></script>
+<script src="/tvair-reservation-action-state.js?v=1.2.3"></script>
+<script>var TVA_IR_UI_VERSION="1.2.3";</script>
+<script src="/genre-shared.js?v=1.2.3"></script>
 
 
 
@@ -331,7 +331,7 @@
 </div>
 <div class="cfg-row" id="cfg-chain-row">
 <label>チェーン予約</label>
-<label class="ui-checkbox-inline"><input class="ui-check-inline" id="cfg-pseudo-continuous" type="checkbox"/> チェーン予約を実行する</label>
+<label class="ui-checkbox-inline"><input class="ui-check-inline" id="cfg-chain-recording" type="checkbox"/> チェーン予約を実行する</label>
 <div class="cfg-note">「後番組を優先する」を選ぶと設定できます。同じ放送局で連続する番組を前後とも欠損なく録画し各番組をマージンを確保した別のTSファイルとして保存します。番組表のチェーンボタンから追加でき予約リストでは「(C)」を表示します。無効にしても未開始の予約は削除せず通常予約として残します。</div>
 </div>
 
@@ -449,9 +449,9 @@
 </div>
 </div>
 </div>
-<script src="/tvair-notification.js?v=1.2.2"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.2"></script>
-<script src="/tvair-epg-widget.js?v=1.2.2"></script>
+<script src="/tvair-notification.js?v=1.2.3"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.3"></script>
+<script src="/tvair-epg-widget.js?v=1.2.3"></script>
 <script>
 const PROGRAM_GUIDE_GEOMETRY=Object.freeze({
   dayStartHour:4,
@@ -1464,12 +1464,12 @@ function canToggleReservationFromProgram(reservedInfo){
 
 
 
-// release_contract: チェーン候補の業務判定はHostの ChainReservationEligibilityContract が唯一の正本。
+// release_contract: チェーン操作可否の業務判定はHostの ChainReservationEligibilityContract が唯一の正本。
 // ProgramGuideはHostから返された predecessorReservationId を表示へ投影するだけで、
 // 同一SID・隣接・親状態・競合状態をJavaScriptで再判定しない。
 function chainUiSettingsSignature(){
   var uiVer = (typeof TVA_IR_UI_VERSION !== 'undefined') ? TVA_IR_UI_VERSION : 'unknown';
-  return 'later='+(window.laterProgramPriorityEnabled===true)+';chain='+(window.pseudoContinuousRecordingEnabled===true)+';v='+uiVer;
+  return 'later='+(window.laterProgramPriorityEnabled===true)+';chain='+(window.chainRecordingEnabled===true)+';v='+uiVer;
 }
 
 
@@ -1493,7 +1493,7 @@ function canShowChainButtonForEvent(ev, evKey, displayState, isEnded, isOnAir, i
   // Chain is a future-only optional action beside ordinary reserve. The Host preview owns
   // pair eligibility; ProgramGuide only applies current feature/time/reservation visibility
   // and must never turn chain eligibility into a cell mode of its own.
-  if(window.laterProgramPriorityEnabled!==true || window.pseudoContinuousRecordingEnabled!==true) return false;
+  if(window.laterProgramPriorityEnabled!==true || window.chainRecordingEnabled!==true) return false;
   if(!ev || isEnded || isOnAir || isRecording) return false;
   if(isUnavailableChainTargetEvent(ev)) return false;
   const state=displayState || getProgramDisplayState(evKey, ev);
@@ -2414,7 +2414,7 @@ async function loadGuide(date, verticalMinuteTo=null, scrollLeftTo=null, traceRe
       applyThemeLinkedGenrePalette(window._cfgThemeGenrePalettes, currentGenreTheme());
     }
     window.laterProgramPriorityEnabled = settingsData && settingsData.laterProgramPriority === true;
-    window.pseudoContinuousRecordingEnabled = window.laterProgramPriorityEnabled === true && settingsData && settingsData.pseudoContinuousRecording === true;
+    window.chainRecordingEnabled = window.laterProgramPriorityEnabled === true && settingsData && settingsData.chainRecordingEnabled === true;
     buildReservationMaps(rsvData);
     window.programGuideReservationRows=Array.isArray(rsvData)?rsvData:[];
     window.programGuideScheduledDailyWindows=Array.isArray(scheduledDailyWindows)?scheduledDailyWindows:[];
@@ -2467,8 +2467,8 @@ let lastReservationSignature = "";
 let lastScheduledDailyWindowSignature = "";
 let lastGuideData = null;
 let chainHintWarmupPasses = 0;
-const CHAIN_HINT_WARMUP_MAX = 1; // release_contract: チェーン候補再計算キャッシュ。
-// EPG配列・予約状態・チェーン設定が同じなら候補フラグだけ復元する。
+const CHAIN_HINT_WARMUP_MAX = 1; // release_contract: Host判定済みチェーン操作可否の再投影キャッシュ。
+// EPG配列・予約状態・チェーン設定が同じならHost判定済みの表示情報だけ復元する。
 let lastChainHintSignature = '';
 let lastChainHintCandidateMap = new Map();
 let lastChainHintSummary = { candidates:0, checked:0, services:0, enabled:false, cacheHit:false };
@@ -2642,7 +2642,7 @@ function buildChainHintPreviewRequest(data){
   const events=(data && Array.isArray(data.events)) ? data.events : [];
   return {
     laterProgramPriorityEnabled: window.laterProgramPriorityEnabled===true,
-    pseudoContinuousRecordingEnabled: window.pseudoContinuousRecordingEnabled===true,
+    chainRecordingEnabled: window.chainRecordingEnabled===true,
     events: events.map(ev=>({
       key:eventKeyFromEvent(ev),
       networkId:Number(ev.networkId)||0,
@@ -3815,7 +3815,7 @@ function genreCls(c, label){
 
 // ── EPG取得 ──────────────────────────────────────────────────────
 // release_contract: EPG操作/進捗パネルはメインページ専用 tvair-epg-widget.js に集約。
-// ここでは既存の番組表側呼び出しとの互換ラッパだけ残す。
+// 番組表側の操作入口は専用widgetへ委譲する。
 function openEpgPanel(){ return window.TvAirEpgWidget ? TvAirEpgWidget.showStatus() : undefined; }
 function startEpg(scope){ return window.TvAirEpgWidget ? TvAirEpgWidget.startManual(scope || 'All') : undefined; }
 function cancelEpg(){ return window.TvAirEpgWidget ? TvAirEpgWidget.cancel() : undefined; }
@@ -4749,7 +4749,7 @@ function completeCfgSave(){
   hideCfgModal();
 }
 window.TvAIrSettingsModule = window.TvAIrSettingsModule || {
-  version:'1.2.2',
+  version:'1.2.3',
   open:()=>showCfgModal(),
   close:()=>hideCfgModal(),
   contract:'single-settings-module-web-modal-basis'
@@ -5085,7 +5085,7 @@ function updateCfgSliderLabels(){
 function applyRecordingOptionPreviewToGuide(){
   try{
     window.laterProgramPriorityEnabled = document.getElementById('cfg-priority-after')?.checked===true;
-    window.pseudoContinuousRecordingEnabled = window.laterProgramPriorityEnabled === true && document.getElementById('cfg-pseudo-continuous')?.checked===true;
+    window.chainRecordingEnabled = window.laterProgramPriorityEnabled === true && document.getElementById('cfg-chain-recording')?.checked===true;
     chainDiagTrace('CHAIN_SETTING_PREVIEW', chainUiSettingsSignature(), 'settings-preview');
     if(lastGuideData){
       applyReservationDiffToGuide(lastGuideData, {reason:'settings-preview'});
@@ -5095,7 +5095,7 @@ function applyRecordingOptionPreviewToGuide(){
 
 function updateRecordingOptionState(){
   const later=document.getElementById('cfg-priority-after')?.checked===true;
-  const chain=document.getElementById('cfg-pseudo-continuous');
+  const chain=document.getElementById('cfg-chain-recording');
   const row=document.getElementById('cfg-chain-row');
   if(chain){
     chain.disabled=!later;
@@ -5467,8 +5467,8 @@ async function loadCfg(){
     document.getElementById('cfg-priority-before').checked = d.laterProgramPriority !== true;
     document.getElementById('cfg-priority-after').checked = d.laterProgramPriority === true;
     window.laterProgramPriorityEnabled = d.laterProgramPriority === true;
-    window.pseudoContinuousRecordingEnabled = d.laterProgramPriority === true && d.pseudoContinuousRecording === true;
-    document.getElementById('cfg-pseudo-continuous').checked = window.pseudoContinuousRecordingEnabled;
+    window.chainRecordingEnabled = d.laterProgramPriority === true && d.chainRecordingEnabled === true;
+    document.getElementById('cfg-chain-recording').checked = window.chainRecordingEnabled;
     updateRecordingOptionState();
     _bonDriverList = Array.isArray(d.bonDriverList) ? d.bonDriverList : [];
     if(!_bonDriverList.length && d.bonDriverDirectory) await refreshBonDriverList(d.bonDriverDirectory);
@@ -5504,12 +5504,12 @@ async function applyThemeRuntimeAfterSettingsSave(dto, result, selectedTheme, re
 }
 
 async function applyReservationActionUiAfterSettingsSave(dto, reason){
-  // release_contract: 設定変更後に再起動なしで番組表・チェーン候補・競合表示を同期する。
-  // 特に録画優先設定 / チェーン予約設定の変更は予約・チェーン候補表示へ影響するため、
-  // UIグローバル値を即時更新し、予約Map再取得→チェーン候補再構築→セル内差分更新を必ず走らせる。
+  // release_contract: 設定変更後に再起動なしで番組表・チェーン操作可否・競合表示を同期する。
+  // 録画優先設定 / チェーン予約設定の変更後は、予約情報を再取得し、
+  // Host判定済みのチェーン操作可否を再投影してセル内表示へ反映する。
   const oldSig=chainUiSettingsSignature();
   window.laterProgramPriorityEnabled = dto && dto.laterProgramPriority === true;
-  window.pseudoContinuousRecordingEnabled = window.laterProgramPriorityEnabled === true && dto && dto.pseudoContinuousRecording === true;
+  window.chainRecordingEnabled = window.laterProgramPriorityEnabled === true && dto && dto.chainRecordingEnabled === true;
   const newSig=chainUiSettingsSignature();
   chainDiagTrace('CHAIN_SETTING_HOT_RELOAD',
     'reason='+(reason||'settings-save')+
@@ -5518,8 +5518,8 @@ async function applyReservationActionUiAfterSettingsSave(dto, reason){
     'settings-hot-reload');
 
   try{
-    // 設定変更で既存のチェーン候補フラグが残ると、前番組優先に戻してもチェーンボタンが残る。
-    // 全体再描画ではなく、予約情報を取り直してセル内差分更新だけで消す。
+    // 設定変更前のチェーン操作可否を表示へ残さない。
+    // 全体再描画ではなく、予約情報を取り直してセル内差分更新で現行状態へ収束させる。
     const rsvData = await fetch('/api/reservations?ts='+Date.now()).then(r=>r.json());
     buildReservationMaps(rsvData);
     lastReservationSignature = stableGuideSignature(rsvData);
@@ -5606,7 +5606,7 @@ async function saveCfgCore(){
     userLogDetailStateChange: document.getElementById('cfg-user-log-detail-state-change').checked,
     userLogDetailEndOrFailureReason: document.getElementById('cfg-user-log-detail-end-or-failure-reason').checked,
     laterProgramPriority: document.getElementById('cfg-priority-after').checked,
-    pseudoContinuousRecording: document.getElementById('cfg-priority-after').checked && document.getElementById('cfg-pseudo-continuous').checked,
+    chainRecordingEnabled: document.getElementById('cfg-priority-after').checked && document.getElementById('cfg-chain-recording').checked,
     themeGenrePalettes: collectThemeGenrePalettesFromSettings(),
     tuners: tuners,
   };
@@ -5675,7 +5675,7 @@ document.getElementById('cfg-user-log-detail-enabled').addEventListener('change'
 document.getElementById('cfg-bondriver-dir').addEventListener('change', async function(){ if(this.value.trim()){ await refreshBonDriverListAndApply(this.value.trim()); } });
 document.getElementById('cfg-priority-before').addEventListener('change', ()=>{ updateRecordingOptionState(); applyRecordingOptionPreviewToGuide(); });
 document.getElementById('cfg-priority-after').addEventListener('change', ()=>{ updateRecordingOptionState(); applyRecordingOptionPreviewToGuide(); });
-document.getElementById('cfg-pseudo-continuous').addEventListener('change', ()=>{ updateRecordingOptionState(); applyRecordingOptionPreviewToGuide(); });
+document.getElementById('cfg-chain-recording').addEventListener('change', ()=>{ updateRecordingOptionState(); applyRecordingOptionPreviewToGuide(); });
 document.getElementById('cfg-overlay').addEventListener('click',e=>{ if(e.target===document.getElementById('cfg-overlay')) hideCfgModal(); });
 document.querySelectorAll('input[name="cfg-system-theme"]').forEach(r=>r.addEventListener('change',()=>previewSystemTheme(r.value)));
 applySystemTheme(getSystemThemeSetting());
@@ -5766,8 +5766,8 @@ if(!tvairSettingsFrameMode){
   bindGuideTopOperationUi();
 }
 </script>
-<script src="/tvair-settings-host.js?v=1.2.2"></script>
-<script src="/tvair-menu-spine.js?v=1.2.2"></script>
+<script src="/tvair-settings-host.js?v=1.2.3"></script>
+<script src="/tvair-menu-spine.js?v=1.2.3"></script>
 <script>
 (function(){
   try{

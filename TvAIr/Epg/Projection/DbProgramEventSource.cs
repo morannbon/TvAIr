@@ -1,4 +1,4 @@
-﻿using TvAIr.Core;
+using TvAIr.Core;
 
 namespace TvAIr.Epg.Projection;
 
@@ -13,10 +13,10 @@ namespace TvAIr.Epg.Projection;
 public sealed class DbProgramEventSource : IProgramEventSource
 {
     private readonly EpgStore _epgStore;
-    private readonly object _snapshotGate = new();
-    private ProjectionSnapshot? _snapshot;
 
     public DbProgramEventSource(EpgStore epgStore) => _epgStore = epgStore;
+
+    internal long ProjectionRevision => _epgStore.ProjectionRevision;
 
     public IReadOnlyList<ProjectedProgramEvent> ProjectCommittedDbEvents(IReadOnlyList<EpgEvent> committedEvents)
     {
@@ -33,35 +33,47 @@ public sealed class DbProgramEventSource : IProgramEventSource
         var storedEvents = _epgStore.GetByEventKeys(keys);
         var rows = new ProjectedProgramEvent[storedEvents.Count];
         for (var i = 0; i < storedEvents.Count; i++)
-            rows[i] = ToProjected(storedEvents[i]);
+            rows[i] = ToProjected(storedEvents[i], retainDbEvent: true);
         return rows;
     }
 
     public IReadOnlyList<ProjectedProgramEvent> GetAll()
-        => GetSnapshot().Rows;
+        => BuildProjectionSnapshot().Rows;
 
-    internal (long Revision, IReadOnlyList<ProjectedProgramEvent> Rows) CaptureProjectionSnapshot()
+    // The merged ProgramGuide snapshot is the long-lived authority.  Do not also retain a second
+    // full ProjectedProgramEvent graph here: the DB rows can be rebuilt only when the DB revision
+    // actually changes, while direct lookup/range routes read just the required raw rows.
+    internal (long Revision, IReadOnlyList<ProjectedProgramEvent> Rows) BuildProjectionSnapshot()
     {
-        var snapshot = GetSnapshot();
-        return (snapshot.Revision, snapshot.Rows);
+        while (true)
+        {
+            var revision = _epgStore.ProjectionRevision;
+            var raw = _epgStore.GetAllRaw();
+            var rows = new ProjectedProgramEvent[raw.Count];
+            for (var i = 0; i < raw.Count; i++)
+                rows[i] = ToProjected(raw[i], retainDbEvent: false);
+
+            var revisionAfterBuild = _epgStore.ProjectionRevision;
+            if (revisionAfterBuild == revision)
+                return (revision, rows);
+        }
     }
 
     public IReadOnlyList<ProjectedProgramEvent> GetByRange(DateTime from, DateTime to)
     {
-        var rows = GetSnapshot().Rows;
-        var result = new List<ProjectedProgramEvent>();
-        foreach (var row in rows)
-        {
-            if (row.End > from && row.Start < to)
-                result.Add(row);
-        }
-        return result;
+        var raw = _epgStore.GetByRange(from, to);
+        if (raw.Count == 0) return Array.Empty<ProjectedProgramEvent>();
+
+        var rows = new ProjectedProgramEvent[raw.Count];
+        for (var i = 0; i < raw.Count; i++)
+            rows[i] = ToProjected(raw[i], retainDbEvent: true);
+        return rows;
     }
 
     public ProjectedProgramEvent? GetByEventKey(ushort networkId, ushort transportStreamId, ushort serviceId, ushort eventId)
     {
-        var key = (networkId, transportStreamId, serviceId, eventId);
-        return GetSnapshot().ByEventKey.TryGetValue(key, out var row) ? row : null;
+        var raw = _epgStore.GetOne(networkId, transportStreamId, serviceId, eventId);
+        return raw is null ? null : ToProjected(raw, retainDbEvent: true);
     }
 
     public IReadOnlyList<ProjectedProgramEvent> GetByEventKeys(
@@ -69,14 +81,13 @@ public sealed class DbProgramEventSource : IProgramEventSource
     {
         if (keys.Count == 0) return Array.Empty<ProjectedProgramEvent>();
 
-        var snapshot = GetSnapshot();
-        var result = new List<ProjectedProgramEvent>(keys.Count);
-        foreach (var key in keys.Distinct())
-        {
-            if (snapshot.ByEventKey.TryGetValue(key, out var row))
-                result.Add(row);
-        }
-        return result;
+        var raw = _epgStore.GetByEventKeys(keys);
+        if (raw.Count == 0) return Array.Empty<ProjectedProgramEvent>();
+
+        var rows = new ProjectedProgramEvent[raw.Count];
+        for (var i = 0; i < raw.Count; i++)
+            rows[i] = ToProjected(raw[i], retainDbEvent: true);
+        return rows;
     }
 
     public ProjectedProgramEvent? GetByProjectedKey(ProjectedEventKey key)
@@ -85,51 +96,16 @@ public sealed class DbProgramEventSource : IProgramEventSource
         return GetByEventKey(key.NetworkId, key.TransportStreamId, key.ServiceId, key.EventId);
     }
 
-    private ProjectionSnapshot GetSnapshot()
-    {
-        var revision = _epgStore.ProjectionRevision;
-        var snapshot = Volatile.Read(ref _snapshot);
-        if (snapshot is not null && snapshot.Revision == revision)
-            return snapshot;
-
-        lock (_snapshotGate)
-        {
-            while (true)
-            {
-                revision = _epgStore.ProjectionRevision;
-                snapshot = _snapshot;
-                if (snapshot is not null && snapshot.Revision == revision)
-                    return snapshot;
-
-                // A capture commit may race the DB read. Publish only when the EPG generation
-                // remained unchanged across the complete raw-read + projection build.
-                var raw = _epgStore.GetAllRaw();
-                var rows = new ProjectedProgramEvent[raw.Count];
-                var byEventKey = new Dictionary<(ushort NetworkId, ushort TransportStreamId, ushort ServiceId, ushort EventId), ProjectedProgramEvent>(raw.Count);
-                for (var i = 0; i < raw.Count; i++)
-                {
-                    var projected = ToProjected(raw[i]);
-                    rows[i] = projected;
-                    byEventKey[(projected.NetworkId, projected.TransportStreamId, projected.ServiceId, projected.EventId)] = projected;
-                }
-
-                var revisionAfterBuild = _epgStore.ProjectionRevision;
-                if (revisionAfterBuild != revision)
-                    continue;
-
-                snapshot = new ProjectionSnapshot(revision, rows, byEventKey);
-                Volatile.Write(ref _snapshot, snapshot);
-                return snapshot;
-            }
-        }
-    }
-
-    private static ProjectedProgramEvent ToProjected(EpgEvent e)
+    private static ProjectedProgramEvent ToProjected(EpgEvent e, bool retainDbEvent)
     {
         var cell = ProgramGuideCellTextDecoder.Decode(e);
+        // AUTO_SEARCH_FIELD_SOURCE_CONTRACT:
+        // Searchable DB projection fields preserve the descriptor semantics exactly.
+        // Display fallbacks must never bleed Items/other description columns into Outline/Detail,
+        // otherwise a checkbox can search data belonging to another checkbox.
         var title = FirstNonEmpty(cell.Title, e.Title);
-        var shortText = FirstNonEmpty(cell.Outline, e.Description);
-        var extendedText = FirstNonEmpty(cell.Detail, cell.Items, e.Description);
+        var shortText = FirstNonEmpty(cell.Outline);
+        var extendedText = FirstNonEmpty(cell.Detail);
         var key = ProjectedEventKey.FromDb(e);
         return new ProjectedProgramEvent
         {
@@ -148,11 +124,15 @@ public sealed class DbProgramEventSource : IProgramEventSource
             ExtendedText = extendedText,
             ExtendedItems = cell.Items ?? string.Empty,
             UpdatedAt = e.UpdatedAt,
-            CellText = string.Join("\n", new[] { title, shortText, extendedText }.Where(v => !string.IsNullOrWhiteSpace(v))),
+            CellText = ComposeCellText(title, shortText, extendedText),
             Genre = e.Genre ?? string.Empty,
             GenreCodes = e.GenreCodes ?? string.Empty,
             DbEventExists = true,
-            DbEvent = e,
+            DbEvent = retainDbEvent ? e : null,
+            DbTableId = e.TableId,
+            DbSectionNumber = e.SectionNumber,
+            DbVersionNumber = e.VersionNumber,
+            DbUpdatedAt = e.UpdatedAt,
             SourceKind = ProjectedEventSourceKinds.TvAirDb,
             SourcePluginId = string.Empty,
             SourceEventKey = key.SourceEventKey,
@@ -168,6 +148,35 @@ public sealed class DbProgramEventSource : IProgramEventSource
         };
     }
 
+    private static string ComposeCellText(string title, string outline, string detail)
+    {
+        var count = (title.Length > 0 ? 1 : 0) + (outline.Length > 0 ? 1 : 0) + (detail.Length > 0 ? 1 : 0);
+        if (count == 0) return string.Empty;
+        if (count == 1) return title.Length > 0 ? title : outline.Length > 0 ? outline : detail;
+
+        var length = title.Length + outline.Length + detail.Length + count - 1;
+        return string.Create(length, (title, outline, detail), static (dst, state) =>
+        {
+            var pos = 0;
+            if (state.title.Length > 0)
+            {
+                state.title.AsSpan().CopyTo(dst[pos..]);
+                pos += state.title.Length;
+            }
+            if (state.outline.Length > 0)
+            {
+                if (pos > 0) dst[pos++] = '\n';
+                state.outline.AsSpan().CopyTo(dst[pos..]);
+                pos += state.outline.Length;
+            }
+            if (state.detail.Length > 0)
+            {
+                if (pos > 0) dst[pos++] = '\n';
+                state.detail.AsSpan().CopyTo(dst[pos..]);
+            }
+        });
+    }
+
     private static string FirstNonEmpty(params string?[] values)
     {
         foreach (var value in values)
@@ -178,8 +187,4 @@ public sealed class DbProgramEventSource : IProgramEventSource
         return string.Empty;
     }
 
-    private sealed record ProjectionSnapshot(
-        long Revision,
-        ProjectedProgramEvent[] Rows,
-        IReadOnlyDictionary<(ushort NetworkId, ushort TransportStreamId, ushort ServiceId, ushort EventId), ProjectedProgramEvent> ByEventKey);
 }

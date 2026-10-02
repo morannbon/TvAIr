@@ -1,4 +1,4 @@
-﻿using TvAIr.Epg.Projection;
+using TvAIr.Epg.Projection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Win32;
 using TvAIr.Channel;
@@ -44,6 +44,7 @@ public sealed class EpgScheduler : BackgroundService
     private readonly IReadOnlyList<TunerProfile> tunerProfiles;
     private readonly IniSettingsService  ini;
     private readonly ChannelFileLoader   channelLoader;
+    private readonly ChannelServiceAccessPolicy serviceAccess;
     private readonly IProgramEventSource   programEvents;
     private readonly TunerPool           tunerPool;
     private readonly ApplicationOperationGate applicationGate;
@@ -160,6 +161,7 @@ public sealed class EpgScheduler : BackgroundService
         ReservationStore               reservationStore,
         IReadOnlyList<TunerProfile>    tunerProfiles,
         ChannelFileLoader              channelLoader,
+        ChannelServiceAccessPolicy      serviceAccess,
         IProgramEventSource             programEvents,
         TunerPool                      tunerPool,
         LogRepository                  log,
@@ -179,6 +181,7 @@ public sealed class EpgScheduler : BackgroundService
         this.tunerProfiles            = tunerProfiles;
         this.ini                      = ini;
         this.channelLoader            = channelLoader;
+        this.serviceAccess            = serviceAccess;
         this.programEvents            = programEvents;
         this.tunerPool                = tunerPool;
         this.log                      = log;
@@ -2723,6 +2726,7 @@ public sealed class EpgScheduler : BackgroundService
         }
 
         var scheduledAll = reservationStore.GetByStatus(ReservationStatus.Scheduled).ToList();
+        var serviceAccessSnapshot = serviceAccess.Capture();
         var userScheduled = scheduledAll
             // SystemEpg/PreRecEpg自身は親候補にしない。Programは時刻枠録画であり対象外。
             // PRE_RECORD_EPG_CHAIN_ROOT_INVARIANT:
@@ -2731,7 +2735,8 @@ public sealed class EpgScheduler : BackgroundService
             .Where(r => (r.Source == ReservationSource.Manual || r.Source == ReservationSource.KeywordSearch || r.Source == ReservationSource.Keyword)
                      && (!r.IsUserChain || !r.UserChainPreviousId.HasValue)
                      && r.IsEnabled
-                     && !r.IsConflicted)
+                     && !r.IsConflicted
+                     && serviceAccessSnapshot.IsOperational(r))
             .OrderBy(r => r.StartTime)
             .ThenBy(r => r.Id)
             .ToList();
@@ -2748,6 +2753,10 @@ public sealed class EpgScheduler : BackgroundService
         var skippedConflicted = preRecordSourceCandidates.Count(r => r.IsEnabled
             && (!r.IsUserChain || !r.UserChainPreviousId.HasValue)
             && r.IsConflicted);
+        var skippedServiceUnavailable = preRecordSourceCandidates.Count(r => r.IsEnabled
+            && (!r.IsUserChain || !r.UserChainPreviousId.HasValue)
+            && !r.IsConflicted
+            && !serviceAccessSnapshot.IsOperational(r));
         var excludedSource = scheduledAll.Count(r => r.Source != ReservationSource.Epg
             && r.Source != ReservationSource.Manual
             && r.Source != ReservationSource.KeywordSearch
@@ -2759,7 +2768,7 @@ public sealed class EpgScheduler : BackgroundService
             var deletedObsolete = reservationStore.DeleteScheduledPreRecordEpgEntriesExceptParents(Array.Empty<int>());
             epgEntryMutationCount += deletedObsolete;
             log.Add("EPG_SCHEDULER", "PreRecEpg",
-                $"result=NO_TARGETS candidates=0 sourceCandidates={preRecordSourceCandidates.Count} excludedSource={excludedSource} skippedDisabled={skippedDisabled} skippedConflicted={skippedConflicted} manualIncluded=True skippedUserChainChild={skippedUserChainChild} countsExclusive=True deletedObsolete={deletedObsolete} action=remove_prerec_only_daily_epg_untouched rule=pre_record_epg_independent_schedule_contract");
+                $"result=NO_TARGETS candidates=0 sourceCandidates={preRecordSourceCandidates.Count} excludedSource={excludedSource} skippedDisabled={skippedDisabled} skippedConflicted={skippedConflicted} skippedServiceUnavailable={skippedServiceUnavailable} manualIncluded=True skippedUserChainChild={skippedUserChainChild} countsExclusive=True deletedObsolete={deletedObsolete} action=remove_prerec_only_daily_epg_untouched rule=pre_record_epg_independent_schedule_contract");
             return epgEntryMutationCount > 0;
         }
 
@@ -2957,7 +2966,7 @@ public sealed class EpgScheduler : BackgroundService
         }
 
         log.Add("EPG_SCHEDULER", "PreRecEpg",
-            $"result={(registeredCount > 0 ? "REGISTERED" : "NO_REGISTER")} candidates={userScheduled.Count} registered={registeredCount} dedupeReused={dedupeReuseCount} dedupeParents=[{string.Join(',', dedupeParentIds.Select(x => $"R{x}"))}] staleDeleted={staleCleanup.Deleted} staleParents=[{staleCleanup.ParentIds}] sourceCandidates={preRecordSourceCandidates.Count} excludedSource={excludedSource} skippedDisabled={skippedDisabled} skippedConflicted={skippedConflicted} skippedExpiredDeadline={skippedExpiredDeadline} deletedExpiredDeadline={deletedExpiredDeadline} preMin={preMin} durMin={durMin} systemMode=daily:{ini.EpgEnabled}/prerec:{ini.EpgPreRecordMinutes > 0} responsibilities=[{responsibilityMap}] dailyFallback=[{dailyFallbackMap}] manualIncluded=True skippedUserChainChild={skippedUserChainChild} countsExclusive=True deletedObsolete={deletedObsoleteChildren} routeMutations={epgEntryMutationCount} wakeRefresh=by_caller rule=system_epg_wave_responsibility_fallback_contract");
+            $"result={(registeredCount > 0 ? "REGISTERED" : "NO_REGISTER")} candidates={userScheduled.Count} registered={registeredCount} dedupeReused={dedupeReuseCount} dedupeParents=[{string.Join(',', dedupeParentIds.Select(x => $"R{x}"))}] staleDeleted={staleCleanup.Deleted} staleParents=[{staleCleanup.ParentIds}] sourceCandidates={preRecordSourceCandidates.Count} excludedSource={excludedSource} skippedDisabled={skippedDisabled} skippedConflicted={skippedConflicted} skippedServiceUnavailable={skippedServiceUnavailable} skippedExpiredDeadline={skippedExpiredDeadline} deletedExpiredDeadline={deletedExpiredDeadline} preMin={preMin} durMin={durMin} systemMode=daily:{ini.EpgEnabled}/prerec:{ini.EpgPreRecordMinutes > 0} responsibilities=[{responsibilityMap}] dailyFallback=[{dailyFallbackMap}] manualIncluded=True skippedUserChainChild={skippedUserChainChild} countsExclusive=True deletedObsolete={deletedObsoleteChildren} routeMutations={epgEntryMutationCount} wakeRefresh=by_caller rule=system_epg_wave_responsibility_fallback_contract");
         return epgEntryMutationCount > 0 || registeredCount > 0;
     }
 

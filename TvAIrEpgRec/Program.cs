@@ -1,4 +1,4 @@
-using System.Buffers;
+﻿using System.Buffers;
 using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.InteropServices;
@@ -93,7 +93,7 @@ internal static class Program
                 Stage = "started",
                 Message = IsEpgLikeMode(mode)
                     ? $"TvAIrEpgRec {mode} mode started. single-process tuner runtime is used before EPG/EPG-check; dbWrite remains false in epg-check."
-                    : "TvAIrEpgRec integrated execution line started. TvAIrEpgRec owns BonDriver/OpenTuner/SetChannel/TS-read/Close/Release/FreeLibrary execution before mode-specific processing; no legacy recorder executable or fallback route is used.",
+                    : "TvAIrEpgRec integrated execution started. TvAIrEpgRec owns BonDriver/OpenTuner/SetChannel/TS-read/Close/Release/FreeLibrary execution before mode-specific processing.",
                 ProcessId = Environment.ProcessId
             }).ConfigureAwait(false);
 
@@ -124,13 +124,13 @@ internal static class Program
             var bonDriverProbeFailed = bonDriverOpenProbe is not null && !bonDriverOpenProbe.OpenTunerOk;
             var setChannelProbeFailed = setChannelProbe is not null && !setChannelProbe.SetChannelOk;
             var tsReadProbeFailed = tsReadProbe is not null && !tsReadProbe.TsReadOk;
-            var compatibleRecordResult = recordMode && tsReadProbe is not null
-                ? DirectRecorderCompatibleResult.FromTsReadProbe(job, tsReadProbe, startedAt, endedAt)
+            var recordingResult = recordMode && tsReadProbe is not null
+                ? RecordingWorkerResult.FromTsReadProbe(job, tsReadProbe, startedAt, endedAt)
                 : null;
             var resultSuccess = !cancelled && !bonDriverProbeFailed && !setChannelProbeFailed && !tsReadProbeFailed;
-            if (compatibleRecordResult is not null)
+            if (recordingResult is not null)
             {
-                resultSuccess = resultSuccess && compatibleRecordResult.Success;
+                resultSuccess = resultSuccess && recordingResult.Success;
             }
 
             var result = new WorkerResult
@@ -166,7 +166,7 @@ internal static class Program
                 BonDriverOpenProbe = bonDriverOpenProbe,
                 SetChannelProbe = setChannelProbe,
                 TsReadProbe = tsReadProbe,
-                Result = compatibleRecordResult,
+                Result = recordingResult,
                 Lineage = BuildLineageSummary(),
                 Arguments = parsed.Values
             };
@@ -678,7 +678,7 @@ internal static class Program
                     : "mode_epg_after_single_process_tuner_runtime_ts_output_enabled"
         };
 
-        summary.RuntimeStatsPath = DirectRecorderCompatibleResult.ResolveRuntimeStatsPath(job, summary.RecordOutputPath);
+        summary.RuntimeStatsPath = RecordingWorkerResult.ResolveRuntimeStatsPath(job, summary.RecordOutputPath);
         // Normal recording remains one reservation / one output. Explicit user-chain recording may attach
         // additional reservation-local sinks to the same BonDriver/OpenTuner/TS-read worker through the immutable-generation
         // ChainControlPath store. Logical boundaries never close/reopen or retune this worker; the same physical capture remains
@@ -933,9 +933,6 @@ internal static class Program
         {
             ExecutableName = "TvAIrEpgRec.exe",
             ImplementationLineage = "TS processing logic integrated into the TvAIrEpgRec common runtime",
-            LegacyExecutableUsed = false,
-            LegacyRecorderExecutableDependency = false,
-            LegacyRecorderFallbackRoute = false,
             TvAIrEpgRecIsSoleExecutionOwner = true,
             RecordDecisionOwner = "TvAIr common allocation route",
             RecordExecutionOwner = "TvAIrEpgRec mode=record",
@@ -947,7 +944,7 @@ internal static class Program
             RecordModule = "TvAIrEpgRec mode=record executes TS writing after the TvAIr common allocation decision",
             EpgModule = "TvAIrEpgRec mode=epg performs EIT/ARIB/intermediate-model work after the common TS route identifies the transport stream",
             EpgCheckModule = "TvAIrEpgRec mode=epg-check performs short timing confirmation; DB write stays false",
-            ExecutionSafetyRule = "Do not add a parallel recorder executable, child process, or fallback route; all physical workers must use the TvAIrEpgRec common TS route",
+            ExecutionSafetyRule = "All physical workers use the TvAIrEpgRec common TS route",
             Rule = "release_contract"
         };
     }
@@ -1574,7 +1571,7 @@ internal sealed class TransportQualityState
         ContinuityDrops += observation.MissingPackets;
         ContinuityGapEvents += observation.GapEvents;
         SameCcContentMismatches += observation.SameCcContentMismatches;
-        // Public recording-quality compatibility contract:
+        // Recording-quality result contract:
         // error = real CC gap events + same-CC content mismatch events.
         ContinuityErrors += observation.GapEvents + observation.SameCcContentMismatches;
         DuplicatePackets += observation.SameCcDuplicates;
@@ -2022,9 +2019,6 @@ internal static class CommonTsRouteModeExecutionGate
             FacadeAttached = summary.CommonTsRoute?.FacadeAttached == true,
             RouteReadyForMode = summary.CommonTsRoute?.RouteReadyForMode == true,
             RecordExecutionRoute = summary.CommonTsRoute?.RecordExecutionRoute ?? "TvAIrEpgRec",
-            LegacyFallbackRouteAvailable = summary.CommonTsRoute?.LegacyFallbackRouteAvailable == true,
-            LegacyExecutableUsed = summary.CommonTsRoute?.LegacyExecutableUsed == true,
-            ExternalRecorderRuntimeDependency = summary.CommonTsRoute?.ExternalRecorderRuntimeDependency == true,
             ServiceScopedTsRequiredBeforeMode = normalizedMode == "record",
             ModeSpecificStage = normalizedMode,
             BonDriverOpenAllowed = summary.CommonTsRoute?.RouteReadyForMode == true,
@@ -2041,14 +2035,12 @@ internal static class CommonTsRouteModeExecutionGate
                 "No station-name partial matching.",
                 "No NEXT string search.",
                 "Do not add a parallel recording route.",
-                "Do not add a legacy recorder executable dependency or fallback route.",
                 "SleepGuard/process monitoring target is TvAIrEpgRec.exe only."
             ]
         };
 
         summary.CommonTsRouteExecution = boundary;
 
-        await progress("common_ts_route_execution_gate_enter", $"rule={boundary.Rule} mode={boundary.Mode} facadeAttached={boundary.FacadeAttached} routeReady={boundary.RouteReadyForMode} bonDriverOpenAllowed={boundary.BonDriverOpenAllowed} setChannelAllowed={boundary.SetChannelAllowed} tsReadAllowed={boundary.TsReadAllowed} legacyFallbackRouteAvailable={boundary.LegacyFallbackRouteAvailable} legacyExecutableUsed={boundary.LegacyExecutableUsed}").ConfigureAwait(false);
         await progress("common_ts_route_scope_policy", $"rule=release_contract mode={normalizedMode} recordServiceFilterAllowed={(normalizedMode == "record")} epgTransportStreamScope={(normalizedMode == "epg")} epgCheckTargetEventScope={(normalizedMode == "epg-check")} target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} note=record_filters_must_not_be_shared_by_normal_epg").ConfigureAwait(false);
 
         if (!boundary.BonDriverOpenAllowed || !boundary.SetChannelAllowed || !boundary.TsReadAllowed)
@@ -2091,9 +2083,6 @@ internal sealed class CommonTsRouteExecutionBoundary
     public string ExecutionOwner { get; set; } = string.Empty;
     public string SharedRouteOwner { get; set; } = string.Empty;
     public string RecordExecutionRoute { get; set; } = string.Empty;
-    public bool LegacyFallbackRouteAvailable { get; set; }
-    public bool LegacyExecutableUsed { get; set; }
-    public bool ExternalRecorderRuntimeDependency { get; set; }
     public bool BonDriverOpenAllowed { get; set; }
     public bool SetChannelAllowed { get; set; }
     public bool TsReadAllowed { get; set; }
@@ -2113,8 +2102,8 @@ internal sealed class CommonTsRouteExecutionBoundary
 internal readonly record struct EffectiveRecordingPolicy(bool CurrentServiceOnly, bool SaveSubtitles);
 
 // Canonical recording-output policy. This contract must be visible to every worker result /
-// progress / TS-write path, not scoped inside BonDriverNativeProbe. Missing/legacy snapshots preserve
-// the historical ON/ON behavior.
+// progress / TS-write path, not scoped inside BonDriverNativeProbe. Missing policy values use
+// the current ON/ON defaults.
 internal static class RecordingOutputPolicyContract
 {
     public static EffectiveRecordingPolicy Resolve(RecordingJob? recording)
@@ -2869,7 +2858,7 @@ internal static class BonDriverNativeProbe
             }
 
             var control = cachedChainControl;
-            if (control?.ContinuousCapture != true || control.Segments.Count == 0) return;
+            if (control is null || control.Segments.Count == 0) return;
 
             foreach (var segment in control.Segments)
             {
@@ -2879,6 +2868,8 @@ internal static class BonDriverNativeProbe
                     primarySegment = segment;
                     continue;
                 }
+                if (!control.ContinuousCapture)
+                    continue;
                 if (string.IsNullOrWhiteSpace(segment.OutputPath)) continue;
                 if (chainSinks.TryGetValue(segment.ReservationId, out var existing))
                 {
@@ -2990,6 +2981,13 @@ internal static class BonDriverNativeProbe
             var now = DateTime.Now;
             if (!primaryClosed && primaryCloseAt.HasValue && now >= primaryCloseAt.Value && stream is not null)
             {
+                // A follow update can land inside the normal 200 ms control-poll interval immediately
+                // before the old CloseAt. Re-read the newest immutable generation once at the exact
+                // close boundary so a just-published extension cannot be lost to the cached value.
+                await RefreshChainControlAsync(summary, progress, force: true).ConfigureAwait(false);
+                now = DateTime.Now;
+                if (primaryCloseAt.HasValue && now < primaryCloseAt.Value)
+                    return;
                 await stream.FlushAsync().ConfigureAwait(false);
                 await stream.DisposeAsync().ConfigureAwait(false);
                 stream = null;
@@ -3070,7 +3068,7 @@ internal static class BonDriverNativeProbe
             var control = JsonSerializer.Deserialize<ChainRecordingControl>(
                 ReadLatestChainControlText(chainControlPath, out _),
                 new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            if (control?.ContinuousCapture != true || control.Segments.Count == 0)
+            if (control is null || control.Segments.Count == 0)
                 return false;
             var maxClose = control.Segments
                 .Where(segment => segment.Enabled)
@@ -3080,12 +3078,11 @@ internal static class BonDriverNativeProbe
             if (maxClose == DateTime.MinValue)
                 return false;
 
-            // CHAIN_CAPTURE_DEADLINE_SINGLE_SOURCE:
-            // The immutable chain-control snapshot is authoritative in both directions. A removed/disabled
-            // downstream segment must shorten the physical read lifetime just as a newly appended segment
-            // extends it. Keeping the historical maximum here leaves a worker alive after the chain tail was
-            // cancelled. Invalid/transient snapshots are ignored by the catch path and preserve the last safe
-            // deadline until the next loop iteration.
+            // RECORD_CAPTURE_DEADLINE_SINGLE_SOURCE:
+            // The immutable Host control snapshot owns the worker read deadline for both ordinary recordings
+            // and explicit continuous chains. Recording-time follow may extend the same running worker without
+            // creating a recovery reservation; chain topology changes may move the deadline in either direction.
+            // Invalid/transient snapshots preserve the last safe deadline until the next loop iteration.
             var requested = new DateTimeOffset(maxClose).AddSeconds(1);
             if (requested == readDeadline)
                 return false;
@@ -3279,7 +3276,7 @@ internal static class BonDriverNativeProbe
             summary.RecordBytesWritten += primaryBytesWritten;
             summary.RecordChunksWritten++;
             AnalyzeRecordOutputBuffer(writeBytes.AsMemory(0, primaryBytesWritten), summary);
-            DirectRecorderCompatibleResult.AppendRuntimeStatsSnapshot(summary, DateTimeOffset.Now, "RECORDING", final: false);
+            RecordingWorkerResult.AppendRuntimeStatsSnapshot(summary, DateTimeOffset.Now, "RECORDING", final: false);
         }
         if (summary.RecordChunksWritten == 1 || summary.RecordChunksWritten % 1000 == 0)
         {
@@ -4216,7 +4213,13 @@ internal static class BonDriverNativeProbe
                                     nextChainDeadlineSyncAt = loopNow.AddMilliseconds(200);
                                 }
                                 if (loopNow >= readDeadline)
-                                    break;
+                                {
+                                    // An extension can be published after the bounded poll but before the old deadline.
+                                    // Check the latest immutable generation once more before terminating the capture.
+                                    TrySyncRecordReadDeadlineFromChainControl(summary.ChainControlPath, ref readDeadline);
+                                    if (loopNow >= readDeadline)
+                                        break;
+                                }
                                 callIndex++;
                                 if (tsDrainPolicy.BacklogImmediateDrain && pendingRemain > 0)
                                 {
@@ -4319,7 +4322,13 @@ internal static class BonDriverNativeProbe
                                         nextChainDeadlineSyncAt = loopNow.AddMilliseconds(200);
                                     }
                                     if (loopNow >= readDeadline)
-                                        break;
+                                    {
+                                        // An extension can be published after the bounded poll but before the old deadline.
+                                        // Check the latest immutable generation once more before terminating the capture.
+                                        TrySyncRecordReadDeadlineFromChainControl(summary.ChainControlPath, ref readDeadline);
+                                        if (loopNow >= readDeadline)
+                                            break;
+                                    }
                                     callIndex++;
                                     if (tsDrainPolicy.BacklogImmediateDrain && pendingRemain > 0)
                                     {
@@ -5419,29 +5428,27 @@ internal static class BonDriverNativeProbe
                 foreach (var tag in ev.DescriptorTags) Increment(summary.TargetServiceDescriptorTagCounts, tag);
 
                 // RECORDING_LIVE_PRESENT_IDENTITY_INVARIANT:
-                // EIT p/f actual (0x4E) の section_number=0 だけを「現在放送中(present)」の正本として保持する。
-                // following(section=1)やschedule EITをpresent継続判定へ混ぜない。current_next_indicator=1も必須。
+                // EIT p/f actual (0x4E) section=0/current_next=1 が「現在放送中(present)」の正本。
+                // present資格を同event内のstart_time/durationで再否定しない。スポーツ延長ではduration更新が
+                // present継続より遅れる実例があるため、時刻は正式follow用の付随Evidenceとしてのみ保持する。
                 if (sectionCrcValid && tableId == 0x4E && sectionNumber == 0 && currentNextIndicator == 1 && !livePresentCaptured)
                 {
+                    var observedAt = DateTimeOffset.Now;
                     var presentStart = DecodeAribMjdBcd(ev.StartTimeBcd);
                     var presentDuration = DecodeDurationSeconds(ev.DurationBcd);
+
+                    summary.LivePresentEventId = ev.EventId;
                     if (presentStart is not null && presentDuration > 0)
                     {
-                        var observedAt = DateTimeOffset.Now;
-                        var presentEnd = presentStart.Value.AddSeconds(presentDuration);
-                        if (IsObservedInsidePresentInterval(presentStart.Value, presentEnd, observedAt))
-                        {
-                            summary.LivePresentEventId = ev.EventId;
-                            summary.LivePresentEventStart = presentStart.Value.ToString("O");
-                            summary.LivePresentEventEnd = presentEnd.ToString("O");
-                            summary.LivePresentEventRunningStatus = ev.RunningStatus;
-                            summary.LivePresentEventTableId = tableId;
-                            summary.LivePresentEventSectionNumber = sectionNumber;
-                            summary.LivePresentEventCurrentNextIndicator = currentNextIndicator;
-                            summary.LivePresentEventObservedAt = observedAt;
-                            livePresentCaptured = true;
-                        }
+                        summary.LivePresentEventStart = presentStart.Value.ToString("O");
+                        summary.LivePresentEventEnd = presentStart.Value.AddSeconds(presentDuration).ToString("O");
                     }
+                    summary.LivePresentEventRunningStatus = ev.RunningStatus;
+                    summary.LivePresentEventTableId = tableId;
+                    summary.LivePresentEventSectionNumber = sectionNumber;
+                    summary.LivePresentEventCurrentNextIndicator = currentNextIndicator;
+                    summary.LivePresentEventObservedAt = observedAt;
+                    livePresentCaptured = true;
                 }
 
                 if (summary.ExpectedEventId > 0 && ev.EventId == summary.ExpectedEventId)
@@ -5459,7 +5466,8 @@ internal static class BonDriverNativeProbe
 
                     // RECORDING_LIVE_EIT_FOLLOW_INVARIANT:
                     // 正式な時刻延長根拠も、同じ録画workerが受信したcurrent EIT p/f presentだけに限定する。
-                    // schedule/following由来の時刻をlive録画延長へ流さない。
+                    // schedule/following由来の時刻をlive録画延長へ流さない。ここではstart_time/durationを
+                    // 正式時刻更新に使うが、その値が観測時刻を包含することをpresent資格条件にはしない。
                     if (sectionCrcValid && tableId == 0x4E && sectionNumber == 0 && currentNextIndicator == 1)
                     {
                         var liveStart = DecodeAribMjdBcd(ev.StartTimeBcd);
@@ -5468,16 +5476,13 @@ internal static class BonDriverNativeProbe
                         {
                             var observedAt = DateTimeOffset.Now;
                             var liveEnd = liveStart.Value.AddSeconds(liveDuration);
-                            if (IsObservedInsidePresentInterval(liveStart.Value, liveEnd, observedAt))
-                            {
-                                summary.LiveExpectedEventStart = liveStart.Value.ToString("O");
-                                summary.LiveExpectedEventEnd = liveEnd.ToString("O");
-                                summary.LiveExpectedEventRunningStatus = ev.RunningStatus;
-                                summary.LiveExpectedEventTableId = tableId;
-                                summary.LiveExpectedEventSectionNumber = sectionNumber;
-                                summary.LiveExpectedEventCurrentNextIndicator = currentNextIndicator;
-                                summary.LiveExpectedEventObservedAt = observedAt;
-                            }
+                            summary.LiveExpectedEventStart = liveStart.Value.ToString("O");
+                            summary.LiveExpectedEventEnd = liveEnd.ToString("O");
+                            summary.LiveExpectedEventRunningStatus = ev.RunningStatus;
+                            summary.LiveExpectedEventTableId = tableId;
+                            summary.LiveExpectedEventSectionNumber = sectionNumber;
+                            summary.LiveExpectedEventCurrentNextIndicator = currentNextIndicator;
+                            summary.LiveExpectedEventObservedAt = observedAt;
                         }
                     }
                 }
@@ -5485,16 +5490,6 @@ internal static class BonDriverNativeProbe
             }
             pos = descEnd;
         }
-    }
-
-    private static bool IsObservedInsidePresentInterval(DateTimeOffset start, DateTimeOffset end, DateTimeOffset observedAt)
-    {
-        // EIT p/f actual section=0 は「present」なので、観測時刻を含まない時刻情報をlive Evidenceとして扱わない。
-        // 数秒の送出/受信/スケジューリング差だけを許容し、日付化け・MJD破損・途中section混入を正本化しない。
-        var tolerance = TimeSpan.FromMinutes(2);
-        return end > start
-            && start <= observedAt.Add(tolerance)
-            && end >= observedAt.Subtract(tolerance);
     }
 
     private static bool IsTargetEitEvent(TsReadProbeSummary summary, int originalNetworkId, int transportStreamId, int serviceId)
@@ -5722,7 +5717,7 @@ internal sealed class WorkerProgress
     public string? FailureDetail { get; set; }
 }
 
-internal sealed class DirectRecorderCompatibleResult
+internal sealed class RecordingWorkerResult
 {
     // runtime statsは1サンプル=1物理行のJSONL正本です。
     // 整形出力を流用すると1オブジェクトが複数行へ分割され、
@@ -5912,7 +5907,7 @@ internal sealed class DirectRecorderCompatibleResult
         }
     }
 
-    public static DirectRecorderCompatibleResult FromTsReadProbe(TvAIrEpgRecJob? job, TsReadProbeSummary summary, DateTimeOffset startedAt, DateTimeOffset endedAt)
+    public static RecordingWorkerResult FromTsReadProbe(TvAIrEpgRecJob? job, TsReadProbeSummary summary, DateTimeOffset startedAt, DateTimeOffset endedAt)
     {
         var recordingPolicy = RecordingOutputPolicyContract.Resolve(summary.Recording);
         var bytesWritten = summary.RecordBytesWritten;
@@ -5965,7 +5960,7 @@ internal sealed class DirectRecorderCompatibleResult
         runtimeStatsEmitted = summary.RuntimeStatsEmitted;
 
 
-        return new DirectRecorderCompatibleResult
+        return new RecordingWorkerResult
         {
             Success = success,
             OutputPath = summary.RecordOutputPath ?? string.Empty,
@@ -6170,7 +6165,7 @@ internal sealed class WorkerResult
     public SetChannelProbeSummary? SetChannelProbe { get; set; }
     public TsReadProbeSummary? TsReadProbe { get; set; }
     [JsonPropertyName("result")]
-    public DirectRecorderCompatibleResult? Result { get; set; }
+    public RecordingWorkerResult? Result { get; set; }
     public ExecutionLineageSummary? Lineage { get; set; }
     public Dictionary<string, string>? Arguments { get; set; }
 }
@@ -6179,9 +6174,6 @@ internal sealed class ExecutionLineageSummary
 {
     public string ExecutableName { get; set; } = string.Empty;
     public string ImplementationLineage { get; set; } = string.Empty;
-    public bool LegacyExecutableUsed { get; set; }
-    public bool LegacyRecorderExecutableDependency { get; set; }
-    public bool LegacyRecorderFallbackRoute { get; set; }
     public bool TvAIrEpgRecIsSoleExecutionOwner { get; set; }
     public string RecordDecisionOwner { get; set; } = string.Empty;
     public string RecordExecutionOwner { get; set; } = string.Empty;

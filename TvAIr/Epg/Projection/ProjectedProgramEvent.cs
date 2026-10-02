@@ -47,7 +47,15 @@ public sealed class ProjectedProgramEvent
     public string GenreCodes { get; init; } = string.Empty;
 
     public bool DbEventExists { get; init; }
+    // Long-lived projection snapshots must not keep the raw DB EpgEvent graph alive.
+    // Direct lookup/incremental routes may still carry DbEvent transiently when raw descriptor
+    // evidence is actually required.  Stable DB provenance needed by normal consumers is kept
+    // as compact scalar metadata below.
     public EpgEvent? DbEvent { get; init; }
+    public byte DbTableId { get; init; }
+    public byte DbSectionNumber { get; init; }
+    public byte DbVersionNumber { get; init; }
+    public DateTime? DbUpdatedAt { get; init; }
 
     public string SourceKind { get; init; } = ProjectedEventSourceKinds.TvAirDb;
     public string SourcePluginId { get; init; } = string.Empty;

@@ -78,10 +78,7 @@
 
   <!-- AribDecodeBridge C++ DLL is built for x86/x64 and copied after Build.
        The flat AribDecodeBridge.dll preserves the existing runtime path; native\x86 and native\x64 keep both architectures available. -->
-
-  <!-- TvAIr does not package or depend on LegacyDirectRecorderBridge.exe. Recording execution uses the current recorder bridge path only. -->
-
-  <!-- Remove development-only Runtime Probe residue from reused/overlay build outputs. -->
+<!-- Remove development-only Runtime Probe residue from reused/overlay build outputs. -->
   <Target Name="RemoveInternalPluginProbeResidue" BeforeTargets="Build;Publish">
     <ItemGroup>
       <InternalPluginProbeResidue Include="$(OutDir)Plugins\PluginRuntimeProbe.dll;$(OutDir)Plugins\PluginRuntimeProbe.pdb;$(OutDir)Plugins\PluginRuntimeProbe.deps.json;$(OutDir)Plugins\PluginRuntimeProbe.runtimeconfig.json" />

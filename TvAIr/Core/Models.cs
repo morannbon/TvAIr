@@ -172,9 +172,6 @@ public sealed class KeywordRule
     /// <summary>正規表現を使うか。false の場合は ; = AND, | = OR, () = グループ。</summary>
     public bool UseRegex { get; set; } = false;
 
-    /// <summary>既存設定読込の互換用検索対象。新規設定では各フィールド個別フラグを使用する。</summary>
-    public string SearchFields { get; set; } = "title";
-
     public bool SearchTitle { get; set; } = true;
     public bool SearchOutline { get; set; } = false;
     public bool SearchDetail { get; set; } = false;
@@ -217,7 +214,7 @@ public sealed class KeywordRule
     public DateTime UpdatedAt { get; set; }
 }
 
-/// <summary>予約生成時に固定する録画出力オプション。未保存予約は従来動作(両方ON)として扱う。</summary>
+/// <summary>予約生成時に固定する録画出力オプション。未保存予約は現在の既定値(両方ON)を使用する。</summary>
 public sealed record ReservationRecordingOptions(bool CurrentServiceOnly = true, bool SaveSubtitles = true);
 
 // ─── プログラム予約ルール ─────────────────────────────────────────

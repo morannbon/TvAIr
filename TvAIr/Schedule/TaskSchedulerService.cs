@@ -1,4 +1,4 @@
-﻿// Windows Task Scheduler には起床時刻スロットだけを登録する。
+// Windows Task Scheduler には起床時刻スロットだけを登録する。
 // 予約・EPG・チェーン等の意味は WakeCoverage としてTvAIr内部に保持し、起床後は各共通経路で再評価する。
 // Wake計画は世代単位で差分適用し、現行世代の必要タスクを保護したまま旧世代・余剰タスクを整理する。
 // 登録結果は実体を再読取して検証し、資格情報方式が使えない場合だけ対話トークン方式へ限定フォールバックする。
@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Security.Principal;
 using TvAIr.Core;
+using TvAIr.Channel;
 using TvAIr.Epg;
 using TvAIr.Tuner;
 
@@ -29,9 +30,6 @@ public sealed class TaskSchedulerService
     private const string WakeSlotStableGeneration = "gWAKEDIFF";
 
     // 過去形式の固定名タスクを現行計画から隔離して整理するための識別子。
-    private const string LegacyWakeTaskName    = "TvAIr_Wake";
-    private const string LegacyWakeEpgTaskName = "TvAIr_Wake_Epg";
-    private const string LegacyWakeRecTaskName = "TvAIr_Wake_Rec";
 
     private readonly ReservationStore   _store;
     private readonly IniSettingsService _ini;
@@ -39,13 +37,13 @@ public sealed class TaskSchedulerService
     private readonly LogRepository      _log;
     private readonly UserEventLogService _userEvents;
     private readonly EpgScheduler _epgScheduler;
+    private readonly ChannelServiceAccessPolicy _serviceAccess;
 
     private static readonly TimeSpan FullValidationInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan WakeOverdueGrace = TimeSpan.FromMinutes(2);
 
     private string?  _lastPlanSignature;
     private DateTime _lastFullValidationUtc = DateTime.MinValue;
-    private bool     _legacyFixedTaskPresenceChecked;
     private bool     _missingCredentialLogged;
     private DateTime _lastRuntimeAuditUtc = DateTime.MinValue;
     private string _lastEpgWakePlanLogKey = string.Empty;
@@ -82,7 +80,8 @@ public sealed class TaskSchedulerService
         IReadOnlyList<TunerProfile> runtimeTunerProfiles,
         LogRepository      log,
         UserEventLogService userEvents,
-        EpgScheduler epgScheduler)
+        EpgScheduler epgScheduler,
+        ChannelServiceAccessPolicy serviceAccess)
     {
         _store = store;
         _ini   = ini;
@@ -90,6 +89,7 @@ public sealed class TaskSchedulerService
         _log   = log;
         _userEvents = userEvents;
         _epgScheduler = epgScheduler;
+        _serviceAccess = serviceAccess;
     }
 
     /// <summary>
@@ -119,11 +119,6 @@ public sealed class TaskSchedulerService
             return false;
         }
 
-        if (!_legacyFixedTaskPresenceChecked)
-        {
-            DetectLegacyFixedTasks();
-            _legacyFixedTaskPresenceChecked = true;
-        }
 
         if (!HasWakeCredentials())
         {
@@ -642,8 +637,10 @@ public sealed class TaskSchedulerService
         var wakeAdditionalSeconds = Math.Max(0, _ini.WakeAdditionalSeconds);
         var candidates = new List<PowerActionWakeProtectionBoundary>();
 
+        var serviceAccessSnapshot = _serviceAccess.Capture();
         var scheduled = _store.GetByStatus(ReservationStatus.Scheduled)
             .Where(r => r.IsEnabled)
+            .Where(serviceAccessSnapshot.IsOperational)
             .Where(r => r.Source != ReservationSource.Epg)
             .Where(r => !r.IsConflicted)
             .Where(r => !string.IsNullOrWhiteSpace(r.TunerName))
@@ -689,8 +686,10 @@ public sealed class TaskSchedulerService
 
     private List<WakeTaskSpec> BuildDesiredTasks(DateTime now, bool emitAudit = true)
     {
+        var serviceAccessSnapshot = _serviceAccess.Capture();
         var allScheduled = _store.GetByStatus(ReservationStatus.Scheduled)
             .Where(r => r.IsEnabled)
+            .Where(r => r.Source == ReservationSource.Epg || serviceAccessSnapshot.IsOperational(r))
             .Where(r => r.StartTime > now)
             .ToList();
 
@@ -1343,16 +1342,16 @@ public sealed class TaskSchedulerService
     private void CleanupStaleWakeSlotTasksAfterSuccessfulApply(string activeGeneration, HashSet<string> desiredNames, string reason)
     {
         // 
-        // 旧世代WakeSlotのうち current_process でも削除できないものは、通常同期で毎回Delete/Disableを試すと
+        // 非現行世代WakeSlotのうち current_process でも削除できないものは、通常同期で毎回Delete/Disableを試すと
         // アクセス拒否と資格情報NGを増幅し、現行Wake登録を重くする。現行世代 desired を唯一の管理対象とし、
-        // 旧世代は wake-active-generation / wake-active-slots により実行時に無効化される orphan として隔離する。
-        // 自動削除対象は、現行世代内の desired 外と旧固定名風だけに限定する。
+        // 非現行世代は wake-active-generation / wake-active-slots により実行時に無効化される orphan として隔離する。
+        // 自動削除対象は、現行世代内の desired 外と現行命名規則外のタスクだけに限定する。
         var allWakeSlots = GetAllWakeSlotTaskNames();
         if (allWakeSlots.Count == 0)
             return;
 
         var activePrefix = WakeSlotTaskPrefix + activeGeneration + "_";
-        var legacyFixed = new List<string>();
+        var unmanagedFormat = new List<string>();
         var staleGeneration = new List<string>();
         var currentExtra = new List<string>();
         var preserved = 0;
@@ -1373,19 +1372,19 @@ public sealed class TaskSchedulerService
 
             var suffix = taskName.Length > WakeSlotTaskPrefix.Length ? taskName[WakeSlotTaskPrefix.Length..] : string.Empty;
             if (!suffix.StartsWith("g", StringComparison.OrdinalIgnoreCase))
-                legacyFixed.Add(taskName);
+                unmanagedFormat.Add(taskName);
             else
                 staleGeneration.Add(taskName);
         }
 
-        var targets = legacyFixed
+        var targets = unmanagedFormat
             .Concat(currentExtra)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
         _log.Add("TaskScheduler", "WAKE_CLEANUP_SCAN",
-            $"activeGeneration={activeGeneration} activeDesired={desiredNames.Count} preservedActive={preserved} legacyFixed={legacyFixed.Count} staleGeneration={staleGeneration.Count} staleGenerationQuarantined={staleGeneration.Count} currentExtra={currentExtra.Count} deleteTargets={targets.Count} reason={reason} recording_blocking=False rule=wake_stale_orphan_quarantine_guard");
+            $"activeGeneration={activeGeneration} activeDesired={desiredNames.Count} preservedActive={preserved} unmanagedFormat={unmanagedFormat.Count} staleGeneration={staleGeneration.Count} staleGenerationQuarantined={staleGeneration.Count} currentExtra={currentExtra.Count} deleteTargets={targets.Count} reason={reason} recording_blocking=False rule=wake_stale_orphan_quarantine_guard");
 
         if (staleGeneration.Count > 0)
         {
@@ -1401,11 +1400,11 @@ public sealed class TaskSchedulerService
             return;
         }
 
-        var deletedLegacy = 0;
+        var deletedUnmanaged = 0;
         var deletedExtra = 0;
-        var failedLegacy = 0;
+        var failedUnmanaged = 0;
         var failedExtra = 0;
-        var failedLegacySamples = new List<string>();
+        var failedUnmanagedSamples = new List<string>();
 
         foreach (var taskName in targets)
         {
@@ -1421,7 +1420,7 @@ public sealed class TaskSchedulerService
             if (deleted)
             {
                 if (targetKind == "current_extra") deletedExtra++;
-                else deletedLegacy++;
+                else deletedUnmanaged++;
             }
             else
             {
@@ -1445,22 +1444,22 @@ public sealed class TaskSchedulerService
                 else
                 {
                     AuditWakeTaskIdentity(taskName, targetKind, activeGeneration, reason);
-                    failedLegacy++;
-                    if (failedLegacySamples.Count < 3)
-                        failedLegacySamples.Add($"{targetKind}:{taskName}:{CompactOneLine(result.Output)}");
+                    failedUnmanaged++;
+                    if (failedUnmanagedSamples.Count < 3)
+                        failedUnmanagedSamples.Add($"{targetKind}:{taskName}:{CompactOneLine(result.Output)}");
                 }
             }
         }
 
-        var deletedTotal = deletedLegacy + deletedExtra;
-        var failedTotal = failedLegacy + failedExtra;
+        var deletedTotal = deletedUnmanaged + deletedExtra;
+        var failedTotal = failedUnmanaged + failedExtra;
         var cleanupResult = failedTotal == 0 ? "OK" : "PARTIAL_NON_BLOCKING";
-        var cleanupDetail = failedLegacy == 0
+        var cleanupDetail = failedUnmanaged == 0
             ? " failedDetails=suppressed"
-            : $" failedSample={CompactOneLine(string.Join(" | ", failedLegacySamples))}";
+            : $" failedSample={CompactOneLine(string.Join(" | ", failedUnmanagedSamples))}";
         _log.Add("TaskScheduler", "WAKE_CLEANUP_DELETE",
-            $"result={cleanupResult} activeGeneration={activeGeneration} preservedActive={preserved} orphanedStale={staleGeneration.Count} deleted={deletedTotal} failed={failedTotal} deletedLegacyFixed={deletedLegacy} deletedStaleGeneration=0 deletedCurrentExtra={deletedExtra} failedLegacyFixed={failedLegacy} failedStaleGeneration=0 failedCurrentExtra={failedExtra} currentExtraPolicy=nonblocking_desired_slots_preserved maintenanceDeniedPolicy=summary_only_for_current_extra recording_blocking=False sleep_resume_desired_tasks_preserved=True reason={reason}{(failedTotal == 0 ? string.Empty : cleanupDetail)} rule=wake_current_extra_nonblocking_policy");
-        if (failedExtra > 0 && failedLegacy == 0 && preserved == desiredNames.Count)
+            $"result={cleanupResult} activeGeneration={activeGeneration} preservedActive={preserved} orphanedStale={staleGeneration.Count} deleted={deletedTotal} failed={failedTotal} deletedUnmanagedFixed={deletedUnmanaged} deletedStaleGeneration=0 deletedCurrentExtra={deletedExtra} failedUnmanagedFixed={failedUnmanaged} failedStaleGeneration=0 failedCurrentExtra={failedExtra} currentExtraPolicy=nonblocking_desired_slots_preserved maintenanceDeniedPolicy=summary_only_for_current_extra recording_blocking=False sleep_resume_desired_tasks_preserved=True reason={reason}{(failedTotal == 0 ? string.Empty : cleanupDetail)} rule=wake_current_extra_nonblocking_policy");
+        if (failedExtra > 0 && failedUnmanaged == 0 && preserved == desiredNames.Count)
         {
             _log.Add("TaskScheduler", "WAKE_CURRENT_EXTRA_NONBLOCKING_SUMMARY",
                 $"result=OK_NONBLOCKING desired={desiredNames.Count} preservedActive={preserved} currentExtra={currentExtra.Count} failedCurrentExtra={failedExtra} recording_blocking=False action=keep_desired_and_suppress_per_task_maintenance_denied reason={reason} rule=wake_current_extra_nonblocking_policy");
@@ -1478,7 +1477,7 @@ public sealed class TaskSchedulerService
         // Wakeタスク実体差異検出の unexpected は cleanup 前のスナップショットである。
         // その値だけを通常ログへ出すと、直後の削除に成功していても「余剰が残った」と誤読できる。
         // cleanup 後に current generation の実体を再取得し、desired 外が本当に残ったかを最終事実として記録する。
-        // 旧generation orphan は別契約で隔離されるため、この監査には含めない。
+        // 非現行generation orphan は別契約で隔離されるため、この監査には含めない。
         if (preCleanupUnexpectedCount <= 0)
             return;
 
@@ -1969,23 +1968,6 @@ public sealed class TaskSchedulerService
         catch
         {
             return false;
-        }
-    }
-
-    private void DetectLegacyFixedTasks()
-    {
-        // 
-        // 旧固定名Wakeタスクは、作成者/権限が現在のTvAIr実行コンテキストと食い違うと
-        // Delete/Create がアクセス拒否になり、近接予約のWake登録を巻き込んで失敗させる。
-        // 録画失敗回避を最優先し、ここでは削除を試みない。新規WakeSlot名前空間だけを使う。
-        var activeGeneration = ReadActiveWakeGenerationFallback();
-        var legacyDetected = RunSchtasks($"/Query /TN \"{LegacyWakeTaskName}\"").Success
-            || RunSchtasks($"/Query /TN \"{LegacyWakeEpgTaskName}\"").Success
-            || RunSchtasks($"/Query /TN \"{LegacyWakeRecTaskName}\"").Success;
-        if (legacyDetected)
-        {
-            _log.Add("TaskScheduler", "WakeLegacy",
-                $"legacyFixedDetected=True activeGeneration={activeGeneration} activePrefix={WakeSlotTaskPrefix}{activeGeneration}_ legacyPrefix=TvAIr_WakeSlot_yyyyMMdd reason=avoid_access_denied_blocking_recording rule=wake_legacy_fixed_task_guard");
         }
     }
 

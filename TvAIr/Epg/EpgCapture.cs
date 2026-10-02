@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Options;
 using TvAIr.Channel;
 using TvAIr.Core;
 using TvAIr.Tuner;
@@ -25,7 +25,7 @@ namespace TvAIr.Epg;
 ///      非チェーンの録画前EPG確認は目的EventIdentityの観測snapshotを呼出元へ返し、通常EPG DBへは書き込まない
 ///      明示チェーンrootのDB-backed追従経路は通常EPG/PreRecとは分離して維持する
 ///
-/// 並列数は TunerPool の空きスロット数で自動決定する（GrConcurrentCaptures/BsCsConcurrentCaptures 廃止）。
+/// 並列数は TunerPool の空きスロット数で自動決定する。
 /// </summary>
 public sealed class EpgCapture
 {
@@ -709,7 +709,7 @@ public sealed class EpgCapture
         var otherSeenReset = store.ResetOtherScheduleSeen();
 #if TVAIR_DEVELOPER_DIAGNOSTICS
         coverageAttribution.BeginRun(runId);
-        Log("EPG_COVERAGE_ATTRIBUTION", "EPG", $"result=RESET runId={runId} otherScheduleSeenResetRows={otherSeenReset} scope=normal_epg_identity_attribution mutation=epg_cache_provenance_marker_reset rule=epg_overlay_gap_attribution_v122");
+        Log("EPG_COVERAGE_ATTRIBUTION", "EPG", $"result=RESET runId={runId} otherScheduleSeenResetRows={otherSeenReset} scope=normal_epg_identity_attribution mutation=epg_cache_provenance_marker_reset rule=epg_overlay_gap_attribution");
 #endif
         PruneCompletedEpgWorkerTasksForOldRuns(runId);
         runtimeEpgDepthOverride = normalizedDepth;
@@ -877,7 +877,7 @@ public sealed class EpgCapture
                         $"result={auditResult} evidence={evidenceReason} runId={audit.RunId} dayOffset=D+{dayOffset} date={audit.Date:yyyy-MM-dd} targetServices={audit.TargetServices} scheduleCompleteServices={audit.ScheduleCompleteServices} scheduleIncompleteServices={audit.ScheduleIncompleteServices} " +
                         $"authoritativeEvents={audit.AuthoritativeEvents} dbPresent={audit.DbPresent} dbMissing={audit.DbMissing} projectionPresent={audit.ProjectionPresent} projectionMissing={audit.ProjectionMissing} blankTitleCount={audit.BlankTitleCount} defectIdentityCount={audit.DefectIdentityCount} " +
                         $"incompleteServiceSample=[{SafeLogValue(audit.IncompleteServiceSample)}] dbMissingSample=[{SafeLogValue(audit.DbMissingSample)}] projectionMissingSample=[{SafeLogValue(audit.ProjectionMissingSample)}] blankTitleSample=[{SafeLogValue(audit.BlankTitleSample)}] " +
-                        "coverageBasis=basic_schedule_section_completion_plus_observed_event_identity continuityRule=observed_basic_to_db_to_db_projection offAirPolicy=no_wall_clock_gap_inference mutation=none publicBuild=compiled_out rule=epg_daily_coverage_audit_v122");
+                        "coverageBasis=basic_schedule_section_completion_plus_observed_event_identity continuityRule=observed_basic_to_db_to_db_projection offAirPolicy=no_wall_clock_gap_inference mutation=none publicBuild=compiled_out rule=epg_daily_coverage_audit");
                 }
 
                 static double RetentionPercent(IEnumerable<EpgCoverageAttributionDiagnosticStore.DailyCoverageAudit> source)
@@ -928,7 +928,7 @@ public sealed class EpgCapture
                     $"authorityWeek={(authorityWeek ? "COMPLETE" : "INCOMPLETE")} passWeek={windowWeekResult} retentionWeek={retentionWeekText} targetWeek=100.000 " +
                     $"authoritative72h={first72h.Sum(x => x.AuthoritativeEvents)} dbMissing72h={first72h.Sum(x => x.DbMissing)} projectionMissing72h={first72h.Sum(x => x.ProjectionMissing)} blankTitle72h={first72h.Sum(x => x.BlankTitleCount)} defectIdentities72h={first72h.Sum(x => x.DefectIdentityCount)} " +
                     $"authoritativeWeek={week.Sum(x => x.AuthoritativeEvents)} dbMissingWeek={week.Sum(x => x.DbMissing)} projectionMissingWeek={week.Sum(x => x.ProjectionMissing)} blankTitleWeek={week.Sum(x => x.BlankTitleCount)} defectIdentitiesWeek={week.Sum(x => x.DefectIdentityCount)} " +
-                    "metric=observed_basic_schedule_identity_retention noWallClockGapInference=true noBroadcasterIntentInference=true mutation=none publicBuild=compiled_out rule=epg_release_coverage_audit_v122");
+                    "metric=observed_basic_schedule_identity_retention noWallClockGapInference=true noBroadcasterIntentInference=true mutation=none publicBuild=compiled_out rule=epg_release_coverage_audit");
             }
 #endif
             return new EpgCaptureResult(string.Equals(runResult, "OK", StringComparison.OrdinalIgnoreCase), completedCount, totalGroups, totalImported, runResult, missingGroups, msg, captureResultDetail)
@@ -2282,7 +2282,7 @@ public sealed class EpgCapture
 
                     // Normal EPGのstartup失敗は、未収束workerを残したまま同一capacityで即再起動しない。
                     // failed workerがexit済みであることをowner正本から確認した場合だけlease/admissionを返し、
-                    // queueの後続と同じcapacity gateを取り直して次attemptへ進む。PreRecは従来どおり単発。
+                    // queueの後続と同じcapacity gateを取り直して次attemptへ進む。PreRecは単発。
                     var startupProcessConverged = workerTaskState.TrySnapshotAttempt(attemptGeneration, out var startupFailureSnapshot)
                         && !IsOwnedWorkerProcessAlive(startupFailureSnapshot);
                     if (!isPreRecordCheck && attempt < maxAttempts && startupProcessConverged)
@@ -2455,7 +2455,7 @@ public sealed class EpgCapture
                     {
                         // USER_CHAIN_PRE_REC_OBSERVED_SNAPSHOT_INVARIANT:
                         // chain-rootも今回のworkerが実観測したsnapshotをschedulerへ返す。
-                        // 既存DB保存は互換投影用に維持するが、時間追従の正本はこの観測snapshotとする。
+                        // 既存DB保存は表示投影用に維持するが、時間追従の正本はこの観測snapshotとする。
                         imported = probe.Events.Count > 0
                             ? probe.Events.Count
                             : await ParseAndStoreAsync(group, tsFile, attempt, maxAttempts, ct, isPreRecordCheck);
@@ -2487,7 +2487,7 @@ public sealed class EpgCapture
                         completenessObservationCts.Token);
 #endif
                     // TvAIrEpgRec の終了を待つ。
-                    // v1.2.2第一段階では予定枠/実取得上限を変更せず、completenessはDeveloper観測専用。
+                    // 現行では予定枠/実取得上限を変更せず、completenessはDeveloper観測専用。
                     // basic scheduleだけの早期completeで0x58-0x5F詳細scheduleを削らないことを優先する。
                     var processTimeout = TimeSpan.FromSeconds(effectiveWait + 8 + 30);
                     var waitResult = await WaitForExitOrExternalFailureAsync(
@@ -2503,7 +2503,7 @@ public sealed class EpgCapture
                     catch (Exception ex)
                     {
                         Log("EPG_CAPTURE_COMPLETENESS_OBSERVER", $"TS{group.TsId}",
-                            $"result=OBSERVER_ERROR worker={workerName} pid={launch.ProcessId} error={ex.GetType().Name}:{SafeLogValue(ex.Message)} action=ignore_observer_error_keep_capture_contract rule=epg_capture_completeness_observer_v122");
+                            $"result=OBSERVER_ERROR worker={workerName} pid={launch.ProcessId} error={ex.GetType().Name}:{SafeLogValue(ex.Message)} action=ignore_observer_error_keep_capture_contract rule=epg_capture_completeness_observer");
                     }
 #endif
 
@@ -3825,7 +3825,7 @@ public sealed class EpgCapture
         TimeSpan safetyCeiling,
         CancellationToken ct)
     {
-        // v1.2.2 diagnosis only:
+        // Developer diagnosis only:
         // Keep the scheduler's fixed occupancy window and worker hard ceiling unchanged.
         // Observe when the existing EpgSectionStatus contract becomes complete so the later
         // production change can distinguish safe early finish from late extended EIT arrival.
@@ -3838,7 +3838,7 @@ public sealed class EpgCapture
         DateTime? firstAllObservedActualCompleteAt = null;
 
         Log("EPG_CAPTURE_COMPLETENESS_OBSERVER", $"TS{group.TsId}",
-            $"result=START worker={workerName} pid={processId} group={group.Group} hardCeilingSec={(int)safetyCeiling.TotalSeconds} targetSidCount={targetSidSet.Count} targetSids=[{string.Join(",", targetSidSet.OrderBy(x => x))}] mutation=none schedulerWindow=unchanged workerCeiling=unchanged rule=epg_capture_completeness_observer_v122");
+            $"result=START worker={workerName} pid={processId} group={group.Group} hardCeilingSec={(int)safetyCeiling.TotalSeconds} targetSidCount={targetSidSet.Count} targetSids=[{string.Join(",", targetSidSet.OrderBy(x => x))}] mutation=none schedulerWindow=unchanged workerCeiling=unchanged rule=epg_capture_completeness_observer");
 
         while (DateTime.Now < deadline)
         {
@@ -3912,11 +3912,11 @@ public sealed class EpgCapture
                 $"basicComplete={basicComplete} basicTables={basicSchedule.Length} basicIncomplete={basicIncomplete} basicCoverageIssues={basicCoverageIssues.Length} " +
                 $"extendedObserved={extendedSchedule.Length > 0} extendedTables={extendedSchedule.Length} extendedIncomplete={extendedIncomplete} allObservedActualComplete={allObservedActualComplete} " +
                 $"firstBasicCompleteSec={(firstBasicCompleteAt.HasValue ? (int)(firstBasicCompleteAt.Value - started).TotalSeconds : -1)} firstAllObservedActualCompleteSec={(firstAllObservedActualCompleteAt.HasValue ? (int)(firstAllObservedActualCompleteAt.Value - started).TotalSeconds : -1)} " +
-                $"ignoredOtherSections={epg.IgnoredOtherTransportStreamEitSectionCount} mutation=none stopRequested=false rule=epg_capture_completeness_observer_v122");
+                $"ignoredOtherSections={epg.IgnoredOtherTransportStreamEitSectionCount} mutation=none stopRequested=false rule=epg_capture_completeness_observer");
         }
 
         Log("EPG_CAPTURE_COMPLETENESS_OBSERVER", $"TS{group.TsId}",
-            $"result=END worker={workerName} pid={processId} elapsedSec={(int)(DateTime.Now - started).TotalSeconds} firstBasicCompleteSec={(firstBasicCompleteAt.HasValue ? (int)(firstBasicCompleteAt.Value - started).TotalSeconds : -1)} firstAllObservedActualCompleteSec={(firstAllObservedActualCompleteAt.HasValue ? (int)(firstAllObservedActualCompleteAt.Value - started).TotalSeconds : -1)} mutation=none rule=epg_capture_completeness_observer_v122");
+            $"result=END worker={workerName} pid={processId} elapsedSec={(int)(DateTime.Now - started).TotalSeconds} firstBasicCompleteSec={(firstBasicCompleteAt.HasValue ? (int)(firstBasicCompleteAt.Value - started).TotalSeconds : -1)} firstAllObservedActualCompleteSec={(firstAllObservedActualCompleteAt.HasValue ? (int)(firstAllObservedActualCompleteAt.Value - started).TotalSeconds : -1)} mutation=none rule=epg_capture_completeness_observer");
     }
 #endif
 
@@ -3981,7 +3981,7 @@ public sealed class EpgCapture
             $"existingDbEvents={alreadyInDb} currentActualCaptureOverlap={alsoInCurrentActualCapture} missingDbEvents={missingFromDb.Length} missingDbAndCurrentActualEvents={missingFromDbAndCurrentActual} " +
             $"networkEventCounts=[{string.Join(",", byNetwork)}] missingSample=[{string.Join(",", missingSample)}] " +
             $"identity=onid_tsid_sid_eventId serviceResolution=configured_ch2_exact mutation=none dbWrite=none projectionWrite=none schedulerWindow=unchanged workerCeiling=unchanged " +
-            $"rule=epg_other_ts_eit_observer_v122");
+            $"rule=epg_other_ts_eit_observer");
     }
 #endif
 
@@ -4134,12 +4134,12 @@ public sealed class EpgCapture
                 catch (IOException ex)
                 {
                     Log("EPG_OTHER_TS_EIT_SUPPLEMENT", $"TS{group.TsId}",
-                        $"result=SKIPPED reason=io_error error={SafeLogValue(ex.Message)} dbWrite=none staleRetire=none rule=epg_other_ts_schedule_supplement_v122");
+                        $"result=SKIPPED reason=io_error error={SafeLogValue(ex.Message)} dbWrite=none staleRetire=none rule=epg_other_ts_schedule_supplement");
                 }
                 catch (UnauthorizedAccessException ex)
                 {
                     Log("EPG_OTHER_TS_EIT_SUPPLEMENT", $"TS{group.TsId}",
-                        $"result=SKIPPED reason=access_error error={SafeLogValue(ex.Message)} dbWrite=none staleRetire=none rule=epg_other_ts_schedule_supplement_v122");
+                        $"result=SKIPPED reason=access_error error={SafeLogValue(ex.Message)} dbWrite=none staleRetire=none rule=epg_other_ts_schedule_supplement");
                 }
             }
 
@@ -4315,7 +4315,7 @@ public sealed class EpgCapture
                     $"{x.Key.NetworkId}/{x.Key.TransportStreamId}/{x.Key.ServiceId}/{x.Key.EventId}=[{string.Join(",", x.Events.Take(8).Select(e => $"{e.Start:MM-ddTHH:mm:ss}/d{e.DurationSeconds}/t0x{e.TableId:X2}"))}]"));
                 Log("EPG_EVENT_ID_TIMING_COLLISION", $"TS{group.TsId}",
                     $"result=OBSERVED phase=before_commit purpose={purpose} group={group.Group} collisionKeys={incomingEventIdTimingCollisions.Length} collisionEvents={collisionEvents} " +
-                    $"incomingIdentity=nid_tsid_sid_eventId_start_duration storagePrimaryKey=nid_tsid_sid_eventId sample=[{SafeLogValue(sample)}] mutation=none dbWrite=none rule=epg_event_identity_collision_observer_v122");
+                    $"incomingIdentity=nid_tsid_sid_eventId_start_duration storagePrimaryKey=nid_tsid_sid_eventId sample=[{SafeLogValue(sample)}] mutation=none dbWrite=none rule=epg_event_identity_collision_observer");
             }
 #endif
 
@@ -4403,7 +4403,7 @@ public sealed class EpgCapture
                         .ToArray();
                     coverageAttribution.MarkActualPresentAfterCommit(exactRetained);
                     Log("EPG_ACTUAL_COMMIT_CONTINUITY", $"TS{group.TsId}",
-                        $"result=OBSERVED purpose={purpose} group={group.Group} commitCandidates={rawEvents.Count} exactPresentAfterCommit={exactRetained.Length} exactMissingAfterCommit={Math.Max(0, rawEvents.Count - exactRetained.Length)} mutation=none observerOnly=True rule=epg_actual_commit_continuity_observer_v122");
+                        $"result=OBSERVED purpose={purpose} group={group.Group} commitCandidates={rawEvents.Count} exactPresentAfterCommit={exactRetained.Length} exactMissingAfterCommit={Math.Max(0, rawEvents.Count - exactRetained.Length)} mutation=none observerOnly=True rule=epg_actual_commit_continuity_observer");
                 }
 
                 if (incomingEventIdTimingCollisions.Length > 0)
@@ -4432,7 +4432,7 @@ public sealed class EpgCapture
                     Log("EPG_EVENT_ID_TIMING_COLLISION", $"TS{group.TsId}",
                         $"result=OBSERVED phase=after_commit purpose={purpose} group={group.Group} collisionKeys={incomingEventIdTimingCollisions.Length} distinctIncomingEvents={distinctIncoming} " +
                         $"storedRows={storedCollisionRows.Count} exactIncomingRetained={exactIncomingRetained} overwrittenOrUnrepresented={Math.Max(0, distinctIncoming - exactIncomingRetained)} " +
-                        $"storagePrimaryKey=nid_tsid_sid_eventId mutation=none observerOnly=True sample=[{SafeLogValue(sample)}] rule=epg_event_identity_collision_observer_v122");
+                        $"storagePrimaryKey=nid_tsid_sid_eventId mutation=none observerOnly=True sample=[{SafeLogValue(sample)}] rule=epg_event_identity_collision_observer");
                 }
 #endif
 
@@ -4472,12 +4472,12 @@ public sealed class EpgCapture
                     Log("EPG_OTHER_TS_EIT_SUPPLEMENT", $"TS{group.TsId}",
                         $"result=OK group={group.Group} candidates={otherSupplementCandidates.Count} existingAtCommit={otherSupplementExisting} insertedMissing={otherSupplementInserted} " +
                         $"identity=onid_tsid_sid_eventId serviceResolution=configured_ch2_exact existenceAuthority=0x60-0x67 enrichment=0x68-0x6F actualPriority=existing_row_preserved auxiliaryObservation=other_schedule_seen existenceVetoAgainstActualBasic=none staleRetire=none pfOther=ignored schedulerWindow=unchanged workerCeiling=unchanged " +
-                        $"rule=epg_other_ts_schedule_supplement_v122");
+                        $"rule=epg_other_ts_schedule_supplement");
                 }
                 else if (otherEpg is not null)
                 {
                     Log("EPG_OTHER_TS_EIT_SUPPLEMENT", $"TS{group.TsId}",
-                        $"result=OK group={group.Group} candidates=0 existingAtCommit=0 insertedMissing=0 identity=onid_tsid_sid_eventId serviceResolution=configured_ch2_exact existenceAuthority=0x60-0x67 enrichment=0x68-0x6F actualPriority=existing_row_preserved auxiliaryObservation=other_schedule_seen existenceVetoAgainstActualBasic=none staleRetire=none pfOther=ignored schedulerWindow=unchanged workerCeiling=unchanged rule=epg_other_ts_schedule_supplement_v122");
+                        $"result=OK group={group.Group} candidates=0 existingAtCommit=0 insertedMissing=0 identity=onid_tsid_sid_eventId serviceResolution=configured_ch2_exact existenceAuthority=0x60-0x67 enrichment=0x68-0x6F actualPriority=existing_row_preserved auxiliaryObservation=other_schedule_seen existenceVetoAgainstActualBasic=none staleRetire=none pfOther=ignored schedulerWindow=unchanged workerCeiling=unchanged rule=epg_other_ts_schedule_supplement");
                 }
                 try
                 {
@@ -5459,14 +5459,14 @@ public sealed class EpgCapture
             $"nearbyCurrentNone={residualNearbyCurrentNone} nearbyCurrentAmbiguous={residualNearbyCurrentAmbiguous} " +
             $"byDate=[{string.Join(',', residualByDate.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key}:{kv.Value}"))}] " +
             $"mutation=none donorRule=unchanged dbWrite=none projectionWrite=none schedulerWindow=unchanged workerCeiling=unchanged " +
-            $"sample={SafeLogValue(TrimLog(string.Join('|', residualReasonSamples), 7600))} rule=epg_body_only_residual_reason_observer_v122");
+            $"sample={SafeLogValue(TrimLog(string.Join('|', residualReasonSamples), 7600))} rule=epg_body_only_residual_reason_observer");
 
         Log("EIT_BODY_ONLY_EXISTING_DB_TITLE_DONOR_OBSERVER", $"TS{group.TsId}",
             $"result=OBSERVED purpose={purpose} group={group.Group} tsid={group.TsId} targetSids=[{string.Join(",", targetServiceIds)}] " +
             $"candidateScope=no_current_or_previous_exact_title exactIdentityFound={existingDbExactIdentityFound} exactTimingFound={existingDbExactTimingFound} " +
             $"decodedTitlePresent={existingDbDecodedTitlePresent} rawShortPresent={existingDbRawShortPresent} donorEligible={existingDbDonorEligible} timingMismatch={existingDbDonorTimingMismatch} " +
             $"identity=nid_tsid_sid_eventId timing=start_duration donorRequirement=exact_identity_and_exact_timing_and_decodable_raw_short mutation=none dbWrite=none projectionWrite=none schedulerWindow=unchanged workerCeiling=unchanged " +
-            $"sample={SafeLogValue(TrimLog(string.Join('|', existingDbDonorSamples), 7600))} rule=epg_existing_db_exact_short_donor_observer_v122");
+            $"sample={SafeLogValue(TrimLog(string.Join('|', existingDbDonorSamples), 7600))} rule=epg_existing_db_exact_short_donor_observer");
 #endif
 
         var ineligible = bodyRows.Count - eligible;
@@ -5626,7 +5626,7 @@ public sealed class EpgCapture
             $"previousVersionAvailable={stats.BodyOnlyPreviousVersionAvailable} previousBasicExactEventFound={stats.BodyOnlyPreviousBasicExactEventFound} " +
             $"previousBasicShortPresent={stats.BodyOnlyPreviousBasicShortPresent} previousBasicDonorEligible={stats.BodyOnlyPreviousBasicDonorEligible} previousBasicDonorAmbiguous={stats.BodyOnlyPreviousBasicDonorAmbiguous} " +
             $"previousVersionDonorUsed={stats.PreviousVersionDonorUsed} interpretation=previous_version_exact_short_descriptor_donor_enabled_only_when_current_strict_and_nearby_title_are_unavailable_and_exact_nid_tsid_sid_eid_start_duration_expected_basic_table_has_one_short_descriptor;paired_section_missing_both_means_section_coverage_gap_present_event_absent_means_basic_extended_content_asymmetry_event_elsewhere_means_section_relocation_or_segment_skew " +
-            $"dbWrite=canonical_merge_only schedulerWindow=unchanged workerCeiling=unchanged sample={SafeLogValue(stats.CacheGapSample)} rule=epg_body_only_basic_section_cache_attribution_v122");
+            $"dbWrite=canonical_merge_only schedulerWindow=unchanged workerCeiling=unchanged sample={SafeLogValue(stats.CacheGapSample)} rule=epg_body_only_basic_section_cache_attribution");
 #endif
     }
 
@@ -6104,7 +6104,7 @@ public sealed class EpgCapture
 
         // deviceGateAlreadyHeld=true は、呼出元startup ownerが同じGR/BSCS device gateの
         // using scope内にいることを明示する契約。awaitを跨ぐAsyncLocalのre-entry推測には依存せず、
-        // 同じgateを自己再取得しない。gate外の呼出元は従来どおり物理device gateを取得してからkillする。
+        // 同じgateを自己再取得しない。gate外の呼出元は物理device gateを取得してからkillする。
         if (deviceGateAlreadyHeld)
             return TryKillOwnedWorkerProcessCore(snapshot);
 
@@ -6374,7 +6374,7 @@ internal sealed class ActiveEpgWorkerTask
             }
             // EPG_WORKER_ATTEMPT_OWNERSHIP_INVARIANT:
             // retryは同一logical worker task内でも別attemptである。lease/process/external signalを
-            // attempt境界で必ず切り替え、旧attempt monitorが新attempt資源へ触れないようにする。
+            // attempt境界でmonitorを切り替え、別attemptの資源へ触れないようにする。
             attemptGeneration++;
             generation = attemptGeneration;
             tunerLease = lease;

@@ -1,7 +1,7 @@
 ﻿namespace TvAIr.Core;
 
 /// <summary>
-/// TVTest.ini の RecordFileName を、DirectRecorder 側の録画ファイル名生成に使うため起動時基準で読む。
+/// TVTest.ini の RecordFileName を、RecordingWorker 側の録画ファイル名生成に使うため起動時基準で読む。
 ///
 /// - TVTest.ini を書き換えない。
 /// - RecordFolder と同じく、TvAIr 側で勝手な保存先・命名規則を既定化しない。

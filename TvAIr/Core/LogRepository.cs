@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Core;
+namespace TvAIr.Core;
 
 /// <summary>
 /// Developer Diagnostics のインメモリ循環ログ正本。
@@ -15,7 +15,7 @@ public sealed class LogRepository
     private readonly object gate = new();
     private readonly Queue<LogEntry> buffer;
     private readonly Queue<LogEntry> auditBuffer;
-    private readonly Dictionary<string, DateTime> recentFingerprints = new();
+    private readonly Dictionary<FingerprintKey, FingerprintState> recentFingerprints = new();
     private readonly int maxSize;
     private readonly int auditMaxSize;
     private readonly bool verboseLogging;
@@ -73,13 +73,13 @@ public sealed class LogRepository
             {
                 var fp = BuildFingerprint(entry);
                 var suppressWindow = GetDuplicateSuppressWindow(entry);
-                if (recentFingerprints.TryGetValue(fp, out var last) && now - last < suppressWindow)
+                if (recentFingerprints.TryGetValue(fp, out var state) && now - state.LastSeen < suppressWindow)
                     return;
-                recentFingerprints[fp] = now;
+                recentFingerprints[fp] = new FingerprintState(now, suppressWindow);
 
                 if (recentFingerprints.Count > maxSize * 2)
                 {
-                    foreach (var key in recentFingerprints.Where(kv => now - kv.Value > GetDuplicateSuppressWindowForFingerprintKey(kv.Key)).Select(kv => kv.Key).ToList())
+                    foreach (var key in recentFingerprints.Where(kv => now - kv.Value.LastSeen > kv.Value.SuppressWindow).Select(kv => kv.Key).ToList())
                         recentFingerprints.Remove(key);
                 }
             }
@@ -200,17 +200,45 @@ public sealed class LogRepository
         return DuplicateSuppressWindow;
     }
 
-    private static TimeSpan GetDuplicateSuppressWindowForFingerprintKey(string key)
-    {
-        if (key.StartsWith("TUNER_CONFLICT", StringComparison.OrdinalIgnoreCase)) return TimeSpan.FromHours(1);
-        if (key.StartsWith("TaskSchedulerWakeWakeタスク実体差異検出", StringComparison.OrdinalIgnoreCase)) return TimeSpan.FromMinutes(30);
-        return DuplicateSuppressWindow;
-    }
+    private readonly record struct FingerprintKey(ulong Hash1, ulong Hash2);
+    private readonly record struct FingerprintState(DateTime LastSeen, TimeSpan SuppressWindow);
 
-    private static string BuildFingerprint(LogEntry entry)
+    private static FingerprintKey BuildFingerprint(LogEntry entry)
     {
-        // 同じ内容の繰り返しだけを抑える。時刻は含めない。
-        return $"{entry.Event}\u001f{entry.Title}\u001f{entry.Message}";
+        // MEMORY_SSOT: the ring buffer already owns the diagnostic strings.  The dedupe index must
+        // never retain a second copy of Event/Title/Message.  Hash the UTF-16 content in-place into
+        // a fixed 128-bit key; lengths/separators keep field boundaries unambiguous.
+        const ulong offset1 = 14695981039346656037UL;
+        const ulong offset2 = 7809847782465536322UL;
+        var hash1 = offset1;
+        var hash2 = offset2;
+
+        static void Mix(ref ulong h1, ref ulong h2, string? value)
+        {
+            const ulong prime1 = 1099511628211UL;
+            const ulong prime2 = 14029467366897019727UL;
+            value ??= string.Empty;
+            foreach (var c in value)
+            {
+                h1 ^= c;
+                h1 *= prime1;
+                h2 ^= (ulong)c + 0x9E3779B97F4A7C15UL;
+                h2 *= prime2;
+            }
+            h1 ^= 0x1FUL;
+            h1 *= prime1;
+            h2 ^= 0xA5UL;
+            h2 *= prime2;
+            h1 ^= (ulong)value.Length;
+            h1 *= prime1;
+            h2 ^= (ulong)value.Length << 1;
+            h2 *= prime2;
+        }
+
+        Mix(ref hash1, ref hash2, entry.Event);
+        Mix(ref hash1, ref hash2, entry.Title);
+        Mix(ref hash1, ref hash2, entry.Message);
+        return new FingerprintKey(hash1, hash2);
     }
 
     private static bool IsAuditEvidence(LogEntry entry)

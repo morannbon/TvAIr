@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using System.Text;
 using System.Security.Cryptography;
 using Microsoft.Data.Sqlite;
@@ -110,7 +110,7 @@ public sealed class ReservationStore
     private readonly Database db;
     private readonly LogRepository log;
     private readonly ChainRuntimeSnapshotRegistry chainSessionRegistry;
-    private readonly ChannelFileLoader channelLoader;
+    private readonly ChannelServiceAccessPolicy serviceAccess;
     private readonly ReservationMutationJournal mutationJournal;
     private readonly NormalEpgWaveOccupation normalEpgWaveOccupation;
 #if TVAIR_DEVELOPER_DIAGNOSTICS
@@ -157,12 +157,12 @@ public sealed class ReservationStore
     /// <summary>時間追従の変化検出閾値（秒）。この秒数以上ずれていれば更新対象とみなす。</summary>
     private const int TimeFollowThresholdSeconds = 30;
 
-    public ReservationStore(Database db, LogRepository log, ChainRuntimeSnapshotRegistry chainSessionRegistry, ChannelFileLoader channelLoader, ReservationMutationJournal mutationJournal, NormalEpgWaveOccupation normalEpgWaveOccupation)
+    public ReservationStore(Database db, LogRepository log, ChainRuntimeSnapshotRegistry chainSessionRegistry, ChannelServiceAccessPolicy serviceAccess, ReservationMutationJournal mutationJournal, NormalEpgWaveOccupation normalEpgWaveOccupation)
     {
         this.db = db;
         this.log = log;
         this.chainSessionRegistry = chainSessionRegistry;
-        this.channelLoader = channelLoader;
+        this.serviceAccess = serviceAccess;
         this.mutationJournal = mutationJournal;
         this.normalEpgWaveOccupation = normalEpgWaveOccupation;
     }
@@ -776,7 +776,7 @@ public sealed class ReservationStore
     /// CHAIN_FEATURE_DISABLE_DETACH_SINGLE_SOURCE_INVARIANT:
     /// チェーン機能の有効→無効遷移では、まだ実行へ入っていないScheduledの保存トポロジーだけを
     /// 同一Transactionで通常予約へdetachする。予約そのもの、ActualTunerName、録画実績は変更しない。
-    /// TunerNameは旧chain FinalConflictPlanの派生値なので未確定へ戻し、後段の共通割当で独立予約として再解決する。
+    /// TunerNameはチェーン割当の派生値なので未確定へ戻し、後段の共通割当で独立予約として再解決する。
     /// Starting/Recording/Stoppingはactive physical captureを設定変更だけで切断しないため対象外。
     /// </summary>
     public UserChainFeatureDisableDetachResult DetachScheduledUserChainsForFeatureDisable(
@@ -4962,12 +4962,33 @@ WHERE source <> 'Epg'
 
         // 評価対象：scheduledのユーザー予約のみ
         var allScheduled = GetByStatus(ReservationStatus.Scheduled).ToList();
-        var scheduled    = allScheduled
+        // SERVICE_ACCESS_ALLOCATION_SINGLE_SOURCE:
+        // .ch2/ChSet の現在状態は予約ユーザー意図(IsEnabled)やTuner競合(IsConflicted)とは別責務。
+        // 永続予約は削除/自動無効化せず保持し、共通サービス操作可否snapshotでOperationalな予約だけを
+        // 物理Tuner割当へ入れる。再び有効になれば次の共通Allocationで自然復帰する。
+        var serviceAccessSnapshot = serviceAccess.Capture();
+        var scheduledCandidates = allScheduled
             .Where(r => r.Status == ReservationStatus.Scheduled)
             .Where(r => r.Source != ReservationSource.Epg)
             .Where(r => r.IsEnabled)
             .Where(r => !IsManualStoppedOccurrenceSuppressed(r))
             .ToList();
+        var serviceUnavailableScheduled = scheduledCandidates
+            .Where(r => !serviceAccessSnapshot.IsOperational(r))
+            .ToList();
+        var scheduled = scheduledCandidates
+            .Where(serviceAccessSnapshot.IsOperational)
+            .ToList();
+
+        if (serviceUnavailableScheduled.Count > 0)
+        {
+            var byReason = serviceUnavailableScheduled
+                .GroupBy(r => serviceAccessSnapshot.GetRejectReason(r))
+                .OrderBy(g => g.Key, StringComparer.Ordinal)
+                .Select(g => $"{g.Key}:{g.Count()}");
+            log.Add("RESERVATION_SERVICE_ACCESS", "Allocation",
+                $"result=FILTERED totalCandidates={scheduledCandidates.Count} operational={scheduled.Count} unavailable={serviceUnavailableScheduled.Count} reasons=[{string.Join(',', byReason)}] action=retain_reservation_clear_runtime_allocation userIntentPreserved=True autoDisable=False autoDelete=False restore=next_common_allocation_when_operational rule=reservation_service_access_single_source");
+        }
 
         // release_contract: 空欄ProgramRuleと同一局・同一時刻の正規イベント予約が存在する場合のみ、空欄側を自動削除する。
         // UI説明は増やさない。削除判定と実処理は共通割り当てルート内に閉じる。
@@ -5325,7 +5346,6 @@ WHERE source <> 'Epg'
             // PHYSICAL_OCCUPANCY_IDENTITY_SINGLE_SOURCE:
             // TunerPool上の実録画leaseとFinalConflictPlan上の将来Unitを同じID空間で比較する。
             // continuous chainだけがroot単位で1本の物理captureを共有し、通常予約は予約単位で独立占有する。
-            // 旧30秒handoff時刻・別worker・境界停止を物理占有判定へ再導入してはならない。
             if (continuousChainPlanning
                 && (reservation.IsUserChain || chainSuccessors.ContainsKey(reservation.Id) || chainPredecessors.ContainsKey(reservation.Id)))
             {
@@ -6479,7 +6499,7 @@ WHERE source <> 'Epg'
         //    各番組を独立TSファイルとして確定し、論理Reservation ownerだけを後続へ移す。
         // 6. 取消・無効化・時間短縮・rebase後は、現在有効なsegment集合からphysical capture終端を再導出し、
         //    session / lease / worker deadlineを延長・短縮の両方向へ収束させる。
-        // この契約を、作成時Tuner永久固定、チェーン絶対優先、旧境界worker切替、別Tuner救済、固定段数上限、
+        // 作成時Tuner永久固定、チェーン絶対優先、別Tuner救済、固定段数上限は設けない。
         // マージン救済、部分録画救済、イベント単独復活へ改変してはならない。
         ApplyFinalPlanWithChainPropagation();
 
@@ -7475,7 +7495,7 @@ WHERE source <> 'Epg'
         using var cmd = con.CreateCommand();
         cmd.CommandText = """
             SELECT id, name, pattern, exclude_pattern, use_regex,
-                   search_fields, search_title, search_outline, search_detail, search_cast,
+                   search_title, search_outline, search_detail, search_cast,
                    use_all_channels, target_services, target_genres, target_days, use_time_range, start_time, end_time, sort_order,
                    expires_on, record_current_service_only, record_subtitles, enabled, created_at, updated_at
             FROM keyword_rules ORDER BY sort_order, id;
@@ -7490,12 +7510,12 @@ WHERE source <> 'Epg'
         using var cmd = con.CreateCommand();
         cmd.CommandText = """
             INSERT INTO keyword_rules
-              (name, pattern, exclude_pattern, use_regex, search_fields,
+              (name, pattern, exclude_pattern, use_regex,
                search_title, search_outline, search_detail, search_cast,
                use_all_channels, target_services, target_genres, target_days, use_time_range, start_time, end_time, sort_order,
                expires_on, record_current_service_only, record_subtitles, enabled, created_at, updated_at)
             VALUES
-              ($name, $pat, $exc, $regex, $fields,
+              ($name, $pat, $exc, $regex,
                $stitle, $soutline, $sdetail, $scast,
                $useAllChannels, $svc, $genres, $days, $useTime, $startTime, $endTime,
                COALESCE((SELECT MAX(sort_order) + 1 FROM keyword_rules), 1),
@@ -7514,7 +7534,7 @@ WHERE source <> 'Epg'
         cmd.CommandText = $"""
             UPDATE keyword_rules SET
               name=$name, pattern=$pat, exclude_pattern=$exc, use_regex=$regex,
-              search_fields=$fields, search_title=$stitle, search_outline=$soutline,
+              search_title=$stitle, search_outline=$soutline,
               search_detail=$sdetail, search_cast=$scast,
               use_all_channels=$useAllChannels,
               target_services=$svc, target_genres=$genres, target_days=$days,
@@ -7832,12 +7852,12 @@ WHERE source <> 'Epg'
             cmd.Transaction = tx;
             cmd.CommandText = """
                 INSERT INTO keyword_rules
-                  (id, name, pattern, exclude_pattern, use_regex, search_fields,
+                  (id, name, pattern, exclude_pattern, use_regex,
                    search_title, search_outline, search_detail, search_cast,
                    use_all_channels, target_services, target_genres, target_days, use_time_range, start_time, end_time, sort_order,
                    expires_on, record_current_service_only, record_subtitles, enabled, created_at, updated_at)
                 VALUES
-                  ($id, $name, $pat, $exc, $regex, $fields,
+                  ($id, $name, $pat, $exc, $regex,
                    $stitle, $soutline, $sdetail, $scast,
                    $useAllChannels, $svc, $genres, $days, $useTime, $startTime, $endTime, $sortOrder,
                    $exp, $recordCurrentServiceOnly, $recordSubtitles, $en, $createdAt, $updatedAt);
@@ -7847,7 +7867,6 @@ WHERE source <> 'Epg'
             cmd.Parameters.AddWithValue("$pat", r.Pattern ?? "");
             cmd.Parameters.AddWithValue("$exc", r.ExcludePattern ?? "");
             cmd.Parameters.AddWithValue("$regex", r.UseRegex ? 1 : 0);
-            cmd.Parameters.AddWithValue("$fields", r.SearchFields ?? "title");
             cmd.Parameters.AddWithValue("$stitle", r.SearchTitle ? 1 : 0);
             cmd.Parameters.AddWithValue("$soutline", r.SearchOutline ? 1 : 0);
             cmd.Parameters.AddWithValue("$sdetail", r.SearchDetail ? 1 : 0);
@@ -8202,25 +8221,24 @@ WHERE source <> 'Epg'
                 Pattern        = r.IsDBNull(2) ? "" : r.GetString(2),
                 ExcludePattern = r.IsDBNull(3) ? "" : r.GetString(3),
                 UseRegex       = r.IsDBNull(4) || r.GetInt32(4) != 0,
-                SearchFields   = r.IsDBNull(5) ? "title" : r.GetString(5),
-                SearchTitle    = r.IsDBNull(6) || r.GetInt32(6) != 0,
-                SearchOutline  = r.IsDBNull(7) || r.GetInt32(7) != 0,
-                SearchDetail   = r.IsDBNull(8) || r.GetInt32(8) != 0,
-                SearchCast     = r.IsDBNull(9) || r.GetInt32(9) != 0,
-                UseAllChannels = r.IsDBNull(10) || r.GetInt32(10) != 0,
-                TargetServices = r.IsDBNull(11) ? "" : r.GetString(11),
-                TargetGenres   = r.IsDBNull(12) ? "" : r.GetString(12),
-                TargetDays     = r.IsDBNull(13) ? "" : r.GetString(13),
-                UseTimeRange   = !r.IsDBNull(14) && r.GetInt32(14) != 0,
-                StartTime      = r.IsDBNull(15) ? "00:00" : r.GetString(15),
-                EndTime        = r.IsDBNull(16) ? "23:59" : r.GetString(16),
-                SortOrder      = r.IsDBNull(17) ? 0 : r.GetInt32(17),
-                ExpiresOn      = r.IsDBNull(18) ? "" : r.GetString(18),
-                RecordCurrentServiceOnly = r.IsDBNull(19) || r.GetInt32(19) != 0,
-                RecordSubtitles = r.IsDBNull(20) || r.GetInt32(20) != 0,
-                Enabled        = r.GetInt32(21) != 0,
-                CreatedAt      = r.IsDBNull(22) ? DateTime.MinValue : DateTime.Parse(r.GetString(22)),
-                UpdatedAt      = r.IsDBNull(23) ? DateTime.MinValue : DateTime.Parse(r.GetString(23)),
+                SearchTitle    = r.IsDBNull(5) || r.GetInt32(5) != 0,
+                SearchOutline  = r.IsDBNull(6) || r.GetInt32(6) != 0,
+                SearchDetail   = r.IsDBNull(7) || r.GetInt32(7) != 0,
+                SearchCast     = r.IsDBNull(8) || r.GetInt32(8) != 0,
+                UseAllChannels = r.IsDBNull(9) || r.GetInt32(9) != 0,
+                TargetServices = r.IsDBNull(10) ? "" : r.GetString(10),
+                TargetGenres   = r.IsDBNull(11) ? "" : r.GetString(11),
+                TargetDays     = r.IsDBNull(12) ? "" : r.GetString(12),
+                UseTimeRange   = !r.IsDBNull(13) && r.GetInt32(13) != 0,
+                StartTime      = r.IsDBNull(14) ? "00:00" : r.GetString(14),
+                EndTime        = r.IsDBNull(15) ? "23:59" : r.GetString(15),
+                SortOrder      = r.IsDBNull(16) ? 0 : r.GetInt32(16),
+                ExpiresOn      = r.IsDBNull(17) ? "" : r.GetString(17),
+                RecordCurrentServiceOnly = r.IsDBNull(18) || r.GetInt32(18) != 0,
+                RecordSubtitles = r.IsDBNull(19) || r.GetInt32(19) != 0,
+                Enabled        = r.GetInt32(20) != 0,
+                CreatedAt      = r.IsDBNull(21) ? DateTime.MinValue : DateTime.Parse(r.GetString(21)),
+                UpdatedAt      = r.IsDBNull(22) ? DateTime.MinValue : DateTime.Parse(r.GetString(22)),
             });
         }
         return list;
@@ -8261,9 +8279,8 @@ WHERE source <> 'Epg'
         {
             if (serviceResolutionUnavailable)
             {
-                // Legacy/incomplete service identity that cannot be resolved unambiguously is not
-                // authority to delete an already-scheduled Program reservation. Preserve current
-                // rows and wait for channel metadata or an explicit user edit to resolve identity.
+                // 解決不能なサービス識別子だけを根拠に、既存の未開始Program予約は削除しない。
+                // チャンネル情報またはユーザー編集で識別子が確定するまで現在行を保持する。
                 log.Add("RESERVE_ENTRY", "ProgramSync",
                     $"result=PRESERVED ruleId={rule.Id} name=[{rule.Name}] reason=service_identity_unresolved nid={rule.NetworkId} tsid={rule.TransportStreamId} sid={rule.ServiceId} action=no_new_projection_no_delete rule=service_identity_contract");
                 return;
@@ -8531,7 +8548,7 @@ WHERE source <> 'Epg'
     {
         try
         {
-            var targets = channelLoader.Load().Targets;
+            var targets = serviceAccess.Capture().ActiveTargets;
             ChannelTarget? target = null;
 
             if (rule.NetworkId > 0 && rule.TransportStreamId > 0 && rule.ServiceId > 0)
@@ -8541,23 +8558,6 @@ WHERE source <> 'Epg'
                     rule.NetworkId,
                     rule.TransportStreamId,
                     rule.ServiceId);
-            }
-
-            // Legacy ProgramRule compatibility only: older rows may carry SID without a complete triplet.
-            // New/current rules use exact NID/TSID/SID. Promote a legacy SID only when current metadata resolves it unambiguously.
-            if (target is null && rule.ServiceId > 0)
-            {
-                // Legacy compatibility may use whichever identity components actually exist in the row,
-                // but it must still resolve to exactly one current ChannelTarget. Never pick the first
-                // TSID/SID match when NID is absent or contradictory.
-                var legacyMatches = targets
-                    .Where(t => t.ServiceId == rule.ServiceId)
-                    .Where(t => rule.NetworkId == 0 || t.OriginalNetworkId == rule.NetworkId)
-                    .Where(t => rule.TransportStreamId == 0 || t.TransportStreamId == rule.TransportStreamId)
-                    .Take(2)
-                    .ToList();
-                if (legacyMatches.Count == 1)
-                    target = legacyMatches[0];
             }
 
             if (target is not null)
@@ -8709,7 +8709,6 @@ WHERE source <> 'Epg'
         cmd.Parameters.AddWithValue("$pat",       r.Pattern ?? "");
         cmd.Parameters.AddWithValue("$exc",       r.ExcludePattern ?? "");
         cmd.Parameters.AddWithValue("$regex",     r.UseRegex ? 1 : 0);
-        cmd.Parameters.AddWithValue("$fields",    r.SearchFields ?? "title");
         cmd.Parameters.AddWithValue("$stitle",    r.SearchTitle ? 1 : 0);
         cmd.Parameters.AddWithValue("$soutline",  r.SearchOutline ? 1 : 0);
         cmd.Parameters.AddWithValue("$sdetail",   r.SearchDetail ? 1 : 0);

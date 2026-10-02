@@ -1,4 +1,3 @@
-﻿using Microsoft.Win32;
 using System.Runtime.InteropServices;
 
 namespace TvAIr.Core;
@@ -10,14 +9,11 @@ namespace TvAIr.Core;
 /// - INI StartupEnabled が正本。
 /// - ON では現在ユーザーの対話ログオン時に TvAIr.exe を通常起動する TvAIr_AutoStart タスクを作成/現行化する。
 /// - OFF では TvAIr_AutoStart タスクを削除する。
-/// - 旧 HKCU Run 登録は移行残骸として削除し、二重起動経路を残さない。
 /// - Wake タスク、予約、EPG、単一インスタンス制御の責務は持たない。
 /// </summary>
 public sealed class WindowsAutoStartService
 {
     private const string TaskName = "TvAIr_AutoStart";
-    private const string LegacyRunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    private const string LegacyRunValueName = "TvAIr";
 
     // Task Scheduler 2.0 constants (taskschd.h)
     private const int TaskTriggerLogon = 9;
@@ -38,21 +34,10 @@ public sealed class WindowsAutoStartService
         try
         {
             if (enabled)
-            {
-                // MIGRATION_ORDER_INVARIANT:
-                // 旧Run登録を先に消すと、新しいTask Scheduler登録が失敗した瞬間に
-                // 次回ログオンの自動起動経路が0本になる。ON移行では必ず新経路を先に確立し、
-                // 成功後だけ旧Run残骸を除去する。
-                if (!RegisterOrRefreshTask())
-                    return false;
-                RemoveLegacyRunRegistration();
-                return true;
-            }
+                return RegisterOrRefreshTask();
 
-            // OFFは両方の自動起動経路を閉じる。Taskが既に無くても成功扱い。
-            var deleted = DeleteTask();
-            RemoveLegacyRunRegistration();
-            return deleted;
+            // Taskが既に無くても成功扱い。
+            return DeleteTask();
         }
         catch (Exception ex)
         {
@@ -170,24 +155,6 @@ public sealed class WindowsAutoStartService
             ?? throw new InvalidOperationException("Windows Task Scheduler 2.0 APIを利用できません。");
         return Activator.CreateInstance(type)
             ?? throw new InvalidOperationException("Windows Task Schedulerサービスへ接続できません。");
-    }
-
-    private void RemoveLegacyRunRegistration()
-    {
-        try
-        {
-            using var key = Registry.CurrentUser.OpenSubKey(LegacyRunKeyPath, writable: true);
-            if (key?.GetValue(LegacyRunValueName) is null)
-                return;
-
-            key.DeleteValue(LegacyRunValueName, throwOnMissingValue: false);
-            _log.Add("Startup", "Migration",
-                "result=LEGACY_RUN_REMOVED source=HKCU_Run action=remove_duplicate_autostart_path rule=windows_autostart_standard_logon_task_contract");
-        }
-        catch (Exception ex)
-        {
-            throw new InvalidOperationException($"旧Run登録の削除に失敗しました: {ex.Message}", ex);
-        }
     }
 
     private static bool IsTaskNotFound(COMException ex)

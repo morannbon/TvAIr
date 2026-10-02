@@ -1,4 +1,4 @@
-﻿#if TVAIR_DEVELOPER_DIAGNOSTICS
+#if TVAIR_DEVELOPER_DIAGNOSTICS
 using TvAIr.Core;
 using TvAIr.Epg.Projection;
 
@@ -82,11 +82,21 @@ public sealed class EpgCoverageAttributionDiagnosticStore
     }
 
     private sealed record ServiceCoverage(bool Complete, string Detail);
+    private readonly record struct EventIdentityKey(ushort NetworkId, ushort TransportStreamId, ushort ServiceId, ushort EventId, long StartTicks, int DurationSeconds)
+    {
+        public DateTime Start => new(StartTicks);
+        public DateTime End => Start.AddSeconds(Math.Max(0, DurationSeconds));
+        public override string ToString() => $"{NetworkId}:{TransportStreamId}:{ServiceId}:{EventId}:{StartTicks}:{DurationSeconds}";
+    }
+    private readonly record struct ServiceIdentityKey(ushort NetworkId, ushort TransportStreamId, ushort ServiceId)
+    {
+        public override string ToString() => $"{NetworkId}:{TransportStreamId}:{ServiceId}";
+    }
 
     private readonly object gate = new();
-    private readonly Dictionary<string, CoverageFlags> flagsByIdentity = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, ServiceObservation> serviceObservations = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, ServiceCoverage> serviceCoverage = new(StringComparer.Ordinal);
+    private readonly Dictionary<EventIdentityKey, CoverageFlags> flagsByIdentity = new();
+    private readonly Dictionary<ServiceIdentityKey, ServiceObservation> serviceObservations = new();
+    private readonly Dictionary<ServiceIdentityKey, ServiceCoverage> serviceCoverage = new();
     private string runId = "none";
     private const int MaxIdentities = 100_000;
 
@@ -192,29 +202,23 @@ public sealed class EpgCoverageAttributionDiagnosticStore
             var dayStart = date.Date;
             var from = evaluationFrom > dayStart ? evaluationFrom : dayStart;
             var to = dayStart.AddDays(1);
-            var authoritativeList = new List<(string Key, DateTime Start, DateTime End)>();
-            foreach (var pair in flagsByIdentity)
-            {
-                if (!pair.Value.HasFlag(CoverageFlags.ActualBasicAuthority))
-                    continue;
-                var parsed = ParseIdentity(pair.Key);
-                if (!parsed.HasValue || parsed.Value.End <= from || parsed.Value.Start >= to)
-                    continue;
-                authoritativeList.Add(parsed.Value);
-            }
-            var authoritative = authoritativeList.Distinct().ToArray();
+            var authoritativeKeys = flagsByIdentity
+                .Where(x => x.Value.HasFlag(CoverageFlags.ActualBasicAuthority)
+                    && x.Key.End > from
+                    && x.Key.Start < to)
+                .Select(x => x.Key)
+                .Distinct()
+                .ToArray();
 
-            var dbSet = dbEvents.Select(EventIdentity).ToHashSet(StringComparer.Ordinal);
+            var dbSet = dbEvents.Select(EventIdentity).ToHashSet();
             var projectionSet = projectedEvents
                 .Where(x => x.DbEventExists)
                 .Select(x => Identity(x.NetworkId, x.TransportStreamId, x.ServiceId, x.EventId, x.Start, x.DurationSeconds))
-                .ToHashSet(StringComparer.Ordinal);
+                .ToHashSet();
             var projectionByIdentity = projectedEvents
                 .Where(x => x.DbEventExists)
-                .GroupBy(x => Identity(x.NetworkId, x.TransportStreamId, x.ServiceId, x.EventId, x.Start, x.DurationSeconds), StringComparer.Ordinal)
-                .ToDictionary(x => x.Key, x => x.First(), StringComparer.Ordinal);
-
-            var authoritativeKeys = authoritative.Select(x => x.Key).ToArray();
+                .GroupBy(x => Identity(x.NetworkId, x.TransportStreamId, x.ServiceId, x.EventId, x.Start, x.DurationSeconds))
+                .ToDictionary(x => x.Key, x => x.First());
             var dbMissing = authoritativeKeys.Where(x => !dbSet.Contains(x)).ToArray();
             var projectionMissing = authoritativeKeys.Where(x => !projectionSet.Contains(x)).ToArray();
             var blankTitles = authoritativeKeys
@@ -223,7 +227,7 @@ public sealed class EpgCoverageAttributionDiagnosticStore
             var defectIdentities = dbMissing
                 .Concat(projectionMissing)
                 .Concat(blankTitles)
-                .Distinct(StringComparer.Ordinal)
+                .Distinct()
                 .ToArray();
             var incomplete = serviceCoverage.Where(x => !x.Value.Complete).ToArray();
             var result = serviceCoverage.Count <= 0 || authoritativeKeys.Length <= 0
@@ -247,9 +251,9 @@ public sealed class EpgCoverageAttributionDiagnosticStore
                 blankTitles.Length,
                 defectIdentities.Length,
                 Sample(incomplete.Select(x => $"{x.Key}:{x.Value.Detail}")),
-                Sample(dbMissing),
-                Sample(projectionMissing),
-                Sample(blankTitles));
+                Sample(dbMissing.Select(x => x.ToString())),
+                Sample(projectionMissing.Select(x => x.ToString())),
+                Sample(blankTitles.Select(x => x.ToString())));
         }
     }
 
@@ -333,16 +337,16 @@ public sealed class EpgCoverageAttributionDiagnosticStore
         return string.Join("/", ids);
     }
 
-    private static string ServiceIdentity(ushort nid, ushort tsid, ushort sid)
-        => $"{nid}:{tsid}:{sid}";
+    private static ServiceIdentityKey ServiceIdentity(ushort nid, ushort tsid, ushort sid)
+        => new(nid, tsid, sid);
 
-    private void Add(IEnumerable<string> identities, CoverageFlags flags)
+    private void Add(IEnumerable<EventIdentityKey> identities, CoverageFlags flags)
     {
         foreach (var identity in identities)
             AddOne(identity, flags);
     }
 
-    private void AddOne(string identity, CoverageFlags flags)
+    private void AddOne(EventIdentityKey identity, CoverageFlags flags)
     {
         lock (gate)
         {
@@ -353,29 +357,11 @@ public sealed class EpgCoverageAttributionDiagnosticStore
         }
     }
 
-    private static string EventIdentity(EpgEvent e)
+    private static EventIdentityKey EventIdentity(EpgEvent e)
         => Identity(e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId, e.Start, e.DurationSeconds);
 
-    internal static string Identity(ushort nid, ushort tsid, ushort sid, ushort eventId, DateTime start, int durationSeconds)
-        => $"{nid}:{tsid}:{sid}:{eventId}:{start.Ticks}:{durationSeconds}";
-
-    private static (string Key, DateTime Start, DateTime End)? ParseIdentity(string value)
-    {
-        var parts = value.Split(':');
-        if (parts.Length != 6
-            || !long.TryParse(parts[4], out var ticks)
-            || !int.TryParse(parts[5], out var durationSeconds))
-            return null;
-        try
-        {
-            var start = new DateTime(ticks);
-            return (value, start, start.AddSeconds(Math.Max(0, durationSeconds)));
-        }
-        catch (ArgumentOutOfRangeException)
-        {
-            return null;
-        }
-    }
+    private static EventIdentityKey Identity(ushort nid, ushort tsid, ushort sid, ushort eventId, DateTime start, int durationSeconds)
+        => new(nid, tsid, sid, eventId, start.Ticks, durationSeconds);
 
     private static string Sample(IEnumerable<string> values)
         => string.Join(" | ", values.Take(20));

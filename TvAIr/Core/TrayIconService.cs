@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Hosting;
 using System.Diagnostics;
 using System.Drawing;
 using System.Runtime.InteropServices;
@@ -49,7 +49,6 @@ public sealed class TrayIconService : IDisposable
 #if TVAIR_DEVELOPER_DIAGNOSTICS
     private int _trayTimerTickCount;
     private long _lastTrayHeartbeatTick;
-    private long _lastProcessAllocatedBytes;
     private long _lastManagedMouseUpTick;
     private long _lastNativeTrayRightTick;
     private IntPtr _notifyIconSinkHandle;
@@ -883,7 +882,6 @@ public sealed class TrayIconService : IDisposable
         }
         QueueTrayDiagnostic("TRAY_STA_HEARTBEAT", "ALIVE",
             $"result=OK thread={Environment.CurrentManagedThreadId} timerTicks={_trayTimerTickCount} timerEnabled={_timer?.Enabled.ToString() ?? "-"} iconExists={(_icon is not null)} iconVisible={_icon?.Visible.ToString() ?? "-"} menuActive={IsTrayMenuActive()} activePopupSequence={activePopupSequence} pendingPopupSequence={pendingPopupSequence} popupOwner={FormatHwnd(popupOwner)} popupCancelRequested={popupCancelRequested} popupOwnership=dedicated_sta stateRefreshInProgress={Volatile.Read(ref _stateRefreshInProgress)} lastNativeRightAgoMs={(nativeRight == 0 ? -1 : now - nativeRight)} lastManagedMouseUpAgoMs={(managed == 0 ? -1 : now - managed)} nativeSink={FormatHwnd(sink)} nativeSinkAlive={sinkAlive} nativeSinkResolution={_notifyIconSinkResolution} foreground={focus.ToLogFields()} rule=tray_sta_message_pump_contract");
-        EmitProcessMemoryDiagnostic();
     #endif
     }
 
@@ -1005,36 +1003,6 @@ public sealed class TrayIconService : IDisposable
     private delegate IntPtr SubclassProc(IntPtr hWnd, uint uMsg, UIntPtr wParam, IntPtr lParam, UIntPtr uIdSubclass, UIntPtr dwRefData);
 
 #endif
-
-    [System.Diagnostics.Conditional("TVAIR_DEVELOPER_DIAGNOSTICS")]
-    private void EmitProcessMemoryDiagnostic()
-    {
-#if TVAIR_DEVELOPER_DIAGNOSTICS
-        // longrun_memory_rootcause_diagnostic:
-        // 既存30秒Tray STA heartbeatのcadenceへ相乗りし、新しいTimer/Taskを作らずに
-        // TvAIr processのWorking Setと.NET managed heapを同一時点で観測する。
-        // Working Set増加がmanaged heap由来か、WebBrowser/COM等native側かを切り分ける診断専用ログ。
-        try
-        {
-            using var process = Process.GetCurrentProcess();
-            process.Refresh();
-            var gc = GC.GetGCMemoryInfo();
-            var managed = GC.GetTotalMemory(forceFullCollection: false);
-            var allocatedTotal = GC.GetTotalAllocatedBytes(precise: false);
-            var previousAllocatedTotal = Interlocked.Exchange(ref _lastProcessAllocatedBytes, allocatedTotal);
-            var allocatedDelta = previousAllocatedTotal == 0
-                ? -1
-                : Math.Max(0, allocatedTotal - previousAllocatedTotal);
-            QueueTrayDiagnostic("APP_MEMORY_DIAGNOSTIC", "PROCESS",
-                $"result=OK workingSetBytes={process.WorkingSet64} privateBytes={process.PrivateMemorySize64} virtualBytes={process.VirtualMemorySize64} managedBytes={managed} gcHeapBytes={gc.HeapSizeBytes} gcFragmentedBytes={gc.FragmentedBytes} gcMemoryLoadBytes={gc.MemoryLoadBytes} gcHighMemoryLoadThresholdBytes={gc.HighMemoryLoadThresholdBytes} gcTotalAvailableMemoryBytes={gc.TotalAvailableMemoryBytes} allocatedTotalBytes={allocatedTotal} allocatedDeltaBytes={allocatedDelta} allocatedDeltaWindowSeconds=30 pinnedObjects={gc.PinnedObjectsCount} finalizationPending={gc.FinalizationPendingCount} gen0={GC.CollectionCount(0)} gen1={GC.CollectionCount(1)} gen2={GC.CollectionCount(2)} threads={process.Threads.Count} handles={process.HandleCount} rule=longrun_memory_rootcause_diagnostic");
-        }
-        catch (Exception ex)
-        {
-            QueueTrayDiagnostic("APP_MEMORY_DIAGNOSTIC", "PROCESS",
-                $"result=FAILED exception={ex.GetType().Name} reason={ex.Message} rule=longrun_memory_rootcause_diagnostic");
-        }
-#endif
-    }
 
     [System.Diagnostics.Conditional("TVAIR_DEVELOPER_DIAGNOSTICS")]
     private void QueueTrayDiagnostic(string eventName, string title, string message)

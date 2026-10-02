@@ -238,7 +238,7 @@ internal static class WorkerPresentation
     private sealed record LogoPaths(string? TitleBarLogoPath, string? CenterLogoPath);
 
     // One and only one top-level user-visible worker window.
-    // This intentionally retains the old proven Form semantics; the rebuild is in responsibility/state ownership,
+    // Window semantics stay stable while responsibility/state ownership is centralized,
     // not in inventing new native-window behavior.
     private sealed class WorkerWindow : System.Windows.Forms.Form
     {

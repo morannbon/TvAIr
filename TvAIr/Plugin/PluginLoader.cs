@@ -33,6 +33,7 @@ internal sealed class PluginLoader : IHostedService
     private readonly LogPresentationStore _logPresentationStore;
     private readonly PluginScopedServiceFactory _pluginScopedServices;
     private readonly PluginReadModelSource _pluginReadModels;
+    private readonly ChannelServiceAccessPolicy _serviceAccess;
     private readonly PluginReservationOperationService _pluginReservationOperations;
     private readonly PluginReservationPlanningService _pluginReservationPlanning;
     private readonly TvTestSettings _tvTestSettings;
@@ -76,6 +77,7 @@ internal sealed class PluginLoader : IHostedService
         LogPresentationStore logPresentationStore,
         PluginScopedServiceFactory pluginScopedServices,
         PluginReadModelSource pluginReadModels,
+        ChannelServiceAccessPolicy serviceAccess,
         PluginReservationOperationService pluginReservationOperations,
         PluginReservationPlanningService pluginReservationPlanning,
         PluginSystemReadService pluginSystemReads,
@@ -113,6 +115,7 @@ internal sealed class PluginLoader : IHostedService
         _logPresentationStore = logPresentationStore;
         _pluginScopedServices = pluginScopedServices;
         _pluginReadModels = pluginReadModels;
+        _serviceAccess = serviceAccess;
         _pluginReservationOperations = pluginReservationOperations;
         _pluginReservationPlanning = pluginReservationPlanning;
         _pluginSystemReads = pluginSystemReads;
@@ -281,6 +284,7 @@ internal sealed class PluginLoader : IHostedService
                 _projectionReservationSync,
                 _logPresentationStore,
                 _pluginReadModels,
+                _serviceAccess,
                 _pluginReservationOperations,
                 _pluginReservationPlanning,
                 _pluginSystemReads,

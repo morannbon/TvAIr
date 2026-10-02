@@ -14,7 +14,7 @@ namespace TvAIr.Core;
 /// </summary>
 public static class TvTestProcessAuditor
 {
-    // release_contract: ActivityKeeper用TVTestはDirectRecorder録画のSleepGuard向け目印であり、
+    // release_contract: ActivityKeeper用TVTestはRecordingWorker録画のSleepGuard向け目印であり、
     // 録画本体ではない。同一スキャン内でプロセスごとにNOTICEを出すとログ量が増えるため、
     // スキャン単位で1行に集約し、同一内容は短時間抑止する。
     private static readonly ConcurrentDictionary<string, DateTime> ActivityKeeperSummaryLastUtc = new(StringComparer.OrdinalIgnoreCase);
@@ -26,15 +26,15 @@ public static class TvTestProcessAuditor
 
     public static void EmitSnapshot(LogRepository log, string phase)
     {
-        _ = CaptureSnapshot(log, phase, emitLegacyEvents: true);
+        _ = CaptureSnapshot(log, phase);
     }
 
     /// <summary>
     /// TvAIr管理下のTVTest/EPGプロセス確認用スナップショット。
     /// 監査ログを出しながら、呼び出し元が対象PIDを安全に判定するために使う。
     /// </summary>
-    public static ProcessSnapshot Capture(LogRepository log, string phase, bool emitLegacyEvents = false)
-        => CaptureSnapshot(log, phase, emitLegacyEvents);
+    public static ProcessSnapshot Capture(LogRepository log, string phase)
+        => CaptureSnapshot(log, phase);
 
     /// <summary>
     /// TvAIr設定内の視聴専用DIDだけを保護判定する。
@@ -78,7 +78,7 @@ public static class TvTestProcessAuditor
             UnknownLiveDid: false);
     }
 
-    private static ProcessSnapshot CaptureSnapshot(LogRepository log, string phase, bool emitLegacyEvents)
+    private static ProcessSnapshot CaptureSnapshot(LogRepository log, string phase)
     {
         var processes = new List<TvTestProcessInfo>();
         var activityKeepers = new List<ActivityKeeperNoticeItem>();
@@ -172,7 +172,7 @@ public static class TvTestProcessAuditor
         }
         log.Add("RECORDER_ACTIVITY_NOTICE", phase,
             $"result=INFO count={ordered.Count} role=ActivityKeeper " +
-            "note=activity_keeper_tvtest_not_recording_route directRecorderFailure=False " +
+            "note=activity_keeper_tvtest_not_recording_route recordingWorkerFailure=False " +
             $"action=sleepguard_marker_only summary={summary} " +
             "rule=release_contract");
     }

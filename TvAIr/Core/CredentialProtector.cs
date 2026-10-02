@@ -10,7 +10,7 @@ namespace TvAIr.Core;
 /// </summary>
 public static class CredentialProtector
 {
-    // エントロピー（追加のランダム性）：既存のWindowsログインパスワードと互換性を維持するアプリ固有値
+    // エントロピー（追加のランダム性）：Windowsユーザー単位の保護に追加するアプリ固有値
     private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("TvAIr.TaskScheduler.v1");
 
     /// <summary>平文パスワードをDPAPIで暗号化してBase64文字列として返す。</summary>

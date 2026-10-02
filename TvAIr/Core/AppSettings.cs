@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Core;
+namespace TvAIr.Core;
 
 /// <summary>
 /// アプリ全体の設定。appsettings.json の各セクションにバインドされる。
@@ -113,7 +113,7 @@ public static class TunerDisplayName
         var n = (name ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(n)) return Build(group, did);
 
-        // 旧版由来の内部名・BonDriver名・一時的に混入した物理名などは、
+        // 内部名・BonDriver名・物理名などは、
         // 予約リストの優先度表示正本である T/S/H の仮想枠名へ戻す。
         var upper = n.ToUpperInvariant();
         if (upper.Contains("BONDRIVER") || upper is "GR" or "BSCS" or "HYBRID"

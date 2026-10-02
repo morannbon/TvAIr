@@ -78,8 +78,8 @@ public sealed class TvTestLauncher
         _log = log;
     }
 
-    // release_contract: TVTest起動はEPG取得・活動維持用途に限定。予約録画本線はDirectRecorder側で扱う。
-    // このクラスはTVTestプロセス維持・EPG取得用途に限定し、本番録画はDirectRecorderへ集約する。
+    // release_contract: TVTest起動はEPG取得・活動維持用途に限定。予約録画本線はRecordingWorker側で扱う。
+    // このクラスはTVTestプロセス維持・EPG取得用途に限定し、本番録画はRecordingWorkerへ集約する。
 
 
     /// <summary>TvAIr管理の視聴用TVTest/LIVETestを、汎用Viewer API契約として可視起動する。</summary>

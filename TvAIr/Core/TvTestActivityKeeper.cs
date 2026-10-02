@@ -6,7 +6,7 @@ namespace TvAIr.Core;
 /// <summary>
 /// 録画/EPG取得/EPG確認中に、SleepGuardとタスクバー識別用のTVTest表示を最小情報で管理する。
 /// release_contract: 対象ごとのTVTest表示を維持し、TVTest側のタイトル再設定に負けないよう所有PIDだけ低頻度で再適用する。
-/// release_contract: DirectRecorder録画中は、既存LIVETest/外部TVTestをActivityKeeperの代用にしない。
+/// release_contract: RecordingWorker録画中は、既存LIVETest/外部TVTestをActivityKeeperの代用にしない。
 /// SleepGuard監視用にTvAIr管理のActivityKeeper TVTestを明示起動し、視聴用プロセスとは分離する。
 /// </summary>
 public sealed class TvTestActivityKeeper
@@ -37,7 +37,7 @@ public sealed class TvTestActivityKeeper
         lock (_gate)
         {
             // release_contract:
-            // DirectRecorder録画中のSleepGuard監視は、既存LIVETest/外部TVTestを証跡代用しない。
+            // RecordingWorker録画中のSleepGuard監視は、既存LIVETest/外部TVTestを証跡代用しない。
             // 視聴用プロセスはユーザー操作対象であり、TvAIrの録画中アクティビティとは別物として扱う。
             // そのため、録画開始ごとにTvAIr管理のActivityKeeper TVTestを明示起動する。
             token.OwnedProcess = StartOwnedProcess(token);
@@ -368,7 +368,7 @@ public sealed class TvTestActivityKeeper
 
                 // VIEWER_TITLE_WINDOW_WAIT_INVARIANT:
                 // TVTest所有PIDのウィンドウ生成完了だけを待つ。同期Sleepでworker threadを占有しない。
-                // ウィンドウを検出した時点で即時終了し、最大2秒という従来の探索上限は変更しない。
+                // ウィンドウを検出した時点で即時終了し、探索上限は最大2秒とする。
                 // 待機条件・上限・所有PID限定はActivityKeeperの不変条件として維持する。
                 await Task.Delay(100, cancellationToken).ConfigureAwait(false);
             }

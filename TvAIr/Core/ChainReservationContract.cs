@@ -1,13 +1,13 @@
-﻿namespace TvAIr.Core;
+namespace TvAIr.Core;
 
 /// <summary>
 /// ユーザー明示チェーン予約の共通契約。
 /// UI/API/保存トポロジー/共通割当/競合/取消/復旧/実行境界で同じ定義を使用する。
 ///
-/// CURRENT INVARIANTS — 旧チェーン実装へ戻さない:
+/// CURRENT INVARIANTS:
 /// 1. トポロジー正本はチェーンボタンで永続化した IsUserChain / UserChainPreviousId / UserChainRootId。
 ///    同一局・隣接時刻・同一Tunerだけを根拠に自動チェーンを再生成しない。
-/// 2. 物理Tunerは、録画開始前はFinalConflictPlanがroot単位で解決し、過去のTunerNameは弱い再選択可能な候補にすぎない。
+/// 2. 物理Tunerは、録画開始前はFinalConflictPlanがroot単位で解決し、保存済みTunerNameは再選択可能な候補として扱う。
 ///    shared capture開始後は現在ownerのActualTunerNameをhard pinし、残る全後続を同じ物理Tunerへ固定する。
 /// 3. 実行時は1本のBonDriver/OpenTuner/TS-read workerをチェーン物理終端まで維持する。論理境界ではTuner解放、
 ///    BonDriver Close、retune、worker restartを行わず、予約ごとの独立Sink/TSファイルと論理ownerだけを切り替える。

@@ -12,7 +12,7 @@ namespace TvAIr.Tuner;
 /// </summary>
 public sealed class ViewerOperationService
 {
-    private readonly ChannelFileLoader _channels;
+    private readonly ChannelServiceAccessPolicy _serviceAccess;
     private readonly ExternalTunerLeaseService _leases;
     private readonly TunerPool _tunerPool;
     private readonly ViewerSessionRegistry _sessions;
@@ -27,7 +27,7 @@ public sealed class ViewerOperationService
     private readonly ConcurrentDictionary<string, ViewerProcessExitWatch> _viewerProcessExitWatches = new(StringComparer.OrdinalIgnoreCase);
 
     public ViewerOperationService(
-        ChannelFileLoader channels,
+        ChannelServiceAccessPolicy serviceAccess,
         ExternalTunerLeaseService leases,
         TunerPool tunerPool,
         ViewerSessionRegistry sessions,
@@ -38,7 +38,7 @@ public sealed class ViewerOperationService
         LogRepository log,
         ApplicationOperationGate applicationGate)
     {
-        _channels = channels;
+        _serviceAccess = serviceAccess;
         _leases = leases;
         _tunerPool = tunerPool;
         _sessions = sessions;
@@ -98,13 +98,10 @@ public sealed class ViewerOperationService
         if (request.NetworkId == 0 || request.TransportStreamId == 0 || request.ServiceId == 0)
             return ViewerOperationPreparationResult.Denied("missingViewerPayload", "ViewerStart payload is incomplete.");
 
-        var channelMap = _channels.Load();
-        var channel = channelMap.Targets.FirstOrDefault(c =>
-            c.OriginalNetworkId == request.NetworkId &&
-            c.TransportStreamId == request.TransportStreamId &&
-            c.ServiceId == request.ServiceId);
+        var channelAccess = _serviceAccess.Capture();
+        var channel = channelAccess.ResolveOperationalTarget(request.NetworkId, request.TransportStreamId, request.ServiceId);
         if (channel is null)
-            return ViewerOperationPreparationResult.Denied("channelNotFound", "Viewer target channel was not found in the TvAIr channel map.");
+            return ViewerOperationPreparationResult.Denied("serviceUnavailable", channelAccess.GetRejectReason(request.NetworkId, request.TransportStreamId, request.ServiceId));
 
         var group = string.IsNullOrWhiteSpace(channel.Group)
             ? (request.GroupHint ?? string.Empty).Trim()
@@ -117,7 +114,7 @@ public sealed class ViewerOperationService
         var pathKey = ViewerProfileContract.TvTestPathKeyForResolvedProfile(profile);
         var channelArgument = $"/chspace {channel.ResolvedSpace} /chi {channel.ResolvedChannelIndex} /sid {request.ServiceId}";
         var identityArgument = $"/nid {request.NetworkId} /tsid {request.TransportStreamId} /sid {request.ServiceId}";
-        var sameTransportServices = channelMap.Targets
+        var sameTransportServices = channelAccess.ActiveTargets
             .Where(c => c.OriginalNetworkId == request.NetworkId && c.TransportStreamId == request.TransportStreamId)
             .OrderBy(c => c.ServiceId)
             .ToArray();

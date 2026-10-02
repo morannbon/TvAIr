@@ -9,7 +9,7 @@ namespace TvAIr.Channel;
 /// GR  : ChSet.txt BonDriverCh → 物理CH番号 → /ch {physCh}
 /// BS/CS: ChSet.txt TsId → (Space, BonCh) → /chspace {Space} /chi {BonCh}
 ///        同一TS内に複数サービスがある場合のみ /sid を追加してONE/TWO/NEXT等を分離する。
-///        DirectRecorder/EPG用のチャンネル同定は /chspace /chi /sid を基本とし、/nid /tsid /reccurservice は通常経路へ混ぜない。
+///        RecordingWorker/EPG用のチャンネル同定は /chspace /chi /sid を基本とし、/nid /tsid /reccurservice は通常経路へ混ぜない。
 /// </summary>
 public sealed class ChannelFileLoader
 {
@@ -482,7 +482,8 @@ public enum ChannelServiceEligibility
 }
 
 /// <summary>
-/// TVTest .ch2 上のサービス有効状態。EPG収集範囲とは独立し、検索・予約・録画対象の正本に使う。
+/// TVTest .ch2 上のサービス有効状態という生の事実。EPG収集範囲とは独立する。
+/// 操作可否の判定は ChannelServiceAccessPolicy だけが公開責務として解釈する。
 /// </summary>
 public sealed class ChannelServiceState
 {
@@ -507,10 +508,10 @@ public sealed class ChannelLoadResult
     public string Message        { get; set; } = "";
 
     /// <summary>
-    /// TVTest .ch2 の state と、同一サービスを実際の録画経路へ解決できるかを一つの契約として返す。
-    /// EPGに存在するだけのサービスは Unknown であり、自動検索候補にはしない。
+    /// ChannelServiceAccessPolicy 内部用。TVTest .ch2 state と現在のChSet routeを分類する。
+    /// EPGに存在するだけのサービスは Unknown。操作側から直接呼ばない。
     /// </summary>
-    public ChannelServiceEligibility GetServiceEligibility(ushort networkId, ushort transportStreamId, ushort serviceId)
+    internal ChannelServiceEligibility GetServiceEligibility(ushort networkId, ushort transportStreamId, ushort serviceId)
     {
         var states = ServiceStates
             .Where(x => x.OriginalNetworkId == networkId
@@ -528,17 +529,14 @@ public sealed class ChannelLoadResult
     /// TVTest .ch2 でユーザーが有効化しているサービスか。ChSet経路の一時的な解決可否とは分離する。
     /// .ch2 に存在しないサービスと state=0 のサービスはいずれも false。
     /// </summary>
-    public bool IsTvTestServiceEnabled(ushort networkId, ushort transportStreamId, ushort serviceId)
+    internal bool IsTvTestServiceEnabled(ushort networkId, ushort transportStreamId, ushort serviceId)
         => ServiceStates.Any(x => x.OriginalNetworkId == networkId
                                   && x.TransportStreamId == transportStreamId
                                   && x.ServiceId == serviceId
                                   && x.IsEnabled);
 
-    public bool IsSearchAndRecordingEnabled(ushort networkId, ushort transportStreamId, ushort serviceId)
-        => IsTvTestServiceEnabled(networkId, transportStreamId, serviceId)
-           && ResolveActiveTarget(networkId, transportStreamId, serviceId) is not null;
 
-    public ChannelTarget? ResolveActiveTarget(ushort networkId, ushort transportStreamId, ushort serviceId)
+    internal ChannelTarget? ResolveActiveTarget(ushort networkId, ushort transportStreamId, ushort serviceId)
         => Targets.FirstOrDefault(x => x.OriginalNetworkId == networkId
                                        && x.TransportStreamId == transportStreamId
                                        && x.ServiceId == serviceId);

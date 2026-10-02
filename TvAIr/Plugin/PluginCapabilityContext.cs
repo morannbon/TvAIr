@@ -24,6 +24,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         ProgramProjectionReservationSyncService projectionReservationSync,
         LogPresentationStore logPresentationStore,
         PluginReadModelSource readModels,
+        ChannelServiceAccessPolicy serviceAccess,
         PluginReservationOperationService reservationOperations,
         PluginReservationPlanningService reservationPlanning,
         PluginSystemReadService systemReads,
@@ -59,23 +60,23 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         Logs = new LogsApi(scopedServices.CreateLog(normalizedPluginId, pluginDisplayName), operationalReads, permissionGate);
         LogPresentation = new LogPresentationApi(normalizedPluginId, logPresentationStore, log, permissionGate);
         RecordingQualityPresentation = new RecordingQualityPresentationApi(normalizedPluginId, logPresentationStore, log, permissionGate);
-        Reservations = new ReservationsApi(normalizedPluginId, readModels, reservationOperations, reservationPlanning, permissionGate);
+        Reservations = new ReservationsApi(normalizedPluginId, readModels, serviceAccess, reservationOperations, reservationPlanning, permissionGate);
         Rules = new RulesApi(readModels, permissionGate);
         Recordings = new RecordingsApi(readModels, recordingResults, reservationScheduler, permissionGate);
         RecordingFiles = new RecordingFilesApi(readModels, recordingResults, permissionGate);
         RecordingInspection = new RecordingInspectionApi(recordingResults, permissionGate);
         PlaybackProgress = new PlaybackProgressApi(playbackProgress, permissionGate);
         MediaInsights = new MediaInsightsApi(readModels, recordingResults, playbackProgress, permissionGate);
-        ContentDiscovery = new ContentDiscoveryApi(readModels, recordingResults, playbackProgress, permissionGate);
+        ContentDiscovery = new ContentDiscoveryApi(readModels, recordingResults, playbackProgress, serviceAccess, permissionGate);
         ExternalProgramSource = new ExternalProgramSourceApi(externalEpgSources, projectionReservationSync, typedEvents, normalizedPluginId, log, permissionGate);
-        ProgramGuide = new ProgramGuideApi(readModels, ExternalProgramSource, permissionGate);
+        ProgramGuide = new ProgramGuideApi(readModels, serviceAccess, ExternalProgramSource, permissionGate);
         ProgramGuideEvents = new ProgramGuideEventsApi(operationalReads, permissionGate);
         Epg = new EpgApi(epgScheduler, operationalReads, permissionGate);
-        Channels = new ChannelsApi(readModels, permissionGate);
-        ServiceMetadata = new ServiceMetadataApi(readModels, permissionGate);
+        Channels = new ChannelsApi(serviceAccess, permissionGate);
+        ServiceMetadata = new ServiceMetadataApi(readModels, serviceAccess, permissionGate);
         Tuners = new TunersApi(readModels, permissionGate);
-        Viewers = new ViewersApi(normalizedPluginId, pluginDisplayName, externalTuners, viewerSessions, viewerOperations, viewerPreemption, readModels, tvTestSettings, ini, tunerProfiles, typedEvents, permissionGate);
-        ViewerReservations = new ViewerReservationsApi(normalizedPluginId, viewerReservations, viewerReservationScheduler, permissionGate);
+        Viewers = new ViewersApi(normalizedPluginId, pluginDisplayName, externalTuners, viewerSessions, viewerOperations, viewerPreemption, readModels, serviceAccess, tvTestSettings, ini, tunerProfiles, typedEvents, permissionGate);
+        ViewerReservations = new ViewerReservationsApi(normalizedPluginId, viewerReservations, viewerReservationScheduler, serviceAccess, permissionGate);
         TimedTextStreams = new TimedTextStreamsApi(normalizedPluginId, timedTextStreams, log);
         Backup = UnavailableBackupApi.Instance;
         var pluginDataDirectory = scopedServices.CreateFiles(normalizedPluginId).RootDirectory;
@@ -405,7 +406,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
     private static bool IsTerminalReservationHistoryRow(Reservation reservation)
         => reservation.Status is ReservationStatus.Completed or ReservationStatus.Cancelled or ReservationStatus.Failed;
 
-    private sealed class ReservationsApi(string pluginId, PluginReadModelSource readModels, PluginReservationOperationService reservationOperations, PluginReservationPlanningService reservationPlanning, CapabilityPermissionGate permissions) : ITvAirReservationsApi
+    private sealed class ReservationsApi(string pluginId, PluginReadModelSource readModels, ChannelServiceAccessPolicy serviceAccess, PluginReservationOperationService reservationOperations, PluginReservationPlanningService reservationPlanning, CapabilityPermissionGate permissions) : ITvAirReservationsApi
     {
         public IReadOnlyList<TvAirReservationDto> List(TvAirReservationQueryDto? query = null)
         {
@@ -420,7 +421,8 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             if (!string.IsNullOrWhiteSpace(query.Status)) rows = rows.Where(r => string.Equals(r.Status.ToString(), query.Status.Trim(), StringComparison.OrdinalIgnoreCase));
             if (query.Enabled.HasValue) rows = rows.Where(r => r.IsEnabled == query.Enabled.Value);
             if (query.Conflicted.HasValue) rows = rows.Where(r => r.IsConflicted == query.Conflicted.Value);
-            return rows.OrderBy(r => r.StartTime).Select(r => ToDto(r, readModels)).ToList();
+            var access = serviceAccess.Capture();
+            return rows.OrderBy(r => r.StartTime).Select(r => ToDto(r, readModels, access)).ToList();
         }
 
         public IReadOnlyList<TvAirReservationDto> ListHistory(TvAirReservationHistoryQueryDto? query = null)
@@ -441,7 +443,8 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             if (!string.IsNullOrWhiteSpace(query.Source)) rows = rows.Where(r => string.Equals(r.Source.ToString(), query.Source.Trim(), StringComparison.OrdinalIgnoreCase));
             if (!string.IsNullOrWhiteSpace(query.Status)) rows = rows.Where(r => string.Equals(r.Status.ToString(), query.Status.Trim(), StringComparison.OrdinalIgnoreCase));
             var take = Math.Clamp(query.Limit ?? 1000, 1, 10000);
-            return rows.OrderByDescending(r => r.EndTime).Take(take).Select(r => ToDto(r, readModels)).ToList();
+            var access = serviceAccess.Capture();
+            return rows.OrderByDescending(r => r.EndTime).Take(take).Select(r => ToDto(r, readModels, access)).ToList();
         }
 
         public TvAirReservationDto? Get(string reservationId)
@@ -449,7 +452,10 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             permissions.Require(nameof(ReservationsApi), PluginPermission.ReadReservations);
             var id = ParseReservationId(reservationId);
             if (!id.HasValue) return null;
-            return readModels.GetReservations().FirstOrDefault(r => r.Id == id.Value) is { } r ? ToDto(r, readModels) : null;
+            var reservation = readModels.GetReservations().FirstOrDefault(r => r.Id == id.Value);
+            if (reservation is null) return null;
+            var access = serviceAccess.Capture();
+            return ToDto(reservation, readModels, access);
         }
 
         public IReadOnlyList<TvAirReservationConflictDto> ListConflicts()
@@ -469,6 +475,16 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
                     CanReserve = false,
                     HasConflict = true,
                     Reason = "NID/TSID/SIDは0～65535の完全な局identityで指定してください。"
+                };
+            }
+            var access = serviceAccess.Capture();
+            if (!access.IsOperational(networkId, transportStreamId, serviceId))
+            {
+                return new TvAirReservationPreviewDto
+                {
+                    CanReserve = false,
+                    HasConflict = true,
+                    Reason = $"serviceUnavailable:{access.GetRejectReason(networkId, transportStreamId, serviceId)}"
                 };
             }
             var preview = reservationPlanning.PreviewReservation(new PluginReservationPlanningDraft(
@@ -527,6 +543,15 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             {
                 return new TvAirChainPreviewDto { CanChain = false, Message = "NID/TSID/SIDは0～65535の完全な局identityで指定してください。" };
             }
+            var access = serviceAccess.Capture();
+            if (!access.IsOperational(networkId, transportStreamId, serviceId))
+            {
+                return new TvAirChainPreviewDto
+                {
+                    CanChain = false,
+                    Message = $"serviceUnavailable:{access.GetRejectReason(networkId, transportStreamId, serviceId)}"
+                };
+            }
             var preview = reservationPlanning.PreviewChain(new PluginReservationPlanningDraft(
                 networkId,
                 transportStreamId,
@@ -555,6 +580,16 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
                 {
                     Success = false,
                     Message = "NID、TSID、SID、EIDは0～65535で指定してください。"
+                };
+            }
+
+            var access = serviceAccess.Capture();
+            if (!access.IsOperational(networkId, transportStreamId, serviceId))
+            {
+                return new TvAirReservationOperationResultDto
+                {
+                    Success = false,
+                    Message = $"serviceUnavailable:{access.GetRejectReason(networkId, transportStreamId, serviceId)}"
                 };
             }
 
@@ -931,6 +966,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         PluginReadModelSource readModels,
         RecordingResultStore recordingResults,
         PlaybackProgressStore playbackProgress,
+        ChannelServiceAccessPolicy serviceAccess,
         CapabilityPermissionGate permissions) : ITvAirContentDiscoveryApi
     {
         public TvAirContentDiscoveryResultDto SearchAvailable(TvAirContentDiscoveryQueryDto query)
@@ -945,8 +981,10 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
 
             if (query.IncludeLive)
             {
+                var access = serviceAccess.Capture();
                 foreach (var e in readModels.GetProgramEvents(now.LocalDateTime, now.AddSeconds(maximumSeconds).LocalDateTime)
-                    .Where(x => x.Start <= now.LocalDateTime && x.End > now.LocalDateTime))
+                    .Where(x => x.Start <= now.LocalDateTime && x.End > now.LocalDateTime)
+                    .Where(x => access.IsOperational(x.NetworkId, x.TransportStreamId, x.ServiceId)))
                 {
                     var remaining = Math.Max(0, (long)(e.End - now.LocalDateTime).TotalSeconds);
                     if (remaining > maximumSeconds || (!string.IsNullOrWhiteSpace(e.Genre) && excluded.Contains(e.Genre))) continue;
@@ -1003,6 +1041,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
 
     private sealed class ProgramGuideApi(
         PluginReadModelSource readModels,
+        ChannelServiceAccessPolicy serviceAccess,
         ITvAirExternalProgramSourceApi externalProgramSource,
         CapabilityPermissionGate permissions) : ITvAirProgramGuideApi
     {
@@ -1027,7 +1066,9 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         {
             permissions.Require(nameof(ProgramGuideApi), PluginPermission.ReadProgramGuideProjection, PluginPermission.ReadEpg);
             query ??= new TvAirProgramGuideQueryDto();
-            IEnumerable<ProjectedProgramEvent> rows = readModels.GetAllProgramEvents();
+            var access = serviceAccess.Capture();
+            IEnumerable<ProjectedProgramEvent> rows = readModels.GetAllProgramEvents()
+                .Where(e => access.IsOperational(e.NetworkId, e.TransportStreamId, e.ServiceId));
             if (query.From.HasValue) rows = rows.Where(e => e.End > query.From.Value.LocalDateTime);
             if (query.To.HasValue) rows = rows.Where(e => e.Start < query.To.Value.LocalDateTime);
             if (query.NetworkId.HasValue) rows = rows.Where(e => e.NetworkId == query.NetworkId.Value);
@@ -1036,7 +1077,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             if (!string.IsNullOrWhiteSpace(query.ServiceName)) rows = rows.Where(e => Contains(readModels.ResolveCurrentServiceName(e.NetworkId, e.TransportStreamId, e.ServiceId, e.ServiceName), query.ServiceName));
             if (!string.IsNullOrWhiteSpace(query.Keyword)) rows = rows.Where(e => Contains(e.Title, query.Keyword) || Contains(e.ShortText, query.Keyword) || Contains(e.ExtendedText, query.Keyword));
             if (!string.IsNullOrWhiteSpace(query.Genre)) rows = rows.Where(e => Contains(e.Genre, query.Genre) || Contains(e.GenreCodes, query.Genre));
-            var displayOrder = readModels.GetChannelLoad().Targets
+            var displayOrder = access.ActiveTargets
                 .Select((channel, index) => new
                 {
                     Key = (channel.OriginalNetworkId, channel.TransportStreamId, channel.ServiceId),
@@ -1065,6 +1106,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             if (!TryToUShort(key.TransportStreamId, out var transportStreamId)) return null;
             if (!TryToUShort(key.ServiceId, out var serviceId)) return null;
             if (!TryToUShort(key.EventNumber, out var eventId)) return null;
+            if (!serviceAccess.Capture().IsOperational(networkId, transportStreamId, serviceId)) return null;
             return readModels.GetProgramEvent(networkId, transportStreamId, serviceId, eventId) is { } e ? ToDto(e, readModels) : null;
         }
 
@@ -1072,8 +1114,10 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         {
             permissions.Require(nameof(ProgramGuideApi), PluginPermission.ReadProgramGuideProjection, PluginPermission.ReadEpg);
             if (string.IsNullOrWhiteSpace(projectedEventId)) return null;
+            var access = serviceAccess.Capture();
             return readModels.GetAllProgramEvents()
-                .FirstOrDefault(e => string.Equals(e.Key.Value, projectedEventId.Trim(), StringComparison.Ordinal)) is { } e
+                .FirstOrDefault(e => string.Equals(e.Key.Value, projectedEventId.Trim(), StringComparison.Ordinal)
+                                     && access.IsOperational(e.NetworkId, e.TransportStreamId, e.ServiceId)) is { } e
                 ? ToDto(e, readModels)
                 : null;
         }
@@ -1342,15 +1386,37 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         }
     }
 
-    private sealed class ChannelsApi(PluginReadModelSource readModels, CapabilityPermissionGate permissions) : ITvAirChannelsApi
+    private sealed class ChannelsApi(ChannelServiceAccessPolicy serviceAccess, CapabilityPermissionGate permissions) : ITvAirChannelsApi
     {
         public IReadOnlyList<TvAirServiceDto> ListServices(TvAirServiceQueryDto? query = null)
         {
             permissions.Require(nameof(ChannelsApi), PluginPermission.ReadChannels);
             query ??= new TvAirServiceQueryDto();
-            IEnumerable<(ChannelTarget Target, int DisplayOrder)> targets = readModels.GetChannelLoad().Targets.Select((target, index) => (target, index));
+            var access = serviceAccess.Capture();
+            if (query.Enabled == false)
+            {
+                var disabled = access.ServiceStates
+                    .GroupBy(x => (x.OriginalNetworkId, x.TransportStreamId, x.ServiceId))
+                    .Where(g => access.GetEligibility(g.Key.OriginalNetworkId, g.Key.TransportStreamId, g.Key.ServiceId) == ChannelServiceEligibility.Disabled)
+                    .Select(g => g.First())
+                    .Where(x => string.IsNullOrWhiteSpace(query.BroadcastType) || Contains(x.Group, query.BroadcastType))
+                    .Select((x, index) => new TvAirServiceDto
+                    {
+                        ServiceName = x.Name,
+                        NetworkId = x.OriginalNetworkId,
+                        TransportStreamId = x.TransportStreamId,
+                        ServiceId = x.ServiceId,
+                        BroadcastType = x.Group,
+                        RemoteControlKeyId = null,
+                        DisplayOrder = index,
+                        IsEnabled = false
+                    })
+                    .ToList();
+                return disabled;
+            }
+
+            IEnumerable<(ChannelTarget Target, int DisplayOrder)> targets = access.ActiveTargets.Select((target, index) => (target, index));
             if (!string.IsNullOrWhiteSpace(query.BroadcastType)) targets = targets.Where(x => Contains(x.Target.Group, query.BroadcastType));
-            if (query.Enabled.HasValue) targets = targets.Where(_ => query.Enabled.Value);
             return targets.Select(x => new TvAirServiceDto
             {
                 ServiceName = x.Target.Name,
@@ -1365,7 +1431,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         }
     }
 
-    private sealed class ServiceMetadataApi(PluginReadModelSource readModels, CapabilityPermissionGate permissions) : ITvAirServiceMetadataApi
+    private sealed class ServiceMetadataApi(PluginReadModelSource readModels, ChannelServiceAccessPolicy serviceAccess, CapabilityPermissionGate permissions) : ITvAirServiceMetadataApi
     {
         public TvAirServiceMetadataDto? Get(int networkId, int transportStreamId, int serviceId)
             => List(null).FirstOrDefault(s => s.NetworkId == networkId && s.TransportStreamId == transportStreamId && s.ServiceId == serviceId);
@@ -1374,7 +1440,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         {
             permissions.Require(nameof(ServiceMetadataApi), PluginPermission.ReadChannels);
             query ??= new TvAirServiceMetadataQueryDto();
-            IEnumerable<ChannelTarget> targets = readModels.GetChannelLoad().Targets;
+            IEnumerable<ChannelTarget> targets = serviceAccess.Capture().ActiveTargets;
             if (!string.IsNullOrWhiteSpace(query.BroadcastType)) targets = targets.Where(t => Contains(t.Group, query.BroadcastType));
             return targets.Select((t, i) => new TvAirServiceMetadataDto
             {
@@ -1432,11 +1498,32 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         string pluginId,
         ViewerReservationStore store,
         ViewerReservationScheduler scheduler,
+        ChannelServiceAccessPolicy serviceAccess,
         CapabilityPermissionGate permissions) : ITvAirViewerReservationsApi
     {
         public TvAirViewerReservationMutationResultDto Create(TvAirViewerReservationCreateRequestDto request)
         {
             permissions.Require(nameof(ViewerReservationsApi), PluginPermission.ControlViewer);
+            ArgumentNullException.ThrowIfNull(request);
+            if (!TryViewerServiceIdentity(request.NetworkId, request.TransportStreamId, request.ServiceId, out var nid, out var tsid, out var sid))
+            {
+                return new TvAirViewerReservationMutationResultDto
+                {
+                    Success = false,
+                    ErrorCode = "invalidServiceIdentity",
+                    Message = "Viewer reservation service identity is incomplete or out of range."
+                };
+            }
+            var access = serviceAccess.Capture();
+            if (!access.IsOperational(nid, tsid, sid))
+            {
+                return new TvAirViewerReservationMutationResultDto
+                {
+                    Success = false,
+                    ErrorCode = "serviceUnavailable",
+                    Message = access.GetRejectReason(nid, tsid, sid)
+                };
+            }
             var result = store.Create(pluginId, request);
             if (result.Success && result.Reservation is { } dto)
             {
@@ -1444,6 +1531,18 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
                 if (row is not null) scheduler.PublishCreated(row);
             }
             return result;
+        }
+
+        private static bool TryViewerServiceIdentity(int networkId, int transportStreamId, int serviceId, out ushort nid, out ushort tsid, out ushort sid)
+        {
+            nid = tsid = sid = 0;
+            if (networkId is <= 0 or > ushort.MaxValue
+                || transportStreamId is <= 0 or > ushort.MaxValue
+                || serviceId is <= 0 or > ushort.MaxValue) return false;
+            nid = (ushort)networkId;
+            tsid = (ushort)transportStreamId;
+            sid = (ushort)serviceId;
+            return true;
         }
 
         public TvAirViewerReservationMutationResultDto Cancel(string reservationId)
@@ -1494,6 +1593,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         ViewerOperationService viewerOperations,
         ViewerOperationPreemptionHub viewerPreemption,
         PluginReadModelSource readModels,
+        ChannelServiceAccessPolicy serviceAccess,
         TvTestSettings tvTestSettings,
         IniSettingsService ini,
         IReadOnlyList<TunerProfile> tunerProfiles,
@@ -1696,6 +1796,9 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             ArgumentNullException.ThrowIfNull(request);
             if (!TryTriplet(request.NetworkId, request.TransportStreamId, request.ServiceId, out var nid, out var tsid, out var sid))
                 return InvalidTarget();
+            var access = serviceAccess.Capture();
+            if (!access.IsOperational(nid, tsid, sid))
+                return UnavailableTarget(access.GetRejectReason(nid, tsid, sid));
             return ToDto(viewerOperations.Start(new ViewerOperationStartRequest(
                 pluginId,
                 request.ViewerProfileId,
@@ -1712,6 +1815,9 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             ArgumentNullException.ThrowIfNull(request);
             if (!TryTriplet(request.NetworkId, request.TransportStreamId, request.ServiceId, out var nid, out var tsid, out var sid))
                 return InvalidTarget();
+            var access = serviceAccess.Capture();
+            if (!access.IsOperational(nid, tsid, sid))
+                return UnavailableTarget(access.GetRejectReason(nid, tsid, sid));
             return ToDto(viewerOperations.EnsureTuned(new ViewerOperationEnsureTunedRequest(
                 pluginId,
                 request.ViewerProfileId,
@@ -1728,6 +1834,9 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             ArgumentNullException.ThrowIfNull(request);
             if (!TryTriplet(request.NetworkId, request.TransportStreamId, request.ServiceId, out var nid, out var tsid, out var sid))
                 return InvalidTarget();
+            var access = serviceAccess.Capture();
+            if (!access.IsOperational(nid, tsid, sid))
+                return UnavailableTarget(access.GetRejectReason(nid, tsid, sid));
             return ToDto(viewerOperations.Retune(new ViewerOperationRetuneRequest(
                 pluginId,
                 request.ViewerProfileId,
@@ -1813,6 +1922,15 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
                 State = "denied",
                 ErrorCode = "missingViewerPayload",
                 Message = "Viewer target triplet is incomplete or out of range."
+            };
+
+        private static TvAirViewerOperationResultDto UnavailableTarget(string reason)
+            => new()
+            {
+                Success = false,
+                State = "denied",
+                ErrorCode = "serviceUnavailable",
+                Message = reason
             };
 
         private static TvAirViewerOperationResultDto ToDto(ViewerOperationResult result)
@@ -2814,42 +2932,52 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             _ => ReservationIntent.Unspecified
         };
 
-    private static TvAirReservationDto ToDto(Reservation r, PluginReadModelSource readModels) => new()
+    private static TvAirReservationDto ToDto(Reservation r, PluginReadModelSource readModels, ChannelServiceAccessSnapshot? serviceAccess = null)
     {
-        ReservationId = FormatReservationId(r.Id),
-        ServiceName = readModels.ResolveCurrentServiceName(r),
-        ProgramTitle = r.Title,
-        Source = r.Source.ToString(),
-        Intent = ReservationIntentContract.IsSystem(r.Intent)
-            ? TvAirReservationIntent.System
-            : Enum.TryParse<TvAirReservationIntent>(r.Intent.ToString(), out var intent) ? intent : TvAirReservationIntent.Unspecified,
-        CreatedThrough = r.CreatedThrough,
-        CreatedByPluginId = r.CreatedByPluginId,
-        Route = r.IsUserChain ? "user_chain" : r.Source.ToString(),
-        Status = r.Status.ToString(),
-        Start = new DateTimeOffset(r.StartTime),
-        End = new DateTimeOffset(r.EndTime),
-        ScheduledStart = r.ScheduledStartTime.HasValue ? new DateTimeOffset(r.ScheduledStartTime.Value) : null,
-        TunerName = string.IsNullOrWhiteSpace(r.TunerName) ? null : r.TunerName,
-        PredecessorReservationId = r.UserChainPreviousId.HasValue ? FormatReservationId(r.UserChainPreviousId.Value) : null,
-        ChainRootReservationId = r.UserChainRootId.HasValue ? FormatReservationId(r.UserChainRootId.Value) : null,
-        IsUserChain = r.IsUserChain,
-        IsEnabled = r.IsEnabled,
-        HasConflict = r.IsConflicted,
-        NetworkId = r.NetworkId,
-        TransportStreamId = r.TransportStreamId,
-        ServiceId = r.ServiceId,
-        EventNumber = r.EventId,
-        PlannedTunerName = string.IsNullOrWhiteSpace(r.TunerName) ? null : r.TunerName,
-        ActualTunerName = string.IsNullOrWhiteSpace(r.ActualTunerName) ? null : r.ActualTunerName,
-        RecordingStartedAt = r.RecordingStartedAt.HasValue ? new DateTimeOffset(r.RecordingStartedAt.Value) : null,
-        RecordingFinishedAt = r.RecordingFinishedAt.HasValue ? new DateTimeOffset(r.RecordingFinishedAt.Value) : null,
-        SourceRuleId = r.SourceRuleId,
-        SourceRuleName = r.SourceRuleName ?? string.Empty,
-        ReservationNumber = r.Id,
-        CreatedAt = new DateTimeOffset(r.CreatedAt),
-        UpdatedAt = new DateTimeOffset(r.UpdatedAt)
-    };
+        var serviceOperational = serviceAccess?.IsOperational(r) ?? true;
+        var serviceAccessReason = serviceOperational || serviceAccess is null
+            ? string.Empty
+            : serviceAccess.GetRejectReason(r);
+
+        return new TvAirReservationDto
+        {
+            ReservationId = FormatReservationId(r.Id),
+            ServiceName = readModels.ResolveCurrentServiceName(r),
+            ProgramTitle = r.Title,
+            Source = r.Source.ToString(),
+            Intent = ReservationIntentContract.IsSystem(r.Intent)
+                ? TvAirReservationIntent.System
+                : Enum.TryParse<TvAirReservationIntent>(r.Intent.ToString(), out var intent) ? intent : TvAirReservationIntent.Unspecified,
+            CreatedThrough = r.CreatedThrough,
+            CreatedByPluginId = r.CreatedByPluginId,
+            Route = r.IsUserChain ? "user_chain" : r.Source.ToString(),
+            Status = r.Status.ToString(),
+            Start = new DateTimeOffset(r.StartTime),
+            End = new DateTimeOffset(r.EndTime),
+            ScheduledStart = r.ScheduledStartTime.HasValue ? new DateTimeOffset(r.ScheduledStartTime.Value) : null,
+            TunerName = serviceOperational && !string.IsNullOrWhiteSpace(r.TunerName) ? r.TunerName : null,
+            PredecessorReservationId = r.UserChainPreviousId.HasValue ? FormatReservationId(r.UserChainPreviousId.Value) : null,
+            ChainRootReservationId = r.UserChainRootId.HasValue ? FormatReservationId(r.UserChainRootId.Value) : null,
+            IsUserChain = r.IsUserChain,
+            IsEnabled = r.IsEnabled,
+            IsServiceOperational = serviceOperational,
+            ServiceAccessReason = serviceAccessReason,
+            HasConflict = r.IsConflicted,
+            NetworkId = r.NetworkId,
+            TransportStreamId = r.TransportStreamId,
+            ServiceId = r.ServiceId,
+            EventNumber = r.EventId,
+            PlannedTunerName = serviceOperational && !string.IsNullOrWhiteSpace(r.TunerName) ? r.TunerName : null,
+            ActualTunerName = string.IsNullOrWhiteSpace(r.ActualTunerName) ? null : r.ActualTunerName,
+            RecordingStartedAt = r.RecordingStartedAt.HasValue ? new DateTimeOffset(r.RecordingStartedAt.Value) : null,
+            RecordingFinishedAt = r.RecordingFinishedAt.HasValue ? new DateTimeOffset(r.RecordingFinishedAt.Value) : null,
+            SourceRuleId = r.SourceRuleId,
+            SourceRuleName = r.SourceRuleName ?? string.Empty,
+            ReservationNumber = r.Id,
+            CreatedAt = new DateTimeOffset(r.CreatedAt),
+            UpdatedAt = new DateTimeOffset(r.UpdatedAt)
+        };
+    }
 
     private static TvAirRecordingFileDto ToFileDto(Reservation reservation, string? filePath)
     {
@@ -2892,7 +3020,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             DurationSeconds = e.DurationSeconds,
             ExtendedItems = e.ExtendedItems,
             UpdatedAt = e.UpdatedAt == default ? null : new DateTimeOffset(e.UpdatedAt),
-            DbUpdatedAt = e.DbEvent?.UpdatedAt is { } dbUpdatedAt ? new DateTimeOffset(dbUpdatedAt) : null,
+            DbUpdatedAt = (e.DbEvent?.UpdatedAt ?? e.DbUpdatedAt) is { } dbUpdatedAt ? new DateTimeOffset(dbUpdatedAt) : null,
             IsSafeForSpecialProjection = projectionSafe,
             SpecialProjectionUnsafeReason = unsafeReason ?? string.Empty,
             ProjectionState = e.ProjectionState,

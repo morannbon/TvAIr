@@ -365,7 +365,7 @@ public sealed class ReservationAllocationRouteService
                 configuredChainFeature, userChainPairs.Count);
 
             _log.Add("ALLOC_POLICY", "Effective",
-                $"source={request.Source} action={request.Action} executionMode={request.ExecutionMode} later={effectiveLater} configuredChainFeature={configuredChainFeature} legacyChainSetting={_ini.PseudoContinuousRecording} storedChainPairs={userChainPairs.Count} continuousChainPlanning={continuousChainPlanning} rule=common_allocation_route_contract");
+                $"source={request.Source} action={request.Action} executionMode={request.ExecutionMode} later={effectiveLater} configuredChainFeature={configuredChainFeature} chainRecordingSetting={_ini.ChainRecordingEnabled} storedChainPairs={userChainPairs.Count} continuousChainPlanning={continuousChainPlanning} rule=common_allocation_route_contract");
 
             var evaluation = EvaluateWithSingleRetry(effectiveLater, continuousChainPlanning, configuredChainFeature, request);
             changes = evaluation.Changes.ToList();

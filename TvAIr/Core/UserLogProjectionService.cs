@@ -163,7 +163,7 @@ public static class UserLogProjectionService
         if (string.Equals(key, TvAirLogDetailKeys.StateAfter, StringComparison.OrdinalIgnoreCase))
             return stored.TryGetValue(TvAirLogDetailKeys.StateAfter, out var after) && !string.IsNullOrWhiteSpace(after) ? $"変更後: {after}" : null;
 
-        // Generic API compatibility: host-managed keys remain reusable for other presenters.
+        // Host-managed keys remain reusable for other presenters.
         if (string.Equals(key, TvAirLogDetailKeys.ProgramTitle, StringComparison.OrdinalIgnoreCase))
             return string.IsNullOrWhiteSpace(entry.ProgramTitle) ? null : $"番組: {entry.ProgramTitle}";
         if (string.Equals(key, TvAirLogDetailKeys.ReservationId, StringComparison.OrdinalIgnoreCase))

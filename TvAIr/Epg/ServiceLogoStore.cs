@@ -21,7 +21,7 @@ public sealed class ServiceLogoStore
             var titleBar = ResolveInventoryPath(networkId, transportStreamId, serviceId, new[] { 2, 5, 3, 4, 0, 1 }, out var titleType);
             var center = ResolveInventoryPath(networkId, transportStreamId, serviceId, new[] { 5, 2 }, out var centerType);
 
-            // 既存代表ロゴは旧DB互換の保険として残す。中央表示はtype5/type2だけ、タイトルバーは小さいtypeも許可する。
+            // 中央表示はtype5/type2、タイトルバーは小さいtypeも利用する。
             if (string.IsNullOrWhiteSpace(titleBar))
             {
                 titleBar = ResolveRepresentativePath(networkId, transportStreamId, serviceId);

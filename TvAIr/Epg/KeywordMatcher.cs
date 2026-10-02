@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using System.Globalization;
 using System.Text.RegularExpressions;
 using TvAIr.Channel;
@@ -58,16 +58,16 @@ public sealed class KeywordMatcher
     private readonly IProgramEventSource _programEvents;
     private readonly ReservationStore _rsvStore;
     private readonly ReservationProjectionMetadataStore _projectionMetadataStore;
-    private readonly ChannelFileLoader _channelLoader;
+    private readonly ChannelServiceAccessPolicy _serviceAccess;
     private readonly IniSettingsService _ini;
     private readonly LogRepository _log;
 
-    public KeywordMatcher(IProgramEventSource programEvents, ReservationStore rsvStore, ReservationProjectionMetadataStore projectionMetadataStore, ChannelFileLoader channelLoader, IniSettingsService ini, LogRepository log)
+    public KeywordMatcher(IProgramEventSource programEvents, ReservationStore rsvStore, ReservationProjectionMetadataStore projectionMetadataStore, ChannelServiceAccessPolicy serviceAccess, IniSettingsService ini, LogRepository log)
     {
         _programEvents = programEvents;
         _rsvStore = rsvStore;
         _projectionMetadataStore = projectionMetadataStore;
-        _channelLoader = channelLoader;
+        _serviceAccess = serviceAccess;
         _ini = ini;
         _log = log;
     }
@@ -76,8 +76,8 @@ public sealed class KeywordMatcher
     {
         var result = new KeywordRulePreviewResult();
         var now = DateTime.Now;
-        var channelMap = _channelLoader.Load();
-        var channelTargets = channelMap.Targets.ToList();
+        var channelMap = _serviceAccess.Capture();
+        var channelTargets = channelMap.ActiveTargets.ToList();
         var events = GetFutureAutoReservationEvents(now, channelMap)
             .OrderBy(e => e.Start)
             .ThenBy(e => e.ServiceName)
@@ -91,7 +91,7 @@ public sealed class KeywordMatcher
         if (compiled is null)
             return result;
 
-        var targetCache = new Dictionary<(string EventKey, long StartTicks, long EndTicks, byte Mask), MatchText>();
+        var targetCache = new Dictionary<(string EventKey, long StartTicks, long EndTicks, byte Mask), MatchTarget>();
         var serviceNameMap = BuildServiceNameMap(channelTargets);
 
         foreach (var ev in events)
@@ -131,7 +131,7 @@ public sealed class KeywordMatcher
     public Dictionary<int, int> GetRuleHitCounts(IEnumerable<KeywordRule> rules)
     {
         var now = DateTime.Now;
-        var channelMap = _channelLoader.Load();
+        var channelMap = _serviceAccess.Capture();
         var events = GetFutureAutoReservationEvents(now, channelMap).ToList();
         var compiled = rules
             .Select(r => (Rule: r, Compiled: CompileRule(r)))
@@ -143,7 +143,7 @@ public sealed class KeywordMatcher
         if (compiled.Count == 0 || events.Count == 0)
             return counts;
 
-        var targetCache = new Dictionary<(string EventKey, long StartTicks, long EndTicks, byte Mask), MatchText>();
+        var targetCache = new Dictionary<(string EventKey, long StartTicks, long EndTicks, byte Mask), MatchTarget>();
 
         foreach (var ev in events)
         {
@@ -193,11 +193,11 @@ public sealed class KeywordMatcher
             if (compiledRule is not null)
             {
                 var now = DateTime.Now;
-                var channelMap = _channelLoader.Load();
-                var targetCache = new Dictionary<(string EventKey, long StartTicks, long EndTicks, byte Mask), MatchText>();
+                var channelMap = _serviceAccess.Capture();
+                var targetCache = new Dictionary<(string EventKey, long StartTicks, long EndTicks, byte Mask), MatchTarget>();
                 foreach (var ev in GetFutureSafeEvents(now))
                 {
-                    var eligibility = channelMap.GetServiceEligibility(ev.NetworkId, ev.TransportStreamId, ev.ServiceId);
+                    var eligibility = channelMap.GetEligibility(ev.NetworkId, ev.TransportStreamId, ev.ServiceId);
                     if (eligibility is ChannelServiceEligibility.Active or ChannelServiceEligibility.Disabled)
                         availableKeys.Add(KeywordOccurrenceKey(ev));
                     if (eligibility == ChannelServiceEligibility.Active && IsMatch(ev, compiledRule, targetCache))
@@ -210,21 +210,6 @@ public sealed class KeywordMatcher
         foreach (var reservation in existing)
         {
             var occurrenceKey = KeywordOccurrenceKey(reservation);
-
-            // A legacy SID-only station selection that is ambiguous/unavailable in current channel
-            // metadata is not a positive mismatch. Preserve the user's already-scheduled row until
-            // the legacy selection can be resolved or the rule is explicitly edited/disabled.
-            // This prevents station-identity migration uncertainty from becoming a destructive
-            // reservation mutation. New automatic additions remain suppressed because IsMatch
-            // cannot match an unresolved legacy station selection.
-            if (rule.Enabled && !ruleExpired && compiledRule is not null
-                && (compiledRule.HasInvalidServiceToken
-                    || compiledRule.UnresolvedLegacyServiceIds.Contains(reservation.ServiceId)))
-            {
-                result.Preserved++;
-                result.PreservedSourceMissing++;
-                continue;
-            }
 
             if (desiredKeys.Contains(occurrenceKey))
             {
@@ -321,19 +306,19 @@ public sealed class KeywordMatcher
         // EPGは受信TS上の全サービスを保持する。一方、自動検索・予約・録画対象は
         // TVTest .ch2 の有効状態(state!=0)を正本とし、さらに現在のChSet経路へ解決できる
         // サービスだけに限定する。録画ファイルの「現在サービスのみ保存」とは独立した契約。
-        var channelMap = _channelLoader.Load();
-        var channelTargets = channelMap.Targets.ToList();
+        var channelMap = _serviceAccess.Capture();
+        var channelTargets = channelMap.ActiveTargets.ToList();
         var safeFutureEvents = GetFutureSafeEvents(futureEvents, now);
         var events = safeFutureEvents
-            .Where(e => channelMap.IsSearchAndRecordingEnabled(e.NetworkId, e.TransportStreamId, e.ServiceId))
+            .Where(e => channelMap.IsOperational(e.NetworkId, e.TransportStreamId, e.ServiceId))
             .ToList();
-        var disabledFutureCount = safeFutureEvents.Count(e => channelMap.GetServiceEligibility(e.NetworkId, e.TransportStreamId, e.ServiceId) == ChannelServiceEligibility.Disabled);
-        var routeUnavailableFutureCount = safeFutureEvents.Count(e => channelMap.GetServiceEligibility(e.NetworkId, e.TransportStreamId, e.ServiceId) == ChannelServiceEligibility.ActiveRouteUnavailable);
-        var unknownFutureCount = safeFutureEvents.Count(e => channelMap.GetServiceEligibility(e.NetworkId, e.TransportStreamId, e.ServiceId) == ChannelServiceEligibility.Unknown);
+        var disabledFutureCount = safeFutureEvents.Count(e => channelMap.GetEligibility(e.NetworkId, e.TransportStreamId, e.ServiceId) == ChannelServiceEligibility.Disabled);
+        var routeUnavailableFutureCount = safeFutureEvents.Count(e => channelMap.GetEligibility(e.NetworkId, e.TransportStreamId, e.ServiceId) == ChannelServiceEligibility.ActiveRouteUnavailable);
+        var unknownFutureCount = safeFutureEvents.Count(e => channelMap.GetEligibility(e.NetworkId, e.TransportStreamId, e.ServiceId) == ChannelServiceEligibility.Unknown);
 
         // Keyword予約の責務も同じTVTest .ch2有効状態へ収束させる。
         // state=0 だけでなく .ch2 に存在しないサービスも「ユーザーが有効化していない」ため、
-        // 過去の全サービスEPG経路で作られたScheduled Keyword予約を残してTuner競合へ参加させない。
+        // 自動検索予約は現在利用可能なサービスだけを対象にする。
         // 一方、.ch2では有効だがChSet経路だけ一時的に解決できないActiveRouteUnavailableは削除しない。
         var removedInactiveScheduled = ReconcileInactiveScheduledKeywordReservations(channelMap);
         if (disabledFutureCount > 0 || routeUnavailableFutureCount > 0 || unknownFutureCount > 0 || removedInactiveScheduled > 0)
@@ -387,126 +372,32 @@ public sealed class KeywordMatcher
             .ToList();
 
         // keyword_match_rule_pipeline_accounting:
-        // The interactive search and automatic reservation paths can both see the same projected
-        // event while an enabled rule is silently skipped before EvaluateMatch (for example by an
-        // expiry gate), or while a later rule is never reached because an earlier rule matched.
         // Audit every compiled rule independently against the same safe future-event snapshot used
-        // by production matching.  This diagnostic pass never creates or suppresses reservations;
-        // it only establishes a per-rule conservation trail from input to final condition match,
-        // including DB-backed and external-only projection sources.
+        // by production matching.  The streaming pass below is also the authoritative source for
+        // global conservation and production first-match selection; no Cartesian result matrix is
+        // retained after an event has been evaluated.
         var rulePipeline = compiled.ToDictionary(
             x => x.Rule.Id,
             x => new RulePipelineAccounting(
                 RuleId: x.Rule.Id,
                 Expired: IsRuleExpired(x.Rule, now),
                 ExpiresOn: x.Rule.ExpiresOn ?? string.Empty));
-        // release_contract KeywordMatcherEvaluationSingleSource:
-        // A single matcher run used to evaluate the same full future-programme x enabled-rule
-        // Cartesian product three times: rule-pipeline accounting, global conservation crosscheck,
-        // and the production first-match pass.  Besides repeating regex work, each pass built its
-        // own potentially large search-target strings for the same event/field-mask pairs.  Keep
-        // all observable accounting and production semantics unchanged, but make the first full
-        // pass authoritative for MatchEvaluation and reuse that immutable result below.
-        var evaluations = new MatchEvaluation[events.Count][];
-        // FieldMask is a 4-bit value (Title/Outline/Detail/Cast).  Match-target text is only
-        // meaningful for the current event, so keep a fixed 16-slot event-local cache instead of
-        // a run-wide Dictionary keyed by occurrence strings/timestamps.  Reuse the same small
-        // array for every event; the initialized bitset makes old-event entries unreachable.
-        var eventTargetCache = new MatchText[16];
-        for (var eventIndex = 0; eventIndex < events.Count; eventIndex++)
-        {
-            var ev = events[eventIndex];
-            var titleMatchText = MatchText.Create(ev.Title);
-            ushort initializedTargetMask = 0;
-            eventTargetCache[0x1] = titleMatchText;
-            initializedTargetMask |= 1 << 0x1;
-            var eventEvaluations = new MatchEvaluation[compiled.Count];
-            evaluations[eventIndex] = eventEvaluations;
 
-            for (var ruleIndex = 0; ruleIndex < compiled.Count; ruleIndex++)
-            {
-                var candidate = compiled[ruleIndex];
-                var accounting = rulePipeline[candidate.Rule.Id];
-                accounting.FutureEventsSeen++;
-                IncrementSourceCount(accounting.SourceEventsSeen, RulePipelineSource(ev));
+        // release_contract KeywordMatcherStreamingEvaluationSingleSource:
+        // Preserve semantic-field boundaries and allocation-free compact matching,
+        // but do not retain MatchEvaluation for every future-programme x enabled-rule pair.  For
+        // each programme, evaluate every rule exactly once, update all diagnostics/conservation
+        // counters immediately, and retain only the first matching rule index required by the
+        // later reservation mutation phase.  This makes memory proportional to programme count,
+        // not programme-count x rule-count, while preserving first-match rule ordering.
+        var compiledFieldMask = compiled.Aggregate((byte)0, static (mask, rule) => (byte)(mask | rule.FieldMask));
+        var ruleCount = compiled.Count;
+        var firstMatchingRuleIndices = new int[events.Count];
+        Array.Fill(firstMatchingRuleIndices, -1);
 
-                if (accounting.Expired)
-                {
-                    accounting.ExpiredSkipped++;
-                    continue;
-                }
-
-                accounting.Evaluated++;
-                if (candidate.IncludeMatcher.IsMatch(titleMatchText))
-                    accounting.TitleExpressionPositive++;
-
-                var evaluation = EvaluateMatch(ev, candidate, eventTargetCache, ref initializedTargetMask);
-                eventEvaluations[ruleIndex] = evaluation;
-                if (evaluation.IsMatch)
-                {
-                    accounting.FinalMatched++;
-                    IncrementSourceCount(accounting.SourceFinalMatched, RulePipelineSource(ev));
-                }
-                else
-                {
-                    accounting.Rejected[evaluation.Reason] = accounting.Rejected.TryGetValue(evaluation.Reason, out var rejected)
-                        ? rejected + 1
-                        : 1;
-                }
-            }
-        }
-        // Evaluation results are now authoritative for this run.  The fixed event-local target
-        // cache contains references only for the last event and is not retained outside this run.
-        Array.Clear(eventTargetCache);
-
-        // keyword_match_projection_diagnostics:
-        // The programme guide and auto-search share IProgramEventSource, but auto-search applies
-        // ProgramEventProjectionGuard before rule evaluation.  A visible event can therefore
-        // disappear before IsMatch and will not appear in rule-rejection diagnostics.  Preserve
-        // the production guard, but account for title-positive future events rejected at this
-        // boundary so every silent loss has an observable reason.
-        var projectionRejectedCounts = new Dictionary<(int RuleId, string Reason), int>();
-        var projectionRejectedSamples = new List<string>();
-        foreach (var ev in futureEvents)
-        {
-            if (ProgramEventProjectionGuard.IsSafeForAutoReservation(ev, out var guardReason))
-                continue;
-
-            var titleMatchText = MatchText.Create(ev.Title);
-            foreach (var candidate in compiled)
-            {
-                if (!candidate.IncludeMatcher.IsMatch(titleMatchText))
-                    continue;
-
-                var key = (candidate.Rule.Id, guardReason);
-                projectionRejectedCounts[key] = projectionRejectedCounts.TryGetValue(key, out var current)
-                    ? current + 1
-                    : 1;
-
-                if (projectionRejectedSamples.Count < 24)
-                {
-                    projectionRejectedSamples.Add(
-                        $"rule={candidate.Rule.Id}:reason={SafeProjectedLogValue(guardReason)}:title={SafeProjectedLogValue(ev.Title)}:service={SafeProjectedLogValue(ev.ServiceName)}:nid={ev.NetworkId}:tsid={ev.TransportStreamId}:sid={ev.ServiceId}:eid={ev.EventId}:start={ev.Start:MM/dd HH:mm}:end={ev.End:MM/dd HH:mm}:projectionState={SafeProjectedLogValue(ev.ProjectionState)}:sourceKind={SafeProjectedLogValue(ev.SourceKind)}:sourcePluginId={SafeProjectedLogValue(ev.SourcePluginId)}:sourceEventKey={SafeProjectedLogValue(ev.SourceEventKey)}:dbEventExists={ev.DbEventExists}");
-                }
-            }
-        }
-
-        var totalAdded = 0;
-        var ruleMatchedCount = 0;
-        var suppressedByExistingEventCount = 0;
-        var suppressedByExistingScheduleCount = 0;
-        var suppressedByKeywordCancelOnceCount = 0;
-        var suppressedByManualStopAutomaticRerecordCount = 0;
-        var suppressedByPastStartAdmissionCount = 0;
-        var existingSuppressionSamples = new List<string>();
         var titlePositiveRejectedCounts = new Dictionary<(int RuleId, MatchRejectReason Reason), int>();
         var titlePositiveRejectedSamples = new List<string>();
 
-        // keyword_match_global_crosscheck:
-        // Evaluate the complete Cartesian product of the current safe future programme snapshot
-        // and every enabled compiled rule. This is programme- and environment-agnostic.
-        // Follow production first-match ordering and account every expected automatic reservation
-        // as existing, explicitly suppressed, or unexplained.
         var crosscheckPairs = 0L;
         var crosscheckExpected = 0;
         var crosscheckExistingEvent = 0;
@@ -515,60 +406,105 @@ public sealed class KeywordMatcher
         var crosscheckManualStop = 0;
         var crosscheckPastStartAdmission = 0;
         var crosscheckUnaccounted = 0;
-        var crosscheckMultipleRuleMatches = 0;
         var crosscheckSourceExpected = new Dictionary<string, int>(StringComparer.Ordinal);
         var crosscheckSourceUnaccounted = new Dictionary<string, int>(StringComparer.Ordinal);
         var crosscheckRuleExpected = new Dictionary<int, int>();
         var crosscheckRuleUnaccounted = new Dictionary<int, int>();
-        var crosscheckTitleRejected = new Dictionary<(int RuleId, MatchRejectReason Reason, string Source), int>();
         var crosscheckUnaccountedSamples = new List<string>();
         var crosscheckPending = new List<(ProjectedProgramEvent Event, CompiledKeywordRule FirstRule, string Source)>();
-        var crosscheckRejectedSamples = new Dictionary<(int RuleId, MatchRejectReason Reason, string Source), List<string>>();
 
         for (var eventIndex = 0; eventIndex < events.Count; eventIndex++)
         {
             var ev = events[eventIndex];
-            var titleMatchText = MatchText.Create(ev.Title);
-            var matchingRules = new List<CompiledKeywordRule>();
             var source = RulePipelineSource(ev);
-            for (var ruleIndex = 0; ruleIndex < compiled.Count; ruleIndex++)
+            // Keep semantic fields lazy inside this event.  The matcher must not build
+            // Title/Outline/Detail/Cast for every active future programme before knowing whether a
+            // rule survived service/genre/day/time filters.  In particular one cast-search rule
+            // forced ExtractCast + normalization for all ~15k programmes.  Materialize each field
+            // only when a rule that has passed structural filters first needs it, then share that
+            // immutable MatchText with the remaining rules for this programme.
+            var eventFields = default(MatchFields);
+            byte initializedFieldMask = 0;
+            if ((compiledFieldMask & 0x1) != 0)
+            {
+                eventFields = EnsureFields(ev, eventFields, 0x1, ref initializedFieldMask);
+            }
+            var titleMatchTarget = new MatchTarget(0x1, eventFields);
+            var firstMatchingRuleIndex = -1;
+
+            for (var ruleIndex = 0; ruleIndex < ruleCount; ruleIndex++)
             {
                 var candidate = compiled[ruleIndex];
+                var accounting = rulePipeline[candidate.Rule.Id];
                 crosscheckPairs++;
-                if (IsRuleExpired(candidate.Rule, now))
-                    continue;
+                accounting.FutureEventsSeen++;
+                IncrementSourceCount(accounting.SourceEventsSeen, source);
 
-                var evaluation = evaluations[eventIndex][ruleIndex];
+                if (accounting.Expired)
+                {
+                    accounting.ExpiredSkipped++;
+                    continue;
+                }
+
+                accounting.Evaluated++;
+                var titlePositive = candidate.IncludeMatcher.IsMatch(titleMatchTarget);
+                if (titlePositive)
+                    accounting.TitleExpressionPositive++;
+
+                var structuralReject = EvaluateStructuralReject(ev, candidate);
+                MatchEvaluation evaluation;
+                if (structuralReject != MatchRejectReason.None)
+                {
+                    evaluation = new MatchEvaluation(false, structuralReject);
+                }
+                else
+                {
+                    eventFields = EnsureFields(ev, eventFields, candidate.FieldMask, ref initializedFieldMask);
+                    evaluation = EvaluateTextMatch(
+                        candidate,
+                        eventFields,
+                        candidate.FieldMask == 0x1 ? titlePositive : null);
+                }
+
                 if (evaluation.IsMatch)
                 {
-                    matchingRules.Add(candidate);
+                    accounting.FinalMatched++;
+                    IncrementSourceCount(accounting.SourceFinalMatched, source);
+                    firstMatchingRuleIndex = firstMatchingRuleIndex < 0 ? ruleIndex : firstMatchingRuleIndex;
                     continue;
                 }
 
-                if (!candidate.IncludeMatcher.IsMatch(titleMatchText))
-                    continue;
-
-                var rejectionKey = (candidate.Rule.Id, evaluation.Reason, source);
-                crosscheckTitleRejected[rejectionKey] = crosscheckTitleRejected.TryGetValue(rejectionKey, out var rejectedCount)
-                    ? rejectedCount + 1
+                accounting.Rejected[evaluation.Reason] = accounting.Rejected.TryGetValue(evaluation.Reason, out var rejected)
+                    ? rejected + 1
                     : 1;
-                if (!crosscheckRejectedSamples.TryGetValue(rejectionKey, out var rejectedSamples))
+
+                if (!titlePositive)
+                    continue;
+
+                // Production first-match traversal records rejection diagnostics only until the
+                // first matching rule.  Mirror that ordering in this same streaming pass.
+                if (firstMatchingRuleIndex < 0)
                 {
-                    rejectedSamples = new List<string>();
-                    crosscheckRejectedSamples[rejectionKey] = rejectedSamples;
+                    var countKey = (candidate.Rule.Id, evaluation.Reason);
+                    titlePositiveRejectedCounts[countKey] = titlePositiveRejectedCounts.TryGetValue(countKey, out var current)
+                        ? current + 1
+                        : 1;
+                    if (titlePositiveRejectedSamples.Count < 24)
+                    {
+                        var candidateRule = candidate.Rule;
+                        titlePositiveRejectedSamples.Add(
+                            $"rule={candidateRule.Id}:reason={evaluation.Reason}:title={SafeProjectedLogValue(ev.Title)}:service={SafeProjectedLogValue(ev.ServiceName)}:nid={ev.NetworkId}:tsid={ev.TransportStreamId}:sid={ev.ServiceId}:eid={ev.EventId}:start={ev.Start:MM/dd HH:mm}:end={ev.End:MM/dd HH:mm}:genres={SafeProjectedLogValue(ev.GenreCodes)}:days={SafeProjectedLogValue(candidateRule.TargetDays)}:services={SafeProjectedLogValue(candidateRule.TargetServices)}:ruleGenres={SafeProjectedLogValue(candidateRule.TargetGenres)}:time={(candidateRule.UseTimeRange ? $"{candidateRule.StartTime}-{candidateRule.EndTime}" : "all")}:fields={candidate.FieldMask}:exclude={SafeProjectedLogValue(candidateRule.ExcludePattern)}");
+                    }
                 }
-                if (rejectedSamples.Count < 3)
-                    rejectedSamples.Add($"title={SafeProjectedLogValue(ev.Title)}:service={SafeProjectedLogValue(ev.ServiceName)}:nid={ev.NetworkId}:tsid={ev.TransportStreamId}:sid={ev.ServiceId}:eid={ev.EventId}:start={ev.Start:MM/dd HH:mm}:end={ev.End:MM/dd HH:mm}:genres={SafeProjectedLogValue(ev.GenreCodes)}");
             }
 
-            if (matchingRules.Count == 0)
+            firstMatchingRuleIndices[eventIndex] = firstMatchingRuleIndex;
+            if (firstMatchingRuleIndex < 0)
                 continue;
 
             crosscheckExpected++;
-            if (matchingRules.Count > 1)
-                crosscheckMultipleRuleMatches++;
-
-            var firstRule = matchingRules[0].Rule;
+            var firstMatchingRule = compiled[firstMatchingRuleIndex];
+            var firstRule = firstMatchingRule.Rule;
             IncrementSourceCount(crosscheckSourceExpected, source);
             crosscheckRuleExpected[firstRule.Id] = crosscheckRuleExpected.TryGetValue(firstRule.Id, out var expectedForRule) ? expectedForRule + 1 : 1;
 
@@ -601,21 +537,59 @@ public sealed class KeywordMatcher
             }
 
             crosscheckUnaccounted++;
-            crosscheckPending.Add((ev, matchingRules[0], source));
+            crosscheckPending.Add((ev, firstMatchingRule, source));
             IncrementSourceCount(crosscheckSourceUnaccounted, source);
             crosscheckRuleUnaccounted[firstRule.Id] = crosscheckRuleUnaccounted.TryGetValue(firstRule.Id, out var missingForRule) ? missingForRule + 1 : 1;
             if (crosscheckUnaccountedSamples.Count < 64)
-                crosscheckUnaccountedSamples.Add($"rule={firstRule.Id}:ruleName={SafeProjectedLogValue(string.IsNullOrWhiteSpace(firstRule.Name) ? TrimRuleLabel(firstRule.Pattern) : firstRule.Name)}:source={source}:title={SafeProjectedLogValue(ev.Title)}:service={SafeProjectedLogValue(ev.ServiceName)}:nid={ev.NetworkId}:tsid={ev.TransportStreamId}:sid={ev.ServiceId}:eid={ev.EventId}:start={ev.Start:MM/dd HH:mm}:end={ev.End:MM/dd HH:mm}:projectionState={SafeProjectedLogValue(ev.ProjectionState)}:sourcePluginId={SafeProjectedLogValue(ev.SourcePluginId)}:sourceEventKey={SafeProjectedLogValue(ev.SourceEventKey)}:matchedRuleIds={string.Join(",", matchingRules.Select(x => x.Rule.Id))}");
+            {
+                crosscheckUnaccountedSamples.Add($"rule={firstRule.Id}:ruleName={SafeProjectedLogValue(string.IsNullOrWhiteSpace(firstRule.Name) ? TrimRuleLabel(firstRule.Pattern) : firstRule.Name)}:source={source}:title={SafeProjectedLogValue(ev.Title)}:service={SafeProjectedLogValue(ev.ServiceName)}:nid={ev.NetworkId}:tsid={ev.TransportStreamId}:sid={ev.ServiceId}:eid={ev.EventId}:start={ev.Start:MM/dd HH:mm}:end={ev.End:MM/dd HH:mm}:projectionState={SafeProjectedLogValue(ev.ProjectionState)}:sourcePluginId={SafeProjectedLogValue(ev.SourcePluginId)}:sourceEventKey={SafeProjectedLogValue(ev.SourceEventKey)}:matchedRuleIds={firstRule.Id}");
+            }
         }
+
+        // keyword_match_projection_diagnostics:
+        // The programme guide and auto-search share IProgramEventSource, but auto-search applies
+        // ProgramEventProjectionGuard before rule evaluation.  A visible event can therefore
+        // disappear before IsMatch and will not appear in rule-rejection diagnostics.  Preserve
+        // the production guard, but account for title-positive future events rejected at this
+        // boundary so every silent loss has an observable reason.
+        var projectionRejectedCounts = new Dictionary<(int RuleId, string Reason), int>();
+        var projectionRejectedSamples = new List<string>();
+        foreach (var ev in futureEvents)
+        {
+            if (ProgramEventProjectionGuard.IsSafeForAutoReservation(ev, out var guardReason))
+                continue;
+
+            var titleMatchText = MatchText.Create(ev.Title);
+            var titleMatchTarget = new MatchTarget(0x1, new MatchFields(titleMatchText, default, default, default));
+            foreach (var candidate in compiled)
+            {
+                if (!candidate.IncludeMatcher.IsMatch(titleMatchTarget))
+                    continue;
+
+                var key = (candidate.Rule.Id, guardReason);
+                projectionRejectedCounts[key] = projectionRejectedCounts.TryGetValue(key, out var current)
+                    ? current + 1
+                    : 1;
+
+                if (projectionRejectedSamples.Count < 24)
+                {
+                    projectionRejectedSamples.Add(
+                        $"rule={candidate.Rule.Id}:reason={SafeProjectedLogValue(guardReason)}:title={SafeProjectedLogValue(ev.Title)}:service={SafeProjectedLogValue(ev.ServiceName)}:nid={ev.NetworkId}:tsid={ev.TransportStreamId}:sid={ev.ServiceId}:eid={ev.EventId}:start={ev.Start:MM/dd HH:mm}:end={ev.End:MM/dd HH:mm}:projectionState={SafeProjectedLogValue(ev.ProjectionState)}:sourceKind={SafeProjectedLogValue(ev.SourceKind)}:sourcePluginId={SafeProjectedLogValue(ev.SourcePluginId)}:sourceEventKey={SafeProjectedLogValue(ev.SourceEventKey)}:dbEventExists={ev.DbEventExists}");
+                }
+            }
+        }
+
+        var totalAdded = 0;
+        var ruleMatchedCount = 0;
+        var suppressedByExistingEventCount = 0;
+        var suppressedByExistingScheduleCount = 0;
+        var suppressedByKeywordCancelOnceCount = 0;
+        var suppressedByManualStopAutomaticRerecordCount = 0;
+        var suppressedByPastStartAdmissionCount = 0;
+        var existingSuppressionSamples = new List<string>();
 
         var crosscheckRuleExpectedSummary = crosscheckRuleExpected.Count == 0 ? "-" : string.Join(",", crosscheckRuleExpected.OrderBy(x => x.Key).Select(x => $"rule{x.Key}={x.Value}"));
         var crosscheckRuleUnaccountedSummary = crosscheckRuleUnaccounted.Count == 0 ? "-" : string.Join(",", crosscheckRuleUnaccounted.OrderBy(x => x.Key).Select(x => $"rule{x.Key}={x.Value}"));
-        var crosscheckRejectedSummary = crosscheckTitleRejected.Count == 0
-            ? "-"
-            : string.Join(",", crosscheckTitleRejected.OrderBy(x => x.Key.RuleId).ThenBy(x => x.Key.Reason).ThenBy(x => x.Key.Source, StringComparer.Ordinal).Select(x => $"rule{x.Key.RuleId}.{x.Key.Reason}.{x.Key.Source}={x.Value}"));
-        var crosscheckRejectedSampleSummary = crosscheckRejectedSamples.Count == 0
-            ? "-"
-            : string.Join("/", crosscheckRejectedSamples.OrderBy(x => x.Key.RuleId).ThenBy(x => x.Key.Reason).ThenBy(x => x.Key.Source, StringComparer.Ordinal).SelectMany(x => x.Value.Select(sample => $"rule={x.Key.RuleId}:reason={x.Key.Reason}:source={x.Key.Source}:{sample}")));
 
         // This is intentionally a pre-commit view.  A newly discovered occurrence is expected to
         // be absent before the production pass below adds it.  Reporting that normal state as
@@ -634,44 +608,8 @@ public sealed class KeywordMatcher
         for (var eventIndex = 0; eventIndex < events.Count; eventIndex++)
         {
             var ev = events[eventIndex];
-            var titleMatchText = MatchText.Create(ev.Title);
-            CompiledKeywordRule? matchedEntry = null;
-            for (var ruleIndex = 0; ruleIndex < compiled.Count; ruleIndex++)
-            {
-                var candidate = compiled[ruleIndex];
-                var candidateRule = candidate.Rule;
-                if (!string.IsNullOrWhiteSpace(candidateRule.ExpiresOn)
-                    && DateOnly.TryParse(candidateRule.ExpiresOn, out var candidateExp)
-                    && candidateExp < DateOnly.FromDateTime(now))
-                {
-                    continue;
-                }
-
-                var evaluation = evaluations[eventIndex][ruleIndex];
-                if (evaluation.IsMatch)
-                {
-                    matchedEntry = candidate;
-                    break;
-                }
-
-                // keyword_match_diagnostics:
-                // A programme whose title itself satisfies the rule expression must never disappear
-                // silently behind a secondary condition.  Record the exact rejection axis for a
-                // bounded sample, without introducing programme- or rule-specific branches.
-                if (candidate.IncludeMatcher.IsMatch(titleMatchText))
-                {
-                    var countKey = (candidateRule.Id, evaluation.Reason);
-                    titlePositiveRejectedCounts[countKey] = titlePositiveRejectedCounts.TryGetValue(countKey, out var current)
-                        ? current + 1
-                        : 1;
-
-                    if (titlePositiveRejectedSamples.Count < 24)
-                    {
-                        titlePositiveRejectedSamples.Add(
-                            $"rule={candidateRule.Id}:reason={evaluation.Reason}:title={SafeProjectedLogValue(ev.Title)}:service={SafeProjectedLogValue(ev.ServiceName)}:nid={ev.NetworkId}:tsid={ev.TransportStreamId}:sid={ev.ServiceId}:eid={ev.EventId}:start={ev.Start:MM/dd HH:mm}:end={ev.End:MM/dd HH:mm}:genres={SafeProjectedLogValue(ev.GenreCodes)}:days={SafeProjectedLogValue(candidateRule.TargetDays)}:services={SafeProjectedLogValue(candidateRule.TargetServices)}:ruleGenres={SafeProjectedLogValue(candidateRule.TargetGenres)}:time={(candidateRule.UseTimeRange ? $"{candidateRule.StartTime}-{candidateRule.EndTime}" : "all")}:fields={candidate.FieldMask}:exclude={SafeProjectedLogValue(candidateRule.ExcludePattern)}");
-                    }
-                }
-            }
+            var matchedRuleIndex = firstMatchingRuleIndices[eventIndex];
+            var matchedEntry = matchedRuleIndex >= 0 ? compiled[matchedRuleIndex] : null;
 
             var evKey = KeywordEventOccurrenceDedupeKey(ev);
             var scheduleKey = KeywordScheduleDedupeKey(ev);
@@ -781,7 +719,7 @@ public sealed class KeywordMatcher
                 {
                     // BROADCAST_SLOT_EVENT_REBIND_INVARIANT:
                     // 自動検索も番組表/Pluginと同じatomic parent入口を通す。EventId差替えで同一放送枠の
-                    // 旧予約が残っていても別ReservationIdを生成せず、既存予約へ収束させる。
+                    // 同一番組の予約は既存ReservationIdへ収束させる。
                     var addResult = _rsvStore.AddOrGetActiveParent(
                         rsv,
                         new ReservationRecordingOptions(rule.RecordCurrentServiceOnly, rule.RecordSubtitles));
@@ -878,16 +816,16 @@ public sealed class KeywordMatcher
             _log.Add("KEYWORD_MATCH", "SuppressedSummary",
                 $"result=OK keywordCancelOnce={suppressedByKeywordCancelOnceCount} manualStopAutomaticRerecord={suppressedByManualStopAutomaticRerecordCount} pastStartAdmission={suppressedByPastStartAdmissionCount} rule=release_contract");
 
-        var titlePositiveRejectedSummary = titlePositiveRejectedCounts.Count == 0
-            ? "-"
-            : string.Join(",", titlePositiveRejectedCounts
-                .OrderBy(x => x.Key.RuleId)
-                .ThenBy(x => x.Key.Reason)
-                .Select(x => $"rule{x.Key.RuleId}.{x.Key.Reason}={x.Value}"));
-
         var actionableDiagnostic = postUnaccounted > 0 || projectionRejectedCounts.Values.Sum() > 0;
         if (actionableDiagnostic)
         {
+            var titlePositiveRejectedSummary = titlePositiveRejectedCounts.Count == 0
+                ? "-"
+                : string.Join(",", titlePositiveRejectedCounts
+                    .OrderBy(x => x.Key.RuleId)
+                    .ThenBy(x => x.Key.Reason)
+                    .Select(x => $"rule{x.Key.RuleId}.{x.Key.Reason}={x.Value}"));
+
             _log.Add("KEYWORD_MATCH_REJECTION_DIAGNOSTICS", "KeywordMatcher",
                 $"result=DIAGNOSTIC scope=title_expression_positive_but_final_rejected counts=[{titlePositiveRejectedSummary}] samples=[{(titlePositiveRejectedSamples.Count == 0 ? "-" : string.Join("/", titlePositiveRejectedSamples))}] rule=keyword_match_rejection_diagnostics");
 
@@ -921,7 +859,7 @@ public sealed class KeywordMatcher
 #if TVAIR_DEVELOPER_DIAGNOSTICS
         var matcherAllocatedAtExit = GC.GetAllocatedBytesForCurrentThread();
         _log.Add("KEYWORD_MATCH_ALLOCATION", "KeywordMatcher",
-            $"result=OK allocatedBytes={Math.Max(0, matcherAllocatedAtExit - matcherAllocatedAtEntry)} events={events.Count} rules={compiled.Count} pairs={crosscheckPairs} evaluationSource=single_pass_matrix_event_local_target_cache allocationScope=current_thread_exact rule=keyword_match_allocation_contract");
+            $"result=OK allocatedBytes={Math.Max(0, matcherAllocatedAtExit - matcherAllocatedAtEntry)} events={events.Count} rules={compiled.Count} pairs={crosscheckPairs} evaluationSource=single_pass_streaming_first_match_shared_semantic_fields_no_compact_materialization allocationScope=current_thread_exact rule=keyword_match_allocation_contract");
 #endif
         return totalAdded;
     }
@@ -1052,7 +990,7 @@ public sealed class KeywordMatcher
             : $"schedule:{KeywordScheduleDedupeKey(reservation)}";
 
     // EventIdはサービス内で再利用されるため、EventId単独では放送発生回を一意に識別できない。
-    // 過去の取消・完了履歴で抑止するのは同じ開始・終了時刻の発生回だけとし、
+    // 取消・完了履歴による抑止は同じ開始・終了時刻の発生回だけに限定し、
     // 将来の別番組が同じEventIdを再利用した場合まで誤って既存扱いしてはならない。
     private static string KeywordEventOccurrenceDedupeKey(ProjectedProgramEvent ev)
         => $"{ev.NetworkId}:{ev.TransportStreamId}:{ev.ServiceId}:{ev.EventId}:{ev.Start:O}:{ev.End:O}";
@@ -1071,18 +1009,18 @@ public sealed class KeywordMatcher
             ? string.Empty
             : text.Trim().Normalize(NormalizationForm.FormKC);
 
-    private IReadOnlyList<ProjectedProgramEvent> GetFutureAutoReservationEvents(DateTime now, ChannelLoadResult channelMap)
+    private IReadOnlyList<ProjectedProgramEvent> GetFutureAutoReservationEvents(DateTime now, ChannelServiceAccessSnapshot channelMap)
         => GetFutureSafeEvents(now)
-            .Where(e => channelMap.IsSearchAndRecordingEnabled(e.NetworkId, e.TransportStreamId, e.ServiceId))
+            .Where(e => channelMap.IsOperational(e.NetworkId, e.TransportStreamId, e.ServiceId))
             .ToList();
 
-    private int ReconcileInactiveScheduledKeywordReservations(ChannelLoadResult channelMap)
+    private int ReconcileInactiveScheduledKeywordReservations(ChannelServiceAccessSnapshot channelMap)
     {
         var inactive = _rsvStore.GetAll()
             .Where(r => r.Source == ReservationSource.Keyword
                         && r.Status == ReservationStatus.Scheduled
                         && r.SourceRuleId.HasValue
-                        && !channelMap.IsTvTestServiceEnabled(r.NetworkId, r.TransportStreamId, r.ServiceId))
+                        && !channelMap.IsTvTestEnabled(r.NetworkId, r.TransportStreamId, r.ServiceId))
             .GroupBy(r => r.SourceRuleId!.Value)
             .ToList();
 
@@ -1142,7 +1080,7 @@ public sealed class KeywordMatcher
             .Where(x => x is not null)
             .Select(x => x!)
             .ToList();
-        var targetCache = new Dictionary<(string EventKey, long StartTicks, long EndTicks, byte Mask), MatchText>();
+        var targetCache = new Dictionary<(string EventKey, long StartTicks, long EndTicks, byte Mask), MatchTarget>();
         var groups = new List<KeywordRuleReservationGroup>();
         var groupMap = new Dictionary<string, KeywordRuleReservationGroup>(StringComparer.Ordinal);
 
@@ -1298,13 +1236,17 @@ public sealed class KeywordMatcher
     private static string NormalizePatternForMatch(string pattern)
     {
         if (string.IsNullOrEmpty(pattern)) return string.Empty;
-        return pattern.Normalize(NormalizationForm.FormKC);
+        return pattern.IsNormalized(NormalizationForm.FormKC)
+            ? pattern
+            : pattern.Normalize(NormalizationForm.FormKC);
     }
 
     private static string NormalizeForMatch(string text)
     {
         if (string.IsNullOrEmpty(text)) return string.Empty;
-        return text.Normalize(NormalizationForm.FormKC);
+        return text.IsNormalized(NormalizationForm.FormKC)
+            ? text
+            : text.Normalize(NormalizationForm.FormKC);
     }
 
     private static string CompactForMatch(string text)
@@ -1316,60 +1258,39 @@ public sealed class KeywordMatcher
     private static string CompactNormalizedForMatch(string normalized)
     {
         if (string.IsNullOrEmpty(normalized)) return string.Empty;
-        var chars = normalized.Where(c => !char.IsWhiteSpace(c)).ToArray();
-        return new string(chars);
+
+        var whitespaceCount = 0;
+        foreach (var c in normalized)
+        {
+            if (char.IsWhiteSpace(c))
+                whitespaceCount++;
+        }
+
+        if (whitespaceCount == 0)
+            return normalized;
+
+        var compactLength = normalized.Length - whitespaceCount;
+        if (compactLength == 0)
+            return string.Empty;
+
+        return string.Create(compactLength, normalized, static (destination, source) =>
+        {
+            var offset = 0;
+            foreach (var c in source)
+            {
+                if (!char.IsWhiteSpace(c))
+                    destination[offset++] = c;
+            }
+        });
     }
 
-    private KeywordServiceFilter ParseServiceFilter(string? raw)
+    private static HashSet<ServiceIdentityContract.Key> ParseServiceFilter(string? raw)
     {
-        var exact = new HashSet<ServiceIdentityContract.Key>();
-        var legacyUnique = new HashSet<ServiceIdentityContract.Key>();
-        var unresolvedLegacySids = new HashSet<ushort>();
-        var hasInvalidToken = false;
-        if (string.IsNullOrWhiteSpace(raw))
-            return new KeywordServiceFilter(exact, legacyUnique, unresolvedLegacySids, hasInvalidToken);
-
-        IReadOnlyList<ChannelTarget> targets;
-        try
-        {
-            targets = _channelLoader.Load().Targets.ToList();
-        }
-        catch
-        {
-            targets = Array.Empty<ChannelTarget>();
-        }
-
+        var keys = new HashSet<ServiceIdentityContract.Key>();
+        if (string.IsNullOrWhiteSpace(raw)) return keys;
         foreach (var token in raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            if (ServiceIdentityContract.TryParseKey(token, out var key))
-            {
-                exact.Add(key);
-                continue;
-            }
-
-            // Legacy keyword rules stored SID-only values. Keep them readable, but only resolve
-            // a legacy SID when it maps to exactly one current service identity. Ambiguous or
-            // temporarily unresolvable legacy selections must not select another station and must
-            // also not become authority to delete already-scheduled reservations for that rule.
-            if (!ushort.TryParse(token, out var legacySid))
-            {
-                hasInvalidToken = true;
-                continue;
-            }
-
-            var matches = targets
-                .Where(t => t.ServiceId == legacySid)
-                .Select(ServiceIdentityContract.From)
-                .Distinct()
-                .Take(2)
-                .ToList();
-            if (matches.Count == 1)
-                legacyUnique.Add(matches[0]);
-            else
-                unresolvedLegacySids.Add(legacySid);
-        }
-
-        return new KeywordServiceFilter(exact, legacyUnique, unresolvedLegacySids, hasInvalidToken);
+            if (ServiceIdentityContract.TryParseKey(token, out var key)) keys.Add(key);
+        return keys;
     }
 
     private static HashSet<char> ParseGenres(string? raw)
@@ -1396,35 +1317,30 @@ public sealed class KeywordMatcher
         if (includeMatcher is null)
             return null;
 
-        var serviceFilter = ParseServiceFilter(rule.TargetServices);
         return new CompiledKeywordRule(
             rule,
             includeMatcher,
             BuildMatcher(rule.ExcludePattern, rule.UseRegex),
-            serviceFilter.ExactServiceKeys,
-            serviceFilter.LegacyUniqueServiceKeys,
-            serviceFilter.UnresolvedLegacyServiceIds,
-            serviceFilter.HasInvalidToken,
+            ParseServiceFilter(rule.TargetServices),
             ParseGenres(rule.TargetGenres),
             ParseDays(rule.TargetDays),
             BuildFieldMask(rule));
     }
 
-    private static bool IsMatch(ProjectedProgramEvent ev, CompiledKeywordRule entry, Dictionary<(string EventKey, long StartTicks, long EndTicks, byte Mask), MatchText> targetCache)
+    private static bool IsMatch(ProjectedProgramEvent ev, CompiledKeywordRule entry, Dictionary<(string EventKey, long StartTicks, long EndTicks, byte Mask), MatchTarget> targetCache)
         => EvaluateMatch(ev, entry, targetCache).IsMatch;
 
     // Interactive/query paths are not a full Cartesian matcher run, so keep their existing
-    // request-local occurrence cache.  The automatic full-run path below uses the bounded
-    // 16-slot event-local cache.
-    private static MatchEvaluation EvaluateMatch(ProjectedProgramEvent ev, CompiledKeywordRule entry, Dictionary<(string EventKey, long StartTicks, long EndTicks, byte Mask), MatchText> targetCache)
+    // request-local occurrence cache.  The automatic full-run path instead materializes each
+    // semantic field once per programme and shares that immutable set across every rule.
+    private static MatchEvaluation EvaluateMatch(ProjectedProgramEvent ev, CompiledKeywordRule entry, Dictionary<(string EventKey, long StartTicks, long EndTicks, byte Mask), MatchTarget> targetCache)
     {
         var rule = entry.Rule;
 
         if (!rule.UseAllChannels)
         {
             var serviceKey = new ServiceIdentityContract.Key(ev.NetworkId, ev.TransportStreamId, ev.ServiceId);
-            if ((entry.ServiceKeys.Count == 0 && entry.LegacyUniqueServiceKeys.Count == 0)
-                || (!entry.ServiceKeys.Contains(serviceKey) && !entry.LegacyUniqueServiceKeys.Contains(serviceKey)))
+            if (entry.ServiceKeys.Count == 0 || !entry.ServiceKeys.Contains(serviceKey))
             {
                 return new MatchEvaluation(false, MatchRejectReason.Service);
             }
@@ -1440,7 +1356,7 @@ public sealed class KeywordMatcher
             return new MatchEvaluation(false, MatchRejectReason.Time);
 
         var target = GetOrBuildTarget(ev, entry.FieldMask, targetCache);
-        if (string.IsNullOrWhiteSpace(target.Raw))
+        if (target.IsEmpty)
             return new MatchEvaluation(false, MatchRejectReason.EmptyTarget);
 
         if (!entry.IncludeMatcher.IsMatch(target))
@@ -1452,15 +1368,62 @@ public sealed class KeywordMatcher
         return new MatchEvaluation(true, MatchRejectReason.None);
     }
 
-    private static MatchEvaluation EvaluateMatch(ProjectedProgramEvent ev, CompiledKeywordRule entry, MatchText[] targetCache, ref ushort initializedTargetMask)
+    private static MatchRejectReason EvaluateStructuralReject(ProjectedProgramEvent ev, CompiledKeywordRule entry)
     {
         var rule = entry.Rule;
 
         if (!rule.UseAllChannels)
         {
             var serviceKey = new ServiceIdentityContract.Key(ev.NetworkId, ev.TransportStreamId, ev.ServiceId);
-            if ((entry.ServiceKeys.Count == 0 && entry.LegacyUniqueServiceKeys.Count == 0)
-                || (!entry.ServiceKeys.Contains(serviceKey) && !entry.LegacyUniqueServiceKeys.Contains(serviceKey)))
+            if (entry.ServiceKeys.Count == 0 || !entry.ServiceKeys.Contains(serviceKey))
+            {
+                return MatchRejectReason.Service;
+            }
+        }
+
+        if (entry.Genres.Count > 0 && !MatchGenre(ev.GenreCodes, entry.Genres))
+            return MatchRejectReason.Genre;
+
+        if (entry.Days.Count > 0 && !entry.Days.Contains((int)ev.Start.DayOfWeek))
+            return MatchRejectReason.Day;
+
+        if (rule.UseTimeRange && !MatchTimeRange(ev.Start, rule.StartTime, rule.EndTime))
+            return MatchRejectReason.Time;
+
+        return MatchRejectReason.None;
+    }
+
+    private static MatchEvaluation EvaluateTextMatch(
+        CompiledKeywordRule entry,
+        MatchFields fields,
+        bool? precomputedIncludeMatch = null)
+    {
+        var target = new MatchTarget(entry.FieldMask, fields);
+        if (target.IsEmpty)
+            return new MatchEvaluation(false, MatchRejectReason.EmptyTarget);
+
+        var includeMatched = precomputedIncludeMatch ?? entry.IncludeMatcher.IsMatch(target);
+        if (!includeMatched)
+            return new MatchEvaluation(false, MatchRejectReason.Include);
+
+        if (entry.ExcludeMatcher?.IsMatch(target) == true)
+            return new MatchEvaluation(false, MatchRejectReason.Exclude);
+
+        return new MatchEvaluation(true, MatchRejectReason.None);
+    }
+
+    private static MatchEvaluation EvaluateMatch(
+        ProjectedProgramEvent ev,
+        CompiledKeywordRule entry,
+        MatchFields fields,
+        bool? precomputedIncludeMatch = null)
+    {
+        var rule = entry.Rule;
+
+        if (!rule.UseAllChannels)
+        {
+            var serviceKey = new ServiceIdentityContract.Key(ev.NetworkId, ev.TransportStreamId, ev.ServiceId);
+            if (entry.ServiceKeys.Count == 0 || !entry.ServiceKeys.Contains(serviceKey))
             {
                 return new MatchEvaluation(false, MatchRejectReason.Service);
             }
@@ -1475,11 +1438,12 @@ public sealed class KeywordMatcher
         if (rule.UseTimeRange && !MatchTimeRange(ev.Start, rule.StartTime, rule.EndTime))
             return new MatchEvaluation(false, MatchRejectReason.Time);
 
-        var target = GetOrBuildTarget(ev, entry.FieldMask, targetCache, ref initializedTargetMask);
-        if (string.IsNullOrWhiteSpace(target.Raw))
+        var target = new MatchTarget(entry.FieldMask, fields);
+        if (target.IsEmpty)
             return new MatchEvaluation(false, MatchRejectReason.EmptyTarget);
 
-        if (!entry.IncludeMatcher.IsMatch(target))
+        var includeMatched = precomputedIncludeMatch ?? entry.IncludeMatcher.IsMatch(target);
+        if (!includeMatched)
             return new MatchEvaluation(false, MatchRejectReason.Include);
 
         if (entry.ExcludeMatcher?.IsMatch(target) == true)
@@ -1527,64 +1491,131 @@ public sealed class KeywordMatcher
         return mask;
     }
 
-    private static MatchText GetOrBuildTarget(ProjectedProgramEvent ev, byte fieldMask, Dictionary<(string EventKey, long StartTicks, long EndTicks, byte Mask), MatchText> targetCache)
+    private static MatchTarget GetOrBuildTarget(ProjectedProgramEvent ev, byte fieldMask, Dictionary<(string EventKey, long StartTicks, long EndTicks, byte Mask), MatchTarget> targetCache)
     {
         var key = (ev.Key.Value, ev.Start.Ticks, ev.End.Ticks, fieldMask);
         if (targetCache.TryGetValue(key, out var cached))
             return cached;
 
-        var parts = new List<string>(4);
-        var title = ev.Title;
-        var shortText = ev.ShortText;
-        var extendedText = ev.ExtendedText;
-        if ((fieldMask & 0x1) != 0 && !string.IsNullOrWhiteSpace(title)) parts.Add(title);
-        if ((fieldMask & 0x2) != 0 && !string.IsNullOrWhiteSpace(shortText)) parts.Add(shortText);
-        if ((fieldMask & 0x4) != 0 && !string.IsNullOrWhiteSpace(extendedText)) parts.Add(extendedText);
-        if ((fieldMask & 0x8) != 0)
-        {
-            var cast = ExtractCast(extendedText);
-            if (!string.IsNullOrWhiteSpace(cast)) parts.Add(cast);
-        }
-
-        var built = MatchText.Create(string.Join("\n", parts));
+        var built = BuildTarget(ev, fieldMask);
         targetCache[key] = built;
         return built;
     }
 
-    private static MatchText GetOrBuildTarget(ProjectedProgramEvent ev, byte fieldMask, MatchText[] targetCache, ref ushort initializedTargetMask)
+    private static MatchTarget GetOrBuildTarget(ProjectedProgramEvent ev, byte fieldMask, MatchTarget[] targetCache, ref ushort initializedTargetMask)
     {
-        // FieldMask is 0..15.  The cache lifetime is one event, so occurrence identity is implicit
-        // and cannot cross-contaminate another occurrence.  This removes run-wide tuple hashing
-        // while keeping the exact same target-text construction semantics.
+        // FieldMask is 0..15. The cache lifetime is one event, so occurrence identity is implicit.
+        // Each selected field stays independent all the way through expression/regex evaluation;
+        // no newline concatenation is allowed to manufacture a match across field boundaries.
         var slot = fieldMask & 0x0F;
         var slotBit = (ushort)(1 << slot);
         if ((initializedTargetMask & slotBit) != 0)
             return targetCache[slot];
 
-        var parts = new List<string>(4);
-        var title = ev.Title;
-        var shortText = ev.ShortText;
-        var extendedText = ev.ExtendedText;
-        if ((fieldMask & 0x1) != 0 && !string.IsNullOrWhiteSpace(title)) parts.Add(title);
-        if ((fieldMask & 0x2) != 0 && !string.IsNullOrWhiteSpace(shortText)) parts.Add(shortText);
-        if ((fieldMask & 0x4) != 0 && !string.IsNullOrWhiteSpace(extendedText)) parts.Add(extendedText);
-        if ((fieldMask & 0x8) != 0)
-        {
-            var cast = ExtractCast(extendedText);
-            if (!string.IsNullOrWhiteSpace(cast)) parts.Add(cast);
-        }
-
-        var built = MatchText.Create(string.Join("\n", parts));
+        var built = BuildTarget(ev, fieldMask);
         targetCache[slot] = built;
         initializedTargetMask |= slotBit;
         return built;
     }
 
-    private static string ExtractCast(string text)
+    private static MatchTarget BuildTarget(ProjectedProgramEvent ev, byte fieldMask)
+        => new(fieldMask, BuildFields(ev, fieldMask));
+
+    private static MatchFields BuildFields(ProjectedProgramEvent ev, byte fieldMask)
     {
-        if (string.IsNullOrWhiteSpace(text)) return string.Empty;
-        var lines = text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
-        return string.Join(" ", lines.Where(l => l.Contains("出演") || l.Contains("キャスト") || l.Contains("声:")));
+        var title = (fieldMask & 0x1) != 0 ? MatchText.Create(ev.Title) : default;
+        var outline = (fieldMask & 0x2) != 0 ? MatchText.Create(ev.ShortText) : default;
+        var detail = (fieldMask & 0x4) != 0 ? MatchText.Create(ev.ExtendedText) : default;
+        var cast = (fieldMask & 0x8) != 0 ? MatchText.Create(ExtractCast(ev.ExtendedItems)) : default;
+        return new MatchFields(title, outline, detail, cast);
+    }
+
+    private static MatchFields EnsureFields(
+        ProjectedProgramEvent ev,
+        MatchFields fields,
+        byte requiredMask,
+        ref byte initializedMask)
+    {
+        var missing = (byte)(requiredMask & ~initializedMask);
+        if (missing == 0)
+            return fields;
+
+        var title = fields.Title;
+        var outline = fields.Outline;
+        var detail = fields.Detail;
+        var cast = fields.Cast;
+
+        if ((missing & 0x1) != 0) title = MatchText.Create(ev.Title);
+        if ((missing & 0x2) != 0) outline = MatchText.Create(ev.ShortText);
+        if ((missing & 0x4) != 0) detail = MatchText.Create(ev.ExtendedText);
+        if ((missing & 0x8) != 0) cast = MatchText.Create(ExtractCast(ev.ExtendedItems));
+
+        initializedMask |= missing;
+        return new MatchFields(title, outline, detail, cast);
+    }
+
+    private static string ExtractCast(string items)
+    {
+        if (string.IsNullOrWhiteSpace(items)) return string.Empty;
+
+        // ExtendedItems is decoded from ARIB extended_event_descriptor item pairs.
+        // Only labels that explicitly identify cast are accepted. Never infer a person from
+        // programme detail, title, staff/original-author/script/director fields, or outside data.
+        // Parse line-by-line without Split/List/Join so the semantic contract stays identical
+        // while intermediate arrays and per-line strings are not allocated.
+        StringBuilder? selected = null;
+        var remaining = items.AsSpan();
+        while (!remaining.IsEmpty)
+        {
+            var newline = remaining.IndexOf('\n');
+            var line = (newline >= 0 ? remaining[..newline] : remaining).Trim();
+            if (!line.IsEmpty && line[^1] == '\r')
+                line = line[..^1].TrimEnd();
+
+            var colon = line.IndexOf(':');
+            if (colon < 0) colon = line.IndexOf('：');
+            if (colon > 0)
+            {
+                var label = line[..colon].Trim();
+                var normalizedLabel = RemoveLabelWhitespace(label);
+                if (normalizedLabel.Contains("出演", StringComparison.Ordinal)
+                    || normalizedLabel.Contains("キャスト", StringComparison.Ordinal)
+                    || normalizedLabel.Equals("声", StringComparison.Ordinal))
+                {
+                    var value = line[(colon + 1)..].Trim();
+                    if (!value.IsEmpty)
+                    {
+                        selected ??= new StringBuilder(value.Length + 16);
+                        if (selected.Length > 0) selected.Append(' ');
+                        selected.Append(value);
+                    }
+                }
+            }
+
+            if (newline < 0) break;
+            remaining = remaining[(newline + 1)..];
+        }
+
+        return selected?.ToString() ?? string.Empty;
+    }
+
+    private static string RemoveLabelWhitespace(ReadOnlySpan<char> label)
+    {
+        var whitespaceCount = 0;
+        foreach (var c in label)
+        {
+            if (c is ' ' or '　') whitespaceCount++;
+        }
+        if (whitespaceCount == 0) return label.ToString();
+        var length = label.Length - whitespaceCount;
+        return string.Create(length, label.ToString(), static (destination, source) =>
+        {
+            var offset = 0;
+            foreach (var c in source)
+            {
+                if (c is not (' ' or '　')) destination[offset++] = c;
+            }
+        });
     }
 
     private static string TrimRuleLabel(string raw)
@@ -1618,59 +1649,141 @@ public sealed class KeywordMatcher
         Exclude
     }
 
-    private readonly record struct MatchEvaluation(bool IsMatch, MatchRejectReason Reason);
+    private readonly record struct MatchEvaluation(bool IsMatch, MatchRejectReason Reason, bool TitlePositive = false);
 
-    private sealed record KeywordServiceFilter(
-        HashSet<ServiceIdentityContract.Key> ExactServiceKeys,
-        HashSet<ServiceIdentityContract.Key> LegacyUniqueServiceKeys,
-        HashSet<ushort> UnresolvedLegacyServiceIds,
-        bool HasInvalidToken);
 
     private sealed record CompiledKeywordRule(
         KeywordRule Rule,
         ITextMatcher IncludeMatcher,
         ITextMatcher? ExcludeMatcher,
         HashSet<ServiceIdentityContract.Key> ServiceKeys,
-        HashSet<ServiceIdentityContract.Key> LegacyUniqueServiceKeys,
-        HashSet<ushort> UnresolvedLegacyServiceIds,
-        bool HasInvalidServiceToken,
         HashSet<char> Genres,
         HashSet<int> Days,
         byte FieldMask);
 
-    // release_contract KeywordMatcherTargetTextSingleSource:
-    // Normalize and whitespace-compact each event/field-mask target once per matcher run.
-    // Matchers consume the immutable forms without rebuilding equivalent strings per rule/term.
-    private readonly record struct MatchText(string Raw, string Normalized, string Compact)
+    // release_contract KeywordMatcherFieldSemanticSingleSource:
+    // Title / Outline / Detail / Cast stay as independent semantic fields. Normalization is cached
+    // per selected field, and logical terms may be satisfied by different selected fields, but
+    // a single term/regex can never cross a field boundary.
+    private readonly record struct MatchText(string Raw, string Normalized)
     {
+        public bool IsEmpty => string.IsNullOrWhiteSpace(Raw);
+
         public static MatchText Create(string? raw)
         {
             var source = raw ?? string.Empty;
-            var normalized = NormalizeForMatch(source);
-            return new MatchText(source, normalized, CompactNormalizedForMatch(normalized));
+            return new MatchText(source, NormalizeForMatch(source));
         }
+    }
+
+    private readonly record struct MatchFields(MatchText Title, MatchText Outline, MatchText Detail, MatchText Cast);
+
+    private readonly record struct MatchTarget(byte FieldMask, MatchFields Fields)
+    {
+        public bool IsEmpty
+        {
+            get
+            {
+                if ((FieldMask & 0x1) != 0 && !Fields.Title.IsEmpty) return false;
+                if ((FieldMask & 0x2) != 0 && !Fields.Outline.IsEmpty) return false;
+                if ((FieldMask & 0x4) != 0 && !Fields.Detail.IsEmpty) return false;
+                if ((FieldMask & 0x8) != 0 && !Fields.Cast.IsEmpty) return false;
+                return true;
+            }
+        }
+
+        public bool MatchesRegex(Regex rx)
+        {
+            if ((FieldMask & 0x1) != 0 && MatchRegex(Fields.Title, rx)) return true;
+            if ((FieldMask & 0x2) != 0 && MatchRegex(Fields.Outline, rx)) return true;
+            if ((FieldMask & 0x4) != 0 && MatchRegex(Fields.Detail, rx)) return true;
+            if ((FieldMask & 0x8) != 0 && MatchRegex(Fields.Cast, rx)) return true;
+            return false;
+        }
+
+        public bool MatchesTerm(string rawTerm, string normalizedTerm, string compactTerm)
+        {
+            if ((FieldMask & 0x1) != 0 && MatchTerm(Fields.Title, rawTerm, normalizedTerm, compactTerm)) return true;
+            if ((FieldMask & 0x2) != 0 && MatchTerm(Fields.Outline, rawTerm, normalizedTerm, compactTerm)) return true;
+            if ((FieldMask & 0x4) != 0 && MatchTerm(Fields.Detail, rawTerm, normalizedTerm, compactTerm)) return true;
+            if ((FieldMask & 0x8) != 0 && MatchTerm(Fields.Cast, rawTerm, normalizedTerm, compactTerm)) return true;
+            return false;
+        }
+
+        private static bool MatchRegex(MatchText field, Regex rx)
+            => !field.IsEmpty && (rx.IsMatch(field.Raw) || rx.IsMatch(field.Normalized));
+
+        private static bool MatchTerm(MatchText field, string rawTerm, string normalizedTerm, string compactTerm)
+        {
+            if (field.IsEmpty) return false;
+            if (field.Raw.Contains(rawTerm, StringComparison.OrdinalIgnoreCase)
+                || field.Normalized.Contains(normalizedTerm, StringComparison.OrdinalIgnoreCase))
+                return true;
+            return !string.IsNullOrWhiteSpace(compactTerm)
+                && ContainsIgnoringWhitespace(field.Normalized, compactTerm);
+        }
+
+        // Semantically equivalent to CompactNormalizedForMatch(field).Contains(compactTerm),
+        // but scans the normalized field directly and skips whitespace instead of allocating a
+        // second full-size compact string for every Title / Outline / Detail / Cast field.
+        private static bool ContainsIgnoringWhitespace(string text, string compactTerm)
+        {
+            if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(compactTerm))
+                return false;
+
+            for (var start = 0; start < text.Length; start++)
+            {
+                while (start < text.Length && char.IsWhiteSpace(text[start]))
+                    start++;
+                if (start >= text.Length)
+                    break;
+                if (!CharEqualsIgnoreCase(text, start, compactTerm, 0))
+                    continue;
+
+                var textIndex = start;
+                var termIndex = 0;
+                while (termIndex < compactTerm.Length)
+                {
+                    while (textIndex < text.Length && char.IsWhiteSpace(text[textIndex]))
+                        textIndex++;
+                    if (textIndex >= text.Length
+                        || !CharEqualsIgnoreCase(text, textIndex, compactTerm, termIndex))
+                    {
+                        break;
+                    }
+                    textIndex++;
+                    termIndex++;
+                }
+
+                if (termIndex == compactTerm.Length)
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool CharEqualsIgnoreCase(string left, int leftIndex, string right, int rightIndex)
+            => left.AsSpan(leftIndex, 1).Equals(right.AsSpan(rightIndex, 1), StringComparison.OrdinalIgnoreCase);
     }
 
     private interface ITextMatcher
     {
-        bool IsMatch(MatchText target);
+        bool IsMatch(MatchTarget target);
     }
 
     private sealed class RegexListMatcher : ITextMatcher
     {
-        private readonly IReadOnlyList<Regex> _regexes;
+        private readonly Regex[] _regexes;
 
         public RegexListMatcher(IReadOnlyList<Regex> regexes)
         {
-            _regexes = regexes;
+            _regexes = regexes as Regex[] ?? regexes.ToArray();
         }
 
-        public bool IsMatch(MatchText target)
+        public bool IsMatch(MatchTarget target)
         {
-            foreach (var rx in _regexes)
+            for (var i = 0; i < _regexes.Length; i++)
             {
-                if (rx.IsMatch(target.Raw) || rx.IsMatch(target.Normalized))
-                    return true;
+                if (target.MatchesRegex(_regexes[i])) return true;
             }
             return false;
         }
@@ -1692,10 +1805,10 @@ public sealed class KeywordMatcher
             return new LogicalKeywordMatcher(parser.Parse());
         }
 
-        public bool IsMatch(MatchText target)
+        public bool IsMatch(MatchTarget target)
         {
             if (_root is null) return false;
-            return _root.IsMatch(target.Raw, target.Normalized, target.Compact);
+            return _root.IsMatch(target);
         }
     }
 
@@ -1881,7 +1994,7 @@ public sealed class KeywordMatcher
 
     private abstract class LogicalNode
     {
-        public abstract bool IsMatch(string rawTarget, string normalizedTarget, string compactTarget);
+        public abstract bool IsMatch(MatchTarget target);
     }
 
     private sealed class TermNode : LogicalNode
@@ -1897,39 +2010,45 @@ public sealed class KeywordMatcher
             _compactTerm = CompactForMatch(term);
         }
 
-        public override bool IsMatch(string rawTarget, string normalizedTarget, string compactTarget)
-        {
-            if (rawTarget.Contains(_rawTerm, StringComparison.OrdinalIgnoreCase)
-                || normalizedTarget.Contains(_normalizedTerm, StringComparison.OrdinalIgnoreCase))
-                return true;
-            if (string.IsNullOrWhiteSpace(_compactTerm)) return false;
-            return compactTarget.Contains(_compactTerm, StringComparison.OrdinalIgnoreCase);
-        }
+        public override bool IsMatch(MatchTarget target)
+            => target.MatchesTerm(_rawTerm, _normalizedTerm, _compactTerm);
     }
 
     private sealed class AndNode : LogicalNode
     {
-        private readonly IReadOnlyList<LogicalNode> _nodes;
+        private readonly LogicalNode[] _nodes;
 
         public AndNode(IReadOnlyList<LogicalNode> nodes)
         {
-            _nodes = nodes;
+            _nodes = nodes as LogicalNode[] ?? nodes.ToArray();
         }
 
-        public override bool IsMatch(string rawTarget, string normalizedTarget, string compactTarget)
-            => _nodes.All(n => n.IsMatch(rawTarget, normalizedTarget, compactTarget));
+        public override bool IsMatch(MatchTarget target)
+        {
+            for (var i = 0; i < _nodes.Length; i++)
+            {
+                if (!_nodes[i].IsMatch(target)) return false;
+            }
+            return true;
+        }
     }
 
     private sealed class OrNode : LogicalNode
     {
-        private readonly IReadOnlyList<LogicalNode> _nodes;
+        private readonly LogicalNode[] _nodes;
 
         public OrNode(IReadOnlyList<LogicalNode> nodes)
         {
-            _nodes = nodes;
+            _nodes = nodes as LogicalNode[] ?? nodes.ToArray();
         }
 
-        public override bool IsMatch(string rawTarget, string normalizedTarget, string compactTarget)
-            => _nodes.Any(n => n.IsMatch(rawTarget, normalizedTarget, compactTarget));
+        public override bool IsMatch(MatchTarget target)
+        {
+            for (var i = 0; i < _nodes.Length; i++)
+            {
+                if (_nodes[i].IsMatch(target)) return true;
+            }
+            return false;
+        }
     }
 }

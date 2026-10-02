@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Core;
+namespace TvAIr.Core;
 
 /// <summary>
 /// Developer Diagnostics の正本。
@@ -8,10 +8,7 @@
 /// 一般公開版では生成・保持・公開しない。ユーザー運用ログ(UserEventLogService)は別責務であり、
 /// Developer Diagnostics を無効化しても一般公開版に残す。
 ///
-/// 今後新しい開発診断を追加する場合も必ず TVAIR_DEVELOPER_DIAGNOSTICS 境界へ所属させる。
-/// ログAddだけでなく、診断専用の計測・文字列構築・Queue・Task・購読・snapshot・ファイル・APIも同じ境界で切る。
-/// Public buildでは「ログが見えない」だけでは不十分で、診断のためだけの処理・保持・外部露出を発生させない。
-/// リリース時に個別削除・手作業で無効化する運用へ戻してはならない。
+/// 開発診断は TVAIR_DEVELOPER_DIAGNOSTICS 境界にまとめ、一般公開版では診断専用処理を生成しない。
 /// </summary>
 internal static class DeveloperDiagnostics
 {

@@ -63,7 +63,7 @@ public static class TunerIsolationPolicy
     public static string ResolveConfiguredCh2Path(string path)
     {
         // release_contract: ch2も明示設定されたパスだけを正とする。
-        // 旧構成名・特定BonDriver名への自動rewriteは通常経路へ混ぜない。
+        // 構成名や特定BonDriver名の自動rewriteは通常経路へ混ぜない。
         return path;
     }
 }

@@ -3,7 +3,7 @@
 /// <summary>
 /// release_contract integrated TvAIrEpgRec common TS route.
 /// TvAIrEpgRec owns recording, EPG acquisition, and pre-record EPG-check execution in one process.
-/// TvAIrEpgRec owns the integrated BonDriver/OpenTuner/SetChannel/TS-read route; no alternate recorder executable or fallback route participates in execution.
+/// TvAIrEpgRec owns the integrated BonDriver/OpenTuner/SetChannel/TS-read route.
 /// </summary>
 internal static class CommonTsRouteFacade
 {
@@ -22,9 +22,6 @@ internal static class CommonTsRouteFacade
             ModeAfterServiceScopedTs = normalizedMode == "record",
             Owner = "TvAIrEpgRec common TS runtime",
             RecordExecutionRoute = "TvAIrEpgRec",
-            LegacyFallbackRouteAvailable = false,
-            LegacyExecutableUsed = false,
-            ExternalRecorderRuntimeDependency = false,
             FacadeAttached = true,
             RouteReadyForMode = routeReady,
             Request = request,
@@ -69,7 +66,6 @@ internal static class CommonTsRouteFacade
                 "Do not use NEXT string search.",
                 "Do not add EPG-only SID resolver as production logic.",
                 "Do not add a parallel recording route outside TvAIrEpgRec.",
-                "Do not add a legacy recorder executable dependency or fallback route.",
                 "SleepGuard/process monitoring target is TvAIrEpgRec.exe only."
             ],
             ValidationIssues = issues
@@ -108,9 +104,6 @@ internal sealed class CommonTsRouteAttachment
     public bool ModeAfterServiceScopedTs { get; set; }
     public string Owner { get; set; } = string.Empty;
     public string RecordExecutionRoute { get; set; } = string.Empty;
-    public bool LegacyFallbackRouteAvailable { get; set; }
-    public bool LegacyExecutableUsed { get; set; }
-    public bool ExternalRecorderRuntimeDependency { get; set; }
     public bool FacadeAttached { get; set; }
     public bool RouteReadyForMode { get; set; }
     public CommonTsRouteRequest? Request { get; set; }

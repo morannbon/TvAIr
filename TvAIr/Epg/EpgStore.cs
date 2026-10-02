@@ -1,4 +1,4 @@
-﻿using Microsoft.Data.Sqlite;
+using Microsoft.Data.Sqlite;
 using TvAIr.Core;
 
 namespace TvAIr.Epg;
@@ -48,7 +48,7 @@ public sealed record EpgStaleRetireStats(
 
 /// <summary>
 /// EPG取得データだけを保持するキャッシュ。
-/// 予約状態・自動検索結果・旧DB互換キーはここに持たない。
+/// 予約状態・自動検索結果はここに持たない。
 /// </summary>
 public sealed class EpgStore
 {
@@ -707,7 +707,7 @@ public sealed class EpgStore
             cmd.Parameters.AddWithValue("$dateTo", dateTo.Value.ToString("O"));
         }
 
-        // キーワードはDBの旧title/description列で絞らない。
+        // キーワードはraw descriptor投影で評価する。
         // raw descriptorから作る共通投影(EpgProjection)でReadEvents後に判定する。
 
         // サービスID
@@ -720,7 +720,7 @@ public sealed class EpgStore
                 cmd.Parameters.AddWithValue($"$sid{i}", (int)svcList[i]);
         }
 
-        // raw descriptor 投影でタイトル検索するため、SQL段階で旧title列に依存しない。
+        // タイトル検索はraw descriptor投影で評価する。
         // キーワード指定時は先に十分な件数を読み、投影後に最終limitを掛ける。
         var prefilterLimit = string.IsNullOrWhiteSpace(keyword) ? Math.Max(1, limit) : Math.Max(limit, 10000);
 
@@ -740,7 +740,7 @@ public sealed class EpgStore
         var events = ReadEvents(cmd);
 
         // 曜日・時間帯・キーワードフィルターはメモリ上で適用（SQLiteに曜日関数がないため）。
-        // キーワード本文は旧description列ではなく、raw descriptor共通デコード投影を見る。
+        // キーワード本文はraw descriptor共通デコード投影を見る。
         var dowSet = daysOfWeek?.ToHashSet();
         IEnumerable<EpgEvent> result = events;
 

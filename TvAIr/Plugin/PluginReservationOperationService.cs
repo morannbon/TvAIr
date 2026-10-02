@@ -17,7 +17,7 @@ internal sealed class PluginReservationOperationService
     private readonly PluginTypedEventHub _typedEvents;
     private readonly LogRepository _log;
     private readonly IniSettingsService _ini;
-    private readonly ChannelFileLoader _channelLoader;
+    private readonly ChannelServiceAccessPolicy _serviceAccess;
 
     public PluginReservationOperationService(
         ReservationStore reservationStore,
@@ -25,14 +25,14 @@ internal sealed class PluginReservationOperationService
         PluginTypedEventHub typedEvents,
         LogRepository log,
         IniSettingsService ini,
-        ChannelFileLoader channelLoader)
+        ChannelServiceAccessPolicy serviceAccess)
     {
         _reservationStore = reservationStore;
         _allocationRoute = allocationRoute;
         _typedEvents = typedEvents;
         _log = log;
         _ini = ini;
-        _channelLoader = channelLoader;
+        _serviceAccess = serviceAccess;
     }
 
     public PluginReservationMutationResult Add(string pluginId, PluginReservationMutationDraft draft)
@@ -41,6 +41,15 @@ internal sealed class PluginReservationOperationService
         try
         {
             var owner = PluginIdentity.Normalize(pluginId);
+            var access = _serviceAccess.Capture();
+            var target = access.ResolveOperationalTarget(draft.NetworkId, draft.TransportStreamId, draft.ServiceId);
+            if (target is null)
+            {
+                var reason = access.GetRejectReason(draft.NetworkId, draft.TransportStreamId, draft.ServiceId);
+                AddAuditLog(owner, "AddReservation",
+                    $"result=REJECTED reason={reason} nid={draft.NetworkId} tsid={draft.TransportStreamId} sid={draft.ServiceId} rule=service_access_single_source_contract");
+                return new PluginReservationMutationResult(false, null, $"serviceUnavailable:{reason}");
+            }
             var reservation = new Reservation
             {
                 NetworkId = draft.NetworkId,
@@ -48,15 +57,9 @@ internal sealed class PluginReservationOperationService
                 ServiceId = draft.ServiceId,
                 EventId = draft.EventId,
                 Title = draft.Title,
-                // SERVICE_IDENTITY_CONTRACT: plugin-supplied ServiceName is never authoritative.
-                // Persist the current Host display name when the exact triplet resolves; keep the
-                // supplied value only as fallback for an identity no longer present in channel metadata.
-                ServiceName = ServiceIdentityContract.ResolveCurrentServiceName(
-                    _channelLoader.Load().Targets,
-                    draft.NetworkId,
-                    draft.TransportStreamId,
-                    draft.ServiceId,
-                    draft.ServiceName),
+                // SERVICE_IDENTITY_CONTRACT: plugin-supplied ServiceName/ChannelArgument are never authoritative.
+                // Service-access admission above already resolved the exact active Host target, so persist that target only.
+                ServiceName = string.IsNullOrWhiteSpace(target.Name) ? draft.ServiceName : target.Name,
                 StartTime = draft.StartTime.AddMinutes(-Math.Max(0, draft.PreMarginMinutes)),
                 EndTime = draft.EndTime.AddMinutes(Math.Max(0, draft.PostMarginMinutes)),
                 // BROADCAST_SLOT_EVENT_REBIND_INVARIANT: Plugin固有の録画前マージンをStartTimeへ適用しても、
@@ -67,7 +70,7 @@ internal sealed class PluginReservationOperationService
                 Intent = draft.Intent,
                 CreatedThrough = "Plugin",
                 CreatedByPluginId = owner,
-                ChannelArgument = draft.ChannelArgument ?? string.Empty,
+                ChannelArgument = target.ChannelArgument ?? string.Empty,
                 IsEnabled = true,
                 SourceRuleName = string.Empty,
                 IsUserChain = false,

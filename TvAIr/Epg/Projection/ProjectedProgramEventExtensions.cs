@@ -44,10 +44,13 @@ public static class ProjectedProgramEventExtensions
             Description = source.ShortText,
             Genre = source.Genre,
             GenreCodes = source.GenreCodes,
+            TableId = source.DbTableId,
+            SectionNumber = source.DbSectionNumber,
+            VersionNumber = source.DbVersionNumber,
             DurationSeconds = source.DurationSeconds,
             Start = source.Start,
             End = source.End,
-            UpdatedAt = DateTime.Now
+            UpdatedAt = source.DbUpdatedAt ?? source.UpdatedAt
         };
     }
 }

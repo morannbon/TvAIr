@@ -14,6 +14,7 @@ public sealed class ReservationPresentationService
     private readonly TunerPool _tunerPool;
     private readonly LogRepository _log;
     private readonly ChannelFileLoader _channelLoader;
+    private readonly ChannelServiceAccessPolicy _serviceAccess;
     private readonly ReservationAllocationRouteService _allocationRoute;
     private readonly IProgramEventSource _programEvents;
     private readonly ReservationProjectionMetadataStore _projectionMetadata;
@@ -26,6 +27,7 @@ public sealed class ReservationPresentationService
         TunerPool tunerPool,
         LogRepository log,
         ChannelFileLoader channelLoader,
+        ChannelServiceAccessPolicy serviceAccess,
         ReservationAllocationRouteService allocationRoute,
         IProgramEventSource programEvents,
         ReservationProjectionMetadataStore projectionMetadata,
@@ -37,6 +39,7 @@ public sealed class ReservationPresentationService
         _tunerPool = tunerPool;
         _log = log;
         _channelLoader = channelLoader;
+        _serviceAccess = serviceAccess;
         _allocationRoute = allocationRoute;
         _programEvents = programEvents;
         _projectionMetadata = projectionMetadata;
@@ -251,6 +254,7 @@ public sealed class ReservationPresentationService
     {
         var chainMap = BuildChainMap();
         var items = new List<ReservationPresentationItem>(reservations.Count);
+        var serviceAccessSnapshot = _serviceAccess.Capture();
 
         foreach (var r in reservations)
         {
@@ -259,7 +263,9 @@ public sealed class ReservationPresentationService
                 chainMap.TryGetValue(r.Id, out var chainInfo);
 
                 var sourceLabel = ReservationOriginClassifier.GetUserSourceLabel(r);
-                var displayStatusLabel = BuildDisplayStatusLabel(r, sourceLabel);
+                var serviceOperational = serviceAccessSnapshot.IsOperational(r);
+                var serviceAccessReason = serviceOperational ? string.Empty : serviceAccessSnapshot.GetRejectReason(r);
+                var displayStatusLabel = BuildDisplayStatusLabel(r, sourceLabel, serviceOperational);
                 // RESERVATION_CONFLICT_PROJECTION_SINGLE_SOURCE:
                 // IsConflicted is FinalAllocationCommit が永続化した競合正本。Presentation層で
                 // 時刻重複やProgramGuideMissing重複から別の競合状態・競合相手を再計算しない。
@@ -297,8 +303,10 @@ public sealed class ReservationPresentationService
                     ChannelArgument = r.ChannelArgument ?? string.Empty,
                     IsConflicted = r.IsConflicted,
                     IsEnabled = r.IsEnabled,
-                    TunerName = priorityName,
-                    PriorityName = priorityName,
+                    IsServiceOperational = serviceOperational,
+                    ServiceAccessReason = serviceAccessReason,
+                    TunerName = serviceOperational ? priorityName : string.Empty,
+                    PriorityName = serviceOperational ? priorityName : string.Empty,
                     ActualTunerName = r.ActualTunerName ?? string.Empty,
                     HasRecordingStarted = r.RecordingStartedAt.HasValue,
                     RecordingStartedAt = r.RecordingStartedAt,
@@ -492,8 +500,13 @@ public sealed class ReservationPresentationService
         }
     }
 
-    private static string BuildDisplayStatusLabel(Reservation reservation, string sourceLabel)
+    private static string BuildDisplayStatusLabel(Reservation reservation, string sourceLabel, bool serviceOperational)
     {
+        if (reservation.Source != ReservationSource.Epg
+            && reservation.Status == ReservationStatus.Scheduled
+            && reservation.IsEnabled
+            && !serviceOperational)
+            return "サービス無効";
         return sourceLabel;
     }
 
@@ -523,6 +536,8 @@ public sealed class ReservationPresentationItem
     public string ChannelArgument { get; set; } = "";
     public bool IsConflicted { get; set; }
     public bool IsEnabled { get; set; }
+    public bool IsServiceOperational { get; set; } = true;
+    public string ServiceAccessReason { get; set; } = "";
     public string TunerName { get; set; } = "";
     public string PriorityName { get; set; } = "";
     public string ActualTunerName { get; set; } = "";

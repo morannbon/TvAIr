@@ -1,4 +1,4 @@
-﻿namespace TvAIrPlugin;
+namespace TvAIrPlugin;
 
 /// <summary>
 /// TvAIr本体能力をプラグインへ公開する新しい汎用Capability APIの入口。
@@ -463,6 +463,10 @@ public sealed class TvAirReservationDto
     public string? ChainRootReservationId { get; init; }
     public bool IsUserChain { get; init; }
     public bool IsEnabled { get; init; }
+    /// <summary>Hostのサービス操作可否SSOTで現在操作可能な予約局か。</summary>
+    public bool IsServiceOperational { get; init; } = true;
+    /// <summary>IsServiceOperational=false の場合のHost正規理由。Plugin独自の.ch2/ChSet再解釈は禁止。</summary>
+    public string ServiceAccessReason { get; init; } = string.Empty;
     public bool HasConflict { get; init; }
     public int NetworkId { get; init; }
     public int TransportStreamId { get; init; }
@@ -725,6 +729,11 @@ public sealed class TvAirRecordingInspectionJobDto
     public string? Message { get; init; }
 }
 
+/// <summary>
+/// Host projected programme surface for operationally available services only.
+/// Services disabled in TVTest .ch2, absent from .ch2, or without a current Host route are not exposed here.
+/// Raw/canonical EPG retention is a Host concern and is intentionally broader than this Plugin surface.
+/// </summary>
 public interface ITvAirProgramGuideApi
 {
     IReadOnlyList<TvAirProgramGuideWaveFilterDto> ListWaveFilters();
@@ -916,6 +925,7 @@ public sealed class TvAirEpgRunResultDto
     public string? Message { get; init; }
 }
 
+/// <summary>Operational Host services by default. Set Enabled=false only when the plugin explicitly needs disabled .ch2 service metadata; disabled services never appear in ProgramGuide or operational Viewer/Reservation routes.</summary>
 public interface ITvAirChannelsApi
 {
     IReadOnlyList<TvAirServiceDto> ListServices(TvAirServiceQueryDto? query = null);
@@ -997,6 +1007,7 @@ public interface ITvAirViewersApi
 /// <summary>
 /// Host-owned one-shot Viewer Reservation contract. Reservations conflict only when ViewerProfileId and ScheduledStart are both equal.
 /// ScheduledEnd remains programme metadata and is not a ViewerProfile occupancy boundary.
+/// Create accepts only services that are operationally available under the Host .ch2/route policy.
 /// </summary>
 public interface ITvAirViewerReservationsApi
 {
@@ -1597,7 +1608,7 @@ public sealed class TvAirEventDto
     public string? SourceOwnerId { get; init; }
     public long? DataRevision { get; init; }
     public string? ChangeKind { get; init; }
-    /// <summary>旧SDK互換。OccurredAtと同じ値。</summary>
+    /// <summary>OccurredAtと同じ値を返す互換プロパティ。</summary>
     public DateTimeOffset Timestamp { get; init; }
     public TvAirEventType EventType { get; init; }
     public string? ReservationId { get; init; }

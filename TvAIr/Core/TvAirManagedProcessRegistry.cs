@@ -5,7 +5,7 @@ namespace TvAIr.Core;
 
 /// <summary>
 /// TvAIr が起動・所有している TVTest 系 PID の軽量レジストリ。
-/// DirectRecorder本線ではTVTestに録画本体を任せないが、録画/EPG中のタスクバー表示と
+/// RecordingWorker本線ではTVTestに録画本体を任せないが、録画/EPG中のタスクバー表示と
 /// SleepGuard監視用にTvAIr所有TVTestを起動するため、外部視聴プロセスと誤分類しないようにする。
 /// </summary>
 public static class TvAirManagedProcessRegistry
@@ -17,7 +17,7 @@ public static class TvAirManagedProcessRegistry
         if (processId <= 0) return;
         Processes[processId] = new ManagedTvTestProcess(
             processId,
-            ManagedTvTestProcessPurpose.DirectRecorder,
+            ManagedTvTestProcessPurpose.RecordingWorker,
             reservationId,
             null,
             null,
@@ -108,7 +108,7 @@ public static class TvAirManagedProcessRegistry
     public static IReadOnlyList<ManagedTvTestProcess> GetRecordings(int? reservationId = null)
     {
         return Processes.Values
-            .Where(p => p.Purpose == ManagedTvTestProcessPurpose.DirectRecorder
+            .Where(p => p.Purpose == ManagedTvTestProcessPurpose.RecordingWorker
                 && (!reservationId.HasValue || p.ReservationId == reservationId.Value))
             .OrderBy(p => p.RegisteredAt)
             .ToList();
@@ -143,7 +143,7 @@ public static class TvAirManagedProcessRegistry
 
 public enum ManagedTvTestProcessPurpose
 {
-    DirectRecorder,
+    RecordingWorker,
     ActivityKeeper,
     Viewer
 }

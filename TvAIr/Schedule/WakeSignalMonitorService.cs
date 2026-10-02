@@ -107,13 +107,13 @@ public sealed class WakeSignalMonitorService : BackgroundService
             if (!validation.Accepted)
             {
                 _log.Add("WAKE_SIGNAL", validation.Reason,
-                    $"kind={kind} at={signal.AtText} generation={ValueOrLegacy(signal.Generation)} slotId={signal.SlotId} reservationId={signal.ReservationId} sourcePid={signal.SourcePid} file={Path.GetFileName(file)} activeGeneration={validation.ActiveGeneration} action=delete_signal_only rule=release_contract");
+                    $"kind={kind} at={signal.AtText} generation={ValueOrDash(signal.Generation)} slotId={signal.SlotId} reservationId={signal.ReservationId} sourcePid={signal.SourcePid} file={Path.GetFileName(file)} activeGeneration={validation.ActiveGeneration} action=delete_signal_only rule=release_contract");
                 TryDelete(file);
                 continue;
             }
 
             _log.Add("WAKE_SIGNAL", "RECEIVED",
-                $"kind={kind} at={signal.AtText} generation={ValueOrLegacy(signal.Generation)} slotId={signal.SlotId} reservationId={signal.ReservationId} sourcePid={signal.SourcePid} file={Path.GetFileName(file)} action=merge_existing_instance rule=release_contract");
+                $"kind={kind} at={signal.AtText} generation={ValueOrDash(signal.Generation)} slotId={signal.SlotId} reservationId={signal.ReservationId} sourcePid={signal.SourcePid} file={Path.GetFileName(file)} action=merge_existing_instance rule=release_contract");
 
             // A WAKE task may cover REC/PRE_EPG/SYSTEM_EPG together.  Only an active slot whose
             // authoritative coverage explicitly contains SYSTEM_EPG may bridge wake -> scheduled
@@ -393,8 +393,8 @@ public sealed class WakeSignalMonitorService : BackgroundService
         catch { return new HashSet<string>(StringComparer.OrdinalIgnoreCase); }
     }
 
-    private static string ValueOrLegacy(string? value)
-        => string.IsNullOrWhiteSpace(value) ? "legacy" : value.Trim();
+    private static string ValueOrDash(string? value)
+        => string.IsNullOrWhiteSpace(value) ? "-" : value.Trim();
 
     private static string Compact(string? value)
         => string.IsNullOrWhiteSpace(value) ? "-" : value.Replace('\r', ' ').Replace('\n', ' ').Trim();

@@ -1,29 +1,29 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 
 <html lang="ja">
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>予約リスト — TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.2"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.2"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.3"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.3"/>
 
-<link href="/tvair-ui-foundation.css?v=1.2.2" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.2" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.2" rel="stylesheet"/>
-<link href="/tvair-list-module.css?v=1.2.2" rel="stylesheet"/>
-<link href="/tvair-reservations.css?v=1.2.2" rel="stylesheet"/>
-<link href="/tvair-user-log.css?v=1.2.2" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.2" rel="stylesheet"/>
-<link href="/tvair-settings-host.css?v=1.2.2" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.2.3" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.3" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.3" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.2.3" rel="stylesheet"/>
+<link href="/tvair-reservations.css?v=1.2.3" rel="stylesheet"/>
+<link href="/tvair-user-log.css?v=1.2.3" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.3" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.3" rel="stylesheet"/>
 
-<script src="/tvair-theme.js?v=1.2.2"></script>
-<script src="/tvair-page-view-state.js?v=1.2.2"></script>
-<script src="/tvair-action-button-state.js?v=1.2.2"></script>
-<script src="/tvair-reservation-action-state.js?v=1.2.2"></script>
-<script src="/tvair-program-time-action.js?v=1.2.2"></script>
-<script src="/genre-shared.js?v=1.2.2"></script>
-<script src="/tvair-user-log.js?v=1.2.2"></script>
+<script src="/tvair-theme.js?v=1.2.3"></script>
+<script src="/tvair-page-view-state.js?v=1.2.3"></script>
+<script src="/tvair-action-button-state.js?v=1.2.3"></script>
+<script src="/tvair-reservation-action-state.js?v=1.2.3"></script>
+<script src="/tvair-program-time-action.js?v=1.2.3"></script>
+<script src="/genre-shared.js?v=1.2.3"></script>
+<script src="/tvair-user-log.js?v=1.2.3"></script>
 
 
 
@@ -1340,7 +1340,7 @@ function buildReservationRowPresentation(r, options){
     timeText: fmtTime(r.startTime, r.endTime),
     serviceText: esc(getDisplayServiceName(r)),
     titleText: esc(buildDisplayTitle(r)),
-    sourceText: esc(r.sourceLabel || '—')
+    sourceText: esc(r.displayStatusLabel || r.sourceLabel || '—')
   };
 }
 
@@ -1875,9 +1875,9 @@ document.addEventListener('DOMContentLoaded', ()=>{
 });
 
 </script>
-<script src="/tvair-notification.js?v=1.2.2"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.2"></script>
-<script src="/tvair-settings-host.js?v=1.2.2"></script>
-<script src="/tvair-menu-spine.js?v=1.2.2"></script>
+<script src="/tvair-notification.js?v=1.2.3"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.3"></script>
+<script src="/tvair-settings-host.js?v=1.2.3"></script>
+<script src="/tvair-menu-spine.js?v=1.2.3"></script>
 </body>
 </html>

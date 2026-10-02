@@ -59,7 +59,7 @@ public sealed class EpgLogoExtractor
             }
 
             // SDT マップと保存済み PNG を (ONID, logo_id) で結合。
-            // service_logos は従来互換の「代表ロゴ」だけを保持し、service_logo_inventory に全typeを蓄積する。
+            // service_logos は代表ロゴを保持し、service_logo_inventory に全typeを蓄積する。
             var records = new List<ServiceLogoRecord>();
             var inventoryRecords = new List<ServiceLogoInventoryRecord>();
             foreach (var map in result.ServiceMaps)

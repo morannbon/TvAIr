@@ -230,7 +230,7 @@ public sealed class SettingsChangeApplicationService
         EpgDepth = requested.EpgDepth,
         EpgPreRecordMinutes = requested.EpgPreRecordMinutes,
         LaterProgramPriority = requested.LaterProgramPriority,
-        PseudoContinuousRecording = requested.PseudoContinuousRecording,
+        ChainRecordingEnabled = requested.ChainRecordingEnabled,
         PreStartMarginSeconds = requested.PreStartMarginSeconds,
         PostEndMarginSeconds = requested.PostEndMarginSeconds,
         WakeMinutesBefore = current.WakeMinutesBefore,
@@ -332,7 +332,7 @@ public sealed class SettingsChangeApplicationService
         // DAILY_EPG_RUNNING_SETTINGS_IMMUTABILITY_CONTRACT
         // Daily AllのRunning永続化が正式な実行開始境界である。開始済みrunへ設定変更を後段適用しない。
         // Running中のDaily実行snapshotを不変に保つため、Daily設定変更はINI commit前に拒否する。
-        // 手動Normal EPGについては従来どおり深度だけを実行中変更不可とし、Daily固有設定へ巻き込まない。
+        // 手動Normal EPGは深度だけを実行中変更不可とし、Daily固有設定から分離する。
         var requestedDailyScheduleChanged =
             before.EpgEnabled != dto.EpgEnabled ||
             before.EpgHour != SettingsDefaults.NormalizeEpgHour(dto.EpgHour) ||
@@ -397,7 +397,7 @@ public sealed class SettingsChangeApplicationService
         // 後者だけの変更でFinalAllocationやPreRec再構築を走らせてはならない。
         var reservationActionUiPolicyChanged =
             before.LaterProgramPriority != after.LaterProgramPriority ||
-            before.PseudoContinuousRecording != after.PseudoContinuousRecording;
+            before.ChainRecordingEnabled != after.ChainRecordingEnabled;
         var recordingSchedulePolicyChanged =
             reservationActionUiPolicyChanged ||
             before.PreStartMarginSeconds != after.PreStartMarginSeconds ||
@@ -531,7 +531,7 @@ public sealed class SettingsChangeApplicationService
             // 保存後の再割当・PreRec・Wakeは新設定で再評価するが、開始済み録画の終了マージンは
             // RecordingSessionが開始時snapshotを保持する。保存値を実行中sessionへ後段上塗りしない。
             _log.Add("SETTINGS_HOT_RELOAD", "RecordingSchedulePolicy",
-                $"changed=True beforeLater={before.LaterProgramPriority} afterLater={after.LaterProgramPriority} beforeChain={before.PseudoContinuousRecording} afterChain={after.PseudoContinuousRecording} pre={before.PreStartMarginSeconds}->{after.PreStartMarginSeconds} post={before.PostEndMarginSeconds}->{after.PostEndMarginSeconds} activeRecordingMarginApply=future_session_only rule=release_contract");
+                $"changed=True beforeLater={before.LaterProgramPriority} afterLater={after.LaterProgramPriority} beforeChain={before.ChainRecordingEnabled} afterChain={after.ChainRecordingEnabled} pre={before.PreStartMarginSeconds}->{after.PreStartMarginSeconds} post={before.PostEndMarginSeconds}->{after.PostEndMarginSeconds} activeRecordingMarginApply=future_session_only rule=release_contract");
         }
 
         var chainFeatureTransition = new ChainFeatureTransitionResult(false, true, 0, "not_applicable");
@@ -540,9 +540,9 @@ public sealed class SettingsChangeApplicationService
         {
             chainFeatureTransition = _chainLifecycle.ApplyFeatureTransition(
                 before.LaterProgramPriority,
-                before.PseudoContinuousRecording,
+                before.ChainRecordingEnabled,
                 after.LaterProgramPriority,
-                after.PseudoContinuousRecording,
+                after.ChainRecordingEnabled,
                 "Settings.Save");
             if (chainFeatureTransition.TransitionedToDisabled && !chainFeatureTransition.DetachApplied)
             {
@@ -715,7 +715,7 @@ public sealed class SettingsChangeApplicationService
             !EqualsIgnoreCase(current.EpgDepth, SettingsDefaults.NormalizeEpgDepth(requested.EpgDepth)) ||
             current.EpgPreRecordMinutes != SettingsDefaults.NormalizeEpgPreRecordMinutes(requested.EpgPreRecordMinutes) ||
             current.LaterProgramPriority != requested.LaterProgramPriority ||
-            current.PseudoContinuousRecording != requested.PseudoContinuousRecording ||
+            current.ChainRecordingEnabled != requested.ChainRecordingEnabled ||
             current.PreStartMarginSeconds != SettingsDefaults.NormalizePreStartMarginSeconds(requested.PreStartMarginSeconds) ||
             current.PostEndMarginSeconds != SettingsDefaults.NormalizePostEndMarginSeconds(requested.PostEndMarginSeconds) ||
             current.WakeMinutesBefore != SettingsDefaults.NormalizeWakeMinutesBefore(requested.WakeMinutesBefore) ||

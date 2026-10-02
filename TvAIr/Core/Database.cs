@@ -187,7 +187,6 @@ public sealed class Database
                 pattern         TEXT    NOT NULL DEFAULT '',
                 exclude_pattern TEXT    NOT NULL DEFAULT '',
                 use_regex       INTEGER NOT NULL DEFAULT 1,
-                search_fields   TEXT    NOT NULL DEFAULT 'title',
                 search_title    INTEGER NOT NULL DEFAULT 1,
                 search_outline  INTEGER NOT NULL DEFAULT 1,
                 search_detail   INTEGER NOT NULL DEFAULT 1,
@@ -521,7 +520,6 @@ public sealed class Database
         EnsureColumn(con, "user_event_logs", "detail", "TEXT NOT NULL DEFAULT ''");
         // keyword_rules はJSON export/importで持ち越すユーザー資産。
         EnsureColumn(con, "keyword_rules", "exclude_pattern", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "keyword_rules", "search_fields",   "TEXT NOT NULL DEFAULT 'title'");
         EnsureColumn(con, "keyword_rules", "search_title",    "INTEGER NOT NULL DEFAULT 1");
         EnsureColumn(con, "keyword_rules", "search_outline",  "INTEGER NOT NULL DEFAULT 1");
         EnsureColumn(con, "keyword_rules", "search_detail",   "INTEGER NOT NULL DEFAULT 1");

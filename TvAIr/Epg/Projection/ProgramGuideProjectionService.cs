@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using TvAIr.Core;
 using TvAIr.Epg;
 
@@ -118,33 +118,65 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
 
     private FullMergedSnapshot GetFullMergedSnapshot()
     {
-        var dbSnapshot = _dbSource.CaptureProjectionSnapshot();
+        // Check revisions before materializing the DB projection.  The merged snapshot is the single
+        // long-lived projected graph; DbProgramEventSource no longer keeps a duplicate 25k-row graph.
+        var dbRevision = _dbSource.ProjectionRevision;
         var externalSnapshot = _externalStore.CaptureProjectionSnapshot();
 
         var cached = Volatile.Read(ref _fullSnapshot);
         if (cached is not null
-            && cached.DbRevision == dbSnapshot.Revision
+            && cached.DbRevision == dbRevision
             && cached.ExternalRevision == externalSnapshot.Revision)
             return cached;
 
         lock (_fullSnapshotGate)
         {
-            cached = _fullSnapshot;
-            if (cached is not null
-                && cached.DbRevision == dbSnapshot.Revision
-                && cached.ExternalRevision == externalSnapshot.Revision)
-                return cached;
+            while (true)
+            {
+                dbRevision = _dbSource.ProjectionRevision;
+                externalSnapshot = _externalStore.CaptureProjectionSnapshot();
+                cached = _fullSnapshot;
+                if (cached is not null
+                    && cached.DbRevision == dbRevision
+                    && cached.ExternalRevision == externalSnapshot.Revision)
+                    return cached;
 
-            var merged = Merge(dbSnapshot.Rows, externalSnapshot.Rows, _log, "GetAll", null, null);
-            var stableRows = Array.AsReadOnly(merged.ToArray());
-            cached = new FullMergedSnapshot(
-                dbSnapshot.Revision,
-                externalSnapshot.Revision,
-                dbSnapshot.Rows.Count,
-                externalSnapshot.Rows.Count,
-                stableRows);
-            Volatile.Write(ref _fullSnapshot, cached);
-            return cached;
+                // Startup normally builds DB-only first and then receives the ExternalEpg snapshot.
+                // In that transition the existing rows are still a pure DB projection, so reuse them
+                // as the merge base instead of decoding the same DB generation a second time.
+                long dbSnapshotRevision;
+                IReadOnlyList<ProjectedProgramEvent> dbRows;
+                if (cached is not null
+                    && cached.DbRevision == dbRevision
+                    && cached.ExternalCount == 0)
+                {
+                    dbSnapshotRevision = cached.DbRevision;
+                    dbRows = cached.Rows;
+                }
+                else
+                {
+                    var dbSnapshot = _dbSource.BuildProjectionSnapshot();
+                    dbSnapshotRevision = dbSnapshot.Revision;
+                    dbRows = dbSnapshot.Rows;
+                }
+
+                var externalAfterDbBuild = _externalStore.CaptureProjectionSnapshot();
+                if (externalAfterDbBuild.Revision != externalSnapshot.Revision)
+                    continue;
+
+                var merged = Merge(dbRows, externalAfterDbBuild.Rows, _log, "GetAll", null, null);
+                IReadOnlyList<ProjectedProgramEvent> stableRows = merged is ProjectedProgramEvent[] array
+                    ? array
+                    : Array.AsReadOnly(merged.ToArray());
+                cached = new FullMergedSnapshot(
+                    dbSnapshotRevision,
+                    externalAfterDbBuild.Revision,
+                    dbRows.Count,
+                    externalAfterDbBuild.Rows.Count,
+                    stableRows);
+                Volatile.Write(ref _fullSnapshot, cached);
+                return cached;
+            }
         }
     }
 
@@ -411,17 +443,17 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
             var breakdown = string.Join(",", overlayAttribution.OrderByDescending(x => x.Value).ThenBy(x => x.Key).Select(x => $"{x.Key}:{x.Value}"));
             var samples = string.Join(" | ", overlayAttributionSamples.OrderBy(x => x.Key).Select(x => $"{x.Key}=[{string.Join(",", x.Value)}]"));
             log.Add("EPG_OVERLAY_GAP_ATTRIBUTION", "ExternalEpg",
-                $"result=OBSERVED route={route} overlayOnly={overlayOnly} runId={_coverageAttribution.CurrentRunId} breakdown=[{breakdown}] samples=[{samples}] identity=onid_tsid_sid_eventId_start_duration mutation=none dbWrite=none projectionWrite=none schedulerWindow=unchanged workerCeiling=unchanged rule=epg_overlay_gap_attribution_v122");
+                $"result=OBSERVED route={route} overlayOnly={overlayOnly} runId={_coverageAttribution.CurrentRunId} breakdown=[{breakdown}] samples=[{samples}] identity=onid_tsid_sid_eventId_start_duration mutation=none dbWrite=none projectionWrite=none schedulerWindow=unchanged workerCeiling=unchanged rule=epg_overlay_gap_attribution");
             if (unobservedByTs.Count > 0)
             {
                 static string Top(Dictionary<string, int> source, int limit)
                     => string.Join(",", source.OrderByDescending(x => x.Value).ThenBy(x => x.Key).Take(limit).Select(x => $"{x.Key}:{x.Value}"));
                 log.Add("EPG_OVERLAY_UNOBSERVED_BREAKDOWN", "ExternalEpg",
-                    $"result=OBSERVED runId={_coverageAttribution.CurrentRunId} total={unobservedByTs.Values.Sum()} byTs=[{Top(unobservedByTs, 20)}] byService=[{Top(unobservedByService, 30)}] byDate=[{Top(unobservedByDate, 16)}] serviceObservation=[{Top(unobservedByServiceObservation, 16)}] externalTableId=unavailable comparisonTableIds=tvair_observed_service_tables mutation=none dbWrite=none projectionWrite=none schedulerWindow=unchanged workerCeiling=unchanged rule=epg_overlay_unobserved_breakdown_v122");
+                    $"result=OBSERVED runId={_coverageAttribution.CurrentRunId} total={unobservedByTs.Values.Sum()} byTs=[{Top(unobservedByTs, 20)}] byService=[{Top(unobservedByService, 30)}] byDate=[{Top(unobservedByDate, 16)}] serviceObservation=[{Top(unobservedByServiceObservation, 16)}] externalTableId=unavailable comparisonTableIds=tvair_observed_service_tables mutation=none dbWrite=none projectionWrite=none schedulerWindow=unchanged workerCeiling=unchanged rule=epg_overlay_unobserved_breakdown");
                 if (unobservedTodayDetails.Count > 0)
                 {
                     log.Add("EPG_OVERLAY_UNOBSERVED_D0_DETAIL", "ExternalEpg",
-                        $"result=OBSERVED date={DateTime.Now:yyyy-MM-dd} segmentTotal={unobservedByDate.GetValueOrDefault(DateTime.Now.ToString("yyyy-MM-dd"))} eventCandidates={unobservedTodayDetails.Count} details=[{string.Join(" || ", unobservedTodayDetails)}] identity=onid_tsid_sid_eventId_start_duration classification=diagnostic_only mutation=none dbWrite=none projectionWrite=none schedulerWindow=unchanged workerCeiling=unchanged rule=epg_overlay_unobserved_d0_detail_v122");
+                        $"result=OBSERVED date={DateTime.Now:yyyy-MM-dd} segmentTotal={unobservedByDate.GetValueOrDefault(DateTime.Now.ToString("yyyy-MM-dd"))} eventCandidates={unobservedTodayDetails.Count} details=[{string.Join(" || ", unobservedTodayDetails)}] identity=onid_tsid_sid_eventId_start_duration classification=diagnostic_only mutation=none dbWrite=none projectionWrite=none schedulerWindow=unchanged workerCeiling=unchanged rule=epg_overlay_unobserved_d0_detail");
                 }
             }
         }
@@ -494,7 +526,8 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
             CanonicalStart = canonicalStart, CanonicalEnd = canonicalEnd, IsTimelineFragment = true, TimelineFragmentReason = reason,
             ServiceName = source.ServiceName, Title = source.Title, ShortText = source.ShortText, ExtendedText = source.ExtendedText, ExtendedItems = source.ExtendedItems,
             UpdatedAt = source.UpdatedAt, CellText = source.CellText, Genre = source.Genre, GenreCodes = source.GenreCodes,
-            DbEventExists = source.DbEventExists, DbEvent = source.DbEvent, SourceKind = source.SourceKind, SourcePluginId = source.SourcePluginId, SourceEventKey = source.SourceEventKey,
+            DbEventExists = source.DbEventExists, DbEvent = source.DbEvent, DbTableId = source.DbTableId, DbSectionNumber = source.DbSectionNumber, DbVersionNumber = source.DbVersionNumber, DbUpdatedAt = source.DbUpdatedAt,
+            SourceKind = source.SourceKind, SourcePluginId = source.SourcePluginId, SourceEventKey = source.SourceEventKey,
             ProjectionTitleDbPresent = source.ProjectionTitleDbPresent, ProjectionTitleOverlayCandidatePresent = source.ProjectionTitleOverlayCandidatePresent, ProjectionTitleSource = source.ProjectionTitleSource,
             ProjectionOutlineDbPresent = source.ProjectionOutlineDbPresent, ProjectionOutlineOverlayCandidatePresent = source.ProjectionOutlineOverlayCandidatePresent, ProjectionOutlineSource = source.ProjectionOutlineSource,
             ProjectionDetailDbPresent = source.ProjectionDetailDbPresent, ProjectionDetailOverlayCandidatePresent = source.ProjectionDetailOverlayCandidatePresent, ProjectionDetailSource = source.ProjectionDetailSource
@@ -525,14 +558,18 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
         var dbShortText = FirstNonEmpty(db.ShortText);
         var overlayShortText = FirstNonEmpty(external.ShortText);
         var dbExtendedText = FirstNonEmpty(db.ExtendedText);
-        var overlayExtendedText = FirstNonEmpty(external.ExtendedText, external.ExtendedItems);
+        // Keep Detail and ExtendedItems as independent semantic fields.  Presentation may choose
+        // its own fallback, but auto-search must not inherit a display fallback as source data.
+        var overlayExtendedText = FirstNonEmpty(external.ExtendedText);
 
         // DbWithOverlay keeps TvAIr DB as the identity and title authority.
         // Overlay text is used only when the corresponding DB display field is empty.
         var title = FirstNonEmpty(dbTitle, overlayTitle);
         var shortText = FirstNonEmpty(dbShortText, overlayShortText);
         var extendedText = FirstNonEmpty(dbExtendedText, overlayExtendedText);
-        var cellText = BuildCellText(title, shortText, extendedText);
+        var projectedItems = db.ExtendedItems.Length > 0 ? db.ExtendedItems : external.ExtendedItems;
+        var presentationExtendedText = FirstNonEmpty(extendedText, projectedItems);
+        var cellText = BuildCellText(title, shortText, presentationExtendedText);
 
         return new ProjectedProgramEvent
         {
@@ -551,13 +588,17 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
             Title = title,
             ShortText = shortText,
             ExtendedText = extendedText,
-            ExtendedItems = db.ExtendedItems.Length > 0 ? db.ExtendedItems : external.ExtendedItems,
+            ExtendedItems = projectedItems,
             UpdatedAt = db.UpdatedAt != default ? db.UpdatedAt : external.UpdatedAt,
             CellText = cellText,
             Genre = FirstNonEmpty(db.Genre, external.Genre),
             GenreCodes = FirstNonEmpty(db.GenreCodes, external.GenreCodes),
             DbEventExists = true,
             DbEvent = db.DbEvent,
+            DbTableId = db.DbTableId,
+            DbSectionNumber = db.DbSectionNumber,
+            DbVersionNumber = db.DbVersionNumber,
+            DbUpdatedAt = db.DbUpdatedAt,
             SourceKind = db.SourceKind,
             SourcePluginId = external.SourcePluginId,
             SourceEventKey = external.SourceEventKey,
@@ -576,7 +617,7 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
     private static ProjectedProgramEvent ToOverlayOnly(ExternalEpgEvent external)
     {
         var key = ProjectedEventKey.FromExternal(external);
-        var extendedText = FirstNonEmpty(external.ExtendedText, external.ExtendedItems);
+        var extendedText = FirstNonEmpty(external.ExtendedText);
         return new ProjectedProgramEvent
         {
             Key = key,
@@ -596,7 +637,7 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
             ExtendedText = extendedText,
             ExtendedItems = external.ExtendedItems ?? string.Empty,
             UpdatedAt = external.UpdatedAt,
-            CellText = BuildCellText(external.Title, external.ShortText, extendedText),
+            CellText = BuildCellText(external.Title, external.ShortText, FirstNonEmpty(extendedText, external.ExtendedItems)),
             Genre = external.Genre ?? string.Empty,
             GenreCodes = external.GenreCodes ?? string.Empty,
             DbEventExists = false,
