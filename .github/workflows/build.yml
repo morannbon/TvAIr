@@ -1,7 +1,13 @@
-name: TvAIr Build Test
+name: TvAIr Build
 
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -26,7 +32,10 @@ jobs:
       - name: Prepare user package
         shell: pwsh
         run: |
-          $out = "package\${{ matrix.platform }}"
+          [xml]$props = Get-Content "Directory.Build.props"
+          $version = [string]$props.Project.PropertyGroup.TvAIrProductVersion
+
+          $out = "package\TvAIr_v${version}_${{ matrix.platform }}"
           $source = "TvAIr\bin\${{ matrix.platform }}\Release\net8.0-windows"
 
           New-Item -ItemType Directory -Force -Path $out | Out-Null
@@ -48,9 +57,35 @@ jobs:
               Remove-Item -Recurse -Force
           }
 
-      - name: Upload user package
+          $zip = "package\TvAIr_v${version}_${{ matrix.platform }}.zip"
+          Compress-Archive -Path "$out\*" -DestinationPath $zip -Force
+
+      - name: Upload package
         uses: actions/upload-artifact@v4
         with:
-          name: TvAIr-${{ matrix.platform }}-ready
-          path: package/${{ matrix.platform }}/
+          name: TvAIr-${{ matrix.platform }}-package
+          path: package/*.zip
           if-no-files-found: error
+
+  draft-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: windows-2022
+
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: TvAIr-*-package
+          path: release
+          merge-multiple: true
+
+      - name: Create draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" `
+            --draft `
+            --title "TvAIr ${{ github.ref_name }}" `
+            release/*.zip
