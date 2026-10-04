@@ -10,82 +10,10 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    runs-on: windows-2022
-
-    strategy:
-      matrix:
-        platform:
-          - x64
-          - x86
-
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
-
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
-
-      - name: Build TvAIr
-        run: msbuild TvAIr.sln /restore /m /p:Configuration=Release /p:Platform=${{ matrix.platform }}
-
-      - name: Prepare user package
-        shell: pwsh
-        run: |
-          [xml]$props = Get-Content "Directory.Build.props"
-          $version = [string]$props.Project.PropertyGroup.TvAIrProductVersion
-
-          $out = "package\TvAIr_v${version}_${{ matrix.platform }}"
-          $source = "TvAIr\bin\${{ matrix.platform }}\Release\net8.0-windows"
-
-          New-Item -ItemType Directory -Force -Path $out | Out-Null
-          Copy-Item "$source\*" $out -Recurse -Force
-
-          Copy-Item "README.md" $out
-          Copy-Item "README.txt" $out
-          Copy-Item "LICENSE" $out
-          Copy-Item "Regex_Manual.txt" $out
-
-          Get-ChildItem $out -Recurse -Include *.pdb,*.lib,*.exp |
-            Remove-Item -Force
-
-          $runtimeRoot = Join-Path $out "runtimes"
-          if (Test-Path $runtimeRoot) {
-            $keep = "win-${{ matrix.platform }}"
-            Get-ChildItem $runtimeRoot -Directory |
-              Where-Object { $_.Name -ne $keep -and $_.Name -ne "win" } |
-              Remove-Item -Recurse -Force
-          }
-
-          $zip = "package\TvAIr_v${version}_${{ matrix.platform }}.zip"
-          Compress-Archive -Path "$out\*" -DestinationPath $zip -Force
-
-      - name: Upload package
-        uses: actions/upload-artifact@v4
-        with:
-          name: TvAIr-${{ matrix.platform }}-package
-          path: package/*.zip
-          if-no-files-found: error
-
-  draft-release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
-    runs-on: windows-2022
-
-    steps:
-      - name: Download packages
-        uses: actions/download-artifact@v4
-        with:
-          pattern: TvAIr-*-package
-          path: release
-          merge-multiple: true
-
-      - name: Create draft release
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "${{ github.ref_name }}" `
-            --draft `
-            --title "TvAIr ${{ github.ref_name }}" `
-            release/*.zip
+  build-and-draft:
+    uses: morannbon/TvAIr-Actions/.github/workflows/reusable-build-release.yml@v1.0.1
+    with:
+      product_name: TvAIr
+      solution: TvAIr.sln
+      package_script: .github/scripts/package.ps1
+      platforms_json: '["x64","x86"]'
