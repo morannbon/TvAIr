@@ -32,7 +32,9 @@ public static class SettingsDefaults
     public const bool StartupEnabled = false;
 
     // NETWORK_USAGE_MASTER_INVARIANT
-    // true=通常のネットワーク設定を評価する。false=完全閉域モードとしてloopback以外の通信を実効停止する。
+    // true=通常のネットワーク設定を評価する。false=完全閉域モード。
+    // OFFは外部脅威境界である非loopback通信を内向き・外向きとも実効停止し、非loopback listenerも閉じる。
+    // localhost/loopbackはTvAIr内部IPCとして維持するため、EPG・録画・予約等の本体機能は閉域でも継続する。
     // 下位のLAN/Plugin設定値は保持し、NetworkUsageEnabled=trueへ戻した時だけ再評価する。
     public const bool NetworkUsageEnabled = false;
 

@@ -253,6 +253,22 @@ if (iniSettings.SettingsMigrationRestartRequired)
 }
 
 builder.Services.AddSingleton(iniSettings);
+
+// NETWORK_USAGE_MASTER_CLOSED_NETWORK_INVARIANT — 変更禁止:
+// 「ネットワーク利用 OFF」はTvAIr内部のlocalhost/loopback IPCを止める設定ではない。
+// 外部脅威境界である非loopback通信を内向き・外向きとも遮断し、完全閉域でもEPG・録画・予約・
+// ProgramGuide・Plugin Host等のローカル本体機能を継続させることが契約。
+// そのため受信側も0.0.0.0待受+403へ戻さず、物理Kestrel endpoint自体をloopback-onlyへ縮退させる。
+var networkUsageGate = new NetworkUsageGate(iniSettings);
+var networkEndpointBinding = new NetworkEndpointBindingConfiguration(iniSettings, networkUsageGate);
+((Microsoft.Extensions.Configuration.IConfigurationBuilder)builder.Configuration).Sources.Add(networkEndpointBinding.ConfigurationSource);
+builder.WebHost.ConfigureKestrel(options =>
+{
+    // reloadOnChangeにより、master/LAN設定変更時も再起動なしで物理endpointを正本へ追従させる。
+    options.Configure(builder.Configuration.GetSection("Kestrel"), reloadOnChange: true);
+});
+builder.Services.AddSingleton(networkUsageGate);
+builder.Services.AddSingleton(networkEndpointBinding);
 builder.Services.AddSingleton<NetworkAccessSecurity>();
 builder.Services.AddSingleton<PluginInternetAccessPermissionStore>();
 builder.Services.AddSingleton<PluginInternetAccessGate>();
@@ -549,6 +565,7 @@ builder.Services.AddSingleton<PluginSystemReadService>();
 builder.Services.AddSingleton<PluginPresentationReadService>();
 builder.Services.AddSingleton<PluginOperationalReadService>();
 builder.Services.AddSingleton<PluginScopedServiceFactory>();
+builder.Services.AddSingleton<PluginExternalJobHost>();
 builder.Services.AddHostedService<PluginLoader>();
 
 // ─── JSON ────────────────────────────────────────────────────────
@@ -562,14 +579,9 @@ builder.Services.ConfigureHttpJsonOptions(opts =>
 
 // ─── ポート設定 ──────────────────────────────────────────────────
 var port = iniSettings.Port;
-// NETWORK_ACCESS_IMMEDIATE_APPLY_BINDING_CONTRACT
-// LAN有効/無効を再起動なしで反映するため、待受自体は起動時から全インターフェースへ固定する。
-// 非loopback要求の許可は下段middlewareがIniSettingsServiceの現在値を要求ごとに判定する。
-// LAN無効時も外部要求は共通境界で403となり、設定変更でlistenerを再構築しない。
-builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
-
-var networkUsageGate = new NetworkUsageGate(iniSettings);
-builder.Services.AddSingleton(networkUsageGate);
+// 物理listenerの公開範囲はNetworkEndpointBindingConfigurationが所有する。
+// loopbackは常時維持し、非loopback endpointはNetworkUsage ON + LAN許可の時だけ存在する。
+// HTTP middlewareの403は認証・要求境界の二次防御であり、master OFF時の物理遮断の代用品ではない。
 
 bool IsNetworkLanAccessActive() =>
     networkUsageGate.Enabled &&
@@ -611,6 +623,18 @@ static bool IsAllowedLoopbackOrigin(HttpRequest request, int expectedPort)
 var app = builder.Build();
 _ = app.Services.GetRequiredService<ReservationMutationSideEffectProjection>();
 UserLogProjectionContractTests.Run();
+
+try
+{
+    var binding = networkEndpointBinding.ApplyCurrentPolicy();
+    app.Services.GetRequiredService<LogRepository>().Add("NETWORK_ENDPOINT_BINDING", "Startup",
+        $"result=ACTIVE network={binding.NetworkUsageEnabled} lanEffective={binding.LanAccessEffective} endpoints=[{string.Join(',', binding.BoundAddresses)}] threatBoundary=non_loopback_external closedNetwork={(binding.NetworkUsageEnabled ? "False" : "True")} rule=network_usage_master_contract");
+}
+catch (Exception ex)
+{
+    app.Services.GetRequiredService<LogRepository>().Add("NETWORK_ENDPOINT_BINDING", "Startup",
+        $"result=FAILED exception={ex.GetType().Name} reason={ex.Message} action=fail_closed_expected rule=network_usage_master_contract");
+}
 
 if (wakeInvocation.IsWakeTask)
 {
@@ -847,7 +871,7 @@ app.MapGet("/network-login", (HttpContext context) =>
     context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'self'; base-uri 'none'";
     var html = $$$"""
 <!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>TvAIr 接続</title><link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.3"></head><body class="tvair-generated-login"><main><h1>TvAIrへ接続</h1><form id="login"><label for="password">接続用パスワード</label><input id="password" type="password" autocomplete="current-password" required minlength="12"><button type="submit">接続</button><div id="message" class="message" role="status"></div></form></main>
+<title>TvAIr 接続</title><link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.4"></head><body class="tvair-generated-login"><main><h1>TvAIrへ接続</h1><form id="login"><label for="password">接続用パスワード</label><input id="password" type="password" autocomplete="current-password" required minlength="12"><button type="submit">接続</button><div id="message" class="message" role="status"></div></form></main>
 <script>
 const form=document.getElementById('login'),password=document.getElementById('password'),message=document.getElementById('message');
 form.addEventListener('submit',async e=>{e.preventDefault();message.textContent='確認しています…';try{const r=await fetch('/api/network-auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:password.value}),credentials:'same-origin'});const j=await r.json().catch(()=>({}));if(!r.ok){message.textContent=j.message||'接続できませんでした。';return;}location.replace({{{returnUrlJson}}});}catch{message.textContent='接続できませんでした。';}});
@@ -1958,7 +1982,7 @@ static IResult RenderPluginWindowHost(string windowId, HttpRequest http, PluginW
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{title}}</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.3">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.4">
 </head>
 <body class="tvair-plugin-window-page">
 <div class="{{hostClass}}" data-window-id="{{encodedWindowId}}" data-window-revision="{{initialRevision}}" data-tool-host="{{toolHost.ToString().ToLowerInvariant()}}">
@@ -2355,10 +2379,10 @@ static IResult RenderPluginVersionInfoPage(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-notification.css?v=1.2.3">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.2.4">
 </head>
 <body>
-<script src="/tvair-notification.js?v=1.2.3"></script>
+<script src="/tvair-notification.js?v=1.2.4"></script>
 <script>
 document.addEventListener('DOMContentLoaded',function(){
   if(window.TvAIrNotify){ TvAIrNotify({ title:'{{safeTitle}}', message:'{{safeVersion}}', onOk:function(){ location.replace('{{safeReturn}}'); } }); }
@@ -2412,7 +2436,7 @@ static IResult RenderPluginDefaultMenuInfo(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeName}} 情報</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.3">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.4">
 </head>
 <body class="tvair-plugin-info-page"><div class="card"><h1>{{safeName}} 情報</h1><div class="row"><div class="k">Version</div><div class="v">{{safeVersion}}</div></div><div class="row"><div class="k">Route</div><div class="v">{{safeRoute}}</div></div><div class="row"><div class="k">Action</div><div class="v">{{safeKind}}</div></div><p>{{safeDescription}}</p><a class="button" href="/">番組表へ戻る</a></div></body>
 </html>
@@ -2433,7 +2457,7 @@ static IResult PluginHtmlMessage(string title, string message, int statusCode, s
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.3">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.4">
 </head>
 <body class="tvair-message-page"><div class="card"><h1>{{safeTitle}}</h1><p>{{safeMessage}}</p><a class="button" href="{{safeHref}}">{{safeLinkText}}</a></div></body>
 </html>
@@ -2493,7 +2517,7 @@ static string BuildPluginFloatingButtonsHtml(RuntimeUiRenderContext context, str
     if (normalized.Length == 0) return string.Empty;
 
     var sb = new System.Text.StringBuilder();
-    sb.Append("<link rel=\"stylesheet\" href=\"/tvair-generated-surfaces.css?v=1.2.3\">");
+    sb.Append("<link rel=\"stylesheet\" href=\"/tvair-generated-surfaces.css?v=1.2.4\">");
 
     foreach (var group in normalized.GroupBy(x => x.Item.Position))
     {
@@ -3523,16 +3547,16 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; media-src 'self' data:">
 <title>{{{{safeTitle}}}} - TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.3">
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.3">
-<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.2.3">
-<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.3">
-<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.2.3">
-<link rel="stylesheet" href="/tvair-notification.css?v=1.2.3">
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.3">
-<link rel="stylesheet" href="/tvair-settings-host.css?v=1.2.3">
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.4">
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.4">
+<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.2.4">
+<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.4">
+<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.2.4">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.2.4">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.4">
+<link rel="stylesheet" href="/tvair-settings-host.css?v=1.2.4">
 {{{{developerThemeDiagnosticScript}}}}
-<script src="/tvair-theme.js?v=1.2.3"></script>
+<script src="/tvair-theme.js?v=1.2.4"></script>
 </head>
 <body class="tvair-non-program-page tvair-plugin-shell-page {{{{themeClass}}}}{{{{contentOnlyClass}}}}" data-plugin-route="{{{{safeRoute}}}}" data-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme="{{{{safeSelectedTheme}}}}" data-tvair-selected-theme="{{{{safeSelectedTheme}}}}" data-tvair-effective-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme-generation="{{{{safeThemeGeneration}}}}" data-tvair-theme-revision="{{{{themeRevision}}}}" data-tvair-theme-scope="all" data-tvair-theme-update-mode="{{{{themeUpdateModeToken}}}}">
 <div id="nav">
@@ -3554,11 +3578,11 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
   </main>
 </div>
 {{{{themeHotApplyScriptTag}}}}
-<script src="/tvair-notification.js?v=1.2.3"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.3"></script>
-<script src="/tvair-safe-event-host.js?v=1.2.3"></script>
-<script src="/tvair-menu-spine.js?v=1.2.3"></script>
-<script src="/tvair-settings-host.js?v=1.2.3"></script>
+<script src="/tvair-notification.js?v=1.2.4"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.4"></script>
+<script src="/tvair-safe-event-host.js?v=1.2.4"></script>
+<script src="/tvair-menu-spine.js?v=1.2.4"></script>
+<script src="/tvair-settings-host.js?v=1.2.4"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -3856,17 +3880,17 @@ static string BuildPluginToolWindowContentHtml(string title, string route, strin
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; media-src 'self' data:">
 <title>{{safeTitle}} - TvAIr Tool Window</title>
-<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.3">
+<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.4">
 {{developerThemeDiagnosticScript}}
-<script src="/tvair-theme.js?v=1.2.3"></script>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.3">
+<script src="/tvair-theme.js?v=1.2.4"></script>
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.4">
 {{pluginHead}}
 </head>
 <body class="tvair-plugin-toolwindow-content-only {{themeClass}}" data-plugin-route="{{safeRoute}}" data-theme="{{safeEffectiveTheme}}" data-tvair-theme="{{safeSelectedTheme}}" data-tvair-selected-theme="{{safeSelectedTheme}}" data-tvair-effective-theme="{{safeEffectiveTheme}}" data-tvair-theme-generation="{{safeThemeGeneration}}" data-tvair-theme-revision="{{themeRevision}}" data-tvair-theme-scope="all" data-tvair-theme-update-mode="{{themeUpdateModeToken}}" data-tvair-host-kind="winforms_webbrowser_fallback_direct_content" data-tvair-toolwindow-contract="release_contract">
 <div class="tvair-toolwindow-content-root">
 {{pluginContent}}
 </div>
-<script src="/tvair-safe-event-host.js?v=1.2.3"></script>
+<script src="/tvair-safe-event-host.js?v=1.2.4"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -5499,6 +5523,14 @@ app.MapPost("/api/debug/program-guide-ui-trace", async (HttpRequest http, LogRep
         var detail = Field(root, "detail", 4096);
         var pageDate = Field(root, "pageDate", 32);
         var hrefPath = Field(root, "hrefPath", 128);
+        var uiVersion = Field(root, "uiVersion", 32);
+
+        // A browser document from the previous executable can survive a host restart and
+        // continue posting Developer UI traces to the new process.  Reject those traces
+        // at the host boundary so diagnostics never mix two product versions.
+        if (!string.Equals(uiVersion, TvAIrVersionContract.ProductVersion, StringComparison.Ordinal))
+            return Results.NoContent();
+
         log.Add("PROGRAM_GUIDE_UI_TRACE", string.IsNullOrWhiteSpace(action) ? "unknown" : action,
             $"reason={SafePluginActionValue(reason)} pageDate={SafePluginActionValue(pageDate)} path={SafePluginActionValue(hrefPath)} detail={SafePluginActionValue(detail)} source=browser_developer_diagnostics mutation=none rule=programguide_ui_trace_contract");
         return Results.NoContent();
@@ -6788,6 +6820,7 @@ app.MapGet("/api/keyword-rules", (ReservationStore store, KeywordMatcher matcher
         r.EndTime,
         r.RecordCurrentServiceOnly,
         r.RecordSubtitles,
+        r.AutoChainReservations,
         r.Enabled,
         r.SortOrder,
         r.ExpiresOn,
@@ -6822,6 +6855,7 @@ app.MapGet("/api/keyword-rules/export", (ReservationStore store) =>
             EndTime = r.EndTime,
             RecordCurrentServiceOnly = r.RecordCurrentServiceOnly,
             RecordSubtitles = r.RecordSubtitles,
+            AutoChainReservations = r.AutoChainReservations,
             ExpiresOn = r.ExpiresOn,
             SortOrder = r.SortOrder,
             Enabled = r.Enabled,
@@ -6956,7 +6990,7 @@ app.MapPost("/api/keyword-rules", (KeywordRule r, ReservationStore store, Reserv
     if (err is not null) return Results.BadRequest(new { message = err });
     r.CreatedAt = r.UpdatedAt = DateTime.Now;
     var id = store.AddKeywordRule(r);
-    log.Add("KEYWORD_RULE", $"Rule{id}", $"ルール作成: enabled={r.Enabled} name=[{r.Name}] pattern=[{r.Pattern}] exclude=[{r.ExcludePattern}] allChannels={r.UseAllChannels}");
+    log.Add("KEYWORD_RULE", $"Rule{id}", $"ルール作成: enabled={r.Enabled} name=[{r.Name}] pattern=[{r.Pattern}] exclude=[{r.ExcludePattern}] allChannels={r.UseAllChannels} autoChain={r.AutoChainReservations}");
     allocationRoute.Run(new ReservationAllocationRouteRequest(
         Source: "KeywordRule",
         Action: "Create",
@@ -7013,7 +7047,7 @@ app.MapPut("/api/keyword-rules/{id}", (int id, KeywordRule r, ReservationStore s
     store.UpdateKeywordRule(r);
     var reconcile = matcher.ReconcileScheduledReservationsForRule(r);
     log.Add("KEYWORD_RULE", $"Rule{id}",
-        $"ルール更新: enabled={r.Enabled} name=[{r.Name}] pattern=[{r.Pattern}] preservedScheduled={reconcile.Preserved} preservedSourceMissing={reconcile.PreservedSourceMissing} recordingOptionsUpdated={reconcile.RecordingOptionsUpdated} removedScheduled={reconcile.Removed}");
+        $"ルール更新: enabled={r.Enabled} name=[{r.Name}] pattern=[{r.Pattern}] preservedScheduled={reconcile.Preserved} preservedSourceMissing={reconcile.PreservedSourceMissing} recordingOptionsUpdated={reconcile.RecordingOptionsUpdated} removedScheduled={reconcile.Removed} autoChain={r.AutoChainReservations}");
 
     allocationRoute.Run(new ReservationAllocationRouteRequest(
         Source: "KeywordRule",
@@ -7045,6 +7079,7 @@ app.MapPut("/api/keyword-rules/{id}", (int id, KeywordRule r, ReservationStore s
             updatedRule.SearchOutline, updatedRule.SearchDetail, updatedRule.SearchCast,
             updatedRule.TargetGenres, updatedRule.TargetServices, updatedRule.TargetDays,
             updatedRule.UseTimeRange, updatedRule.StartTime, updatedRule.EndTime,
+            updatedRule.RecordCurrentServiceOnly, updatedRule.RecordSubtitles, updatedRule.AutoChainReservations,
             updatedRule.Enabled, updatedRule.UseAllChannels, updatedRule.ExpiresOn,
             updatedRule.SortOrder, HitCount = hitCount
         }

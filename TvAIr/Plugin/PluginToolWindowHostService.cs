@@ -48,7 +48,7 @@ public sealed class PluginToolWindowHostService
                 return new PluginToolWindowOpenResult(activate ? "ACTIVATED" : "REVEALED", existing.HostKind, IsWebView2RuntimeAvailable(), true, true, activate, activate ? "existing_window_reused_and_activated" : "existing_window_reused_without_activation", existingIcon.Source, existingIcon.Applied, existingIcon.Diagnostics);
             }
 
-            var host = new HostedWindow(session, absoluteUrl, iconSpec, IsWebView2RuntimeAvailable(), activate, OnHostedWindowClosed, OnHostedWindowClosing, OnHostedWindowStateChanged, _log);
+            var host = new HostedWindow(session, absoluteUrl, iconSpec, IsWebView2RuntimeAvailable(), activate, OnHostedWindowClosed, OnHostedWindowClosing, OnHostedWindowLifecycleChanged, OnHostedWindowStateChanged, _log);
             _windows[windowId] = host;
             _sessions.MarkHostAlive(windowId, true);
             host.Start();
@@ -237,6 +237,25 @@ public sealed class PluginToolWindowHostService
         return true;
     }
 
+    private void OnHostedWindowLifecycleChanged(
+        PluginWindowSession session,
+        PluginWindowLifecycleState state,
+        string source,
+        PluginWindowCloseBehavior closeBehavior,
+        PluginWindowBackgroundExecution backgroundExecution)
+    {
+        PublishRuntimeWindowLifecycle(
+            session.PluginId,
+            session.WindowId,
+            session.WindowDefinitionId,
+            session.RouteSegment,
+            state,
+            closeBehavior,
+            backgroundExecution,
+            source,
+            sessionDisposed: false);
+    }
+
     private void OnHostedWindowClosing(
         string windowId,
         string hostInstanceId,
@@ -406,6 +425,7 @@ public sealed class PluginToolWindowHostService
         private readonly bool _initialActivateRequested;
         private readonly Action<PluginWindowSession, string, PluginWindowHostState?, bool, PluginWindowCloseBehavior, PluginWindowBackgroundExecution> _onClosed;
         private readonly Action<string, string, PluginWindowHostState?, string, PluginWindowCloseBehavior, PluginWindowBackgroundExecution> _onClosing;
+        private readonly Action<PluginWindowSession, PluginWindowLifecycleState, string, PluginWindowCloseBehavior, PluginWindowBackgroundExecution> _onLifecycleChanged;
         private readonly Action<string, PluginWindowHostState?> _onStateChanged;
         private readonly BlockingCollection<QueuedToolWindowAction> _actions = new();
         private Thread? _thread;
@@ -416,7 +436,7 @@ public sealed class PluginToolWindowHostService
         private ToolWindowForm? _form;
         private readonly LogRepository _log;
 
-        public HostedWindow(PluginWindowSession session, string initialUrl, PluginToolWindowIconSpec? initialIconSpec, bool webView2RuntimeAvailable, bool initialActivateRequested, Action<PluginWindowSession, string, PluginWindowHostState?, bool, PluginWindowCloseBehavior, PluginWindowBackgroundExecution> onClosed, Action<string, string, PluginWindowHostState?, string, PluginWindowCloseBehavior, PluginWindowBackgroundExecution> onClosing, Action<string, PluginWindowHostState?> onStateChanged, LogRepository log)
+        public HostedWindow(PluginWindowSession session, string initialUrl, PluginToolWindowIconSpec? initialIconSpec, bool webView2RuntimeAvailable, bool initialActivateRequested, Action<PluginWindowSession, string, PluginWindowHostState?, bool, PluginWindowCloseBehavior, PluginWindowBackgroundExecution> onClosed, Action<string, string, PluginWindowHostState?, string, PluginWindowCloseBehavior, PluginWindowBackgroundExecution> onClosing, Action<PluginWindowSession, PluginWindowLifecycleState, string, PluginWindowCloseBehavior, PluginWindowBackgroundExecution> onLifecycleChanged, Action<string, PluginWindowHostState?> onStateChanged, LogRepository log)
         {
             _initialSession = session;
             _initialUrl = initialUrl;
@@ -425,6 +445,7 @@ public sealed class PluginToolWindowHostService
             WebView2RuntimeAvailable = webView2RuntimeAvailable;
             _onClosed = onClosed;
             _onClosing = onClosing;
+            _onLifecycleChanged = onLifecycleChanged;
             _onStateChanged = onStateChanged;
             _currentCloseBehavior = session.CloseBehavior;
             _currentBackgroundExecution = session.BackgroundExecution;
@@ -702,6 +723,8 @@ public sealed class PluginToolWindowHostService
                     HostKind,
                     WebView2RuntimeAvailable,
                     state => _onStateChanged(_initialSession.WindowId, state),
+                    (lifecycleState, source, closeBehavior, backgroundExecution) =>
+                        _onLifecycleChanged(_initialSession, lifecycleState, source, closeBehavior, backgroundExecution),
                     (state, source, closeBehavior, backgroundExecution) =>
                         SignalClosing(state, source, closeBehavior, backgroundExecution),
                     _log);
@@ -743,6 +766,7 @@ public sealed class PluginToolWindowHostService
         private readonly string _hostKind;
         private readonly bool _webView2RuntimeAvailable;
         private readonly Action<PluginWindowHostState> _onStateChanged;
+        private readonly Action<PluginWindowLifecycleState, string, PluginWindowCloseBehavior, PluginWindowBackgroundExecution> _onLifecycleChanged;
         private readonly Action<PluginWindowHostState, string, PluginWindowCloseBehavior, PluginWindowBackgroundExecution> _onClosing;
         private readonly LogRepository _log;
         private string _pluginName;
@@ -779,13 +803,14 @@ public sealed class PluginToolWindowHostService
 
         protected override bool ShowWithoutActivation => !_initialActivateRequested || base.ShowWithoutActivation;
 
-        public ToolWindowForm(PluginWindowSession session, string url, PluginToolWindowIconSpec? iconSpec, bool initialActivateRequested, string hostKind, bool webView2RuntimeAvailable, Action<PluginWindowHostState> onStateChanged, Action<PluginWindowHostState, string, PluginWindowCloseBehavior, PluginWindowBackgroundExecution> onClosing, LogRepository log)
+        public ToolWindowForm(PluginWindowSession session, string url, PluginToolWindowIconSpec? iconSpec, bool initialActivateRequested, string hostKind, bool webView2RuntimeAvailable, Action<PluginWindowHostState> onStateChanged, Action<PluginWindowLifecycleState, string, PluginWindowCloseBehavior, PluginWindowBackgroundExecution> onLifecycleChanged, Action<PluginWindowHostState, string, PluginWindowCloseBehavior, PluginWindowBackgroundExecution> onClosing, LogRepository log)
         {
             _windowId = session.WindowId;
             _initialActivateRequested = initialActivateRequested;
             _hostKind = hostKind;
             _webView2RuntimeAvailable = webView2RuntimeAvailable;
             _onStateChanged = onStateChanged;
+            _onLifecycleChanged = onLifecycleChanged;
             _onClosing = onClosing;
             _log = log;
             _pluginName = string.IsNullOrWhiteSpace(session.PluginName) ? session.RouteSegment : session.PluginName;
@@ -858,7 +883,11 @@ public sealed class PluginToolWindowHostService
                 RestoreRefreshScrollAfterRerender();
                 PublishStateIfLoaded();
             };
-            Shown += (_, _) => LogPlacementTrace(session, "shown_actual");
+            Shown += (_, _) =>
+            {
+                LogPlacementTrace(session, "shown_actual");
+                _onLifecycleChanged(PluginWindowLifecycleState.Shown, "host_shown", _closeBehavior, _backgroundExecution);
+            };
             Load += (_, _) =>
             {
                 _loaded = true;
@@ -889,6 +918,7 @@ public sealed class PluginToolWindowHostService
                     Hide();
                     PublishState(hostAliveOverride: true);
                     _log.Add("PLUGIN_TOOL_WINDOW_LIFETIME", _pluginName, $"result=HIDDEN_BY_HOST_X windowId={_windowId} closeBehavior={_closeBehavior} backgroundExecution={_backgroundExecution} statePersistence={_statePersistence} hostAlive=True rule=runtime_descriptor_window_lifetime_contract");
+                    _onLifecycleChanged(PluginWindowLifecycleState.Hidden, "host_x_button", _closeBehavior, _backgroundExecution);
                     return;
                 }
 
@@ -915,6 +945,7 @@ public sealed class PluginToolWindowHostService
                 Hide();
                 PublishState(hostAliveOverride: true);
                 _log.Add("PLUGIN_TOOL_WINDOW_LIFETIME", _pluginName, $"result=HIDDEN windowId={_windowId} closeBehavior={_closeBehavior} backgroundExecution={_backgroundExecution} statePersistence={_statePersistence} hostAlive=True rule=runtime_descriptor_window_lifetime_contract");
+                _onLifecycleChanged(PluginWindowLifecycleState.Hidden, "host_close_request", _closeBehavior, _backgroundExecution);
                 return;
             }
             _explicitDispose = true;
@@ -933,6 +964,7 @@ public sealed class PluginToolWindowHostService
             _backgroundExecution = session.BackgroundExecution;
             _statePersistence = session.StatePersistence;
             var activateRequested = activate && _activationPolicy != PluginWindowActivationPolicy.Never;
+            var wasVisible = Visible;
             var minimizedBefore = WindowState == FormWindowState.Minimized && IsActuallyMinimized();
             // A non-activating reuse/content update must preserve the user's minimized state.
             // Restoring a minimized ToolWindow changes the Win32 foreground window and can close
@@ -945,6 +977,8 @@ public sealed class PluginToolWindowHostService
                 if (activateRequested) Show();
                 else ShowWindowWithoutActivation();
             }
+            if (!wasVisible && Visible)
+                _onLifecycleChanged(PluginWindowLifecycleState.Shown, "host_reveal", _closeBehavior, _backgroundExecution);
             if (activateRequested)
                 ForceForeground();
             else if (minimizedBefore)

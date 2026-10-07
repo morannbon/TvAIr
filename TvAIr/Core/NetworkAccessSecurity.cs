@@ -35,7 +35,7 @@ public sealed class NetworkAccessSecurity
         if (address is null) return false;
         if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
         if (IPAddress.IsLoopback(address)) return true;
-        if (!IsPrivateAddress(address)) return false;
+        if (!IsPrivateNetworkAddress(address)) return false;
 
         try
         {
@@ -61,7 +61,7 @@ public sealed class NetworkAccessSecurity
         return false;
     }
 
-    private static bool IsPrivateAddress(IPAddress address)
+    internal static bool IsPrivateNetworkAddress(IPAddress address)
     {
         var bytes = address.GetAddressBytes();
         if (address.AddressFamily == AddressFamily.InterNetwork)

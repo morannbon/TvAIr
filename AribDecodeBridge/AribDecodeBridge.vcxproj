@@ -109,6 +109,9 @@
   <ItemGroup>
     <ClInclude Include="AribDecodeBridge.h" />
   </ItemGroup>
+  <Target Name="EnsureTrackingDirectories" BeforeTargets="PrepareForBuild">
+    <MakeDir Directories="$(IntDir);$(IntDir)$(ProjectName).tlog" />
+  </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
 </Project>

@@ -113,6 +113,7 @@ public sealed class SettingsChangeApplicationService
     private readonly WindowsAutoStartService _startupService;
     private readonly NetworkAccessSecurity _networkSecurity;
     private readonly NetworkUsageGate _networkUsage;
+    private readonly NetworkEndpointBindingConfiguration _networkEndpointBinding;
     private readonly ReservationAllocationRouteService _allocationRoute;
     private readonly ReservationScheduler _reservationScheduler;
     private readonly ChainLifecycleCoordinator _chainLifecycle;
@@ -132,6 +133,7 @@ public sealed class SettingsChangeApplicationService
         WindowsAutoStartService startupService,
         NetworkAccessSecurity networkSecurity,
         NetworkUsageGate networkUsage,
+        NetworkEndpointBindingConfiguration networkEndpointBinding,
         ReservationAllocationRouteService allocationRoute,
         ReservationScheduler reservationScheduler,
         ChainLifecycleCoordinator chainLifecycle,
@@ -149,6 +151,7 @@ public sealed class SettingsChangeApplicationService
         _startupService = startupService;
         _networkSecurity = networkSecurity;
         _networkUsage = networkUsage;
+        _networkEndpointBinding = networkEndpointBinding;
         _allocationRoute = allocationRoute;
         _reservationScheduler = reservationScheduler;
         _chainLifecycle = chainLifecycle;
@@ -496,6 +499,17 @@ public sealed class SettingsChangeApplicationService
             clearedNetworkLoginFailures = invalidation.ClearedLoginFailures;
             _log.Add("NETWORK_ACCESS_SESSION_INVALIDATED", "Settings",
                 $"reason={(networkPasswordChanged ? "credential_changed" : (before.NetworkUsageEnabled && !after.NetworkUsageEnabled ? "network_master_disabled" : "lan_disabled"))} revoked={revokedNetworkSessions} clearedLoginFailures={clearedNetworkLoginFailures} network={before.NetworkUsageEnabled}->{after.NetworkUsageEnabled} lan={before.NetworkLanAccessEnabled}->{after.NetworkLanAccessEnabled} rule=network_access_immediate_apply_contract");
+        }
+
+        if (networkAccessChanged)
+        {
+            // NETWORK_ACCESS_PHYSICAL_BINDING_CONTRACT
+            // master OFF / LAN非許可では非loopback listenerそのものを閉じる。
+            // 「全interface待受のまま403」は外部peerからsocketへ到達できるため完全閉域ではない。
+            // loopbackはTvAIr内部IPCとして常時残し、本体機能をネットワーク非依存で継続させる。
+            var binding = _networkEndpointBinding.ApplyCurrentPolicy();
+            _log.Add("NETWORK_ENDPOINT_BINDING", "Settings",
+                $"result=APPLIED network={binding.NetworkUsageEnabled} lanEffective={binding.LanAccessEffective} endpoints=[{string.Join(',', binding.BoundAddresses)}] threatBoundary=non_loopback_external action=physical_listener_reconfigured rule=network_usage_master_contract");
         }
 
         if (channelMapChanged)

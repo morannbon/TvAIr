@@ -1231,7 +1231,7 @@ public sealed class IniSettingsService
         if (trimmed.Length == 0) return string.Empty;
 
         // SETTINGS_PATH_COMPARISON_ROOT_CONTRACT
-        // 単純なTrimEndはWindowsドライブroot（例: C:\\）をC:へ変えて意味を変える。
+        // 単純なTrimEndはWindowsドライブrootの意味を変えるため使用しない。
         // Path.TrimEndingDirectorySeparatorでrootを保持し、末尾区切りだけを比較上正規化する。
         return Path.TrimEndingDirectorySeparator(trimmed);
     }

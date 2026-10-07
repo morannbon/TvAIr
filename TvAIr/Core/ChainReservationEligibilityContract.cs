@@ -1,4 +1,4 @@
-namespace TvAIr.Core;
+﻿namespace TvAIr.Core;
 
 /// <summary>
 /// ユーザー明示チェーンの成立条件正本。
@@ -88,13 +88,14 @@ public static class ChainReservationEligibilityContract
             && successor.UserChainRootId.Value == predecessorRoot;
     }
 
-    public static Result EvaluatePair(
+    private static Result EvaluatePairCore(
         Reservation? predecessor,
         ushort successorNetworkId,
         ushort successorTransportStreamId,
         ushort successorServiceId,
         DateTime successorStart,
-        bool featureEnabled = true)
+        bool featureEnabled,
+        bool rejectCurrentConflict)
     {
         if (!featureEnabled)
             return new Result(false, FailureReason.FeatureDisabled);
@@ -104,7 +105,7 @@ public static class ChainReservationEligibilityContract
             return new Result(false, FailureReason.PredecessorNotActive);
         if (!predecessor.IsEnabled)
             return new Result(false, FailureReason.PredecessorDisabled);
-        if (predecessor.IsConflicted)
+        if (rejectCurrentConflict && predecessor.IsConflicted)
             return new Result(false, FailureReason.PredecessorConflicted);
         if (!IsSameService(predecessor, successorNetworkId, successorTransportStreamId, successorServiceId))
             return new Result(false, FailureReason.NotSameService);
@@ -112,6 +113,51 @@ public static class ChainReservationEligibilityContract
             return new Result(false, FailureReason.NotAdjacent);
         return new Result(true, FailureReason.None);
     }
+
+    /// <summary>
+    /// UI/APIの1回の明示チェーン操作に使う成立条件。現在競合中の前番組から新しい後続を
+    /// 追加する操作は拒否する。競合はあくまで現在の共通割当結果であり、保存トポロジー
+    /// そのものの構造条件ではないため、複数の既存Scheduled予約を同一Transactionで
+    /// 連続列へ昇格する場合は EvaluateTopologyPair を使い、列全体確定後に共通割当で
+    /// 競合を再評価する。
+    /// </summary>
+    public static Result EvaluatePair(
+        Reservation? predecessor,
+        ushort successorNetworkId,
+        ushort successorTransportStreamId,
+        ushort successorServiceId,
+        DateTime successorStart,
+        bool featureEnabled = true)
+        => EvaluatePairCore(
+            predecessor,
+            successorNetworkId,
+            successorTransportStreamId,
+            successorServiceId,
+            successorStart,
+            featureEnabled,
+            rejectCurrentConflict: true);
+
+    /// <summary>
+    /// 保存トポロジーを原子的に構築する際の構造条件正本。
+    /// 現在の IsConflicted はFinalConflictPlanの派生状態なのでここでは成立条件に含めない。
+    /// 優先順位・前後マージン・競合判定を緩和するものではなく、トポロジー確定後に
+    /// 必ず既存の共通割当/FinalConflictPlanへ戻して再評価する。
+    /// </summary>
+    public static Result EvaluateTopologyPair(
+        Reservation? predecessor,
+        ushort successorNetworkId,
+        ushort successorTransportStreamId,
+        ushort successorServiceId,
+        DateTime successorStart,
+        bool featureEnabled = true)
+        => EvaluatePairCore(
+            predecessor,
+            successorNetworkId,
+            successorTransportStreamId,
+            successorServiceId,
+            successorStart,
+            featureEnabled,
+            rejectCurrentConflict: false);
 
     public static Result EvaluateOffer(
         Reservation? predecessor,

@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Globalization;
 using System.Text.RegularExpressions;
 using TvAIr.Channel;
@@ -751,6 +751,8 @@ public sealed class KeywordMatcher
 
         }
 
+        ApplyAutomaticKeywordChains(rules, now);
+
         // release_contract KeywordMatcherPostCommitConservation:
         // Reclassify only the pre-commit pending occurrences against the authoritative state after
         // this run has completed all Add/suppression decisions.  This distinguishes a normal
@@ -870,6 +872,119 @@ public sealed class KeywordMatcher
 
     private bool IsPastNewKeywordAdmissionBoundary(ProjectedProgramEvent ev, DateTime now)
         => now >= GetKeywordAdmissionBoundary(ev);
+
+    private void ApplyAutomaticKeywordChains(IReadOnlyList<KeywordRule> rules, DateTime now)
+    {
+        // AUTOMATIC_KEYWORD_CHAIN_ASSIST_CONTRACT:
+        // This is not a new chain policy. It automates explicit chain topology construction only
+        // for Keyword rules that opted in. A contiguous existing Scheduled sequence is validated
+        // and committed atomically before the normal common allocation runs, so a transient
+        // pre-chain conflict cannot split the intended topology halfway through construction.
+        // Priority, margins, conflict propagation/restoration, cancellation, Wake, PreRec and
+        // recording execution remain owned by the existing chain/allocation contracts.
+        if (!_ini.UserChainRecordingEnabled)
+        {
+            var requested = rules.Count(r => r.AutoChainReservations);
+            if (requested > 0)
+                _log.Add("KEYWORD_AUTO_CHAIN", "KeywordMatcher",
+                    $"result=DISABLED requestedRules={requested} reason=global_chain_feature_disabled required=later_program_priority_and_chain_recording action=preserve_rule_preference_no_topology_mutation rule=automatic_keyword_chain_assist_contract");
+            return;
+        }
+
+        var enabledRuleIds = rules
+            .Where(r => r.Enabled && r.AutoChainReservations)
+            .Select(r => r.Id)
+            .ToHashSet();
+        if (enabledRuleIds.Count == 0) return;
+
+        var reservations = _rsvStore.GetAll()
+            .Where(r => r.Source == ReservationSource.Keyword
+                && r.SourceRuleId.HasValue
+                && enabledRuleIds.Contains(r.SourceRuleId.Value)
+                && r.IsEnabled
+                && r.Status == ReservationStatus.Scheduled
+                && r.EndTime > now)
+            .OrderBy(r => r.SourceRuleId)
+            .ThenBy(r => r.NetworkId)
+            .ThenBy(r => r.TransportStreamId)
+            .ThenBy(r => r.ServiceId)
+            .ThenBy(r => r.StartTime)
+            .ThenBy(r => r.Id)
+            .ToList();
+
+        var attempted = 0;
+        var applied = 0;
+        var alreadyLinked = 0;
+        var rejected = 0;
+        var sequences = 0;
+        var samples = new List<string>();
+
+        foreach (var group in reservations.GroupBy(r => new
+                 {
+                     RuleId = r.SourceRuleId!.Value,
+                     r.NetworkId,
+                     r.TransportStreamId,
+                     r.ServiceId
+                 }))
+        {
+            var ordered = group.OrderBy(r => r.StartTime).ThenBy(r => r.Id).ToList();
+            var run = new List<Reservation>();
+
+            void FlushRun()
+            {
+                if (run.Count < 2)
+                {
+                    run.Clear();
+                    return;
+                }
+
+                sequences++;
+                var pairCount = run.Count - 1;
+                attempted += pairCount;
+                var mutation = _rsvStore.PromoteExistingScheduledUserChainSequence(
+                    run.Select(x => x.Id).ToArray(),
+                    featureEnabled: true);
+
+                if (mutation.Applied)
+                {
+                    applied += mutation.AppliedPairs;
+                    alreadyLinked += mutation.AlreadyLinkedPairs;
+                }
+                else
+                {
+                    rejected += pairCount;
+                    if (samples.Count < 12)
+                        samples.Add($"rule={group.Key.RuleId}:R{run[0].Id}->R{run[^1].Id}:{mutation.Reason}");
+                }
+
+                run.Clear();
+            }
+
+            foreach (var reservation in ordered)
+            {
+                if (run.Count == 0)
+                {
+                    run.Add(reservation);
+                    continue;
+                }
+
+                var predecessor = run[^1];
+                if (predecessor.EndTime == reservation.StartTime)
+                {
+                    run.Add(reservation);
+                    continue;
+                }
+
+                FlushRun();
+                run.Add(reservation);
+            }
+
+            FlushRun();
+        }
+
+        _log.Add("KEYWORD_AUTO_CHAIN", "KeywordMatcher",
+            $"result=OK rules={enabledRuleIds.Count} candidates={reservations.Count} sequences={sequences} attempted={attempted} applied={applied} alreadyLinked={alreadyLinked} rejected={rejected} samples=[{string.Join(',', samples)}] source=KeywordRuleId+service_identity+exact_adjacency operation=atomic_existing_scheduled_sequence priorityMutation=none marginMutation=none conflictMutation=none cancellationMutation=none finalConflictOwner=common_allocation rule=automatic_keyword_chain_assist_contract");
+    }
 
     private static bool IsRuleExpired(KeywordRule rule, DateTime now)
         => !string.IsNullOrWhiteSpace(rule.ExpiresOn)

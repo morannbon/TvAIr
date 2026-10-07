@@ -470,6 +470,8 @@ public interface ITvAirPluginRuntimeContext
     global::TvAIrPlugin.ITvAirContentDiscoveryApi ContentDiscovery { get; }
     global::TvAIrPlugin.ITvAirProgramGuideApi ProgramGuide { get; }
     global::TvAIrPlugin.ITvAirExternalProgramSourceApi ExternalProgramSource { get; }
+    global::TvAIrPlugin.ITvAirEpgApi Epg { get; }
+    global::TvAIrPlugin.ITvAirExternalJobsApi ExternalJobs { get; }
     global::TvAIrPlugin.ITvAirChannelsApi Channels { get; }
     global::TvAIrPlugin.ITvAirTunersApi Tuners { get; }
     global::TvAIrPlugin.Viewers.ITvAirViewersApi Viewers { get; }

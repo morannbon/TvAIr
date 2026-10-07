@@ -1,11 +1,16 @@
-using System.Threading;
+﻿using System.Threading;
 
 namespace TvAIr.Core;
 
 /// <summary>
-/// TvAIr network usage master boundary. OFF means closed-network mode: lower LAN/Plugin settings
-/// remain persisted but are not effective, and in-flight Host-managed external traffic is cancelled.
-/// Loopback/local IPC is intentionally outside this non-loopback network boundary.
+/// TvAIr network usage master boundary. OFF means closed-network mode.
+///
+/// NETWORK_USAGE_MASTER_CLOSED_NETWORK_INVARIANT — 変更禁止:
+/// 脅威境界はTvAIr内部ではなく外部（非loopback）である。OFF時はLAN/Internetの内向き・外向き通信を
+/// すべて実効停止し、進行中の外部通信をcancelし、非loopback listenerも閉じる。下位LAN/Plugin設定値は
+/// 保存したまま非実効化する。一方、localhost/loopbackはTvAIr内部IPCとして境界外に置き、完全閉域でも
+/// EPG・録画・予約・ProgramGuide・Plugin Host等のローカル本体機能を継続させる。
+/// 「0.0.0.0で待受けたまま403を返す」は外部socket到達面を残すため、この契約を満たさない。
 /// </summary>
 public sealed class NetworkUsageGate : IDisposable
 {

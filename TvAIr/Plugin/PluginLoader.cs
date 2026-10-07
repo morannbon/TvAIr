@@ -61,6 +61,7 @@ internal sealed class PluginLoader : IHostedService
     private readonly ReservationScheduler _reservationScheduler;
     private readonly PluginManagedExternalLookupHost _externalLookupHost;
     private readonly PluginInternetAccessGate _internetAccessGate;
+    private readonly PluginExternalJobHost _externalJobHost;
     private readonly List<(ITvAirRuntimeCapabilityPlugin Plugin, string PluginId)> _loadedRuntimeCapabilities = new();
     private readonly List<PluginRuntimeContext> _runtimeContexts = new();
 
@@ -104,7 +105,8 @@ internal sealed class PluginLoader : IHostedService
         PlaybackProgressStore playbackProgress,
         ReservationScheduler reservationScheduler,
         PluginManagedExternalLookupHost externalLookupHost,
-        PluginInternetAccessGate internetAccessGate)
+        PluginInternetAccessGate internetAccessGate,
+        PluginExternalJobHost externalJobHost)
     {
         EnsurePluginSdkResolver();
         _log = log;
@@ -143,6 +145,7 @@ internal sealed class PluginLoader : IHostedService
         _reservationScheduler = reservationScheduler;
         _externalLookupHost = externalLookupHost;
         _internetAccessGate = internetAccessGate;
+        _externalJobHost = externalJobHost;
     }
 
     /// <summary>
@@ -310,6 +313,7 @@ internal sealed class PluginLoader : IHostedService
                 _reservationScheduler,
                 _externalLookupHost,
                 _internetAccessGate,
+                _externalJobHost,
                 pluginId,
                 descriptor.DisplayName,
                 PluginsDirectory,
@@ -486,6 +490,7 @@ internal sealed class PluginLoader : IHostedService
             try
             {
                 _externalLookupHost.CancelPlugin(entry.PluginId);
+                _externalJobHost.CancelPlugin(entry.PluginId);
                 lifecycle.OnStop();
                 _log.Add("PLUGIN_RUNTIME_LIFECYCLE", entry.PluginId, "action=stop result=OK source=runtime_descriptor rule=runtime_lifecycle_contract");
             }
@@ -495,7 +500,10 @@ internal sealed class PluginLoader : IHostedService
             }
         }
         foreach (var entry in _loadedRuntimeCapabilities)
+        {
             _externalLookupHost.CancelPlugin(entry.PluginId);
+            _externalJobHost.CancelPlugin(entry.PluginId);
+        }
 
         for (var i = _runtimeContexts.Count - 1; i >= 0; i--)
         {

@@ -1,31 +1,33 @@
 <!DOCTYPE html>
+<!-- release_contract: distributable help must be environment-independent. Examples may use only abstract tokens created for documentation. Never reuse real user rules, names, programme titles, station names, dates, episode numbers, search strings, viewing/recording preferences, or locally observed data. -->
 <html lang="ja">
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<title>TvAIr 設定ヘルプ</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.3"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.3"/>
-<link href="/tvair-ui-foundation.css?v=1.2.3" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.3" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.3" rel="stylesheet"/>
-<link href="/tvair-help.css?v=1.2.3" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.3" rel="stylesheet"/>
-<script src="/tvair-theme.js?v=1.2.3"></script>
+<title>TvAIr ヘルプ</title>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.4"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.4"/>
+<link href="/tvair-ui-foundation.css?v=1.2.4" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.4" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.4" rel="stylesheet"/>
+<link href="/tvair-help.css?v=1.2.4" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.4" rel="stylesheet"/>
+<script src="/tvair-theme.js?v=1.2.4"></script>
 </head>
 <body class="tvair-non-program-page tvair-page-width-wide tvair-help-page">
 <header class="help-window-bar" aria-label="ヘルプ見出し">
-  <div class="help-window-title">TvAIr 設定ヘルプ</div>
-  <div class="help-window-note">設定画面と同じ順番で確認できます</div>
+  <div class="help-window-title">TvAIr ヘルプ</div>
+  <div class="help-window-note">設定と自動検索予約の使い方を確認できます</div>
 </header>
 <div class="help-shell">
-  <aside class="help-sidebar" aria-label="設定ヘルプ項目">
-    <div class="help-sidebar-title">設定</div>
+  <aside class="help-sidebar" aria-label="ヘルプ項目">
+    <div class="help-sidebar-title">ヘルプ</div>
     <button class="help-nav active" data-help-tab="general" type="button">全般</button>
     <button class="help-nav" data-help-tab="network" type="button">ネットワーク</button>
     <button class="help-nav" data-help-tab="tvtest" type="button">TVTest</button>
     <button class="help-nav" data-help-tab="tuner" type="button">チューナー</button>
     <button class="help-nav" data-help-tab="recording" type="button">録画</button>
+    <button class="help-nav" data-help-tab="keyword" type="button">自動検索予約</button>
     <button class="help-nav" data-help-tab="log" type="button">ログ</button>
     <button class="help-nav" data-help-tab="display" type="button">表示</button>
   </aside>
@@ -110,6 +112,42 @@
       </div>
     </section>
 
+    <section class="help-section" id="help-keyword">
+      <header class="help-section-head"><p class="help-kicker">自動検索予約</p><h1>自動検索予約と正規表現</h1><p>検索条件の組み立て方と、正規表現を使用する場合の書き方を説明します。</p></header>
+      <div class="help-group">
+        <h2>検索対象</h2>
+        <article class="setting-card"><h3>キーワードと除外キーワード</h3><p>「キーワード」に一致した番組を候補にし、「除外キーワード」に一致した番組は候補から外します。検索対象は「タイトル」「概要」「詳細」「出演者」から選択できます。初期状態ではタイトルだけを検索します。</p><p>正規表現を使用しない場合は、<code>;</code> がAND、<code>|</code> がOR、<code>()</code> がグループです。例: <code>語A;語B</code> は「語A」と「語B」の両方を含む条件、<code>語A|語B</code> はどちらかを含む条件です。</p></article>
+        <article class="setting-card"><h3>正規表現を使用</h3><p>チェックすると、キーワードと除外キーワードを.NETの正規表現として評価します。大文字と小文字は区別しません。TvAIrは検索文字列と番組情報を正規化して照合するため、半角・全角などの互換文字は同じものとして一致する場合があります。</p><p>検索対象に複数の項目を選んだ場合、1本の正規表現は各項目へ個別に照合されます。1本の正規表現がタイトルから概要へまたがって一致することはありません。</p></article>
+      </div>
+      <div class="help-group">
+        <h2>正規表現の基本</h2>
+        <article class="setting-card"><h3>文字列を含む</h3><p><code>語A</code> と書くと「語A」を含む検索対象に一致します。</p></article>
+        <article class="setting-card"><h3>OR（どちらかを含む）</h3><p><code>語A|語B</code> は「語A」または「語B」に一致します。範囲をまとめるときは <code>()</code> を使い、<code>(語A|語B)語C</code> のように書けます。</p></article>
+        <article class="setting-card"><h3>AND（両方を含む）</h3><p>正規表現では先読みを使います。順番を問わず語Aと語Bの両方を含める場合は <code>(?=.*語A)(?=.*語B).*</code> と書きます。</p></article>
+        <article class="setting-card"><h3>順番が決まっているAND</h3><p>語Aの後に語Bが現れることが分かっている場合は <code>語A.*語B</code> と書けます。順番が逆になる可能性がある場合は先読みを使ってください。</p></article>
+        <article class="setting-card"><h3>数字</h3><p><code>\d</code> は数字1文字、<code>\d+</code> は1文字以上の連続した数字に一致します。</p></article>
+        <article class="setting-card"><h3>任意の文字列</h3><p><code>.*</code> は0文字以上の任意の文字列です。例: <code>語A.*語B</code> は「語A」の後に任意の文字列があり、その後に「語B」が現れる場合に一致します。</p></article>
+        <article class="setting-card"><h3>角括弧や記号を文字として検索</h3><p><code>. ^ $ * + ? { } [ ] \ | ( )</code> などは正規表現で特別な意味を持ちます。文字そのものを検索するときは <code>\</code> でエスケープします。例: <code>\[ABC\]</code> は「[ABC]」という文字列に一致します。</p></article>
+      </div>
+      <div class="help-group">
+        <h2>TvAIrでの正規表現の扱い</h2>
+        <article class="setting-card"><h3>セミコロンは正規表現の区切り</h3><p>正規表現ONでは <code>;</code> で区切った各部分を別々の正規表現として扱い、いずれか1つが一致するとキーワード条件に一致します。正規表現ONでAND条件を作る目的には <code>;</code> を使わず、<code>(?=.*語A)(?=.*語B).*</code> のような先読みを使用してください。</p></article>
+        <article class="setting-card"><h3>除外条件</h3><p>除外キーワードも同じ正規表現規則で評価します。除外欄のいずれかの正規表現に一致した番組は対象外になります。否定条件を複雑な1本の正規表現へ詰め込むより、除外欄を使用する方が確認しやすくなります。</p></article>
+        <article class="setting-card"><h3>半角・全角</h3><p>TvAIrは互換文字の正規化を行ってからも照合します。たとえば <code>ABC123</code> と <code>ＡＢＣ１２３</code> のような互換文字は、正規化後に同等として照合されます。</p></article>
+        <article class="setting-card"><h3>広すぎる条件に注意</h3><p><code>.*</code> だけの条件はほぼすべての文字列に一致します。保存前の検索結果で対象番組を確認し、必要な語や対象チャンネル、ジャンル、曜日、時間帯を組み合わせてください。</p></article>
+      </div>
+      <div class="help-group">
+        <h2>よく使う形</h2>
+        <article class="setting-card compact"><dl>
+          <dt>OR</dt><dd><code>語A|語B</code> — 語Aまたは語Bを含む</dd>
+          <dt>AND</dt><dd><code>(?=.*語A)(?=.*語B).*</code> — 語Aと語Bを順番に関係なく両方含む</dd>
+          <dt>順序あり</dt><dd><code>語A.*語B</code> — 語Aの後に語Bを含む</dd>
+          <dt>数字列</dt><dd><code>\d+</code> — 1文字以上の連続した数字</dd>
+          <dt>記号</dt><dd><code>\[ABC\]</code> — [ABC]という文字列</dd>
+        </dl></article>
+      </div>
+    </section>
+
     <section class="help-section" id="help-log">
       <header class="help-section-head"><p class="help-kicker">ログ</p><h1>ログ</h1></header>
       <div class="help-group">
@@ -161,7 +199,7 @@
   if(window.self !== window.top){ document.body.classList.add('in-modal'); }
 })();
 </script>
-<script src="/tvair-settings-host.js?v=1.2.3"></script>
-<script src="/tvair-notification.js?v=1.2.3"></script>
+<script src="/tvair-settings-host.js?v=1.2.4"></script>
+<script src="/tvair-notification.js?v=1.2.4"></script>
 </body>
 </html>

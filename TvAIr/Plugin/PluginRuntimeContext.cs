@@ -72,6 +72,8 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
         ContentDiscovery = hostApis.ContentDiscovery;
         ProgramGuide = hostApis.ProgramGuide;
         ExternalProgramSource = hostApis.ExternalProgramSource;
+        Epg = hostApis.Epg;
+        ExternalJobs = hostApis.ExternalJobs;
         Channels = hostApis.Channels;
         Tuners = hostApis.Tuners;
         _runtimeViewersApi = new RuntimeViewersApi(hostApis.Viewers);
@@ -120,6 +122,8 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
     public ITvAirContentDiscoveryApi ContentDiscovery { get; }
     public ITvAirProgramGuideApi ProgramGuide { get; }
     public ITvAirExternalProgramSourceApi ExternalProgramSource { get; }
+    public ITvAirEpgApi Epg { get; }
+    public ITvAirExternalJobsApi ExternalJobs { get; }
     public ITvAirChannelsApi Channels { get; }
     public ITvAirTunersApi Tuners { get; }
     public TvAIrPlugin.Viewers.ITvAirViewersApi Viewers { get; }

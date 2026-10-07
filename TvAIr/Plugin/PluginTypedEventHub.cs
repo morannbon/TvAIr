@@ -32,6 +32,13 @@ public sealed class PluginTypedEventHub : IDisposable
     private int maxPendingEventCount;
     private int disposed;
 
+    // RECORDING_POWER_HANDOFF_DISPATCH_INVARIANT:
+    // Host内部の電源責務引き継ぎは、outboxへ積んだ時点ではなく、実際のsubscriber callbackが
+    // returnした時点を「Typed Event配送完了」とする。RecordingResultFinalizedは外部後処理側が
+    // callback内で自身のSystemRequired保持を取得できるため、TvAIr側はこの完了通知より先に
+    // 録画由来Power Requestを解放してはならない。Plugin公開APIではなくHost内部通知である。
+    internal event Action<TvAirEventDto>? DispatchCompleted;
+
     public PluginTypedEventHub(LogRepository log, ReservationMutationJournal reservationMutations, ChannelFileLoader channelLoader)
     {
         this.log = log;
@@ -181,7 +188,7 @@ public sealed class PluginTypedEventHub : IDisposable
             OperationId = source.OperationId, SourceOwnerId = source.SourceOwnerId, DataRevision = source.DataRevision, ChangeKind = source.ChangeKind,
             EventType = source.EventType, ReservationId = source.ReservationId, ServiceName = ResolveEventServiceName(source), ProgramTitle = source.ProgramTitle,
             Reservation = NormalizeSnapshot(source.Reservation), BeforeReservation = NormalizeSnapshot(source.BeforeReservation), AfterReservation = NormalizeSnapshot(source.AfterReservation),
-            ChangedFields = source.ChangedFields, RecordingResult = NormalizeRecordingResult(source.RecordingResult), RuntimeWindowLifecycle = source.RuntimeWindowLifecycle, ViewerReservation = source.ViewerReservation, Details = source.Details
+            ChangedFields = source.ChangedFields, RecordingResult = NormalizeRecordingResult(source.RecordingResult), ExternalJob = source.ExternalJob, RuntimeWindowLifecycle = source.RuntimeWindowLifecycle, ViewerReservation = source.ViewerReservation, Details = source.Details
         };
         Subscriber[] targets;
         lock (gate)
@@ -201,6 +208,12 @@ public sealed class PluginTypedEventHub : IDisposable
                 candidates = candidates.Where(x => string.Equals(x.PluginId, ownerPluginId, StringComparison.OrdinalIgnoreCase));
             }
             if (dto.EventType == TvAirEventType.ViewerReservationChanged
+                && !string.IsNullOrWhiteSpace(dto.SourceOwnerId))
+            {
+                var ownerPluginId = PluginIdentity.Normalize(dto.SourceOwnerId);
+                candidates = candidates.Where(x => string.Equals(x.PluginId, ownerPluginId, StringComparison.OrdinalIgnoreCase));
+            }
+            if (dto.EventType == TvAirEventType.ExternalJobChanged
                 && !string.IsNullOrWhiteSpace(dto.SourceOwnerId))
             {
                 var ownerPluginId = PluginIdentity.Normalize(dto.SourceOwnerId);
@@ -229,6 +242,29 @@ public sealed class PluginTypedEventHub : IDisposable
             }
         }
         log.Add("PLUGIN_TYPED_EVENT_DISPATCH", dto.EventType.ToString(), $"eventInstanceId={dto.EventInstanceId} entityId={dto.EntityId ?? "-"} occurredAt={dto.OccurredAt:O} sequence={dto.Sequence} subscriberCount={targets.Length} deliveredCount={delivered} failedCount={failed} pluginIds={Safe(string.Join(",", targets.Select(x => x.PluginId).Distinct(StringComparer.OrdinalIgnoreCase)))} payloadReservation={dto.Reservation is not null} payloadBefore={dto.BeforeReservation is not null} payloadAfter={dto.AfterReservation is not null} rule=typed_event_outbox");
+        NotifyDispatchCompleted(dto);
+    }
+
+    private void NotifyDispatchCompleted(TvAirEventDto dto)
+    {
+        var listeners = DispatchCompleted;
+        if (listeners is null) return;
+
+        foreach (var callback in listeners.GetInvocationList())
+        {
+            if (callback is not Action<TvAirEventDto> listener)
+                continue;
+            try
+            {
+                listener(dto);
+            }
+            catch (Exception ex)
+            {
+                // Host内部の完了観測失敗でPlugin配送そのものを失敗扱いにしない。
+                log.Add("PLUGIN_TYPED_EVENT_DISPATCH_COMPLETION_FAILED", dto.EventType.ToString(),
+                    $"eventInstanceId={dto.EventInstanceId} entityId={dto.EntityId ?? "-"} exceptionType={ex.GetType().Name} message={Safe(ex.Message)} rule=typed_event_outbox");
+            }
+        }
     }
 
     private string ResolveCurrentServiceName(ushort networkId, ushort transportStreamId, ushort serviceId, string? fallback)
@@ -310,7 +346,8 @@ public sealed class PluginTypedEventHub : IDisposable
             QualityCompleteness = source.QualityCompleteness,
             QualitySource = source.QualitySource,
             ResourceReleaseState = source.ResourceReleaseState,
-            ResultFinalized = source.ResultFinalized
+            ResultFinalized = source.ResultFinalized,
+            Succeeded = source.Succeeded
         };
     }
 

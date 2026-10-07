@@ -42,6 +42,31 @@ public sealed class RecordingResultStore
             // evidence may be completed without changing the finalized public result itself.
             if (existing?.PublicResult?.ResultFinalized == true)
             {
+                // ReservationId is the live-reservation key, but recording-results.json can outlive a
+                // reservations DB replacement/restore in developer and recovery workflows. Therefore
+                // ReservationId alone is not sufficient to prove that an existing finalized row is the
+                // same recording occurrence. Treat a different scheduled event/file identity as a new
+                // occurrence and replace the stale row. The finalize-once guard remains strict only for
+                // the same recording occurrence.
+                if (!IsSameRecordingOccurrence(existing.PublicResult, result))
+                {
+                    var previous = existing.PublicResult;
+                    rows[result.ReservationId] = new StoredRecordingResult
+                    {
+                        PublicResult = result,
+                        TerminationEvidence = terminationEvidence
+                    };
+                    SaveUnsafe();
+                    log.Add("RECORDING_RESULT_STORE_FINALIZE_ONCE", "RecordingResultStore",
+                        $"result=APPLIED_NEW_OCCURRENCE reservation={result.ReservationId} " +
+                        $"previousScheduled={previous.ScheduledStartTime:O} currentScheduled={result.ScheduledStartTime:O} " +
+                        $"previousEvent={previous.NetworkId}:{previous.TransportStreamId}:{previous.ServiceId}:{previous.EventId} " +
+                        $"currentEvent={result.NetworkId}:{result.TransportStreamId}:{result.ServiceId}:{result.EventId} " +
+                        $"previousFile={SanitizePath(previous.FilePath)} currentFile={SanitizePath(result.FilePath)} " +
+                        "publicResult=replaced_stale_occurrence rule=recording_result_finalize_once_contract");
+                    return RecordingResultUpsertOutcome.AppliedNewFinalized;
+                }
+
                 if (existing.TerminationEvidence is null && terminationEvidence is not null)
                 {
                     existing.TerminationEvidence = terminationEvidence;
@@ -52,7 +77,7 @@ public sealed class RecordingResultStore
                 }
 
                 log.Add("RECORDING_RESULT_STORE_FINALIZE_ONCE", "RecordingResultStore",
-                    $"result=SKIPPED_ALREADY_FINALIZED reservation={result.ReservationId} publicResult=preserved rule=recording_result_finalize_once_contract");
+                    $"result=SKIPPED_ALREADY_FINALIZED reservation={result.ReservationId} identity=same_recording_occurrence publicResult=preserved rule=recording_result_finalize_once_contract");
                 return RecordingResultUpsertOutcome.SkippedAlreadyFinalized;
             }
 
@@ -124,10 +149,10 @@ public sealed class RecordingResultStore
             var loaded = list
                 .Where(x => x.PublicResult is not null && !string.IsNullOrWhiteSpace(x.PublicResult.ReservationId))
                 .GroupBy(x => x.PublicResult.ReservationId, StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(g => g.Key, g => g.Last(), StringComparer.OrdinalIgnoreCase);
+                .ToDictionary(g => g.Key, g => NormalizeSucceeded(g.Last()), StringComparer.OrdinalIgnoreCase);
 
             log.Add("RECORDING_RESULT_STORE_LOAD", "RecordingResultStore",
-                $"result=OK format={(isNewFormat ? "stored_result" : "legacy_public_result")} count={loaded.Count} migration={(isNewFormat ? "none" : "on_next_save")} rule=recording_result_store_contract");
+                $"result=OK format={(isNewFormat ? "stored_result" : "legacy_public_result")} count={loaded.Count} migration=typed_succeeded_projection rule=recording_result_store_contract");
             return loaded;
         }
         catch (Exception ex)
@@ -137,6 +162,55 @@ public sealed class RecordingResultStore
             return new(StringComparer.OrdinalIgnoreCase);
         }
     }
+
+
+    // Legacy recording-results predate the typed Succeeded field. The store is the compatibility
+    // boundary: infer the historical value once from the old finalized terminal result and expose
+    // only the typed value to plugins. New writes always carry Succeeded directly.
+    private static StoredRecordingResult NormalizeSucceeded(StoredRecordingResult row)
+    {
+        var source = row.PublicResult;
+        if (source.Succeeded || !source.ResultFinalized || !string.Equals(source.Result, "Completed", StringComparison.OrdinalIgnoreCase))
+            return row;
+        row.PublicResult = new TvAirRecordingResultDto
+        {
+            ReservationId = source.ReservationId, RecordingId = source.RecordingId, ServiceName = source.ServiceName, EventTitle = source.EventTitle,
+            NetworkId = source.NetworkId, TransportStreamId = source.TransportStreamId, ServiceId = source.ServiceId, EventId = source.EventId,
+            ScheduledStartTime = source.ScheduledStartTime, Genre = source.Genre, GenreCodes = source.GenreCodes, ActualStartTime = source.ActualStartTime,
+            ActualEndTime = source.ActualEndTime, Result = source.Result, EndReason = source.EndReason, FilePath = source.FilePath, FileCreated = source.FileCreated,
+            Drop = source.Drop, Error = source.Error, Scramble = source.Scramble, QualityDataAvailable = source.QualityDataAvailable,
+            QualityCompleteness = source.QualityCompleteness, QualitySource = source.QualitySource, ResourceReleaseState = source.ResourceReleaseState,
+            ResultFinalized = source.ResultFinalized, Succeeded = true
+        };
+        return row;
+    }
+
+
+    private static bool IsSameRecordingOccurrence(TvAirRecordingResultDto existing, TvAirRecordingResultDto incoming)
+    {
+        if (!string.Equals(existing.ReservationId, incoming.ReservationId, StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (existing.ScheduledStartTime.ToUniversalTime() != incoming.ScheduledStartTime.ToUniversalTime())
+            return false;
+        if (existing.NetworkId != incoming.NetworkId
+            || existing.TransportStreamId != incoming.TransportStreamId
+            || existing.ServiceId != incoming.ServiceId
+            || existing.EventId != incoming.EventId)
+            return false;
+
+        // EventId=0 reservations have no broadcast-event identity, so include the committed title as
+        // the remaining occurrence discriminator. FilePath is deliberately not part of identity: the
+        // same recording occurrence may only learn its final path late in the lifecycle, and a path
+        // change must never weaken finalize-once protection.
+        if (existing.EventId == 0
+            && !string.Equals(existing.EventTitle, incoming.EventTitle, StringComparison.Ordinal))
+            return false;
+
+        return true;
+    }
+
+    private static string SanitizePath(string? value)
+        => string.IsNullOrWhiteSpace(value) ? "-" : Sanitize(value);
 
     private static string Sanitize(string? value)
     {

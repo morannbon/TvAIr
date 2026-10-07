@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Text;
 using System.Security.Cryptography;
 using Microsoft.Data.Sqlite;
@@ -86,6 +86,14 @@ public sealed record UserChainMutationResult(
     string Reason,
     int ReservationId,
     Reservation? Reservation);
+
+public sealed record UserChainSequenceMutationResult(
+    bool Applied,
+    string Reason,
+    int AttemptedPairs,
+    int AppliedPairs,
+    int AlreadyLinkedPairs,
+    IReadOnlyList<int> UpdatedReservationIds);
 
 public sealed record UserChainFeatureDisableDetachResult(
     bool Applied,
@@ -770,6 +778,192 @@ public sealed class ReservationStore
             }
         }
         return new UserChainMutationResult(true, added, "applied", id, result);
+    }
+
+    /// <summary>
+    /// 既存Scheduled予約の連続列を、保存トポロジー検証と同一Transactionで原子的に昇格する。
+    /// 自動検索予約の補助では、列の途中に現在競合中の予約があっても、その競合は
+    /// FinalConflictPlanの派生状態として扱い、保存トポロジー確定の可否には使わない。
+    /// 優先順位・前後マージン・競合結果をここで変更せず、呼び出し元はcommit後に
+    /// 既存の共通割当を1回だけ実行して最終競合を再評価する。
+    /// </summary>
+    public UserChainSequenceMutationResult PromoteExistingScheduledUserChainSequence(
+        IReadOnlyList<int> reservationIds,
+        bool featureEnabled)
+    {
+        if (!featureEnabled)
+            return new UserChainSequenceMutationResult(false, "feature_disabled", 0, 0, 0, Array.Empty<int>());
+        if (reservationIds is null || reservationIds.Count < 2)
+            return new UserChainSequenceMutationResult(false, "sequence_too_short", 0, 0, 0, Array.Empty<int>());
+        if (reservationIds.Distinct().Count() != reservationIds.Count)
+            return new UserChainSequenceMutationResult(false, "sequence_duplicate_reservation", reservationIds.Count - 1, 0, 0, Array.Empty<int>());
+
+        using var con = db.Open();
+        using var tx = con.BeginTransaction(System.Data.IsolationLevel.Serializable);
+
+        List<Reservation> active;
+        using (var read = con.CreateCommand())
+        {
+            read.Transaction = tx;
+            read.CommandText = """
+                SELECT id, network_id, transport_stream_id, service_id, event_id,
+                       title, start_time, end_time, status, source, created_at, updated_at,
+                       channel_argument, is_conflicted, is_enabled, tuner_name, actual_tuner_name,
+                       recording_started_at, recording_finished_at, service_name,
+                       scheduled_start_time, source_rule_id, source_rule_name,
+                       is_user_chain, user_chain_previous_id, user_chain_root_id,
+                       recording_recovery_chain_id, recovery_parent_reservation_id, data_version,
+                       reservation_intent, created_through, created_by_plugin_id
+                FROM reservations
+                WHERE status IN ('scheduled','starting','recording','stopping','completed')
+                ORDER BY id;
+                """;
+            active = ReadReservations(read).ToList();
+        }
+
+        var byId = active.ToDictionary(x => x.Id);
+        var sequence = new List<Reservation>(reservationIds.Count);
+        foreach (var id in reservationIds)
+        {
+            if (!byId.TryGetValue(id, out var reservation))
+                return new UserChainSequenceMutationResult(false, $"reservation_missing:R{id}", reservationIds.Count - 1, 0, 0, Array.Empty<int>());
+            if (reservation.Status != ReservationStatus.Scheduled)
+                return new UserChainSequenceMutationResult(false, $"reservation_not_scheduled:R{id}", reservationIds.Count - 1, 0, 0, Array.Empty<int>());
+            if (!reservation.IsEnabled)
+                return new UserChainSequenceMutationResult(false, $"reservation_disabled:R{id}", reservationIds.Count - 1, 0, 0, Array.Empty<int>());
+            sequence.Add(reservation);
+        }
+
+        if (!TryResolveCanonicalStoredChainRoot(sequence[0], byId, out var canonicalRootId, out var rootFailure, out _))
+            return new UserChainSequenceMutationResult(false, rootFailure, reservationIds.Count - 1, 0, 0, Array.Empty<int>());
+
+        // 先頭の既存祖先に今回の後続IDが含まれていれば、列を追加するとcycleになる。
+        var upstream = new HashSet<int>();
+        var upstreamCursor = sequence[0];
+        while (upstreamCursor.UserChainPreviousId.HasValue)
+        {
+            if (!upstream.Add(upstreamCursor.Id))
+                return new UserChainSequenceMutationResult(false, "chain_cycle_detected", reservationIds.Count - 1, 0, 0, Array.Empty<int>());
+            if (!byId.TryGetValue(upstreamCursor.UserChainPreviousId.Value, out var upstreamPredecessor))
+                return new UserChainSequenceMutationResult(false, "chain_broken_predecessor", reservationIds.Count - 1, 0, 0, Array.Empty<int>());
+            upstreamCursor = upstreamPredecessor;
+        }
+        if (sequence.Skip(1).Any(x => upstream.Contains(x.Id) || x.Id == upstreamCursor.Id))
+            return new UserChainSequenceMutationResult(false, "chain_cycle_detected", reservationIds.Count - 1, 0, 0, Array.Empty<int>());
+
+        var updates = new List<(Reservation Before, int PredecessorId, int RootId)>();
+        var alreadyLinked = 0;
+
+        for (var i = 1; i < sequence.Count; i++)
+        {
+            var predecessor = sequence[i - 1];
+            var successor = sequence[i];
+
+            var topologyEligibility = ChainReservationEligibilityContract.EvaluateTopologyPair(
+                predecessor,
+                successor.NetworkId,
+                successor.TransportStreamId,
+                successor.ServiceId,
+                successor.StartTime,
+                featureEnabled);
+            if (!topologyEligibility.IsEligible)
+                return new UserChainSequenceMutationResult(false, topologyEligibility.ReasonToken, reservationIds.Count - 1, 0, alreadyLinked, Array.Empty<int>());
+
+            var competingSuccessor = active.FirstOrDefault(x => x.IsUserChain
+                && x.UserChainPreviousId == predecessor.Id
+                && x.Id != successor.Id
+                && ReservationLifecycleContract.IsChainTopologyActive(x.Status));
+            if (competingSuccessor is not null)
+                return new UserChainSequenceMutationResult(false, $"predecessor_already_has_successor:R{competingSuccessor.Id}", reservationIds.Count - 1, 0, alreadyLinked, Array.Empty<int>());
+
+            if (successor.IsUserChain && successor.UserChainPreviousId.HasValue)
+            {
+                if (successor.UserChainPreviousId.Value != predecessor.Id)
+                    return new UserChainSequenceMutationResult(false, "successor_already_has_predecessor", reservationIds.Count - 1, 0, alreadyLinked, Array.Empty<int>());
+                if (!successor.UserChainRootId.HasValue || successor.UserChainRootId.Value != canonicalRootId)
+                    return new UserChainSequenceMutationResult(false, "chain_root_mismatch", reservationIds.Count - 1, 0, alreadyLinked, Array.Empty<int>());
+                alreadyLinked++;
+                continue;
+            }
+
+            // 後続が既存チェーンのrootで、その先に保存済み子がある場合は、ここだけrootを
+            // 付け替えると下流rootが分裂する。呼び出し側がその連続列全体を渡す場合だけ許可する。
+            var expectedNextId = i + 1 < sequence.Count ? sequence[i + 1].Id : (int?)null;
+            var existingChild = active.FirstOrDefault(x => x.IsUserChain
+                && x.UserChainPreviousId == successor.Id
+                && ReservationLifecycleContract.IsChainTopologyActive(x.Status));
+            if (existingChild is not null && existingChild.Id != expectedNextId)
+                return new UserChainSequenceMutationResult(false, $"successor_has_external_descendant:R{existingChild.Id}", reservationIds.Count - 1, 0, alreadyLinked, Array.Empty<int>());
+
+            updates.Add((successor, predecessor.Id, canonicalRootId));
+        }
+
+        var updatedAt = DateTime.Now.ToString("O");
+        foreach (var updateRow in updates)
+        {
+            using var update = con.CreateCommand();
+            update.Transaction = tx;
+            update.CommandText = """
+                UPDATE reservations
+                SET is_user_chain = 1,
+                    user_chain_previous_id = $predecessorId,
+                    user_chain_root_id = $rootId,
+                    data_version = data_version + 1,
+                    updated_at = $updated
+                WHERE id = $id
+                  AND status = 'scheduled'
+                  AND is_enabled = 1
+                  AND data_version = $dataVersion;
+                """;
+            update.Parameters.AddWithValue("$id", updateRow.Before.Id);
+            update.Parameters.AddWithValue("$predecessorId", updateRow.PredecessorId);
+            update.Parameters.AddWithValue("$rootId", updateRow.RootId);
+            update.Parameters.AddWithValue("$dataVersion", updateRow.Before.DataVersion);
+            update.Parameters.AddWithValue("$updated", updatedAt);
+            if (update.ExecuteNonQuery() != 1)
+            {
+                tx.Rollback();
+                return new UserChainSequenceMutationResult(false, $"compare_and_set_failed:R{updateRow.Before.Id}", reservationIds.Count - 1, 0, alreadyLinked, Array.Empty<int>());
+            }
+        }
+
+        tx.Commit();
+
+        var updatedIds = new List<int>(updates.Count);
+        foreach (var updateRow in updates)
+        {
+            var after = GetById(updateRow.Before.Id);
+            if (after is null) continue;
+            updatedIds.Add(after.Id);
+            LogStartingDataVersionMutation(
+                "PromoteExistingScheduledUserChainSequence",
+                updateRow.Before,
+                after,
+                nameof(Reservation.IsUserChain),
+                nameof(Reservation.UserChainPreviousId),
+                nameof(Reservation.UserChainRootId),
+                nameof(Reservation.DataVersion));
+            mutationJournal.Record(
+                ReservationMutationKind.Updated,
+                updateRow.Before,
+                after,
+                nameof(Reservation.IsUserChain),
+                nameof(Reservation.UserChainPreviousId),
+                nameof(Reservation.UserChainRootId));
+            log.Add("CHAIN_MUTATION", $"R{updateRow.PredecessorId}->R{after.Id}",
+                $"result=APPLIED added=False root=R{updateRow.RootId} validation=atomic_existing_scheduled_sequence conflictAdmission=deferred_to_common_allocation rule=release_contract");
+        }
+
+        log.Add("CHAIN_SEQUENCE_MUTATION", $"R{sequence[0].Id}->R{sequence[^1].Id}",
+            $"result=APPLIED members={sequence.Count} pairs={sequence.Count - 1} updated={updatedIds.Count} alreadyLinked={alreadyLinked} root=R{canonicalRootId} transaction=single conflictAdmission=final_common_allocation priorityMutation=none marginMutation=none rule=automatic_keyword_chain_assist_contract");
+
+        return new UserChainSequenceMutationResult(
+            true,
+            "applied",
+            reservationIds.Count - 1,
+            updates.Count,
+            alreadyLinked,
+            updatedIds);
     }
 
     /// <summary>
@@ -3690,9 +3884,16 @@ WHERE source <> 'Epg'
             cmd.Parameters.AddWithValue("$dataVersion", r.DataVersion);
             var rows = cmd.ExecuteNonQuery();
             affected += rows;
-            if (rows == 0)
+            if (rows > 0)
+            {
+                log.Add("RESERVATION_AUDIT", "EXPIRE_APPLIED",
+                    $"service={TrimForAudit(r.ServiceName)} title={TrimTitleForAudit(r.Title)} rawTitleBlank={RawTitleBlankForAudit(r.Title)} id=R{r.Id} status={r.Status}->Cancelled source={r.Source} enabled={r.IsEnabled} conflicted={r.IsConflicted} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} tuner={SafeTuner(r.TunerName)} userChain={r.IsUserChain} chainPrev={(r.UserChainPreviousId.HasValue ? $"R{r.UserChainPreviousId.Value}" : "-")} recordingStartedAt={(r.RecordingStartedAt.HasValue ? r.RecordingStartedAt.Value.ToString("MM/dd HH:mm:ss") : "-")} dataVersion={r.DataVersion}->{r.DataVersion + 1} reason=end_time_past_without_recording action=cancelled rule=release_contract");
+            }
+            else
+            {
                 log.Add("RESERVATION_AUDIT", "EXPIRE_CAS_REJECTED",
-                    $"id=R{r.Id} expectedDataVersion={r.DataVersion} reason=state_or_version_changed action=preserve_newer_runtime_or_edit rule=release_contract");
+                    $"service={TrimForAudit(r.ServiceName)} title={TrimTitleForAudit(r.Title)} rawTitleBlank={RawTitleBlankForAudit(r.Title)} id=R{r.Id} status={r.Status} source={r.Source} enabled={r.IsEnabled} conflicted={r.IsConflicted} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} tuner={SafeTuner(r.TunerName)} userChain={r.IsUserChain} chainPrev={(r.UserChainPreviousId.HasValue ? $"R{r.UserChainPreviousId.Value}" : "-")} recordingStartedAt={(r.RecordingStartedAt.HasValue ? r.RecordingStartedAt.Value.ToString("MM/dd HH:mm:ss") : "-")} expectedDataVersion={r.DataVersion} reason=state_or_version_changed action=preserve_newer_runtime_or_edit rule=release_contract");
+            }
         }
         tx.Commit();
 
@@ -7497,7 +7698,7 @@ WHERE source <> 'Epg'
             SELECT id, name, pattern, exclude_pattern, use_regex,
                    search_title, search_outline, search_detail, search_cast,
                    use_all_channels, target_services, target_genres, target_days, use_time_range, start_time, end_time, sort_order,
-                   expires_on, record_current_service_only, record_subtitles, enabled, created_at, updated_at
+                   expires_on, record_current_service_only, record_subtitles, auto_chain_reservations, enabled, created_at, updated_at
             FROM keyword_rules ORDER BY sort_order, id;
             """;
         return ReadKeywordRules(cmd);
@@ -7513,13 +7714,13 @@ WHERE source <> 'Epg'
               (name, pattern, exclude_pattern, use_regex,
                search_title, search_outline, search_detail, search_cast,
                use_all_channels, target_services, target_genres, target_days, use_time_range, start_time, end_time, sort_order,
-               expires_on, record_current_service_only, record_subtitles, enabled, created_at, updated_at)
+               expires_on, record_current_service_only, record_subtitles, auto_chain_reservations, enabled, created_at, updated_at)
             VALUES
               ($name, $pat, $exc, $regex,
                $stitle, $soutline, $sdetail, $scast,
                $useAllChannels, $svc, $genres, $days, $useTime, $startTime, $endTime,
                COALESCE((SELECT MAX(sort_order) + 1 FROM keyword_rules), 1),
-               $exp, $recordCurrentServiceOnly, $recordSubtitles, $en, $now, $now);
+               $exp, $recordCurrentServiceOnly, $recordSubtitles, $autoChainReservations, $en, $now, $now);
             SELECT last_insert_rowid();
             """;
         BindKeywordRule(cmd, r, now);
@@ -7540,7 +7741,7 @@ WHERE source <> 'Epg'
               target_services=$svc, target_genres=$genres, target_days=$days,
               use_time_range=$useTime, start_time=$startTime, end_time=$endTime,
               expires_on=$exp, record_current_service_only=$recordCurrentServiceOnly, record_subtitles=$recordSubtitles,
-              enabled=$en, updated_at=$now
+              auto_chain_reservations=$autoChainReservations, enabled=$en, updated_at=$now
             WHERE id=$id;
             """;
         BindKeywordRule(cmd, r, now);
@@ -7855,12 +8056,12 @@ WHERE source <> 'Epg'
                   (id, name, pattern, exclude_pattern, use_regex,
                    search_title, search_outline, search_detail, search_cast,
                    use_all_channels, target_services, target_genres, target_days, use_time_range, start_time, end_time, sort_order,
-                   expires_on, record_current_service_only, record_subtitles, enabled, created_at, updated_at)
+                   expires_on, record_current_service_only, record_subtitles, auto_chain_reservations, enabled, created_at, updated_at)
                 VALUES
                   ($id, $name, $pat, $exc, $regex,
                    $stitle, $soutline, $sdetail, $scast,
                    $useAllChannels, $svc, $genres, $days, $useTime, $startTime, $endTime, $sortOrder,
-                   $exp, $recordCurrentServiceOnly, $recordSubtitles, $en, $createdAt, $updatedAt);
+                   $exp, $recordCurrentServiceOnly, $recordSubtitles, $autoChainReservations, $en, $createdAt, $updatedAt);
                 """;
             cmd.Parameters.AddWithValue("$id", r.Id > 0 ? r.Id : i + 1);
             cmd.Parameters.AddWithValue("$name", r.Name ?? "");
@@ -7882,6 +8083,7 @@ WHERE source <> 'Epg'
             cmd.Parameters.AddWithValue("$exp", r.ExpiresOn ?? "");
             cmd.Parameters.AddWithValue("$recordCurrentServiceOnly", r.RecordCurrentServiceOnly ? 1 : 0);
             cmd.Parameters.AddWithValue("$recordSubtitles", r.RecordSubtitles ? 1 : 0);
+            cmd.Parameters.AddWithValue("$autoChainReservations", r.AutoChainReservations ? 1 : 0);
             cmd.Parameters.AddWithValue("$en", r.Enabled ? 1 : 0);
             cmd.Parameters.AddWithValue("$createdAt", (r.CreatedAt == default ? DateTime.Now : r.CreatedAt).ToString("O"));
             cmd.Parameters.AddWithValue("$updatedAt", (r.UpdatedAt == default ? DateTime.Now : r.UpdatedAt).ToString("O"));
@@ -8236,9 +8438,10 @@ WHERE source <> 'Epg'
                 ExpiresOn      = r.IsDBNull(17) ? "" : r.GetString(17),
                 RecordCurrentServiceOnly = r.IsDBNull(18) || r.GetInt32(18) != 0,
                 RecordSubtitles = r.IsDBNull(19) || r.GetInt32(19) != 0,
-                Enabled        = r.GetInt32(20) != 0,
-                CreatedAt      = r.IsDBNull(21) ? DateTime.MinValue : DateTime.Parse(r.GetString(21)),
-                UpdatedAt      = r.IsDBNull(22) ? DateTime.MinValue : DateTime.Parse(r.GetString(22)),
+                AutoChainReservations = !r.IsDBNull(20) && r.GetInt32(20) != 0,
+                Enabled        = r.GetInt32(21) != 0,
+                CreatedAt      = r.IsDBNull(22) ? DateTime.MinValue : DateTime.Parse(r.GetString(22)),
+                UpdatedAt      = r.IsDBNull(23) ? DateTime.MinValue : DateTime.Parse(r.GetString(23)),
             });
         }
         return list;
@@ -8723,6 +8926,7 @@ WHERE source <> 'Epg'
         cmd.Parameters.AddWithValue("$exp",       r.ExpiresOn ?? "");
         cmd.Parameters.AddWithValue("$recordCurrentServiceOnly", r.RecordCurrentServiceOnly ? 1 : 0);
         cmd.Parameters.AddWithValue("$recordSubtitles", r.RecordSubtitles ? 1 : 0);
+        cmd.Parameters.AddWithValue("$autoChainReservations", r.AutoChainReservations ? 1 : 0);
         cmd.Parameters.AddWithValue("$en",        r.Enabled ? 1 : 0);
         cmd.Parameters.AddWithValue("$now",       now);
     }

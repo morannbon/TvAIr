@@ -1,7 +1,17 @@
-<Project>
+﻿<Project>
   <Target Name="VerifyTvAIrVersionConsistency"
           BeforeTargets="BeforeBuild"
           Condition="'$(MSBuildProjectName)' == 'TvAIr' and '$(DesignTimeBuild)' != 'true'">
     <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)build\Verify-TvAIr-Version.ps1&quot;" />
   </Target>
+
+  <!-- Developer-only regression gate SSOT. Public builds set TvAIrDeveloperDiagnostics=false,
+       so this source/build gate is skipped and adds no Public runtime work. Add new recurrence
+       prevention gates only through Verify-DeveloperRegressionGates.ps1. -->
+  <Target Name="VerifyDeveloperRegressionGates"
+          BeforeTargets="BeforeBuild"
+          Condition="'$(MSBuildProjectName)' == 'TvAIr' and '$(DesignTimeBuild)' != 'true' and '$(TvAIrDeveloperDiagnostics)' == 'true'">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)build\Verify-DeveloperRegressionGates.ps1&quot;" />
+  </Target>
+
 </Project>

@@ -202,6 +202,7 @@ public sealed class Database
                 expires_on      TEXT    NOT NULL DEFAULT '',
                 record_current_service_only INTEGER NOT NULL DEFAULT 1,
                 record_subtitles INTEGER NOT NULL DEFAULT 1,
+                auto_chain_reservations INTEGER NOT NULL DEFAULT 0,
                 enabled         INTEGER NOT NULL DEFAULT 1,
                 created_at      TEXT    NOT NULL DEFAULT '',
                 updated_at      TEXT    NOT NULL DEFAULT ''
@@ -535,6 +536,7 @@ public sealed class Database
         EnsureColumn(con, "keyword_rules", "expires_on",      "TEXT NOT NULL DEFAULT ''");
         EnsureColumn(con, "keyword_rules", "record_current_service_only", "INTEGER NOT NULL DEFAULT 1");
         EnsureColumn(con, "keyword_rules", "record_subtitles", "INTEGER NOT NULL DEFAULT 1");
+        EnsureColumn(con, "keyword_rules", "auto_chain_reservations", "INTEGER NOT NULL DEFAULT 0");
 
         using (var fillSort = con.CreateCommand())
         {

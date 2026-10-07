@@ -2,26 +2,26 @@
 
 <html lang="ja">
 <head>
-<!-- TvAIr-UI-Version: 1.2.3 -->
+<!-- TvAIr-UI-Version: 1.2.4 -->
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.3"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.3"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.4"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.4"/>
 
-<link href="/tvair-ui-foundation.css?v=1.2.3" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.3" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.3" rel="stylesheet"/>
-<link href="/tvair-epg-panel.css?v=1.2.3" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.3" rel="stylesheet"/>
-<link href="/tvair-settings-host.css?v=1.2.3" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.2.4" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.4" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.4" rel="stylesheet"/>
+<link href="/tvair-epg-panel.css?v=1.2.4" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.4" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.4" rel="stylesheet"/>
 
-<script src="/tvair-theme.js?v=1.2.3"></script>
-<script src="/tvair-page-view-state.js?v=1.2.3"></script>
-<script src="/tvair-action-button-state.js?v=1.2.3"></script>
-<script src="/tvair-reservation-action-state.js?v=1.2.3"></script>
-<script>var TVA_IR_UI_VERSION="1.2.3";</script>
-<script src="/genre-shared.js?v=1.2.3"></script>
+<script src="/tvair-theme.js?v=1.2.4"></script>
+<script src="/tvair-page-view-state.js?v=1.2.4"></script>
+<script src="/tvair-action-button-state.js?v=1.2.4"></script>
+<script src="/tvair-reservation-action-state.js?v=1.2.4"></script>
+<script>var TVA_IR_UI_VERSION="1.2.4";</script>
+<script src="/genre-shared.js?v=1.2.4"></script>
 
 
 
@@ -449,9 +449,9 @@
 </div>
 </div>
 </div>
-<script src="/tvair-notification.js?v=1.2.3"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.3"></script>
-<script src="/tvair-epg-widget.js?v=1.2.3"></script>
+<script src="/tvair-notification.js?v=1.2.4"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.4"></script>
+<script src="/tvair-epg-widget.js?v=1.2.4"></script>
 <script>
 const PROGRAM_GUIDE_GEOMETRY=Object.freeze({
   dayStartHour:4,
@@ -1979,7 +1979,8 @@ function uiTrace(action, detail='', reason=''){
       reason:String(reason||'').slice(0,96),
       detail:String(detail||'').slice(0,4096),
       pageDate:String(currentDate||'').slice(0,32),
-      hrefPath:String(location.pathname||'').slice(0,128)
+      hrefPath:String(location.pathname||'').slice(0,128),
+      uiVersion:(typeof TVA_IR_UI_VERSION !== 'undefined' ? String(TVA_IR_UI_VERSION) : '').slice(0,32)
     });
     if(navigator.sendBeacon){
       navigator.sendBeacon('/api/debug/program-guide-ui-trace', new Blob([payload],{type:'application/json'}));
@@ -2337,6 +2338,18 @@ function restoreScroll(gs, top, left){
   ProgramGuideFloatingActionController.afterProgrammaticScroll("restoreScroll");
 }
 
+// Full ProgramGuide rebuild can transiently collapse horizontal scrollWidth while the
+// channel DOM is replaced. Horizontal ownership therefore belongs to the full-load /
+// full-refresh caller, which restores the saved left position only after renderGuide()
+// has completed. Vertical ownership remains inside the current timeline projection.
+function restoreProgramGuideHorizontalScroll(gs, left, reason='program-guide-horizontal-restore'){
+  if(!gs) return;
+  ProgramGuideFloatingActionController.beforeProgrammaticScroll(reason);
+  gs.scrollLeft=Math.max(0, Number(left)||0);
+  ProgramGuideFloatingActionController.syncHeader();
+  ProgramGuideFloatingActionController.afterProgrammaticScroll(reason);
+}
+
 // 日付変更時に呼ぶ（全データ再取得→再描画）
 // verticalMinuteTo: null=現在の時刻位置正本を保持、数値=04:00起点の分位置へ移動
 // scrollLeftTo: null=現在位置を保持、数値=その位置へ強制移動
@@ -2426,7 +2439,8 @@ async function loadGuide(date, verticalMinuteTo=null, scrollLeftTo=null, traceRe
     lastScheduledDailyWindowSignature = stableGuideSignature(scheduledDailyWindows);
     lastGuideRefreshSignature = stableGuideSignature({ data, rsvData, scheduledDailyWindows });
     uiTrace('loadGuide-before-render', 'elapsedMs='+Math.round(performance.now()-traceStart)+' events='+(data.events||[]).length+' reservations='+(rsvData||[]).length+' '+guideDomSummary(), traceReason);
-    renderGuide(data, traceReason, requestedVerticalMinute, savedLeft);
+    renderGuide(data, traceReason, requestedVerticalMinute);
+    restoreProgramGuideHorizontalScroll(gs, savedLeft, 'loadGuide-horizontal-restore');
     updateDateNav();
     const top=gs.scrollTop;
     // The explicit full load is already the freshest complete ProgramGuide snapshot.
@@ -3160,7 +3174,8 @@ async function refreshGuide(){
     lastGuideData = data;
     uiTrace('refreshGuide-before-render', 'events='+(data.events||[]).length+' reservations='+(rsvData||[]).length+' '+guideDomSummary(), 'poll');
     chainHintWarmupPasses=0;
-    renderGuide(data, 'refreshGuide-epg-change', savedMinute, savedLeft);
+    renderGuide(data, 'refreshGuide-epg-change', savedMinute);
+    restoreProgramGuideHorizontalScroll(gs, savedLeft, 'refreshGuide-horizontal-restore');
     markProgramGuideFullLoadSuccess(refreshDate);
     uiTrace('refreshGuide-end', 'elapsedMs='+Math.round(performance.now()-traceStart)+' restoredMinute='+savedMinute+' restoredLeft='+savedLeft+' '+guideDomSummary(), 'poll');
   }catch(e){
@@ -3539,7 +3554,7 @@ function renderProgramGuideTimeRangeOverlays(){
   });
 }
 
-function renderGuide(data, traceReason='renderGuide', verticalMinuteTo=null, scrollLeftTo=null){
+function renderGuide(data, traceReason='renderGuide', verticalMinuteTo=null){
   clearChainHintsForGuideData(data);
   rebuildProgramGuideEventStore(data);
   const renderTraceStart=performance.now();
@@ -3577,11 +3592,11 @@ function renderGuide(data, traceReason='renderGuide', verticalMinuteTo=null, scr
   }
   const projectedMinute=clampProgramGuideVerticalMinute(programGuideVerticalMinute);
   const projectedTop=Math.max(0,Math.round(msToPx(dayStartMs+projectedMinute*60000)));
-  const projectedLeft=scrollLeftTo!==null ? Number(scrollLeftTo)||0 : (gs ? gs.scrollLeft : 0);
+  const currentLeft=gs ? gs.scrollLeft : 0;
   const ccolsForViewport=document.getElementById('ch-cols');
   if(ccolsForViewport) ccolsForViewport.style.height=totalPx+'px';
-  if(gs) restoreScroll(gs, projectedTop, projectedLeft);
-  uiTrace('renderGuide-viewport-projected', 'verticalMinute='+projectedMinute+' top='+projectedTop+' left='+projectedLeft+' '+guideDomSummary(), traceReason);
+  if(gs) restoreScroll(gs, projectedTop, currentLeft);
+  uiTrace('renderGuide-viewport-projected', 'verticalMinute='+projectedMinute+' top='+projectedTop+' left='+currentLeft+' '+guideDomSummary(), traceReason);
 
   // サービスマップ（出現順）
   const svcs=buildServiceColumns(events);
@@ -4749,7 +4764,7 @@ function completeCfgSave(){
   hideCfgModal();
 }
 window.TvAIrSettingsModule = window.TvAIrSettingsModule || {
-  version:'1.2.3',
+  version:'1.2.4',
   open:()=>showCfgModal(),
   close:()=>hideCfgModal(),
   contract:'single-settings-module-web-modal-basis'
@@ -5766,8 +5781,8 @@ if(!tvairSettingsFrameMode){
   bindGuideTopOperationUi();
 }
 </script>
-<script src="/tvair-settings-host.js?v=1.2.3"></script>
-<script src="/tvair-menu-spine.js?v=1.2.3"></script>
+<script src="/tvair-settings-host.js?v=1.2.4"></script>
+<script src="/tvair-menu-spine.js?v=1.2.4"></script>
 <script>
 (function(){
   try{

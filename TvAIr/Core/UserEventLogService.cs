@@ -1961,6 +1961,7 @@ public sealed class UserEventLogService
 
         // USER_LOG_REPORT_COPY_INVARIANT
         // 報告用コピーもユーザーが扱う公開面である。
+        // 正本は user_event_logs のみ。Developer Diagnostics の生ログを混ぜない。
         // 標準1行の内容を正本とし、解析に必要なユーザー可読の事実だけを重複なく追加する。
         // origin / trigger / route / contract / operationId 等の内部契約名や、同一値の別形式再掲を出さない。
         foreach (var e in selected)

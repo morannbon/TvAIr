@@ -116,7 +116,7 @@ public sealed class Reservation
     public bool IsConflicted { get; set; } = false;
     /// <summary>ユーザーが能動的に録画ON/OFFを選択するフラグ。false=録画しない（リストには残る）。</summary>
     public bool IsEnabled { get; set; } = true;
-    /// <summary>事前に割り当てたチューナー名（例: 地上波-A）。競合時は空文字。</summary>
+    /// <summary>事前に割り当てたチューナー表示名。競合時は空文字。</summary>
     public string TunerName { get; set; } = "";
     /// <summary>録画開始時に実際に確保したチューナー名。ログ/完了表示ではこちらを優先する。</summary>
     public string ActualTunerName { get; set; } = "";
@@ -124,7 +124,7 @@ public sealed class Reservation
     public DateTime? RecordingStartedAt { get; set; } = null;
     /// <summary>録画終了実績。</summary>
     public DateTime? RecordingFinishedAt { get; set; } = null;
-    /// <summary>局名（例: NHK総合・東京）。登録時にEPG/チャンネルファイルから解決して保存。</summary>
+    /// <summary>局名。登録時にEPG/チャンネルファイルから解決して保存。</summary>
     public string ServiceName { get; set; } = "";
     /// <summary>
     /// 元の予約開始時刻（登録時刻）。時間追従でStartTimeが更新されても元の時刻を保持する。
@@ -182,7 +182,7 @@ public sealed class KeywordRule
     /// <summary>対象サービスID（カンマ区切り）。UseAllChannels=false のときのみ使用。</summary>
     public string TargetServices { get; set; } = "";
 
-    /// <summary>対象ジャンルコード上位1桁（カンマ区切り）。空=全ジャンル。例: "6,3"</summary>
+    /// <summary>対象ジャンルコード上位1桁（カンマ区切り）。空=全ジャンル。</summary>
     public string TargetGenres { get; set; } = "";
 
     /// <summary>曜日指定。空=毎日。0=日〜6=土 のカンマ区切り。</summary>
@@ -208,6 +208,13 @@ public sealed class KeywordRule
 
     /// <summary>自動検索予約で生成する録画に字幕データを保存する。既定ON。</summary>
     public bool RecordSubtitles { get; set; } = true;
+
+    /// <summary>
+    /// 同一自動検索ルール・同一サービスで真正隣接する予約について、
+    /// ユーザーが番組表でチェーンを押す既存操作を自動適用する。既定OFF。
+    /// チェーンの競合優先度・取消・復帰・録画境界の契約は一切変更しない。
+    /// </summary>
+    public bool AutoChainReservations { get; set; } = false;
 
     public bool Enabled { get; set; } = true;
     public DateTime CreatedAt { get; set; }

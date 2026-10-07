@@ -128,6 +128,9 @@ public sealed class LogRepository
         if (ev == "RESERVATION_AUDIT" && string.Equals(title, "TickWindow", StringComparison.OrdinalIgnoreCase)) return true;
         if (ev == "RESERVATION_AUDIT" && string.Equals(title, "DueForce", StringComparison.OrdinalIgnoreCase)) return true;
         if (ev == "RESERVATION_AUDIT" && title.EndsWith("_PAST_TERMINAL_SUMMARY", StringComparison.OrdinalIgnoreCase)) return true;
+        // Expiration is rare but operationally significant: keep its per-reservation evidence visible
+        // in Developer Diagnostics so a legitimate stale cleanup can be distinguished from a missed recording.
+        if (ev == "RESERVATION_AUDIT" && title is "EXPIRE_CANDIDATE" or "EXPIRE_APPLIED" or "EXPIRE_CAS_REJECTED") return false;
         if (ev == "RESERVATION_AUDIT" && msg.Contains("rule=release_contract", StringComparison.OrdinalIgnoreCase)) return true;
         if (ev == "RESERVATION_PIPELINE_AUDIT" && msg.Contains("stage=start_request", StringComparison.OrdinalIgnoreCase) && msg.Contains("conflicted=True", StringComparison.OrdinalIgnoreCase)) return true;
         if (ev == "REC_DUE_SCAN" && msg.Contains("conflicted=True", StringComparison.OrdinalIgnoreCase)) return true;

@@ -1,4 +1,4 @@
-using TvAIr.Epg;
+﻿using TvAIr.Epg;
 
 namespace TvAIr.Core;
 
@@ -57,7 +57,7 @@ public static class RecordingTsVerifier
 
             // release_contract: EITの番組名は停止直後・途中開始・番組境界付近で次番組/近傍番組を拾うことがある。
             // サービス一致 + PMT映像あり + 対象サービスのスクランブル0 が確認できている場合、
-            // 番組名不一致だけで録画実体の失敗に見せない。警告情報として残し、判定名はWARNへ降格する。
+            // 番組名不一致だけで録画実体の失敗に見せない。正常系の境界観測として残し、異常警告には分類しない。
             var titleMismatchDowngraded = serviceOk && videoOk && !expectedServiceScrambled && serviceInEit && eventMismatch;
             var titleMismatchKind = ClassifyTitleMismatch(reservation, stage, eventMismatch);
             var result = !serviceOk
@@ -104,10 +104,10 @@ public static class RecordingTsVerifier
     {
         if (string.Equals(result, "OK", StringComparison.OrdinalIgnoreCase))
             return "clear_ts_ok";
-        if (string.Equals(result, "OK_EVENT_TITLE_BOUNDARY_WARN", StringComparison.OrdinalIgnoreCase))
-            return "clear_ts_ok_stop_boundary_eit_title_warning_not_recording_failure";
-        if (string.Equals(result, "OK_EVENT_TITLE_MISMATCH_WARN", StringComparison.OrdinalIgnoreCase))
-            return "clear_ts_ok_eit_title_warning_not_transport_failure";
+        if (string.Equals(result, "OK_EVENT_TITLE_BOUNDARY_OBSERVED", StringComparison.OrdinalIgnoreCase))
+            return "clear_ts_ok_stop_boundary_eit_title_observed_not_recording_failure";
+        if (string.Equals(result, "OK_EVENT_TITLE_MISMATCH_OBSERVED", StringComparison.OrdinalIgnoreCase))
+            return "clear_ts_ok_eit_title_observed_not_transport_failure";
         if (string.Equals(result, "SERVICE_OK_VIDEO_SCRAMBLED", StringComparison.OrdinalIgnoreCase))
             return "service_found_but_target_video_scrambled_investigate_descramble";
         if (string.Equals(result, "SERVICE_OK_VIDEO_UNKNOWN", StringComparison.OrdinalIgnoreCase))
@@ -145,14 +145,14 @@ public static class RecordingTsVerifier
                     ? "late_start_nearby_eit"
                     : "after_stop_boundary_eit";
             return new TitleMismatchClassification(
-                "OK_EVENT_TITLE_BOUNDARY_WARN",
-                "clear_ts_ok_stop_boundary_eit_title_warning_not_recording_failure",
+                "OK_EVENT_TITLE_BOUNDARY_OBSERVED",
+                "clear_ts_ok_stop_boundary_eit_title_observed_not_recording_failure",
                 reason);
         }
 
         return new TitleMismatchClassification(
-            "OK_EVENT_TITLE_MISMATCH_WARN",
-            "clear_ts_ok_event_title_warning_not_recording_failure",
+            "OK_EVENT_TITLE_MISMATCH_OBSERVED",
+            "clear_ts_ok_event_title_observed_not_recording_failure",
             "eit_title_mismatch_but_clear_ts_ok");
     }
 

@@ -50,6 +50,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         ReservationScheduler reservationScheduler,
         PluginManagedExternalLookupHost externalLookupHost,
         PluginInternetAccessGate internetAccessGate,
+        PluginExternalJobHost externalJobHost,
         string pluginId,
         string pluginDisplayName,
         string pluginsDirectory,
@@ -96,7 +97,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             scopedServices.CreateRuntimeStorage(normalizedPluginId),
             permissionGate);
         Events = new EventsApi(normalizedPluginId, log, typedEvents, permissionGate);
-        ExternalJobs = new ExternalJobsApi(permissionGate);
+        ExternalJobs = new ExternalJobsApi(normalizedPluginId, externalJobHost, permissionGate);
         Hosts = new HostsApi(permissionGate);
         Plugins = new PluginsApi(registry, permissionGate);
         ExternalLookup = new ExternalLookupApi(normalizedPluginId, pluginDisplayName, externalLookupHost, permissionGate);
@@ -755,7 +756,8 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
                     QualityCompleteness = result?.QualityCompleteness ?? string.Empty,
                     QualitySource = result?.QualitySource ?? string.Empty,
                     ResourceReleaseState = result?.ResourceReleaseState ?? string.Empty,
-                    ResultFinalized = result?.ResultFinalized ?? false
+                    ResultFinalized = result?.ResultFinalized ?? false,
+                    Succeeded = result?.Succeeded ?? false
                 };
             }).ToList();
             return history;
@@ -2724,38 +2726,30 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         }
     }
 
-    private sealed class ExternalJobsApi(CapabilityPermissionGate permissions) : ITvAirExternalJobsApi
+    private sealed class ExternalJobsApi(string pluginId, PluginExternalJobHost host, CapabilityPermissionGate permissions) : ITvAirExternalJobsApi
     {
         public TvAirExternalJobDto Enqueue(TvAirExternalJobRequestDto request)
         {
             permissions.Require(nameof(ExternalJobsApi), PluginPermission.LaunchExternalProcess);
-            return new TvAirExternalJobDto
-            {
-                JobId = string.Empty,
-                Kind = request.Kind,
-                State = "NotAvailable",
-                ReservationId = request.ReservationId,
-                Accepted = false,
-                Message = "External job execution is not connected yet."
-            };
+            return host.Enqueue(pluginId, request);
         }
 
         public TvAirExternalJobDto? Get(string jobId)
         {
             permissions.Require(nameof(ExternalJobsApi), PluginPermission.LaunchExternalProcess);
-            return null;
+            return host.Get(pluginId, jobId);
         }
 
         public IReadOnlyList<TvAirExternalJobDto> List(TvAirExternalJobQueryDto? query = null)
         {
             permissions.Require(nameof(ExternalJobsApi), PluginPermission.LaunchExternalProcess);
-            return Array.Empty<TvAirExternalJobDto>();
+            return host.List(pluginId, query);
         }
 
         public bool Cancel(string jobId)
         {
             permissions.Require(nameof(ExternalJobsApi), PluginPermission.LaunchExternalProcess);
-            return false;
+            return host.Cancel(pluginId, jobId);
         }
     }
 

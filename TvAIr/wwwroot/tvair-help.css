@@ -1,4 +1,4 @@
-﻿/* TvAIr Settings Help Surface release_contract
+/* TvAIr Settings Help Surface release_contract
    Scope: help.html only.
    Contract: one shared help page for hamburger/context menu entry; theme colors come from role tokens. */
 
@@ -72,3 +72,5 @@ body.in-modal .setting-card dl{grid-template-columns:96px minmax(0,1fr)}
 }
 
 /* release_contract: right-pane cards use a single shared pane width across hamburger modal and context/direct help. */
+
+.help-section code{font-family:Consolas,'Cascadia Mono',monospace;font-size:.94em;padding:1px 4px;border:1px solid var(--tvair-role-border-soft);border-radius:4px;background:var(--tvair-role-page-bg,var(--app-bg));color:var(--tvair-role-text-fg);overflow-wrap:anywhere}

@@ -4,7 +4,12 @@ namespace TvAIrPlugin.Windows;
 
 public enum PluginWindowMultiplicity { Single, Multiple }
 public enum PluginWindowActivationMode { None, ShowWithoutActivation, Activate, RevealWithoutActivation }
-/// <summary>Runtime WindowのHost正本ライフサイクル状態。Host-managed ToolWindowの終端はRuntimeWindowLifecycleChangedでPluginへ通知される。</summary>
+/// <summary>
+/// Runtime WindowのHost正本ライフサイクル状態。
+/// Host-managed ToolWindowの表示/非表示/終端遷移はRuntimeWindowLifecycleChangedでPluginへ通知される。
+/// CloseBehavior=Hide/PreserveSessionでXまたはHost APIにより非表示になった場合はHidden、再表示時はShown。
+/// CloseBehavior=Disposeで終端化する場合はClosing→Closed。BackgroundExecutionはこのlifecycle通知とは別契約である。
+/// </summary>
 public enum PluginWindowLifecycleState { Created, Shown, Hidden, Closing, Closed }
 public enum PluginWindowScrollPolicy { Auto, Hidden, Vertical, Horizontal, Both }
 public enum PluginWindowAxisScrollPolicy { Auto, Hidden, Visible }

@@ -5750,6 +5750,18 @@ private readonly ReservationStore _store;
         CancellationToken ct)
     {
         var rid = reservation.Id;
+
+        // RECORDING_RESULT_FINALIZED_FILE_RELEASE_INVARIANT:
+        // TvAIrEpgRec writes the per-segment ResultPath only after that segment sink has been flushed
+        // and disposed. The shared capture process may continue for a successor, but it no longer
+        // holds or writes this RecordingId's OutputPath once ResultPath exists.
+        if (!File.Exists(segment.ResultPath))
+        {
+            _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{rid}",
+                $"result=WAIT reason=segment_sink_release_evidence_missing resultPath={SafeValue(segment.ResultPath)} output={SafeValue(segment.OutputPath)} rule=recording_result_finalized_file_release_contract");
+            return false;
+        }
+
         var stopClaim = _store.TryBeginRecordingStop(rid, reservation.DataVersion);
         if (!stopClaim.Applied)
         {
@@ -5812,7 +5824,8 @@ private readonly ReservationStore _store;
             QualityCompleteness = qualityAvailable ? outcome.QualityCompleteness : "unavailable",
             QualitySource = qualityAvailable ? outcome.QualitySource : "Unavailable",
             ResourceReleaseState = "shared_capture_retained_for_chain_successor",
-            ResultFinalized = true
+            ResultFinalized = true,
+            Succeeded = finalStatus == ReservationStatus.Completed
         }, committed);
         var termination = new RecordingTerminationEvidence
         {
@@ -5839,6 +5852,8 @@ private readonly ReservationStore _store;
             try
             {
                 using var eventScope = _typedEvents.BeginOutboxScope(out var commitEvents);
+                _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{rid}",
+                    $"result=READY source=shared_chain_segment projection=PluginTypedEvent segmentSinkReleased=True sharedWorkerContinues=True path={SafeValue(result.FilePath)} externalReadAllowed={(result.FileCreated == true && !string.IsNullOrWhiteSpace(result.FilePath) ? "True" : "NoFile")} rule=recording_result_finalized_file_release_contract");
                 _typedEvents.Publish(new TvAirEventDto
                 {
                     EventType = TvAirEventType.RecordingResultFinalized,
@@ -7852,7 +7867,8 @@ private readonly ReservationStore _store;
                     QualityCompleteness = qualityAvailable ? recorderOutcome.QualityCompleteness : "unavailable",
                     QualitySource = qualityAvailable ? recorderOutcome.QualitySource : "Unavailable",
                     ResourceReleaseState = string.IsNullOrWhiteSpace(terminationEvidence.LeaseReleaseResult) ? "unknown" : terminationEvidence.LeaseReleaseResult,
-                    ResultFinalized = true
+                    ResultFinalized = true,
+                    Succeeded = finalStatus == ReservationStatus.Completed
                 };
                 finalizedResultDto = resultDto;
             }
@@ -7919,6 +7935,18 @@ private readonly ReservationStore _store;
             _log.Add("PROCESS_OWNERSHIP", $"R{rid}",
                 $"unregisterManagedPid=True pid={pid} reason=recording_session_finished rule=release_contract");
 
+            // RecordingResultFinalized is the external-read handoff boundary. A normal recording may
+            // publish a finalized result only after the owned worker has stopped, so TvAIrEpgRec can no
+            // longer write or hold the recording file. This guard is deliberately at the common projection
+            // boundary so future stop-path changes cannot accidentally move the event earlier.
+            var finalizedFileReleaseReady = await EnsureRecordingResultFinalizedFileReleaseBoundaryAsync(session, rid, "normal_stop").ConfigureAwait(false);
+            if (!finalizedFileReleaseReady)
+            {
+                finalizedResultDto = null;
+                _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{rid}",
+                    $"result=BLOCKED reason=owned_worker_still_alive path={SafeValue(session.RecordingFilePath)} action=suppress_finalized_result_and_event rule=recording_result_finalized_file_release_contract");
+            }
+
             if (stopLifecycleCommitted && finalizedResultDto is not null && committedReservation is not null)
             {
                 // RECORDING_STOP_RESULT_PROJECTION_ISOLATION_INVARIANT:
@@ -7954,6 +7982,8 @@ private readonly ReservationStore _store;
                 {
                     try
                     {
+                        _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{rid}",
+                            $"result=READY source=normal_stop projection=PluginTypedEvent workerReleaseConfirmed=True path={SafeValue(finalizedResultDto.FilePath)} externalReadAllowed={(finalizedResultDto.FileCreated == true && !string.IsNullOrWhiteSpace(finalizedResultDto.FilePath) ? "True" : "NoFile")} rule=recording_result_finalized_file_release_contract");
                         _typedEvents.Publish(new TvAirEventDto
                         {
                             EventType = TvAirEventType.RecordingResultFinalized,
@@ -8082,15 +8112,60 @@ private readonly ReservationStore _store;
 
                 if (physicalStopStarted && exceptionSettleApplied && stopFailure is not null)
                 {
-                    ProjectStopExceptionFallbackResult(
+                    // Even on stop-exception recovery, never publish RecordingResultFinalized while the
+                    // owned recording worker can still hold/write the file. Force the same file-release
+                    // boundary used by the normal stop path; if it cannot be established, keep the
+                    // reservation terminal failure but suppress the finalized recording projection/event.
+                    var fallbackFileReleaseReady = await EnsureRecordingResultFinalizedFileReleaseBoundaryAsync(
                         session,
-                        stopFailure,
-                        committedStopFailureReason ?? BuildRecordingStopExceptionReason(stopFailure));
+                        session.ReservationId,
+                        "stop_exception_fallback").ConfigureAwait(false);
+                    if (fallbackFileReleaseReady)
+                    {
+                        ProjectStopExceptionFallbackResult(
+                            session,
+                            stopFailure,
+                            committedStopFailureReason ?? BuildRecordingStopExceptionReason(stopFailure));
+                    }
+                    else
+                    {
+                        _log.Add("REC_STOP_EXCEPTION_RESULT", $"R{session.ReservationId}",
+                            $"target=PluginTypedEvent result=SKIPPED reason=file_release_boundary_not_established path={SafeValue(session.RecordingFilePath)} rule=recording_result_finalized_file_release_contract");
+                    }
                 }
                 session.CancelFinalization();
             }
             stopGate.Release();
         }
+    }
+
+
+    // RECORDING_RESULT_FINALIZED_FILE_RELEASE_INVARIANT:
+    // RecordingResultFinalized is both the terminal-result notification and the external file-read
+    // handoff. For ordinary/exception stop paths, the owned TvAIrEpgRec process must no longer be
+    // alive before ResultFinalized=true is persisted or the typed event is published.
+    // Shared-chain logical segments use their ResultPath as an equivalent per-file close boundary,
+    // because TvAIrEpgRec writes it only after flushing and disposing that segment's stream.
+    private async Task<bool> EnsureRecordingResultFinalizedFileReleaseBoundaryAsync(
+        RecordingSession session,
+        int reservationId,
+        string source)
+    {
+        if (!IsOwnedRecordingWorkerAlive(session))
+        {
+            _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{reservationId}",
+                $"result=WORKER_RELEASED source={SafeValue(source)} workerAlive=False path={SafeValue(session.RecordingFilePath)} publicationPending=True rule=recording_result_finalized_file_release_contract");
+            return true;
+        }
+
+        _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{reservationId}",
+            $"result=RECOVER source={SafeValue(source)} workerAlive=True pid={session.ProcessId} action=stop_owned_worker_before_finalized_publication rule=recording_result_finalized_file_release_contract");
+        await KillProcessTreeAsync(session.ProcessId, reservationId).ConfigureAwait(false);
+
+        var stillAlive = IsOwnedRecordingWorkerAlive(session);
+        _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{reservationId}",
+            $"result={(stillAlive ? "BLOCKED" : "WORKER_RELEASED")} source={SafeValue(source)} workerAlive={stillAlive} pid={session.ProcessId} path={SafeValue(session.RecordingFilePath)} publicationPending={!stillAlive} rule=recording_result_finalized_file_release_contract");
+        return !stillAlive;
     }
 
 
@@ -8162,7 +8237,8 @@ private readonly ReservationStore _store;
             QualityCompleteness = qualityAvailable ? outcome.QualityCompleteness : "unavailable",
             QualitySource = qualityAvailable ? outcome.QualitySource : "Unavailable",
             ResourceReleaseState = evidence.LeaseReleaseResult,
-            ResultFinalized = true
+            ResultFinalized = true,
+            Succeeded = false
         };
 
         try
@@ -8195,6 +8271,8 @@ private readonly ReservationStore _store;
             try
             {
                 using var eventScope = _typedEvents.BeginOutboxScope(out var commitEvents);
+                _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{rid}",
+                    $"result=READY source=stop_exception_fallback projection=PluginTypedEvent workerReleaseConfirmed=True path={SafeValue(result.FilePath)} externalReadAllowed={(result.FileCreated == true && !string.IsNullOrWhiteSpace(result.FilePath) ? "True" : "NoFile")} rule=recording_result_finalized_file_release_contract");
                 _typedEvents.Publish(new TvAirEventDto
                 {
                     EventType = TvAirEventType.RecordingResultFinalized,
@@ -8256,7 +8334,8 @@ private readonly ReservationStore _store;
             QualityCompleteness = result.QualityCompleteness,
             QualitySource = result.QualitySource,
             ResourceReleaseState = result.ResourceReleaseState,
-            ResultFinalized = result.ResultFinalized
+            ResultFinalized = result.ResultFinalized,
+            Succeeded = result.Succeeded
         };
 
 
