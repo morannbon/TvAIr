@@ -571,6 +571,7 @@ public sealed class ViewerOperationService
                     _log.Add("VIEWER_PROFILE_WINDOW_STATE", "Viewer",
                         $"viewerProfile={Safe(plan.Profile.Id)} previousPid={processId} newPid={processId} preserveViewerWindowState=True viewerActivation={Safe(plan.ViewerActivation)} windowStateCaptured={retained} capturedShowState={Safe(retained ? armedPending!.Snapshot.State : null)} capturedBounds={(retained ? $"{armedPending!.Snapshot.Left},{armedPending.Snapshot.Top},{armedPending.Snapshot.Width}x{armedPending.Snapshot.Height}" : "-")} capturedMonitor={(retained ? $"{armedPending!.Snapshot.MonitorLeft},{armedPending.Snapshot.MonitorTop},{armedPending.Snapshot.MonitorWidth}x{armedPending.Snapshot.MonitorHeight}" : "-")} restoreWindowStateRequested=False restoreWindowStateApplied=False activationChanged=False stage=retune_succeeded_delayed_death_snapshot_armed rule=viewer_window_state_contract");
                 }
+#if TVAIR_DEVELOPER_DIAGNOSTICS
                 ViewerRetuneDelayedDeathAudit.MarkRetuned(
                     processId,
                     request.NetworkId,
@@ -579,6 +580,7 @@ public sealed class ViewerOperationService
                     plan.Group,
                     lease.Did,
                     lease.BonDriverFileName);
+#endif
                 var sessions = _sessions.Synchronize(_leases.GetActiveLeases());
                 var session = sessions.FirstOrDefault(x => string.Equals(x.LeaseId, lease.LeaseId, StringComparison.OrdinalIgnoreCase));
                 detailSession = session;
@@ -890,7 +892,9 @@ public sealed class ViewerOperationService
                 $"result=FAILED viewerProfile={Safe(before.ViewerProfileId)} previousViewerSession={Safe(before.ViewerSessionId)} previousPid={previousPid} stage=stop reason={Safe(stopped.Reason)} rule=viewer_session_contract");
             return ViewerOperationResult.Failed(stopped.Reason, "Viewer ownership stop failed.", before, lease, stopDiagnostics);
         }
+#if TVAIR_DEVELOPER_DIAGNOSTICS
         ViewerRetuneDelayedDeathAudit.MarkProcessEnded(previousPid);
+#endif
 
         _sessions.Synchronize(_leases.GetActiveLeases());
         var lingeringSession = _sessions.GetBySessionId(before.ViewerSessionId);
@@ -1130,7 +1134,9 @@ public sealed class ViewerOperationService
             // so a dead Process/EventHandler cannot survive after its lease/session is terminal.
             DisarmViewerProcessExitWatch(staleLease.LeaseId, stalePid);
             TvAirManagedProcessRegistry.Unregister(stalePid);
+#if TVAIR_DEVELOPER_DIAGNOSTICS
             ViewerRetuneDelayedDeathAudit.MarkProcessEnded(stalePid);
+#endif
         }
 
         var released = _leases.Release(staleLease.LeaseId, $"viewer_operation_stale_recovery:{reason}");
@@ -1228,7 +1234,9 @@ public sealed class ViewerOperationService
                 // with registry/lease/session state instead of leaving an event subscription behind.
                 DisarmViewerProcessExitWatch(lease.LeaseId, stalePid);
                 TvAirManagedProcessRegistry.Unregister(stalePid);
+#if TVAIR_DEVELOPER_DIAGNOSTICS
                 ViewerRetuneDelayedDeathAudit.MarkProcessEnded(stalePid);
+#endif
             }
             var released = _leases.Release(lease.LeaseId, "viewer_activate_stale_recovery");
             _sessions.Synchronize(_leases.GetActiveLeases());
@@ -1303,8 +1311,10 @@ public sealed class ViewerOperationService
             return ViewerOperationResult.Failed(stopped.Reason, "Viewer ownership stop failed.", session, lease, string.Join(",", stopped.Details));
         }
 
+#if TVAIR_DEVELOPER_DIAGNOSTICS
         if (lease.ProcessId is > 0)
             ViewerRetuneDelayedDeathAudit.MarkProcessEnded(lease.ProcessId.Value);
+#endif
 
         var after = _sessions.Synchronize(_leases.GetActiveLeases());
         var stillActive = after.Any(x => string.Equals(x.ViewerSessionId, session.ViewerSessionId, StringComparison.OrdinalIgnoreCase));
@@ -1431,8 +1441,10 @@ public sealed class ViewerOperationService
                 ArmViewerProcessExitWatch(target.ViewerProfileId, target.LeaseId, compatibleStopPid);
             return ViewerOperationResult.Failed(stopped.Reason, "Viewer ownership stop failed.", session, target, stopDiag);
         }
+#if TVAIR_DEVELOPER_DIAGNOSTICS
         if (target.ProcessId is > 0)
             ViewerRetuneDelayedDeathAudit.MarkProcessEnded(target.ProcessId.Value);
+#endif
 
         var activeAfterLeases = _leases.GetActiveLeases().ToList();
         var after = _sessions.Synchronize(activeAfterLeases);
@@ -1851,8 +1863,10 @@ public sealed record ViewerOperationEnsureTunedRequest(
     Action<ViewerOperationEnsureTunedBeforeStart>? BeforeStartNew = null,
     Action<ViewerOperationEnsureTunedAfterStart>? AfterStartNew = null,
     bool SuppressStaleDiagnosticLog = false,
+#if TVAIR_DEVELOPER_DIAGNOSTICS
     Action<ViewerOperationEnsureTunedStaleLease>? BeforeStaleLeaseRelease = null,
     Action<ViewerOperationEnsureTunedStaleLease>? AfterStaleLeaseRelease = null,
+#endif
     string? SourceDisplayName = null,
     string? ActionName = null);
 
@@ -1860,9 +1874,11 @@ public sealed record ViewerOperationEnsureTunedBeforeLeaseRequest(
     ViewerOperationPlan Plan,
     ViewerManagedLeaseScopeSnapshot ManagedLeaseScope);
 
+#if TVAIR_DEVELOPER_DIAGNOSTICS
 public sealed record ViewerOperationEnsureTunedStaleLease(
     ExternalTunerLeaseDto Lease,
     DelayedDeathResult DelayedDeath);
+#endif
 
 public sealed record ViewerOperationEnsureTunedBeforeRetune(
     ViewerOperationPlan Plan,

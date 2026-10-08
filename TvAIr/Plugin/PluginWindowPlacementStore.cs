@@ -1,6 +1,5 @@
 ﻿namespace TvAIr.Plugin;
 
-using System.Collections.Concurrent;
 using System.Drawing;
 using System.Text.Json;
 using System.Windows.Forms;
@@ -21,15 +20,13 @@ public sealed class PluginWindowPlacementStore
     private const string PlacementKeyPrefix = "placement.";
 
     private readonly object _gate = new();
-    private readonly ConcurrentDictionary<string, PersistentPluginStorage> _storageByPlugin =
-        new(StringComparer.OrdinalIgnoreCase);
-    private readonly string _dataDirectory;
+    private readonly PluginScopedServiceFactory _scopedServices;
     private readonly LogRepository _log;
 
-    public PluginWindowPlacementStore(Database database, LogRepository log)
+    internal PluginWindowPlacementStore(PluginScopedServiceFactory scopedServices, LogRepository log)
     {
         _log = log ?? throw new ArgumentNullException(nameof(log));
-        _dataDirectory = database?.DataDirectory ?? throw new ArgumentNullException(nameof(database));
+        _scopedServices = scopedServices ?? throw new ArgumentNullException(nameof(scopedServices));
     }
 
     public PluginWindowPlacementPersistencePolicy? GetPolicy(string pluginId, string windowDefinitionId)
@@ -144,12 +141,7 @@ public sealed class PluginWindowPlacementStore
 
 
     private PersistentPluginStorage GetStorage(string pluginId)
-    {
-        var normalizedPluginId = PluginIdentity.Normalize(pluginId);
-        return _storageByPlugin.GetOrAdd(
-            normalizedPluginId,
-            id => new PersistentPluginStorage(id, _dataDirectory, _log));
-    }
+        => _scopedServices.CreateRuntimeStorage(pluginId);
 
     private T? ReadValue<T>(string pluginId, string key) where T : class
     {

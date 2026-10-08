@@ -300,6 +300,18 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
             .Where(external => !matchedExternal.Contains(ExternalIdentity(external)))
             .ToArray();
 
+        // PROGRAM_GUIDE_EVENT_IDENTITY_TIMING_PROMOTION_INVARIANT:
+        // TvAIr DB owns the canonical event identity and timeline.  When PreRec/recording follow
+        // promotes the DB timing before an ExternalEpg snapshot has refreshed, the external row can
+        // still carry the old start/end for the same non-zero EventIdentity.  That stale row must not
+        // become a second ProgramGuide cell merely because the old/new intervals no longer overlap.
+        // Keep timing compatibility as the condition for borrowing overlay text, but suppress an
+        // unmatched external timeline row whenever the same canonical DB EventIdentity already exists.
+        var dbEventIdentities = dbEvents
+            .Where(e => e.EventId != 0)
+            .Select(e => EventIdentity(e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId))
+            .ToHashSet(StringComparer.Ordinal);
+
         // Preserve the global DB-identity boundary contract without issuing one SQLite query
         // per overlay-only candidate.  Resolve all unmatched event identities in bounded batches
         // and keep the same IsSameBroadcastEvent / range-overlap decisions in memory.
@@ -351,6 +363,13 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
 #endif
         foreach (var external in unmatchedExternal)
         {
+            if (external.EventId != 0
+                && dbEventIdentities.Contains(EventIdentity(external.NetworkId, external.TransportStreamId, external.ServiceId, external.EventId)))
+            {
+                externalSuppressedByDbIdentity++;
+                continue;
+            }
+
             if (rangeFrom is not null && rangeTo is not null
                 && directDbByIdentity.TryGetValue(
                     EventIdentity(external.NetworkId, external.TransportStreamId, external.ServiceId, external.EventId),

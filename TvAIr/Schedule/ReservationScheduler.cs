@@ -55,6 +55,20 @@ private readonly ReservationStore _store;
     private readonly NormalEpgWaveOccupation _normalEpgWaveOccupation;
     private readonly ExternalTunerLeaseService _externalTuners;
 
+    // Recording worker runtime evidence is useful for failure diagnosis, but terminal failure artifacts
+    // must not accumulate forever during long-running operation. Successful runs are removed immediately;
+    // retained failure evidence gets a bounded seven-day window and is pruned only when a later recording starts.
+    private static readonly TimeSpan RecordingRuntimeEvidenceRetention = TimeSpan.FromDays(7);
+    private static readonly string[] RecordingRuntimeArtifactPrefixes =
+    [
+        "record_job_",
+        "record_result_",
+        "record_progress_",
+        "record_runtime_",
+        "record_stop_",
+        "record_chain_control_"
+    ];
+
     [DllImport("powrprof.dll", SetLastError = true)]
     private static extern bool SetSuspendState(bool hibernate, bool forceCritical, bool disableWakeEvent);
 
@@ -3994,6 +4008,7 @@ private readonly ReservationStore _store;
             BuildReservationPipelineAudit(r, "filename_finalized", group: group, plannedTuner: r.TunerName, actualTuner: lease.Name, lease: lease, resolvedChannel: resolvedChannel, fileNameBuild: fileNameBuild, outputPath: outputPath, plannedEnd: plannedEnd, finalGuardApplied: true, note: $"namingMode={namingPolicy.Mode};timeBase={namingPolicy.Base};changed={fileNameNormalizedChanged}"));
         var workDir = Path.Combine(AppContext.BaseDirectory, "runtime", "tvairepgrec-production-recording");
         Directory.CreateDirectory(workDir);
+        PruneExpiredRecordingRuntimeEvidence(workDir);
         var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
         var requestPath = Path.Combine(workDir, $"record_job_R{r.Id}_{stamp}_{Guid.NewGuid():N}.json");
         var responsePath = Path.Combine(workDir, $"record_result_R{r.Id}_{stamp}_{Guid.NewGuid():N}.json");
@@ -4289,6 +4304,61 @@ private readonly ReservationStore _store;
             ContinuousChainCapture: continuousChainCapture);
     }
 
+
+
+    private void PruneExpiredRecordingRuntimeEvidence(string workDir)
+    {
+        if (string.IsNullOrWhiteSpace(workDir) || !Directory.Exists(workDir)) return;
+
+        var cutoffUtc = DateTime.UtcNow - RecordingRuntimeEvidenceRetention;
+        var deleted = 0;
+        var failed = 0;
+
+        IEnumerable<string> entries;
+        try
+        {
+            entries = Directory.EnumerateFileSystemEntries(workDir, "*", SearchOption.TopDirectoryOnly)
+                .Where(path => RecordingRuntimeArtifactPrefixes.Any(prefix =>
+                    Path.GetFileName(path).StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
+                .ToArray();
+        }
+        catch
+        {
+            return;
+        }
+
+        foreach (var path in entries)
+        {
+            try
+            {
+                var lastWriteUtc = File.Exists(path)
+                    ? File.GetLastWriteTimeUtc(path)
+                    : Directory.Exists(path)
+                        ? Directory.GetLastWriteTimeUtc(path)
+                        : DateTime.MaxValue;
+                if (lastWriteUtc > cutoffUtc) continue;
+
+                if (File.Exists(path))
+                    File.Delete(path);
+                else if (Directory.Exists(path))
+                    Directory.Delete(path, recursive: true);
+                else
+                    continue;
+
+                deleted++;
+            }
+            catch
+            {
+                failed++;
+            }
+        }
+
+        if (deleted > 0 || failed > 0)
+        {
+            _log.Add("TVAIREPGREC_RECORD_RUNTIME_RETENTION", "Maintenance",
+                $"result={(failed == 0 ? "OK" : "PARTIAL")} deleted={deleted} failed={failed} retentionDays={RecordingRuntimeEvidenceRetention.TotalDays:0} scope=terminal_runtime_evidence_only trigger=recording_start rule=recording_runtime_evidence_retention_contract");
+        }
+    }
 
 
     private async Task CleanupFailedRecordingWorkerStartupArtifactsAsync(
@@ -5032,14 +5102,20 @@ private readonly ReservationStore _store;
     // 同じ未存在パスを選べるため、TvAIrプロセス内で出力先を先にclaimする。
     // 衝突時の名前は従来どおり TVTest系の重複回避表現 ` (1)`, ` (2)` ... のみを使う。
     private static readonly object RecordingOutputPathClaimGate = new();
-    private static readonly HashSet<string> RecordingOutputPathClaims = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, DateTime> RecordingOutputPathClaims = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan RecordingOutputPathClaimStaleAfter = TimeSpan.FromHours(24);
+    private const int RecordingOutputPathClaimPruneThreshold = 256;
 
     private static string MakeUniqueRecordingPath(string path)
     {
         lock (RecordingOutputPathClaimGate)
         {
+            var nowUtc = DateTime.UtcNow;
+            if (RecordingOutputPathClaims.Count >= RecordingOutputPathClaimPruneThreshold)
+                PruneRecordingOutputPathClaimsLocked(nowUtc);
+
             var fullPath = Path.GetFullPath(path);
-            if (!File.Exists(fullPath) && RecordingOutputPathClaims.Add(fullPath))
+            if (!File.Exists(fullPath) && TryClaimRecordingOutputPathLocked(fullPath, nowUtc))
                 return fullPath;
 
             var dir = Path.GetDirectoryName(fullPath) ?? ".";
@@ -5048,16 +5124,36 @@ private readonly ReservationStore _store;
             for (var i = 1; i < 1000; i++)
             {
                 var candidate = Path.GetFullPath(Path.Combine(dir, $"{name} ({i}){ext}"));
-                if (!File.Exists(candidate) && RecordingOutputPathClaims.Add(candidate))
+                if (!File.Exists(candidate) && TryClaimRecordingOutputPathLocked(candidate, nowUtc))
                     return candidate;
             }
 
             while (true)
             {
                 var candidate = Path.GetFullPath(Path.Combine(dir, $"{name}_{Guid.NewGuid():N}{ext}"));
-                if (!File.Exists(candidate) && RecordingOutputPathClaims.Add(candidate))
+                if (!File.Exists(candidate) && TryClaimRecordingOutputPathLocked(candidate, nowUtc))
                     return candidate;
             }
+        }
+    }
+
+    private static bool TryClaimRecordingOutputPathLocked(string fullPath, DateTime nowUtc)
+    {
+        if (RecordingOutputPathClaims.ContainsKey(fullPath))
+            return false;
+
+        RecordingOutputPathClaims[fullPath] = nowUtc;
+        return true;
+    }
+
+    private static void PruneRecordingOutputPathClaimsLocked(DateTime nowUtc)
+    {
+        foreach (var pair in RecordingOutputPathClaims.ToArray())
+        {
+            // workerが実ファイルを作成した時点で、以後の重複回避はFile.Existsが正本になる。
+            // 起動失敗等でファイルが作られないclaimも、record worker上限12時間を十分超える24時間で回収する。
+            if (File.Exists(pair.Key) || nowUtc - pair.Value >= RecordingOutputPathClaimStaleAfter)
+                RecordingOutputPathClaims.Remove(pair.Key);
         }
     }
 

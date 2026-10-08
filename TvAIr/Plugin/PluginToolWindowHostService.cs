@@ -1,4 +1,4 @@
-namespace TvAIr.Plugin;
+﻿namespace TvAIr.Plugin;
 
 using System.Collections.Concurrent;
 using System.Threading;
@@ -729,7 +729,7 @@ public sealed class PluginToolWindowHostService
                         SignalClosing(state, source, closeBehavior, backgroundExecution),
                     _log);
                 _form = form;
-                var timer = new System.Windows.Forms.Timer { Interval = 250 };
+                using var timer = new System.Windows.Forms.Timer { Interval = 250 };
                 timer.Tick += (_, _) =>
                 {
                     while (_actions.TryTake(out var queuedAction))
@@ -752,7 +752,10 @@ public sealed class PluginToolWindowHostService
             }
             finally
             {
+                _alive = false;
                 _form = null;
+                try { _actions.CompleteAdding(); } catch { }
+                while (_actions.TryTake(out _)) { }
             }
         }
     }

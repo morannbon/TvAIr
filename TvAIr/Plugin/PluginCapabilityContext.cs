@@ -2152,6 +2152,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         private readonly LogRepository _log;
         private readonly CapabilityPermissionGate _permissions;
         private const int ClosedNotificationRetentionLimit = 128;
+        private const int ActiveNotificationStateLimit = 256;
         private readonly Dictionary<string, TvAIrPlugin.Notifications.PluginNotificationState> _states = new(StringComparer.Ordinal);
         private readonly object _gate = new();
 
@@ -2181,8 +2182,18 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             var id = BuildId(definitionId, instanceKey);
             lock (_gate)
             {
+                PruneClosedStatesLocked();
                 var now = DateTimeOffset.UtcNow;
                 var created = !_states.TryGetValue(id, out var previous);
+                var consumesActiveSlot = created || previous!.IsClosed;
+                if (consumesActiveSlot && _states.Values.Count(x => !x.IsClosed) >= ActiveNotificationStateLimit)
+                {
+                    _log.Add("PLUGIN_NOTIFICATION_HOST", _pluginId,
+                        $"result=REJECTED notificationInstanceId={id} reason=active_state_capacity_reached active={_states.Values.Count(x => !x.IsClosed)} limit={ActiveNotificationStateLimit} rule=plugin_notification_host_contract");
+                    return TvAIrPlugin.Runtime.TvAirOperationResult<TvAIrPlugin.Notifications.PluginNotificationState>.Fail(
+                        TvAIrPlugin.Runtime.TvAirErrorCode.PayloadTooLarge,
+                        "Active notification state capacity has been reached.");
+                }
                 var state = created
                     ? new TvAIrPlugin.Notifications.PluginNotificationState(id, definitionId, instanceKey, request.Title ?? string.Empty, request.Message ?? string.Empty, request.Severity, false, false, 1, now, now)
                     : previous! with { Title = request.Title ?? string.Empty, Message = request.Message ?? string.Empty, Severity = request.Severity, IsClosed = false, Revision = previous!.Revision + 1, UpdatedAtUtc = now };
@@ -2200,10 +2211,19 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
 
             lock (_gate)
             {
+                PruneClosedStatesLocked();
                 if (!_states.TryGetValue(request.NotificationInstanceId, out var previous))
                     return TvAIrPlugin.Runtime.TvAirOperationResult<TvAIrPlugin.Notifications.PluginNotificationState>.Fail(TvAIrPlugin.Runtime.TvAirErrorCode.EntityNotFound, "Notification was not found.");
                 if (request.ExpectedRevision.HasValue && request.ExpectedRevision.Value != previous.Revision)
                     return TvAIrPlugin.Runtime.TvAirOperationResult<TvAIrPlugin.Notifications.PluginNotificationState>.Fail(TvAIrPlugin.Runtime.TvAirErrorCode.RevisionConflict, "Notification revision does not match.");
+                if (previous.IsClosed && _states.Values.Count(x => !x.IsClosed) >= ActiveNotificationStateLimit)
+                {
+                    _log.Add("PLUGIN_NOTIFICATION_HOST", _pluginId,
+                        $"result=REJECTED notificationInstanceId={request.NotificationInstanceId} reason=active_state_capacity_reached active={_states.Values.Count(x => !x.IsClosed)} limit={ActiveNotificationStateLimit} rule=plugin_notification_host_contract");
+                    return TvAIrPlugin.Runtime.TvAirOperationResult<TvAIrPlugin.Notifications.PluginNotificationState>.Fail(
+                        TvAIrPlugin.Runtime.TvAirErrorCode.PayloadTooLarge,
+                        "Active notification state capacity has been reached.");
+                }
 
                 var state = previous with { Title = request.Title ?? string.Empty, Message = request.Message ?? string.Empty, Severity = request.Severity, IsClosed = false, Revision = previous.Revision + 1, UpdatedAtUtc = DateTimeOffset.UtcNow };
                 _states[state.NotificationInstanceId] = state;

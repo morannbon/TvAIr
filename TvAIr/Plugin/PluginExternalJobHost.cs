@@ -13,7 +13,10 @@ namespace TvAIr.Plugin;
 internal sealed class PluginExternalJobHost : IDisposable
 {
     private const int TailCharacterLimit = 4 * 1024;
-    private const int MaxJobsPerPlugin = 8192;
+    private const int MaxActiveJobsPerPlugin = 8192;
+    // Keep every active job, but retain only a bounded recent terminal history per plugin.
+    // ClientRequestId idempotency is retained for the same bounded job history.
+    private const int MaxTerminalJobsPerPlugin = 512;
 
     private readonly object gate = new();
     private readonly Dictionary<string, JobEntry> jobs = new(StringComparer.OrdinalIgnoreCase);
@@ -58,14 +61,16 @@ internal sealed class PluginExternalJobHost : IDisposable
             var requestKey = MakeRequestKey(owner, clientRequestId);
             if (requestIndex.TryGetValue(requestKey, out var existingId) && jobs.TryGetValue(existingId, out var existing))
                 return existing.ToDto();
-            if (jobs.Values.Count(x => SameOwner(x, owner)) >= MaxJobsPerPlugin)
+
+            PruneTerminalHistoryLocked(owner);
+            if (jobs.Values.Count(x => SameOwner(x, owner) && !x.IsTerminal) >= MaxActiveJobsPerPlugin)
             {
                 return new TvAirExternalJobDto
                 {
                     Kind = request.Kind, StateCode = TvAirExternalJobState.Failed, State = TvAirExternalJobState.Failed.ToString(),
                     ReservationId = NormalizeOptional(request.ReservationId), RecordingId = NormalizeOptional(request.RecordingId),
                     ClientRequestId = clientRequestId, Accepted = false, FinishedAt = DateTimeOffset.Now,
-                    FailureCode = "host_job_capacity_reached", Message = "External job session capacity was reached. Restart TvAIr before accepting more jobs."
+                    FailureCode = "host_job_capacity_reached", Message = "External job active-session capacity was reached."
                 };
             }
 
@@ -136,7 +141,11 @@ internal sealed class PluginExternalJobHost : IDisposable
         }
 
         TryKillTree(entry);
-        if (entry.State == TvAirExternalJobState.Cancelled) Publish(entry);
+        if (entry.State == TvAirExternalJobState.Cancelled)
+        {
+            Publish(entry);
+            PruneTerminalHistory(owner);
+        }
         return true;
     }
 
@@ -158,11 +167,17 @@ internal sealed class PluginExternalJobHost : IDisposable
                 }
             }
         }
+        var terminalPublished = false;
         foreach (var entry in active)
         {
             TryKillTree(entry);
-            if (entry.State == TvAirExternalJobState.Cancelled) Publish(entry);
+            if (entry.State == TvAirExternalJobState.Cancelled)
+            {
+                Publish(entry);
+                terminalPublished = true;
+            }
         }
+        if (terminalPublished) PruneTerminalHistory(owner);
     }
 
     private async Task RunAsync(JobEntry entry)
@@ -252,6 +267,7 @@ internal sealed class PluginExternalJobHost : IDisposable
                 entry.Process = null;
             }
             Publish(entry);
+            PruneTerminalHistory(entry.PluginId);
         }
         catch (Exception ex)
         {
@@ -265,6 +281,7 @@ internal sealed class PluginExternalJobHost : IDisposable
                 entry.Process = null;
             }
             Publish(entry);
+            PruneTerminalHistory(entry.PluginId);
         }
         finally
         {
@@ -311,6 +328,32 @@ internal sealed class PluginExternalJobHost : IDisposable
         if (!Path.IsPathFullyQualified(request.Process.ExecutablePath)) return ("executable_path_must_be_absolute", "ExecutablePath must be an absolute path.");
         if (!string.IsNullOrWhiteSpace(request.Process.WorkingDirectory) && !Path.IsPathFullyQualified(request.Process.WorkingDirectory)) return ("working_directory_must_be_absolute", "WorkingDirectory must be an absolute path when specified.");
         return null;
+    }
+
+    private void PruneTerminalHistory(string pluginId)
+    {
+        lock (gate) PruneTerminalHistoryLocked(pluginId);
+    }
+
+    private void PruneTerminalHistoryLocked(string pluginId)
+    {
+        var stale = jobs.Values
+            .Where(x => SameOwner(x, pluginId) && x.IsTerminal)
+            .OrderByDescending(x => x.FinishedAt ?? x.QueuedAt)
+            .ThenByDescending(x => x.QueuedAt)
+            .Skip(MaxTerminalJobsPerPlugin)
+            .ToList();
+
+        foreach (var entry in stale)
+        {
+            jobs.Remove(entry.JobId);
+            var requestKey = MakeRequestKey(entry.PluginId, entry.ClientRequestId);
+            if (requestIndex.TryGetValue(requestKey, out var indexedJobId)
+                && string.Equals(indexedJobId, entry.JobId, StringComparison.OrdinalIgnoreCase))
+            {
+                requestIndex.Remove(requestKey);
+            }
+        }
     }
 
     private static bool SameOwner(JobEntry entry, string pluginId) => string.Equals(entry.PluginId, pluginId, StringComparison.OrdinalIgnoreCase);

@@ -159,53 +159,14 @@ public sealed class TunerProfile
 /// </summary>
 public sealed class EpgSettings
 {
-    /// <summary>EPG取得機能の有効/無効</summary>
-    public bool Enabled { get; set; } = SettingsDefaults.EpgEnabled;
-
-    /// <summary>毎日自動取得する時刻（時）</summary>
-    public int DailyRefreshHour { get; set; } = SettingsDefaults.EpgHour;
-
-    /// <summary>毎日自動取得する時刻（分）</summary>
-    public int DailyRefreshMinute { get; set; } = SettingsDefaults.EpgMinute;
-
     /// <summary>TSファイルの一時保存ディレクトリ。空の場合はDataDirectory配下のts-recを使用。</summary>
     public string TsRecordDirectory { get; set; } = "";
-
-    /// <summary>
-    /// EPG取得深度。shallow=120秒/TS、medium=180秒/TS、deep=240秒/TS、deeper=300秒/TS。
-    /// この値から PerChannelWaitSeconds が算出される。
-    /// </summary>
-    public string EpgDepth { get; set; } = SettingsDefaults.EpgDepth;
-    /// <summary>
-    /// 1TSあたりの録画待機秒数。EpgDepthから自動算出される（読み取り専用）。
-    /// shallow=120、medium=180、deep=240、deeper=300。
-    /// </summary>
-    public int PerChannelWaitSeconds => EpgDurationPolicy.BaseSecondsForDepth(EpgDepth);
 
     /// <summary>全体の取得時間上限（分）</summary>
     public int TotalTimeLimitMinutes { get; set; } = 180;
 
     /// <summary>TSファイルのパース最大パケット数（0=EOFまで全量）</summary>
     public int MaxPacketsToScan { get; set; } = 0;
-
-    /// <summary>
-    /// 診断モード。通常運用では false 推奨。
-    /// release_contract以降、EPG汚染系の診断はタグ別カウント中心に限定し、
-    /// 汚染本文・rawHex・サンプル文字列は通常ログへ出さない。
-    /// </summary>
-    public bool DiagnosticMode { get; set; } = false;
-
-    /// <summary>
-    /// 同一TS内サービス数によるEPG取得秒数の自動延長設定。
-    /// release_contractでは通常EPGの実行時間には使わない。EPGが薄い場合は秒数延長ではなく、ch2由来のNID/TSID/SID束ねを優先して確認する。
-    /// </summary>
-    public int MultiServiceExtraSeconds { get; set; } = 0;
-
-    /// <summary>
-    /// 録画開始何分前に直前EPG確認を行うか。時間追従（延長・繰り上げ対応）に使用。
-    /// 既定値は設定正本に従う。設定メニューから変更可能。
-    /// </summary>
-    public int EpgPreRecordMinutes { get; set; } = SettingsDefaults.EpgPreRecordMinutes;
 }
 
 /// <summary>

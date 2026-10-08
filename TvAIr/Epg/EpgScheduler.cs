@@ -62,9 +62,6 @@ public sealed class EpgScheduler : BackgroundService
     private readonly object dailyRunStateGate = new();
     private DailyEpgRunState? currentDailyRunState;
 
-    // appsettings.json由来の静的設定（iniに存在しない項目）
-    private readonly int _multiServiceExtraSeconds;
-
     // EpgDepthは設定保存時に動的更新されるため独立フィールドで管理
     private string _currentDepth;
 
@@ -155,7 +152,6 @@ public sealed class EpgScheduler : BackgroundService
 
 
     public EpgScheduler(
-        EpgSettings                    settings,
         IniSettingsService             ini,
         EpgCapture                     capture,
         ReservationStore               reservationStore,
@@ -196,11 +192,8 @@ public sealed class EpgScheduler : BackgroundService
         this.powerResumeSignals = powerResumeSignals;
         this.broadcastTimeReference = broadcastTimeReference;
         dailyRunStateStore = new DailyEpgRunStateStore(database.DataDirectory);
-        _multiServiceExtraSeconds     = Math.Max(0, settings.MultiServiceExtraSeconds);
-
         // 定時EPGの有効状態・時刻・深度は、設定画面/API/INI保存が共有する
-        // IniSettingsService を起動時正本とする。appsettings の EpgSettings は
-        // worker実行時間などの非ユーザー設定だけに限定し、定時契約へ逆投影しない。
+        // IniSettingsServiceを唯一の正本とする。
         _currentDepth = SettingsDefaults.NormalizeEpgDepth(ini.EpgDepth);
         capture.UpdateRuntimeDepth(_currentDepth);
         config = new EpgScheduleConfig(
@@ -2021,7 +2014,7 @@ public sealed class EpgScheduler : BackgroundService
                     if (tunerCount <= 0)
                         return (Group: bg.Key, TunerCount: 0, Jobs: Array.Empty<int>(), Loads: Array.Empty<int>(), Critical: 0);
                     var jobs = bg
-                        .Select(g => EpgDurationPolicy.CreateSchedulePlan(depth, _multiServiceExtraSeconds, g.Targets.Count).RecDurationSeconds)
+                        .Select(g => EpgDurationPolicy.CreateSchedulePlan(depth, g.Targets.Count).RecDurationSeconds)
                         .Where(x => x > 0)
                         .ToArray();
                     var loads = BuildLaneLoads(jobs, tunerCount);

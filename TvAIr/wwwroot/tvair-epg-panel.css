@@ -1,4 +1,4 @@
-﻿/* TvAIr EPG progress panel ownership contract
+/* TvAIr EPG progress panel ownership contract
    Owner: EPG progress panel only.
    Purpose: keep EPG progress panel structure, role-based colors, progress bar and actions out of index.html,
    tvair-ui-modules.css and tvair-theme-contract.css. EPG panel colors must be dialog/progress/action roles, not fixed navy tokens. */

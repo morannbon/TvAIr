@@ -1,4 +1,4 @@
-﻿/* TvAIr timed text streams page styles. Static page presentation only. */
+/* TvAIr timed text streams page styles. Static page presentation only. */
 body.tvair-timed-text-page{background:var(--tvair-role-page-bg);color:var(--tvair-role-page-fg);}
   #main{padding:64px 22px 22px;max-width:1180px;margin:0 auto;}
   .header-row{display:flex;align-items:center;gap:12px;margin-bottom:14px;}

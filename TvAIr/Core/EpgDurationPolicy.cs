@@ -28,8 +28,7 @@ public static class EpgDurationPolicy
         bool isPreRecordCheck,
         int? maxCaptureSeconds,
         int serviceCount,
-        int pass,
-        int configuredExtraPerServiceSeconds)
+        int pass)
     {
         var normalizedDepth = NormalizeDepth(depth);
         var configuredBase = BaseSecondsForDepth(normalizedDepth);
@@ -37,10 +36,8 @@ public static class EpgDurationPolicy
         // release_contract以降の方針を共通化:
         // BS/CSや多サービスTSを秒数の隠れ延長で補わず、チャンネル/TS/SID束ねの監査で追う。
         var effectiveBase = configuredBase;
-        var configuredExtra = Math.Max(0, configuredExtraPerServiceSeconds);
-        var effectiveExtra = 0;
         var safeServiceCount = Math.Max(1, serviceCount);
-        var normalSeconds = effectiveBase + Math.Max(0, safeServiceCount - 1) * effectiveExtra;
+        var normalSeconds = effectiveBase;
 
         // 再巡回でも勝手に秒数を伸ばさない。
         var retryExtra = 0;
@@ -61,8 +58,6 @@ public static class EpgDurationPolicy
             Depth: normalizedDepth,
             ConfiguredBaseSeconds: configuredBase,
             EffectiveBaseSeconds: effectiveBase,
-            ConfiguredExtraPerServiceSeconds: configuredExtra,
-            EffectiveExtraPerServiceSeconds: effectiveExtra,
             ServiceCount: safeServiceCount,
             NormalDurationSeconds: normalSeconds,
             RetryExtraSeconds: retryExtra,
@@ -74,23 +69,19 @@ public static class EpgDurationPolicy
 
     public static EpgDurationPlan CreateSchedulePlan(
         string? depth,
-        int configuredExtraPerServiceSeconds,
         int serviceCount = 1)
         => Create(
             depth,
             isPreRecordCheck: false,
             maxCaptureSeconds: null,
             serviceCount: serviceCount,
-            pass: 1,
-            configuredExtraPerServiceSeconds: configuredExtraPerServiceSeconds);
+            pass: 1);
 }
 
 public sealed record EpgDurationPlan(
     string Depth,
     int ConfiguredBaseSeconds,
     int EffectiveBaseSeconds,
-    int ConfiguredExtraPerServiceSeconds,
-    int EffectiveExtraPerServiceSeconds,
     int ServiceCount,
     int NormalDurationSeconds,
     int RetryExtraSeconds,

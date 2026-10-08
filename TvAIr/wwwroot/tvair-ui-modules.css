@@ -1,4 +1,4 @@
-﻿/* TvAIr UI Modules release_contract
+/* TvAIr UI Modules release_contract
    Shared UI role owners, including the ProgramCell action geometry/token contract.
    ProgramCell frame geometry/time conversion and Wake/EPG/plugin behavior are outside this stylesheet contract.
    Active definitions are grouped by role: AppShell, Shell, DataView, RuleList, ProgramGuide, HeaderCell, EnabledToggle, DisabledRowState.

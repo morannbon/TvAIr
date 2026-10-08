@@ -29,14 +29,11 @@ namespace TvAIr.Epg;
 /// </summary>
 public sealed class EpgCapture
 {
-    private readonly IOptionsMonitor<EpgSettings> settingsMonitor;
+    private readonly EpgSettings settings;
 
-    // release_contract: IOptionsMonitor に切り替えたため CurrentValue は読み取り専用。
-    // UpdateRuntimeDepth() で設定された EpgDepth だけ別フィールドでオーバーライドする。
+    // EPG深度の正本はIniSettingsService。設定変更時はUpdateRuntimeDepth()で即時投影する。
     private string? runtimeEpgDepthOverride;
-    private EpgSettings settings => settingsMonitor.CurrentValue;
-    // UpdateRuntimeDepth() によるオーバーライドを優先し、なければ CurrentValue の EpgDepth を使う。
-    private string effectiveEpgDepth => runtimeEpgDepthOverride ?? settings.EpgDepth;
+    private string effectiveEpgDepth => runtimeEpgDepthOverride ?? ini.EpgDepth;
     private readonly IReadOnlyList<TunerProfile> tunerProfiles;
     private readonly ChannelFileLoader channelLoader;
     private readonly TvTestLauncher launcher;
@@ -92,7 +89,7 @@ public sealed class EpgCapture
 
 
     public EpgCapture(
-        IOptionsMonitor<EpgSettings> settingsMonitor,
+        IOptions<EpgSettings> settingsOptions,
         IReadOnlyList<TunerProfile> tunerProfiles,
         ChannelFileLoader channelLoader,
         TvTestLauncher launcher,
@@ -113,7 +110,7 @@ public sealed class EpgCapture
 #endif
         BroadcastTimeReference broadcastTimeReference)
     {
-        this.settingsMonitor = settingsMonitor;
+        this.settings = settingsOptions.Value;
         this.tunerProfiles = tunerProfiles;
         this.channelLoader = channelLoader;
         this.launcher      = launcher;
@@ -584,7 +581,7 @@ public sealed class EpgCapture
     public void UpdateRuntimeDepth(string? epgDepth)
     {
         var normalized = NormalizeDepth(epgDepth);
-        var before = runtimeEpgDepthOverride ?? settings.EpgDepth;
+        var before = runtimeEpgDepthOverride ?? ini.EpgDepth;
         runtimeEpgDepthOverride = normalized;
         Log("EPG_DEPTH_APPLIED", "EPG",
             $"before={before} after={normalized} perTsSeconds={WaitSecondsForDepth(normalized)} source=runtime_depth rule=epg_duration_policy_common");
@@ -2086,19 +2083,15 @@ public sealed class EpgCapture
             isPreRecordCheck,
             maxCaptureSeconds,
             serviceCount,
-            pass,
-            settings.MultiServiceExtraSeconds);
+            pass);
 
         // release_contract: EPG深度/取得秒数は EpgDurationPolicy に集約。
         // 待機秒→分の数値変換だけを共有する。定時EPG取得と録画前EPG確認の生成・実行契約は共有しない。
         var baseWaitSec = durationPlan.ConfiguredBaseSeconds;
         var effectiveBaseWaitSec = durationPlan.EffectiveBaseSeconds;
-        var configuredExtraPerService = durationPlan.ConfiguredExtraPerServiceSeconds;
-        var extraPerService = durationPlan.EffectiveExtraPerServiceSeconds;
-
         Log("EPG_DURATION_POLICY", $"TS{group.TsId}",
             $"mode={(isPreRecordCheck ? "epg-check" : "normal-epg")} group={group.Group} depth={durationPlan.Depth} configuredBase={durationPlan.ConfiguredBaseSeconds}s effectiveBase={durationPlan.EffectiveBaseSeconds}s " +
-            $"configuredExtraPerService={durationPlan.ConfiguredExtraPerServiceSeconds}s effectiveExtraPerService={durationPlan.EffectiveExtraPerServiceSeconds}s services={durationPlan.ServiceCount} " +
+            $"services={durationPlan.ServiceCount} " +
             $"reason={durationPlan.Reason} rule={durationPlan.Rule}");
 
         var normalWaitSec = durationPlan.NormalDurationSeconds;

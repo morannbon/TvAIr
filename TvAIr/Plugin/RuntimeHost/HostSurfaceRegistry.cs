@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using TvAIrPlugin.Runtime;
 using TvAIrPlugin.Surfaces;
 
@@ -36,6 +36,7 @@ internal sealed class HostSurfaceRegistry : ITvAirHostSurfacesApi, IDisposable
     public TvAirOperationResult<HostSurfaceState> Resolve(HostSurfaceKind kind, string ownerInstanceId, string slotId = "main")
     {
         if (!Available()) return TvAirOperationResult<HostSurfaceState>.Fail(TvAirErrorCode.RuntimeDisconnected, "Plugin runtime is disconnected.");
+        PruneOrphanedHosts();
         if (string.IsNullOrWhiteSpace(ownerInstanceId))
             return TvAirOperationResult<HostSurfaceState>.Fail(TvAirErrorCode.InvalidRequest, "Host surface owner id is required.");
         if (kind == HostSurfaceKind.WindowContent && !_windows.Exists(ownerInstanceId))
@@ -60,6 +61,7 @@ internal sealed class HostSurfaceRegistry : ITvAirHostSurfacesApi, IDisposable
     public TvAirOperationResult<PluginSurfaceAttachment> Attach(AttachPluginSurfaceRequest request)
     {
         if (!Available()) return TvAirOperationResult<PluginSurfaceAttachment>.Fail(TvAirErrorCode.RuntimeDisconnected, "Plugin runtime is disconnected.");
+        PruneOrphanedHosts();
         if (request is null)
             return TvAirOperationResult<PluginSurfaceAttachment>.Fail(TvAirErrorCode.InvalidRequest, "Attachment request is required.");
         if (!_hosts.TryGetValue(request.HostSurfaceInstanceId, out var host))
@@ -126,7 +128,46 @@ internal sealed class HostSurfaceRegistry : ITvAirHostSurfacesApi, IDisposable
     }
 
     public IReadOnlyList<HostSurfaceState> List()
-        => _hosts.Values.OrderBy(x => x.Kind).ThenBy(x => x.OwnerInstanceId).ThenBy(x => x.SlotId).ToArray();
+    {
+        PruneOrphanedHosts();
+        return _hosts.Values.OrderBy(x => x.Kind).ThenBy(x => x.OwnerInstanceId).ThenBy(x => x.SlotId).ToArray();
+    }
+
+    private void PruneOrphanedHosts()
+    {
+        // Long-run ownership: WindowContent and ViewerOverlay host surfaces are runtime views of
+        // short-lived owner instances. Once that owner is gone, keeping the host id (and any
+        // attachment reachable only from it) turns open/close or viewer restart count into retained
+        // process-lifetime state. Prune only owner kinds whose liveness can be authoritatively
+        // resolved here; ApplicationPage/Panel/Background ownership remains caller-managed.
+        foreach (var pair in _hosts.ToArray())
+        {
+            var host = pair.Value;
+            var orphaned = host.Kind switch
+            {
+                HostSurfaceKind.WindowContent => !_windows.Exists(host.OwnerInstanceId),
+                HostSurfaceKind.ViewerOverlay => _resolveViewerTarget(host.OwnerInstanceId) is null,
+                _ => false
+            };
+            if (!orphaned)
+                continue;
+
+            foreach (var attachmentPair in _attachments.ToArray())
+            {
+                var attachment = attachmentPair.Value;
+                if (!string.Equals(attachment.HostSurfaceInstanceId, host.HostSurfaceInstanceId, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (!_attachments.TryRemove(attachmentPair.Key, out var removed))
+                    continue;
+
+                _surfaces.DetachHost(removed.SurfaceInstanceId, removed.HostSurfaceInstanceId);
+                if (host.Kind == HostSurfaceKind.WindowContent)
+                    _windows.DetachSurface(host.OwnerInstanceId, removed.SurfaceInstanceId);
+            }
+
+            _hosts.TryRemove(pair.Key, out _);
+        }
+    }
 
     private bool Available() => Volatile.Read(ref _disposed) == 0 && _runtime.IsConnected;
 
