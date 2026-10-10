@@ -1,4 +1,4 @@
-using TvAIr.Epg.Projection;
+﻿using TvAIr.Epg.Projection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Win32;
 using TvAIr.Channel;
@@ -593,6 +593,7 @@ public sealed class EpgScheduler : BackgroundService
             "BS" => "BS",
             "CS" => "CS",
             "BSCS" or "BS/CS" or "BSC S" => "BSCS",
+            "HYBRID" or "CATV" or "ISDB-C" => "HYBRID",
             _ => "All"
         };
     }
@@ -778,7 +779,12 @@ public sealed class EpgScheduler : BackgroundService
             return "空きチューナーがないためEPG取得を開始できません";
         if (r.Contains("warmup", StringComparison.OrdinalIgnoreCase))
             return "録画開始直後のためEPG取得を開始できません";
-        return "録画予約があるためEPG取得を開始できません";
+        if (r.Contains("target_duration_unavailable", StringComparison.OrdinalIgnoreCase))
+            return "EPG取得に必要なチャンネルまたはチューナーの設定を確認してください";
+        if (r.Contains("recording", StringComparison.OrdinalIgnoreCase)
+            || r.Contains("reservation", StringComparison.OrdinalIgnoreCase))
+            return "録画予約があるためEPG取得を開始できません";
+        return "EPG取得を開始できません。設定とチューナーの状態を確認してください";
     }
 
     // ─── 手動実行 ────────────────────────────────────────────────
@@ -1513,9 +1519,11 @@ public sealed class EpgScheduler : BackgroundService
         var normalized = NormalizeEpgScheduleGroup(group);
         return tunerProfiles
             .Where(t => !string.Equals(IniSettingsService.NormalizeTunerRole(t.Role), "Viewing", StringComparison.OrdinalIgnoreCase))
+            // Match TunerPool.MatchGroup: HYBRID recording tuners can serve both
+            // GR and BSCS. Do not infer the broadcast type from a cable ONID here.
             .Where(t => string.Equals(NormalizeEpgScheduleGroup(t.Group), normalized, StringComparison.OrdinalIgnoreCase)
-                     || (string.Equals(t.Group, "HYBRID", StringComparison.OrdinalIgnoreCase)
-                         && string.Equals(normalized, "BSCS", StringComparison.OrdinalIgnoreCase)))
+                     || (string.Equals(NormalizeEpgScheduleGroup(t.Group), "HYBRID", StringComparison.OrdinalIgnoreCase)
+                         && (normalized is "GR" or "BSCS")))
             .ToArray();
     }
 
@@ -1529,10 +1537,10 @@ public sealed class EpgScheduler : BackgroundService
     private int EnsureDailyProjection(DailyEpgRunState state, bool refreshAllocationRoute)
     {
         var changed = 0;
-        var recordingTunersByGroup = new[] { "GR", "BSCS" }
+        var recordingTunersByGroup = new[] { "GR", "BSCS", "HYBRID" }
             .ToDictionary(
                 group => group,
-                group => GetScheduledRecordingTuners(group),
+                group => GetScheduledRecordingTuners(group).Where(t => NormalizeEpgScheduleGroup(t.Group) == group).ToArray(),
                 StringComparer.OrdinalIgnoreCase);
 
         if (state.State is not (DailyEpgRunPhase.Planned or DailyEpgRunPhase.Running))
@@ -1971,7 +1979,7 @@ public sealed class EpgScheduler : BackgroundService
     }
 
     private string ResolveReservationGroup(Reservation r)
-        => ReservationTunerGroupResolver.Resolve(r, tunerProfiles);
+        => serviceAccess.Capture().ResolveSchedulingGroup(r, tunerProfiles);
 
     private int EstimateEpgRequiredSeconds(string targetScope, string? depth = null)
         => EstimateEpgDuration(targetScope, SettingsDefaults.NormalizeEpgDepth(depth ?? _currentDepth)).RequiredSeconds;
@@ -1986,55 +1994,47 @@ public sealed class EpgScheduler : BackgroundService
         var normalizedScope = NormalizeTargetScope(targetScope);
         var safetyMarginSeconds = (int)EpgStartEstimateSafetyMargin.TotalSeconds;
 
-        static int[] BuildLaneLoads(IReadOnlyList<int> jobs, int lanes)
-        {
-            var loads = new int[Math.Max(1, lanes)];
-            foreach (var seconds in jobs)
-            {
-                var lane = 0;
-                for (var i = 1; i < loads.Length; i++)
-                    if (loads[i] < loads[lane]) lane = i;
-                loads[lane] += Math.Max(1, seconds);
-            }
-            return loads;
-        }
-
         try
         {
             var load = channelLoader.Load();
-            var groups = EpgCapture.FilterGroupsByScope(capture.BuildGroups(load.Targets, emitDiagnostics: false), EpgCapture.NormalizeTargetScope(normalizedScope));
+            var groups = EpgCapture.FilterGroupsByScope(capture.BuildNormalEpgGroups(load, emitDiagnostics: false), EpgCapture.NormalizeTargetScope(normalizedScope));
             if (groups.Count == 0)
                 return new EpgDurationEstimate(0, 0, safetyMarginSeconds, 0, 0, Array.Empty<int>(), "no_explicit_channel_targets");
 
-            var perBroadcastGroup = groups
-                .GroupBy(g => NormalizeEpgScheduleGroup(g.Group), StringComparer.OrdinalIgnoreCase)
-                .Select(bg =>
-                {
-                    var tunerCount = Math.Max(0, GetScheduledRecordingTuners(bg.Key).Count);
-                    if (tunerCount <= 0)
-                        return (Group: bg.Key, TunerCount: 0, Jobs: Array.Empty<int>(), Loads: Array.Empty<int>(), Critical: 0);
-                    var jobs = bg
-                        .Select(g => EpgDurationPolicy.CreateSchedulePlan(depth, g.Targets.Count).RecDurationSeconds)
-                        .Where(x => x > 0)
-                        .ToArray();
-                    var loads = BuildLaneLoads(jobs, tunerCount);
-                    return (Group: bg.Key, TunerCount: tunerCount, Jobs: jobs, Loads: loads, Critical: loads.Length == 0 ? 0 : loads.Max());
-                })
-                .ToArray();
-
-            if (perBroadcastGroup.Any(x => x.TunerCount <= 0))
-                return new EpgDurationEstimate(0, 0, safetyMarginSeconds, 0, groups.Count, Array.Empty<int>(), "no_recording_tuner");
-
-            var critical = perBroadcastGroup.Max(x => x.Critical);
-            var aggregateLoads = perBroadcastGroup.SelectMany(x => x.Loads).ToArray();
+            var physical = tunerProfiles.Where(t => string.Equals(IniSettingsService.NormalizeTunerRole(t.Role), "Recording", StringComparison.OrdinalIgnoreCase))
+                .GroupBy(t => t.Name, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() == 1).Select(g => g.Single()).ToArray();
+            var snapshot = serviceAccess.Capture();
+            var loads = new int[physical.Length];
+            var transports = groups.Where(g => g.Targets.Count > 0)
+                .GroupBy(g => (g.Targets[0].OriginalNetworkId, g.Targets[0].TransportStreamId))
+                .Select(g => g.ToArray()).ToArray();
+            int[] CompatibleLanes(TsGroup[] alternatives)
+                => Enumerable.Range(0, physical.Length).Where(i => alternatives.Any(g =>
+                    ChannelServiceAccessSnapshot.SupportsGroup(physical[i].Group, g.Group)
+                    && (string.IsNullOrWhiteSpace(physical[i].ChannelCh2Path)
+                        ? !g.Key.StartsWith("direct:", StringComparison.Ordinal)
+                        : g.Targets.All(t => snapshot.TryResolveDirectRouteForConfiguredSource(physical[i].BonDriverFileName,
+                            physical[i].ChannelCh2Path, new BroadcastServiceKey(t.OriginalNetworkId, t.TransportStreamId, t.ServiceId)))))).ToArray();
+            // Place restricted transports first, so a flexible tuner does not
+            // hide the usable capacity of another driver's narrower table.
+            foreach (var alternatives in transports.OrderBy(a => CompatibleLanes(a).Length)
+                .ThenBy(a => a.Min(g => g.Group), StringComparer.OrdinalIgnoreCase))
+            {
+                var candidates = CompatibleLanes(alternatives).OrderBy(i => loads[i]).ThenBy(i => i).ToArray();
+                if (candidates.Length == 0)
+                    return new EpgDurationEstimate(0, 0, safetyMarginSeconds, 0, transports.Length, Array.Empty<int>(), "no_compatible_recording_tuner");
+                var duration = alternatives.Max(g => EpgDurationPolicy.CreateSchedulePlan(depth, g.Targets.Count).RecDurationSeconds);
+                loads[candidates[0]] += Math.Max(1, duration);
+            }
+            var critical = loads.Length == 0 ? 0 : loads.Max();
             return new EpgDurationEstimate(
                 RequiredSeconds: critical + safetyMarginSeconds,
                 CaptureCriticalPathSeconds: critical,
                 SafetyMarginSeconds: safetyMarginSeconds,
-                TunerCount: perBroadcastGroup.Sum(x => x.TunerCount),
-                TsCount: groups.Count,
-                LaneLoadsSeconds: aggregateLoads,
-                Source: "capture_target_resolver_duration_policy");
+                TunerCount: physical.Length,
+                TsCount: transports.Length,
+                LaneLoadsSeconds: loads,
+                Source: "physical_tuner_route_duration_policy");
         }
         catch (Exception ex)
         {
@@ -2049,7 +2049,8 @@ public sealed class EpgScheduler : BackgroundService
         var scope = string.IsNullOrWhiteSpace(normalizedScope) ? "ALL" : normalizedScope.Trim().ToUpperInvariant();
         if (scope is "GR") return new[] { "GR" };
         if (scope is "BS" or "CS" or "BSCS") return new[] { "BSCS" };
-        return new[] { "GR", "BSCS" };
+        if (scope is "HYBRID" or "CATV" or "ISDB-C") return new[] { "HYBRID" };
+        return new[] { "GR", "BSCS", "HYBRID" };
     }
 
     private static string NormalizeBlockedReason(string? reason)
@@ -2729,7 +2730,7 @@ public sealed class EpgScheduler : BackgroundService
                      && (!r.IsUserChain || !r.UserChainPreviousId.HasValue)
                      && r.IsEnabled
                      && !r.IsConflicted
-                     && serviceAccessSnapshot.IsOperational(r))
+                     && serviceAccessSnapshot.IsOperationalForRecording(r, recordableTuners))
             .OrderBy(r => r.StartTime)
             .ThenBy(r => r.Id)
             .ToList();
@@ -2749,7 +2750,7 @@ public sealed class EpgScheduler : BackgroundService
         var skippedServiceUnavailable = preRecordSourceCandidates.Count(r => r.IsEnabled
             && (!r.IsUserChain || !r.UserChainPreviousId.HasValue)
             && !r.IsConflicted
-            && !serviceAccessSnapshot.IsOperational(r));
+            && !serviceAccessSnapshot.IsOperationalForRecording(r, recordableTuners));
         var excludedSource = scheduledAll.Count(r => r.Source != ReservationSource.Epg
             && r.Source != ReservationSource.Manual
             && r.Source != ReservationSource.KeywordSearch

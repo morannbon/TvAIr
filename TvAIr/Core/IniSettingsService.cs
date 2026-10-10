@@ -23,6 +23,8 @@ public sealed class IniSettingsService
     private string _persistedTvTestExecutablePath = "";
     private string _persistedViewingTvTestExecutablePath = "";
     private string _persistedBonDriverDirectory = "";
+    private string _persistedGrChSetFilePath = "";
+    private string _persistedBscsChSetFilePath = "";
     private bool _persistedUseMinOption = SettingsDefaults.UseMinOption;
     private bool _persistedUseNodshowOption = SettingsDefaults.UseNodshowOption;
     private List<TunerProfileDto> _persistedTuners = new();
@@ -246,7 +248,10 @@ public sealed class IniSettingsService
     private static bool IsCurrentTunerKey(string key)
     {
         if (!key.StartsWith("Tuner", StringComparison.OrdinalIgnoreCase)) return false;
-        return int.TryParse(key[5..], out var index) && index > 0;
+        var suffix = key[5..];
+        if (suffix.EndsWith("Ch2Path", StringComparison.OrdinalIgnoreCase))
+            suffix = suffix[..^7];
+        return int.TryParse(suffix, out var index) && index > 0;
     }
 
     private static void EnsureCurrentSettingsSchema(Dictionary<string, string> values)
@@ -379,6 +384,7 @@ public sealed class IniSettingsService
                 Role              = NormalizeTunerRole(parts[4]),
                 LogicalViewerSlotId = LogicalViewerSlotIdentity.Resolve(parts[5], parts[2], parts[3], parts[4], i),
                 DeviceNumber      = int.TryParse(parts[6], out var deviceNumber) ? deviceNumber : 0,
+                ChannelCh2Path = GetStr(dict, $"Tuner{i}Ch2Path", ""),
             });
         }
 
@@ -670,6 +676,8 @@ public sealed class IniSettingsService
         var runtimeTvTestExecutablePath = TvTestExecutablePath;
         var runtimeViewingTvTestExecutablePath = ViewingTvTestExecutablePath;
         var runtimeBonDriverDirectory = BonDriverDirectory;
+        var runtimeGrChSetFilePath = GrChSetFilePath;
+        var runtimeBscsChSetFilePath = BscsChSetFilePath;
         var runtimeDataDirectory = DataDirectory;
         var runtimePort = Port;
         // release_contract: ch2/ChSet はチューナーRuntimeTopologyではなくChannelMap契約。
@@ -759,6 +767,7 @@ public sealed class IniSettingsService
                 Role = NormalizeTunerRole(t.Role),
                 LogicalViewerSlotId = LogicalViewerSlotIdentity.Resolve(t.LogicalViewerSlotId, group, did, t.Role, index + 1),
                 DeviceNumber = deviceNumber,
+                ChannelCh2Path = (t.ChannelCh2Path ?? "").Trim(),
             };
         }).ToList();
 
@@ -800,6 +809,8 @@ public sealed class IniSettingsService
         {
             var t = persistedTuners[i];
             lines.Add($"Tuner{i + 1} = {t.Name}, {t.BonDriverFileName}, {t.Group}, {t.Did}, {NormalizeTunerRole(t.Role)}, {LogicalViewerSlotIdentity.Resolve(t.LogicalViewerSlotId, t.Group, t.Did, t.Role, i + 1)}, {t.DeviceNumber}");
+            if (!string.IsNullOrWhiteSpace(t.ChannelCh2Path))
+                lines.Add($"Tuner{i + 1}Ch2Path = {t.ChannelCh2Path}");
         }
 
         lines.AddRange(new[]
@@ -884,6 +895,17 @@ public sealed class IniSettingsService
         }
 
         // SETTINGS_SAVE_COMMIT_BOUNDARY_CONTRACT
+        _persistedGrChSetFilePath = GrChSetFilePath;
+        _persistedBscsChSetFilePath = BscsChSetFilePath;
+        // A change between ChSet and automatic BonDriver routes changes pool bindings.
+        // Keep the running route until restart, including when other topology is pending.
+        if (!applyTunerTopologyToRuntime)
+        {
+            if (string.IsNullOrWhiteSpace(runtimeGrChSetFilePath) != string.IsNullOrWhiteSpace(GrChSetFilePath))
+                GrChSetFilePath = runtimeGrChSetFilePath;
+            if (string.IsNullOrWhiteSpace(runtimeBscsChSetFilePath) != string.IsNullOrWhiteSpace(BscsChSetFilePath))
+                BscsChSetFilePath = runtimeBscsChSetFilePath;
+        }
         // WriteIniAtomically成功後はINIを永続正本とし、rollback境界は書込み確定前で閉じる。
         // 再起動待ちTopologyは確定済みPersisted値と分離してRuntime値を維持する。
         if (!applyTunerTopologyToRuntime)
@@ -1042,9 +1064,9 @@ public sealed class IniSettingsService
         BonDriverDirectory   = _persistedBonDriverDirectory,
         ViewingTvTestExecutablePath = _persistedViewingTvTestExecutablePath,
         GrChannelFilePath    = GrChannelFilePath,
-        GrChSetFilePath      = GrChSetFilePath,
+        GrChSetFilePath      = _persistedGrChSetFilePath,
         BscsChannelFilePath  = BscsChannelFilePath,
-        BscsChSetFilePath    = BscsChSetFilePath,
+        BscsChSetFilePath    = _persistedBscsChSetFilePath,
         DataDirectory        = _persistedDataDirectory,
         SystemTheme          = SystemTheme,
         EffectiveDataDirectory = ResolveDataDirectory(_persistedDataDirectory),
@@ -1097,7 +1119,9 @@ public sealed class IniSettingsService
 
 
     public bool IsTunerTopologyRestartPending() =>
-        !MatchesRuntimeTunerTopology(
+        string.IsNullOrWhiteSpace(GrChSetFilePath) != string.IsNullOrWhiteSpace(_persistedGrChSetFilePath)
+        || string.IsNullOrWhiteSpace(BscsChSetFilePath) != string.IsNullOrWhiteSpace(_persistedBscsChSetFilePath)
+        || !MatchesRuntimeTunerTopology(
             _persistedTvTestExecutablePath,
             _persistedViewingTvTestExecutablePath,
             _persistedBonDriverDirectory,
@@ -1161,7 +1185,9 @@ public sealed class IniSettingsService
     public bool MatchesRuntimeTunerTopology(IniSettingsUpdateDto dto)
     {
         ArgumentNullException.ThrowIfNull(dto);
-        return MatchesRuntimeTunerTopology(
+        return string.IsNullOrWhiteSpace(GrChSetFilePath) == string.IsNullOrWhiteSpace(dto.GrChSetFilePath)
+            && string.IsNullOrWhiteSpace(BscsChSetFilePath) == string.IsNullOrWhiteSpace(dto.BscsChSetFilePath)
+            && MatchesRuntimeTunerTopology(
             dto.TvTestExecutablePath,
             dto.ViewingTvTestExecutablePath,
             dto.BonDriverDirectory,
@@ -1188,6 +1214,8 @@ public sealed class IniSettingsService
 
     private void CapturePersistedTunerTopologyFromRuntime()
     {
+        _persistedGrChSetFilePath = GrChSetFilePath;
+        _persistedBscsChSetFilePath = BscsChSetFilePath;
         _persistedTvTestExecutablePath = TvTestExecutablePath;
         _persistedViewingTvTestExecutablePath = ViewingTvTestExecutablePath;
         _persistedBonDriverDirectory = BonDriverDirectory;
@@ -1220,7 +1248,27 @@ public sealed class IniSettingsService
             Role = t.Role,
             LogicalViewerSlotId = LogicalViewerSlotIdentity.Resolve(t.LogicalViewerSlotId, t.Group, t.Did, t.Role, index + 1),
             DeviceNumber = t.DeviceNumber,
+            ChannelCh2Path = t.ChannelCh2Path,
         }).ToList();
+
+    /// <summary>Runtime-only BonDriver/ch2 binding; inferred paths are never persisted.</summary>
+    public IReadOnlyList<TunerProfileDto> GetEffectiveTuners()
+    {
+        var result = CloneTuners(Tuners);
+        foreach (var tuner in result)
+        {
+            // Keep compatibility with previously delivered developer configurations.
+            if (!string.IsNullOrWhiteSpace(tuner.ChannelCh2Path)) continue;
+            var group = TunerDisplayName.NormalizeGroup(tuner.Group);
+            var automatic = group == "HYBRID"
+                || (group == "GR" && string.IsNullOrWhiteSpace(GrChSetFilePath))
+                || (group == "BSCS" && string.IsNullOrWhiteSpace(BscsChSetFilePath));
+            if (!automatic || string.IsNullOrWhiteSpace(tuner.BonDriverFileName)) continue;
+            tuner.ChannelCh2Path = TvAIr.Channel.BonDriverChannelSourceResolver.Resolve(
+                TvTestExecutablePath, BonDriverDirectory, tuner.BonDriverFileName);
+        }
+        return result;
+    }
 
     private static bool EqualsPathValue(string? left, string? right) =>
         string.Equals(NormalizePathValue(left), NormalizePathValue(right), StringComparison.OrdinalIgnoreCase);
@@ -1251,7 +1299,7 @@ public sealed class IniSettingsService
                 var name = TunerDisplayName.ForUi(t.Name, group, did);
                 var logicalViewerSlotId = LogicalViewerSlotIdentity.Resolve(
                     t.LogicalViewerSlotId, group, did, role, index + 1);
-                return $"{index}|{name}|{bon}|{group}|{did}|{role}|{logicalViewerSlotId}";
+                return $"{index}|{name}|{bon}|{group}|{did}|{role}|{logicalViewerSlotId}|{NormalizePathValue(t.ChannelCh2Path)}";
             }));
     }
 
@@ -1401,6 +1449,8 @@ public sealed class TunerProfileDto
     public string Role              { get; set; } = "";
     public string LogicalViewerSlotId { get; set; } = "";
     public int DeviceNumber { get; set; }
+    /// <summary>Optional .ch2 explicitly generated for this tuner's BonDriver. Empty uses existing shared channel configuration.</summary>
+    public string ChannelCh2Path { get; set; } = "";
 }
 
 /// <summary>設定の読取／保存で共有する永続化値。書込み命令や表示補助値は含めない。</summary>

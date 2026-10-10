@@ -39,18 +39,8 @@ public static class ReservationTunerGroupResolver
 
     public static bool TryResolveFromNetworkId(ushort networkId, out string group)
     {
-        // ARIB/Japan: BS=4, CS1=6, CS2=7。地上デジタルの ONID はこれらとは別値。
-        if (networkId is 4 or 6 or 7)
-        {
-            group = Bscs;
+        if (BroadcastNetworkIdentity.TryResolveWave(networkId, out group))
             return true;
-        }
-
-        if (networkId != 0)
-        {
-            group = Gr;
-            return true;
-        }
 
         group = Unknown;
         return false;
@@ -76,13 +66,13 @@ public static class ReservationTunerGroupResolver
                 continue;
 
             var normalized = (profile.Group ?? string.Empty).Trim().ToUpperInvariant();
-            if (normalized is Gr or Bscs)
+            if (normalized is Gr or Bscs or "HYBRID")
             {
                 group = normalized;
                 return true;
             }
 
-            // HYBRID は物理候補能力であり、予約自身の放送波Identityではない。
+            // Unrecognized physical groups do not establish a broadcast identity.
             return false;
         }
 

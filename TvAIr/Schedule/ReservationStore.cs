@@ -5106,58 +5106,46 @@ WHERE source <> 'Epg'
             .Where(p => !string.Equals(IniSettingsService.NormalizeTunerRole(p.Role), "Viewing", StringComparison.OrdinalIgnoreCase))
             .ToList();
 
-        // 放送波グループは正規チャンネル／チューナーIdentityだけから解決する。
-        string ResolveGroup(Reservation r) => ReservationTunerGroupResolver.Resolve(r, recordingTunerProfiles);
+        var allocationServiceSnapshot = serviceAccess.Capture();
+
+        string ResolveGroup(Reservation r)
+            => allocationServiceSnapshot.ResolveSchedulingGroup(r, recordingTunerProfiles);
 
         static bool SupportsReservationGroup(string tunerGroup, string reservationGroup)
-        {
-            var tg = (tunerGroup ?? string.Empty).Trim().ToUpperInvariant();
-            var rg = (reservationGroup ?? string.Empty).Trim().ToUpperInvariant();
-            if (tg == "HYBRID") return rg is "GR" or "BSCS" or "HYBRID";
-            return tg == rg;
-        }
+            => ChannelServiceAccessSnapshot.SupportsGroup(tunerGroup, reservationGroup);
 
-        // release_contract:
-        // 予約リストの「優先度」列は、物理チューナー名でも BonDriver/DID でもなく、
-        // 設定画面の優先度順に対応する仮想枠名(T1/S1/...)を表示正本にする。
-        // Recording role だけを group 別 capacity として使う点は維持するが、
-        // RoleBinding の物理識別寄り表示名を予約リストへ出さない。
+        // Allocation stores the actual pool name. Priority T/S/H labels are a UI
+        // projection; one configured physical profile has one occupancy identity.
+        var recordingProfileByPrioritySlot = recordingTunerProfiles
+            .GroupBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.Count() == 1 && !string.IsNullOrWhiteSpace(g.Key))
+            .ToDictionary(g => g.Key, g => g.Single(), StringComparer.OrdinalIgnoreCase);
         var roleBindingRecordingTunerNamesByGroup = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         var configuredTunerNameToPrioritySlotName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var g in new[] { "GR", "BSCS" })
+        foreach (var g in new[] { "GR", "BSCS", "HYBRID" })
         {
-            var names = new List<string>();
+            roleBindingRecordingTunerNamesByGroup[g] = recordingTunerProfiles
+                .Where(p => SupportsReservationGroup(p.Group, g) && recordingProfileByPrioritySlot.ContainsKey(p.Name))
+                .Select(p => p.Name).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             var ordinal = 0;
-            foreach (var profile in recordingTunerProfiles.Where(p => SupportsReservationGroup(p.Group, g)))
+            foreach (var profile in recordingTunerProfiles.Where(p => TunerDisplayName.NormalizeGroup(p.Group) == g))
             {
                 ordinal++;
                 var displayName = TunerDisplayName.PrioritySlotName(g, ordinal);
-                names.Add(displayName);
-                var configuredName = (profile.Name ?? string.Empty).Trim();
-                if (!string.IsNullOrWhiteSpace(configuredName)) configuredTunerNameToPrioritySlotName[configuredName] = displayName;
-                var did = (profile.Did ?? string.Empty).Trim();
-                if (!string.IsNullOrWhiteSpace(did)) configuredTunerNameToPrioritySlotName[$"{TunerDisplayName.GroupLabel(profile.Group)}-{did.ToUpperInvariant()}"] = displayName;
+                configuredTunerNameToPrioritySlotName[displayName] = profile.Name;
+                if (!string.IsNullOrWhiteSpace(profile.Did))
+                    configuredTunerNameToPrioritySlotName[$"{TunerDisplayName.GroupLabel(profile.Group)}-{profile.Did.ToUpperInvariant()}"] = profile.Name;
             }
-            roleBindingRecordingTunerNamesByGroup[g] = names.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         }
-
-        var roleBindingRecordingTunerNameSet = roleBindingRecordingTunerNamesByGroup.Values
-            .SelectMany(x => x)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         string ToRoleBindingTunerName(string? tunerName, string group)
         {
             var value = (tunerName ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(value)) return string.Empty;
-
-            if (roleBindingRecordingTunerNameSet.Contains(value))
-                return value;
-
-            if (configuredTunerNameToPrioritySlotName.TryGetValue(value, out var priorityName))
-                return priorityName;
-
-            // 旧予約などが保持する名前が現在の優先度表に無い場合だけ原値を残す。
-            // 現在設定に存在する物理名/過去の論理名は上で T/S の優先度名へ戻す。
+            if (recordingProfileByPrioritySlot.TryGetValue(value, out var physical)
+                && SupportsReservationGroup(physical.Group, group)) return value;
+            if (configuredTunerNameToPrioritySlotName.TryGetValue(value, out var mapped)
+                && recordingProfileByPrioritySlot.TryGetValue(mapped, out physical)
+                && SupportsReservationGroup(physical.Group, group)) return mapped;
             return value;
         }
 
@@ -5167,7 +5155,16 @@ WHERE source <> 'Epg'
         // .ch2/ChSet の現在状態は予約ユーザー意図(IsEnabled)やTuner競合(IsConflicted)とは別責務。
         // 永続予約は削除/自動無効化せず保持し、共通サービス操作可否snapshotでOperationalな予約だけを
         // 物理Tuner割当へ入れる。再び有効になれば次の共通Allocationで自然復帰する。
-        var serviceAccessSnapshot = serviceAccess.Capture();
+        var serviceAccessSnapshot = allocationServiceSnapshot;
+        // The physical BonDriver's source table is authoritative for a direct-route tuner.
+        // Legacy ChSet tuners retain their existing admission rules.
+        // This check applies only to independent reservations; explicit-chain physical
+        // placement is governed by its separate approved lifecycle contract.
+        bool HasDirectServiceRoute(string logicalTunerName, Reservation reservation)
+            => recordingProfileByPrioritySlot.TryGetValue(logicalTunerName, out var profile)
+               && SupportsReservationGroup(profile.Group, ResolveGroup(reservation))
+               && serviceAccessSnapshot.CanTune(profile, reservation);
+
         var scheduledCandidates = allScheduled
             .Where(r => r.Status == ReservationStatus.Scheduled)
             .Where(r => r.Source != ReservationSource.Epg)
@@ -5175,10 +5172,10 @@ WHERE source <> 'Epg'
             .Where(r => !IsManualStoppedOccurrenceSuppressed(r))
             .ToList();
         var serviceUnavailableScheduled = scheduledCandidates
-            .Where(r => !serviceAccessSnapshot.IsOperational(r))
+            .Where(r => !serviceAccessSnapshot.IsOperationalForRecording(r, recordingTunerProfiles))
             .ToList();
         var scheduled = scheduledCandidates
-            .Where(serviceAccessSnapshot.IsOperational)
+            .Where(r => serviceAccessSnapshot.IsOperationalForRecording(r, recordingTunerProfiles))
             .ToList();
 
         if (serviceUnavailableScheduled.Count > 0)
@@ -5791,39 +5788,33 @@ WHERE source <> 'Epg'
             // 各passでroot物理枠を全量再構築する。前passの部分結果を再利用してはならない。
             chainResolvedTunerByRoot.Clear();
 
-            foreach (var grpKey in unitsByKey.Select(u => u.Group).Distinct(StringComparer.OrdinalIgnoreCase))
+            // A HYBRID profile can appear as both Tn and Sn. Those are display/
+            // reservation aliases, not separate pieces of hardware. Keep one interval
+            // store per actual configured profile for the whole final allocation pass.
+            // Never carry intervals over from an earlier reevaluation pass.
+            var physicalFinalIntervals = new Dictionary<TunerProfile,
+                List<(DateTime Start, DateTime End, ConflictOccupancyUnit? Unit, string? PhysicalOccupancyKey, string Reason)>>(ReferenceEqualityComparer.Instance);
+
+            // One priority pass across every wave. Shared HYBRID capacity is never
+            // reserved in a group-dependent order.
             {
-                var candidateNames = roleBindingRecordingTunerNamesByGroup.TryGetValue(grpKey, out var virtualCandidates)
-                    ? virtualCandidates.ToList()
-                    : new List<string>();
+                var grpKey = "ALL";
+                var candidateNames = recordingProfileByPrioritySlot.Keys.ToList();
                 var finalFreeAt = candidateNames.ToDictionary(name => name, _ => DateTime.MinValue, StringComparer.OrdinalIgnoreCase);
                 var recordingCapacityTuners = candidateNames.Count > 0 ? string.Join(",", candidateNames) : "-";
-
-                if (candidateNames.Count == 0)
-                {
-                    foreach (var unit in unitsByKey.Where(u => string.Equals(u.Group, grpKey, StringComparison.OrdinalIgnoreCase)))
-                    {
-                        foreach (var member in unit.Reservations.Where(m => evaluatedIds.Contains(m.Id)))
-                        {
-                            finalConflictedIds.Add(member.Id);
-                            AddTunerAllocationDebugTrace(debugTrace!, recordingTunerProfiles, "FINAL_UNIT_CONFLICT", member,
-                                $"unitKey={unit.UnitKey} unit={unit.UnitId} members={unit.MemberIds} reason=no_candidate_tuner_for_group group={grpKey} rule=release_contract");
-                        }
-                    }
-                    continue;
-                }
 
                 // 通常EPGはFinalConflictPlanの外部intervalとして理由を保持する。
                 // active recording等と一つのfinalFreeAtへ潰すと、後段で「EPGだけ除けば成立するか」を判定できないため、
                 // normal_epg_wave intervalは別に保持し、Process/Leaseの物理正本自体は変更しない。
-                NormalEpgWaveOccupationSnapshot? epgOccupationForGroup = null;
-                var normalEpgIntervals = new List<(string TunerName, DateTime Start, DateTime End)>();
-                if (normalEpgWaveOccupation.TryGet(grpKey, out var epgOccupation))
+                var epgOccupations = new Dictionary<string, NormalEpgWaveOccupationSnapshot>(StringComparer.OrdinalIgnoreCase);
+                var normalEpgIntervals = new List<(string TunerName, DateTime Start, DateTime End, string Group)>();
+                foreach (var epgGroup in new[] { "GR", "BSCS", "HYBRID" })
                 {
-                    epgOccupationForGroup = epgOccupation;
+                    if (!normalEpgWaveOccupation.TryGet(epgGroup, out var epgOccupation)) continue;
+                    epgOccupations[epgGroup] = epgOccupation;
                     var mappedTailTuners = epgOccupation.PhysicalTailOnly
                         ? epgOccupation.PhysicalTailTuners
-                            .Select(name => ToRoleBindingTunerName(name, grpKey))
+                            .Select(name => ToRoleBindingTunerName(name, epgGroup))
                             .Where(name => !string.IsNullOrWhiteSpace(name) && finalFreeAt.ContainsKey(name))
                             .Distinct(StringComparer.OrdinalIgnoreCase)
                             .ToArray()
@@ -5832,12 +5823,12 @@ WHERE source <> 'Epg'
                         || mappedTailTuners.Length == epgOccupation.PhysicalTailTuners.Count;
                     var occupiedTuners = epgOccupation.PhysicalTailOnly && tailMappingComplete && mappedTailTuners.Length > 0
                         ? mappedTailTuners
-                        : candidateNames.ToArray();
+                        : candidateNames.Where(name => SupportsReservationGroup(recordingProfileByPrioritySlot[name].Group, epgGroup)).ToArray();
                     var effectiveEpgEnd = epgOccupation.PhysicalTailOnly
                         ? DateTime.MaxValue
                         : (epgOccupation.PlannedEndAt > DateTime.Now ? epgOccupation.PlannedEndAt : DateTime.Now);
                     foreach (var tunerName in occupiedTuners)
-                        normalEpgIntervals.Add((tunerName, epgOccupation.StartedAt, effectiveEpgEnd));
+                        normalEpgIntervals.Add((tunerName, epgOccupation.StartedAt, effectiveEpgEnd, epgGroup));
                     AddTunerAllocationDebugTrace(debugTrace!, recordingTunerProfiles, "FINAL_EPG_WAVE_OCCUPY", new Reservation { Id = 0, Title = "NormalEpgWaveOccupation" },
                         $"group={grpKey} tuners={string.Join(",", occupiedTuners)} mode={(epgOccupation.PhysicalTailOnly ? "physical_tail" : "wave_wide")} plannedEnd={epgOccupation.PlannedEndAt:MM/dd HH:mm:ss} activeUntilClear=True source={epgOccupation.Source} silent={epgOccupation.Silent} runGeneration={epgOccupation.RunGeneration} revision={epgOccupation.Revision} tailMappingComplete={tailMappingComplete} physicalLeaseMutation=False rule=normal_epg_wave_occupation_contract");
                 }
@@ -5851,9 +5842,9 @@ WHERE source <> 'Epg'
                         s.UsageKind == Tuner.TunerUsageKind.Recording
                         && s.PlannedEndTime.HasValue
                         && !string.IsNullOrEmpty(s.Name)
-                        && SupportsReservationGroup(s.Group, grpKey)))
+                        ))
                     {
-                        var virtualName = ToRoleBindingTunerName(slot.Name, grpKey);
+                        var virtualName = ToRoleBindingTunerName(slot.Name, slot.Group);
                         if (slot.ReservationId.HasValue
                             && unitByMemberId.TryGetValue(slot.ReservationId.Value, out var ownedUnit))
                         {
@@ -5873,7 +5864,7 @@ WHERE source <> 'Epg'
                         if (slot.ReservationId.HasValue
                             && allChainReservationsById.TryGetValue(slot.ReservationId.Value, out var activeReservation))
                         {
-                            physicalOccupancyKey = ResolvePhysicalOccupancyKey(activeReservation, grpKey);
+                            physicalOccupancyKey = ResolvePhysicalOccupancyKey(activeReservation, ResolveGroup(activeReservation));
                         }
 
                         var current = finalFreeAt[virtualName];
@@ -5889,14 +5880,14 @@ WHERE source <> 'Epg'
                 }
                 else
                 {
-                    foreach (var rec in recordingReservations.Where(r => SupportsReservationGroup(ResolveGroup(r), grpKey)))
+                    foreach (var rec in recordingReservations)
                     {
                         if (unitMemberIds.Contains(rec.Id))
                             continue;
-                        var virtualName = ToRoleBindingTunerName(EffectiveTunerName(rec), grpKey);
+                        var virtualName = ToRoleBindingTunerName(EffectiveTunerName(rec), ResolveGroup(rec));
                         if (string.IsNullOrWhiteSpace(virtualName) || !finalFreeAt.ContainsKey(virtualName)) continue;
                         var recEnd = rec.EndTime + postMargin;
-                        var physicalOccupancyKey = ResolvePhysicalOccupancyKey(rec, grpKey);
+                        var physicalOccupancyKey = ResolvePhysicalOccupancyKey(rec, ResolveGroup(rec));
                         if (recEnd > finalFreeAt[virtualName])
                         {
                             finalFreeAt[virtualName] = recEnd;
@@ -5939,10 +5930,19 @@ WHERE source <> 'Epg'
                         adjacentBoundaryEligible: UnitOverlaps(a, b));
                 }
 
-                var finalIntervals = candidateNames.ToDictionary(
-                    name => name,
-                    _ => new List<(DateTime Start, DateTime End, ConflictOccupancyUnit? Unit, string? PhysicalOccupancyKey, string Reason)>(),
-                    StringComparer.OrdinalIgnoreCase);
+                var finalIntervals = new Dictionary<string,
+                    List<(DateTime Start, DateTime End, ConflictOccupancyUnit? Unit, string? PhysicalOccupancyKey, string Reason)>>(StringComparer.OrdinalIgnoreCase);
+                foreach (var name in candidateNames)
+                {
+                    if (!recordingProfileByPrioritySlot.TryGetValue(name, out var physicalProfile))
+                        continue;
+                    if (!physicalFinalIntervals.TryGetValue(physicalProfile, out var intervals))
+                    {
+                        intervals = new List<(DateTime Start, DateTime End, ConflictOccupancyUnit? Unit, string? PhysicalOccupancyKey, string Reason)>();
+                        physicalFinalIntervals.Add(physicalProfile, intervals);
+                    }
+                    finalIntervals.Add(name, intervals);
+                }
 
                 foreach (var kv in finalFreeAt)
                 {
@@ -5980,8 +5980,7 @@ WHERE source <> 'Epg'
                 var finalChainTunerByRoot = chainResolvedTunerByRoot;
                 var chainRootClaims = new List<(int RootId, string TunerName, DateTime Start, DateTime End)>();
                 var chainRootPlans = unitsByKey
-                    .Where(u => string.Equals(u.Group, grpKey, StringComparison.OrdinalIgnoreCase)
-                        && u.IsUserChain
+                    .Where(u => u.IsUserChain
                         && u.ChainRootId.HasValue
                         && (forcedChainConflictIds == null || !u.Reservations.Any(m => forcedChainConflictIds.Contains(m.Id))))
                     .GroupBy(u => u.ChainRootId!.Value)
@@ -6023,6 +6022,7 @@ WHERE source <> 'Epg'
 
                     foreach (var member in members)
                     {
+                        if (!member.Reservations.All(r => HasDirectServiceRoute(tunerName, r))) return false;
                         if (intervals.Any(x => IntervalCompetesWithUnit(x, member)))
                             return false;
 
@@ -6098,8 +6098,7 @@ WHERE source <> 'Epg'
                 // 共通優先順位どおり通常予約が勝てる状態を維持する。
                 // この判断はFinalConflictPlan内部だけで行い、チェーン側の優先順位は変更しない。
                 var resolvedChainPlacementClaims = unitsByKey
-                    .Where(u => string.Equals(u.Group, grpKey, StringComparison.OrdinalIgnoreCase)
-                        && u.IsUserChain
+                    .Where(u => u.IsUserChain
                         && (forcedChainConflictIds == null || !u.Reservations.Any(m => forcedChainConflictIds.Contains(m.Id)))
                         && u.ChainRootId.HasValue
                         && finalChainTunerByRoot.TryGetValue(u.ChainRootId.Value, out var resolvedName)
@@ -6112,7 +6111,7 @@ WHERE source <> 'Epg'
                         u.UnitKey))
                     .ToList();
 
-                foreach (var unit in unitsByKey.Where(u => string.Equals(u.Group, grpKey, StringComparison.OrdinalIgnoreCase))
+                foreach (var unit in unitsByKey
                     .OrderBy(u => u, Comparer<ConflictOccupancyUnit>.Create((a, b) => -CompareFinalUnitPriority(a, b)))
                     .ThenBy(u => u.OccupyStart)
                     .ThenBy(u => u.PriorityReservation.StartTime)
@@ -6164,11 +6163,13 @@ WHERE source <> 'Epg'
                                 : null;
 
                     bool CanUseTuner(string name)
-                        => finalIntervals.TryGetValue(name, out var intervals)
+                        => unit.Reservations.All(r => HasDirectServiceRoute(name, r))
+                           && finalIntervals.TryGetValue(name, out var intervals)
                            && !intervals.Any(x => IntervalCompetesWithUnit(x, unit));
 
                     bool CanUseTunerWithoutNormalEpg(string name)
-                        => finalIntervals.TryGetValue(name, out var intervals)
+                        => unit.Reservations.All(r => HasDirectServiceRoute(name, r))
+                           && finalIntervals.TryGetValue(name, out var intervals)
                            && !intervals.Any(x => !string.Equals(x.Reason, "normal_epg_wave", StringComparison.OrdinalIgnoreCase)
                                && IntervalOverlaps(unit.OccupyStart, unit.OccupyEnd, x.Start, x.End)
                                && IntervalCompetesWithUnit(x, unit));
@@ -6180,24 +6181,17 @@ WHERE source <> 'Epg'
 
                     void RecordNormalEpgBlockerIfCausal(IEnumerable<string> tunerNames)
                     {
-                        if (epgOccupationForGroup is null)
-                            return;
-                        var causal = tunerNames
-                            .Where(name => !string.IsNullOrWhiteSpace(name) && candidateNames.Contains(name, StringComparer.OrdinalIgnoreCase))
-                            .Distinct(StringComparer.OrdinalIgnoreCase)
-                            .Any(name => HasOverlappingNormalEpg(name)
-                                && !CanUseTuner(name)
-                                && CanUseTunerWithoutNormalEpg(name));
-                        if (!causal)
-                            return;
-
-                        foreach (var member in unit.Reservations.Where(m => evaluatedIds.Contains(m.Id)))
+                        var causalNames = tunerNames.Where(name => candidateNames.Contains(name, StringComparer.OrdinalIgnoreCase)
+                            && HasOverlappingNormalEpg(name) && !CanUseTuner(name) && CanUseTunerWithoutNormalEpg(name)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                        if (causalNames.Count == 0) return;
+                        foreach (var epg in epgOccupations)
                         {
-                            normalEpgBlockerEvidence[member.Id] = new NormalEpgConflictBlockerEvidence(
-                                member.Id,
-                                grpKey,
-                                epgOccupationForGroup.RunGeneration,
-                                epgOccupationForGroup.Revision);
+                            if (!normalEpgIntervals.Any(interval => interval.Group == epg.Key
+                                && causalNames.Contains(interval.TunerName)
+                                && IntervalOverlaps(unit.OccupyStart, unit.OccupyEnd, interval.Start, interval.End))) continue;
+                            foreach (var member in unit.Reservations.Where(m => evaluatedIds.Contains(m.Id)))
+                                normalEpgBlockerEvidence[member.Id] = new NormalEpgConflictBlockerEvidence(member.Id, epg.Key, epg.Value.RunGeneration, epg.Value.Revision);
+                            break;
                         }
                     }
 
@@ -6340,6 +6334,7 @@ WHERE source <> 'Epg'
                         List<string> AvailableTuners(ConflictOccupancyUnit moving)
                         {
                             var available = candidateNames
+                                .Where(name => moving.Reservations.All(r => HasDirectServiceRoute(name, r)))
                                 .Where(name => !OverlapsFixedInterval(moving, name))
                                 .Where(name => !placement.Any(kv =>
                                     string.Equals(kv.Value, name, StringComparison.OrdinalIgnoreCase)
@@ -6431,6 +6426,7 @@ WHERE source <> 'Epg'
                     {
                         foreach (var name in candidateNames)
                         {
+                            if (!challenger.Reservations.All(r => HasDirectServiceRoute(name, r))) continue;
                             if (!finalIntervals.TryGetValue(name, out var intervals))
                                 continue;
                             var overlaps = intervals
@@ -8751,7 +8747,7 @@ WHERE source <> 'Epg'
     {
         try
         {
-            var targets = serviceAccess.Capture().ActiveTargets;
+            var targets = serviceAccess.Capture().DisplayTargets;
             ChannelTarget? target = null;
 
             if (rule.NetworkId > 0 && rule.TransportStreamId > 0 && rule.ServiceId > 0)

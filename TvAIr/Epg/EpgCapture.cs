@@ -219,7 +219,7 @@ public sealed class EpgCapture
                 state.Reader.RejectedEventHeaders.ToArray(), state.Reader.TitleDecodes.ToArray(),
                 state.Reader.BuildSectionStatuses(), eventObservations, state.Reader.BuildAccumulatorAudits(), parsed);
 
-            var channels = channelLoader.Load().Targets;
+            var channels = channelLoader.GetDisplayTargets();
             var serviceNameByIdentity = channels
                 .GroupBy(c => (c.OriginalNetworkId, c.TransportStreamId, c.ServiceId))
                 .ToDictionary(g => g.Key, g => g.First().Name);
@@ -510,7 +510,7 @@ public sealed class EpgCapture
         var grouped = SnapshotActiveEpgWorkerTasks(runId)
             .Select(x => x.Snapshot())
             .Where(x => x.PoolLeaseId.HasValue && x.PoolLeaseCurrent && !string.IsNullOrWhiteSpace(x.TunerName))
-            .GroupBy(x => string.Equals(x.Group, "BSCS", StringComparison.OrdinalIgnoreCase) ? "BSCS" : "GR", StringComparer.OrdinalIgnoreCase);
+            .GroupBy(x => TunerDisplayName.NormalizeGroup(x.Group), StringComparer.OrdinalIgnoreCase);
 
         foreach (var group in grouped)
         {
@@ -729,14 +729,13 @@ public sealed class EpgCapture
             foreach (var warning in load.Warnings)
                 Log("EPG_CHANNEL_CONFIG", "Settings", warning);
 
-            if (load.Targets.Count == 0)
+            if (load.Targets.Count == 0 && load.DirectSourceServices.Count == 0)
             {
                 Log("EPG_RUN_FAIL", "EPG", "有効なチャンネルがありません。ch2/ChSetを設定画面で明示してください。source=explicit_settings rule=release_contract");
                 return EpgCaptureResult.Failed("有効なチャンネルがありません。ch2/ChSetを設定画面で明示してください。");
             }
 
-            var allGroups = BuildGroups(load.Targets, load.ServiceStates);
-            var groups = FilterGroupsByScope(allGroups, normalizedScope);
+            var groups = FilterGroupsByScope(BuildNormalEpgGroups(load), normalizedScope);
             if (groups.Count == 0)
             {
                 var noTarget = $"EPG取得対象がありません。targetScope={normalizedScope}";
@@ -768,7 +767,7 @@ public sealed class EpgCapture
                 CancelRoute = showProgress ? "VisibleWidget" : "SilentTray"
             });
             Log("EPG_PLAN", "EPG",
-                $"TS単位巡回取得を開始します。targetScope={normalizedScope} 対象 {groups.SelectMany(g => g.Targets).Count()} 局 / {groups.Count} グループ。allGroups={allGroups.Count} rule=epg_plan_contract");
+                $"TS単位巡回取得を開始します。targetScope={normalizedScope} 対象 {groups.SelectMany(g => g.Targets).Count()} 局 / {groups.Count} グループ。rule=epg_plan_contract");
 
             using var limitCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             limitCts.CancelAfter(TimeSpan.FromMinutes(settings.TotalTimeLimitMinutes));
@@ -982,7 +981,7 @@ public sealed class EpgCapture
                 "failureStage=admission_claim;failureReason=admission_claim_not_current");
         }
         var load = channelLoader.Load();
-        if (load.Targets.Count == 0)
+        if (load.Targets.Count == 0 && load.DirectSourceServices.Count == 0)
         {
             try { preclaimedPreRecordLease.Dispose(); } catch { }
             return new EpgCaptureResult(false, 0, 1, 0, "FAILED", 1,
@@ -995,7 +994,8 @@ public sealed class EpgCapture
         // from the exact NID/TSID/SID triplet. ServiceName is mutable display metadata and must never
         // participate in PreRec admission/target resolution.
         var groups = FilterGroupsForExpectedServiceIdentity(
-            FilterGroupsByScope(BuildGroups(load.Targets), normalizedScope),
+            FilterGroupsByScope(BuildPreRecordGroups(load, preclaimedPreRecordLease,
+                new BroadcastServiceKey(executionContract.NetworkId, executionContract.TransportStreamId, executionContract.ServiceId)), normalizedScope),
             executionContract.NetworkId,
             executionContract.TransportStreamId,
             executionContract.ServiceId);
@@ -1220,6 +1220,12 @@ public sealed class EpgCapture
     // NORMAL_EPG_RUN_PASS_CONTRACT:
     // This queue/admission layer belongs only to normal EPG runs. PreRec owns a separate run entry
     // and invokes CaptureGroupAsync directly so it cannot re-enter normal EPG run/status/queue state.
+    internal static int CountPhysicalEpgCapacity(IReadOnlyList<TunerSlotStatus> status, IReadOnlyList<string> targetGroups, bool freeOnly)
+        => status.Count(s => !string.Equals(s.Role, "Viewing", StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrWhiteSpace(s.BonDriverFileName)
+            && (!freeOnly || s.UsageKind == TunerUsageKind.Free)
+            && targetGroups.Any(group => ChannelServiceAccessSnapshot.SupportsGroup(s.Group, group)));
+
     private async Task<int> RunPassAsync(
         IReadOnlyList<TsGroup> groups,
         HashSet<string> completedGroups,
@@ -1239,7 +1245,7 @@ public sealed class EpgCapture
             .ToList();
         var groupRecordableSlots = targetGroups.ToDictionary(
             g => g,
-            g => status.Count(s => string.Equals(s.Group, g, StringComparison.OrdinalIgnoreCase)
+            g => status.Count(s => ChannelServiceAccessSnapshot.SupportsGroup(s.Group, g)
                 && !string.Equals(s.Role, "Viewing", StringComparison.OrdinalIgnoreCase)),
             StringComparer.OrdinalIgnoreCase);
         var groupLogicalUsableSlots = targetGroups.ToDictionary(
@@ -1250,9 +1256,9 @@ public sealed class EpgCapture
             g => g,
             g => groupLogicalUsableSlots.TryGetValue(g, out var slots) ? slots : 0,
             StringComparer.OrdinalIgnoreCase);
-        var totalRecordableSlots = groupRecordableSlots.Values.Sum();
-        var totalLogicalEpgUsableSlots = groupLogicalUsableSlots.Values.Sum();
-        var totalGroupEpgAdmissionCapacity = groupEpgCapacity.Values.Sum();
+        var totalRecordableSlots = CountPhysicalEpgCapacity(status, targetGroups, freeOnly: false);
+        var totalLogicalEpgUsableSlots = CountPhysicalEpgCapacity(status, targetGroups, freeOnly: true);
+        var totalGroupEpgAdmissionCapacity = totalLogicalEpgUsableSlots;
         var groupRecordableSummary = string.Join(",", targetGroups.Select(g => $"{g}:{(groupRecordableSlots.TryGetValue(g, out var recordableValue) ? recordableValue : 0)}"));
         var groupLogicalSummary = string.Join(",", targetGroups.Select(g => $"{g}:{(groupLogicalUsableSlots.TryGetValue(g, out var logicalValue) ? logicalValue : 0)}"));
         var groupCapacitySummary = string.Join(",", targetGroups.Select(g => $"{g}:{(groupEpgCapacity.TryGetValue(g, out var capacityValue) ? capacityValue : 0)}"));
@@ -1272,6 +1278,7 @@ public sealed class EpgCapture
             .Where(kv => kv.Value > 0)
             .ToDictionary(kv => kv.Key, kv => new SemaphoreSlim(kv.Value), StringComparer.OrdinalIgnoreCase);
         using var workerAdmissionReleased = new SemaphoreSlim(0);
+        using var physicalAdmission = new SemaphoreSlim(Math.Max(1, totalLogicalEpgUsableSlots));
         if (groupSemaphores.Count == 0)
         {
             Log("EPG_GROUP_CAPACITY_ADMISSION", "EPG",
@@ -1283,6 +1290,23 @@ public sealed class EpgCapture
         var tasks = new List<Task>();
         var pendingGroups = orderedGroups.ToList();
         var gate = new object();
+        // An ONID/TSID identifies the broadcast transport, not the physical tuning route.
+        // Keep every route candidate in the plan, but admit only one candidate for a
+        // transport at a time. An unsuccessful candidate must not suppress fallback.
+        static string TransportIdentity(TsGroup group)
+        {
+            var first = group.Targets.FirstOrDefault();
+            return first is null
+                ? $"unresolved:{group.Key}"
+                : $"{first.OriginalNetworkId}:{first.TransportStreamId}";
+        }
+        var runningTransports = new HashSet<string>(StringComparer.Ordinal);
+        var completedTransports = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var group in groups)
+        {
+            if (completedGroups.Contains(group.Key))
+                completedTransports.Add(TransportIdentity(group));
+        }
 
         Task LaunchAsync(TsGroup group, SemaphoreSlim groupSemaphore)
         {
@@ -1294,6 +1318,7 @@ public sealed class EpgCapture
                 if (Interlocked.Exchange(ref admissionReleased, 1) == 0)
                 {
                     releaseSemaphore.Release();
+                    physicalAdmission.Release();
                     workerAdmissionReleased.Release();
                 }
             }
@@ -1305,6 +1330,8 @@ public sealed class EpgCapture
                     async Task ReacquireWorkerAdmissionAsync(CancellationToken token)
                     {
                         await releaseSemaphore.WaitAsync(token).ConfigureAwait(false);
+                        try { await physicalAdmission.WaitAsync(token).ConfigureAwait(false); }
+                        catch { releaseSemaphore.Release(); throw; }
                         Interlocked.Exchange(ref admissionReleased, 0);
                     }
 
@@ -1330,7 +1357,11 @@ public sealed class EpgCapture
                         int completedGroupCount;
                         lock (gate)
                         {
-                            completedGroups.Add(g.Key);
+                            completedTransports.Add(TransportIdentity(g));
+                            // An imported transport completes every alternative physical route
+                            // for the same ONID/TSID; they are not extra EPG obligations.
+                            foreach (var alternative in groups.Where(x => TransportIdentity(x) == TransportIdentity(g)))
+                                completedGroups.Add(alternative.Key);
                             imported += count;
                             completedGroupCount = completedGroups.Count;
                         }
@@ -1377,6 +1408,13 @@ public sealed class EpgCapture
                 }
                 finally
                 {
+                    lock (gate)
+                    {
+                        runningTransports.Remove(TransportIdentity(g));
+                    }
+                    // The next route may become eligible even if worker admission was
+                    // released earlier than post-capture import completion.
+                    workerAdmissionReleased.Release();
                     workerTaskState.MarkOwnerTaskCompleted();
                     var ownerSnapshot = workerTaskState.Snapshot();
                     var converged = TryConvergeExitedEpgWorker(workerTaskState, EpgWorkerTerminalReason.Completed, "owner_task_finally", ownerSnapshot.AttemptGeneration);
@@ -1408,11 +1446,13 @@ public sealed class EpgCapture
                         var group = pendingGroups[i];
                         lock (gate)
                         {
-                            if (completedGroups.Contains(group.Key))
+                            if (completedGroups.Contains(group.Key) || completedTransports.Contains(TransportIdentity(group)))
                             {
                                 pendingGroups.RemoveAt(i--);
                                 continue;
                             }
+                            if (runningTransports.Contains(TransportIdentity(group)))
+                                continue;
                         }
 
                         var groupKey = NormalizeEpgTargetGroup(group.Group);
@@ -1426,7 +1466,16 @@ public sealed class EpgCapture
 
                         if (!groupSemaphore.Wait(0))
                             continue;
+                        if (!physicalAdmission.Wait(0))
+                        {
+                            groupSemaphore.Release();
+                            continue;
+                        }
 
+                        lock (gate)
+                        {
+                            runningTransports.Add(TransportIdentity(group));
+                        }
                         pendingGroups.RemoveAt(i--);
                         launchedInThisScan = true;
                         await LaunchAsync(group, groupSemaphore);
@@ -2156,7 +2205,7 @@ public sealed class EpgCapture
                 lease = preclaimedPreRecordLease;
                 if (!lease.IsCurrent
                     || !string.Equals(lease.Name, preferredRecordingTunerName, StringComparison.OrdinalIgnoreCase)
-                    || !string.Equals(NormalizePreRecordAdmissionGroupForCapture(lease.Group), NormalizePreRecordAdmissionGroupForCapture(group.Group), StringComparison.OrdinalIgnoreCase))
+                    || !ChannelServiceAccessSnapshot.SupportsGroup(lease.Group, group.Group))
                 {
                     Log("PRE_REC_EPG_RUNTIME_TUNER_ACQUIRE", $"TS{group.TsId}",
                         $"result=ADMISSION_CLAIM_INVALID worker={workerName} selectedTuner={SafeLogValue(preferredRecordingTunerName)} leaseTuner={SafeLogValue(lease.Name)} leaseGroup={SafeLogValue(lease.Group)} targetGroup={SafeLogValue(group.Group)} failureStage=admission_claim failureReason=claim_identity_mismatch action=no_worker_launch rule=pre_record_epg_admission_claim_ssot");
@@ -2178,6 +2227,31 @@ public sealed class EpgCapture
                     RecordCaptureFailure(group, "epg_tuner_unavailable", $"waitMs={ResolveEpgLogicalAcquireWaitMs(plannedEnd, isPreRecordCheck)} unmanagedExternalTvTest=out_of_scope policy=logical_resource_queue", attempt, maxAttempts, workerTaskState.RunId);
                 }
                 return 0;
+            }
+
+            // Resolve the physical transport only after the actual tuner has been leased.
+            // An explicitly configured per-BonDriver .ch2 must never borrow the
+            // wave-global ChSet coordinates. Reject a missing/mismatched route
+            // before attaching this lease to an EPG worker.
+            var epgTuneArgument = group.Targets[0].ChannelArgument;
+            if (!string.IsNullOrWhiteSpace(lease.ChannelCh2Path))
+            {
+                var requestedServices = group.Targets
+                    .Select(t => new BroadcastServiceKey(t.OriginalNetworkId, t.TransportStreamId, t.ServiceId))
+                    .Distinct()
+                    .ToArray();
+                var routes = channelLoader.Load().BonDriverRoutes;
+                if (routes is null || !routes.TryBuildTransportTargetsForLease(
+                        lease, requestedServices, group.Group, out var leaseTargets)
+                    || leaseTargets.Count == 0)
+                {
+                    RecordCaptureFailure(group, "epg_bondriver_route_unavailable",
+                        $"tuner={lease.Name} configuredCh2=true action=no_worker_launch", attempt, maxAttempts, workerTaskState.RunId);
+                    lease.Dispose();
+                    return 0;
+                }
+                // EPG captures a whole TS; do not select a particular SID here.
+                epgTuneArgument = $"/chspace {leaseTargets[0].ResolvedSpace} /chi {leaseTargets[0].ResolvedChannelIndex}";
             }
 
             if (!workerTaskState.TryAttachLease(lease, out var attemptGeneration, out var attemptRejectReason))
@@ -2245,7 +2319,7 @@ public sealed class EpgCapture
                     group,
                     lease.BonDriverFileName,
                     lease.Did,
-                    group.Targets[0].ChannelArgument,
+                    epgTuneArgument,
                     tsFile,
                     effectiveWait,
                     ct,
@@ -3775,7 +3849,16 @@ public sealed class EpgCapture
             }
             else
             {
-                lease = tunerPool.AcquireForEpg(group.Group, plannedEnd);
+                if (group.Key.StartsWith("direct:", StringComparison.Ordinal))
+                {
+                    var routes = channelLoader.Load().BonDriverRoutes;
+                    var services = group.Targets.Select(t => new BroadcastServiceKey(
+                        t.OriginalNetworkId, t.TransportStreamId, t.ServiceId)).ToArray();
+                    lease = routes is null ? null : tunerPool.AcquireForEpgService(
+                        group.Group, services, plannedEnd, routes, out _);
+                }
+                else
+                    lease = tunerPool.AcquireForEpg(group.Group, plannedEnd, legacySourcesOnly: true);
             }
             if (lease is not null)
             {
@@ -3802,7 +3885,12 @@ public sealed class EpgCapture
 
             var remainingMs = Math.Max(0, maxWaitMs - waitedMs);
             if (remainingMs <= 0) continue;
-            await tunerPool.WaitForEpgSlotAsync(group.Group, TimeSpan.FromMilliseconds(remainingMs), ct).ConfigureAwait(false);
+            // A free slot can still be incompatible with this transport/source.
+            // The generic pool notification would return immediately in that case.
+            if (tunerPool.CountEpgUsableFreeSlots(group.Group) > 0)
+                await Task.Delay(Math.Min(250, remainingMs), ct).ConfigureAwait(false);
+            else
+                await tunerPool.WaitForEpgSlotAsync(group.Group, TimeSpan.FromMilliseconds(remainingMs), ct).ConfigureAwait(false);
             waitedMs = (int)Math.Min(maxWaitMs, Math.Max(0, (DateTime.UtcNow - waitStartedAt).TotalMilliseconds));
         }
     }
@@ -3921,7 +4009,7 @@ public sealed class EpgCapture
     {
         // Developer-only evidence path over the same isolated other-TS analysis used by
         // the product supplement path. Never performs an additional TS parse or mutation.
-        var configuredServices = channelLoader.Load().Targets
+        var configuredServices = channelLoader.GetDisplayTargets()
             .Select(t => (t.OriginalNetworkId, t.TransportStreamId, t.ServiceId))
             .ToHashSet();
 
@@ -3980,7 +4068,7 @@ public sealed class EpgCapture
 
     private List<EpgEvent> BuildOtherTransportStreamSupplementEvents(EpgAnalyzeResult other)
     {
-        var configuredTargets = channelLoader.Load().Targets
+        var configuredTargets = channelLoader.GetDisplayTargets()
             .GroupBy(t => (t.OriginalNetworkId, t.TransportStreamId, t.ServiceId))
             .ToDictionary(g => g.Key, g => g.First());
 
@@ -4113,7 +4201,7 @@ public sealed class EpgCapture
                     otherSupplementCandidates = FilterCurrentOrFutureImportEvents(
                         BuildOtherTransportStreamSupplementEvents(otherEpg), canonicalImportCutoff);
 #if TVAIR_DEVELOPER_DIAGNOSTICS
-                    var configuredServiceKeys = channelLoader.Load().Targets
+                    var configuredServiceKeys = channelLoader.GetDisplayTargets()
                         .Select(t => (t.OriginalNetworkId, t.TransportStreamId, t.ServiceId))
                         .ToHashSet();
                     var otherBasicAuthorityKeys = otherEpg.EventAccumulatorAudits
@@ -4602,6 +4690,7 @@ public sealed class EpgCapture
             "BS" => "BS",
             "CS" => "CS",
             "BSCS" or "BS/CS" => "BSCS",
+            "HYBRID" or "CATV" or "ISDB-C" => "HYBRID",
             _ => "All"
         };
     }
@@ -4614,6 +4703,7 @@ public sealed class EpgCapture
             "BS" => groups.Where(g => g.Group == "BSCS" && g.Targets.Any(t => t.OriginalNetworkId == 4)).ToList(),
             "CS" => groups.Where(g => g.Group == "BSCS" && g.Targets.All(t => t.OriginalNetworkId != 4)).ToList(),
             "BSCS" => groups.Where(g => g.Group == "BSCS").ToList(),
+            "HYBRID" => groups.Where(g => g.Group == "HYBRID").ToList(),
             _ => groups.ToList()
         };
     }
@@ -5849,6 +5939,102 @@ public sealed class EpgCapture
             .Where(t => t.Length > 0)
             .ToArray();
         return string.Join(";", tokens);
+    }
+
+    /// <summary>
+    /// Single normal-EPG plan source for admission/duration and worker execution.
+    /// PreRec intentionally uses its separate reservation-scoped plan.
+    /// </summary>
+    internal List<TsGroup> BuildPreRecordGroups(ChannelLoadResult load, TunerLease lease, BroadcastServiceKey service)
+    {
+        if (string.IsNullOrWhiteSpace(lease.ChannelCh2Path)) return BuildGroups(load.Targets);
+        var group = BroadcastNetworkIdentity.TryResolveWave(service.NetworkId, out var wave) ? wave : lease.Group;
+        if (load.BonDriverRoutes is null || !load.BonDriverRoutes.TryBuildTargetForLease(lease, service, group, out var target))
+            return new List<TsGroup>();
+        return BuildGroups(new[] { target });
+    }
+
+    internal List<TsGroup> BuildNormalEpgGroups(ChannelLoadResult load, bool emitDiagnostics = true)
+    {
+        ArgumentNullException.ThrowIfNull(load);
+        var groups = BuildGroups(load.Targets, load.ServiceStates, emitDiagnostics);
+        groups.AddRange(BuildDirectEpgGroups(load));
+        return groups;
+    }
+
+    // Explicit BonDriver tables are admitted only with their physical tuner binding.
+    // This plan never publishes direct services to globally routable ActiveTargets.
+    // In particular, an unknown ISDB-C ONID is NOT guessed to be terrestrial:
+    // the explicitly configured physical tuner's group owns scheduling here.
+    private List<TsGroup> BuildDirectEpgGroups(ChannelLoadResult load)
+    {
+        var groups = new List<TsGroup>();
+        // A broadcast transport identity does not identify a physical BonDriver route.
+        // In mixed tuner setups the legacy table may describe the same ONID/TSID
+        // with different tuning coordinates. Keep the explicit physical route;
+        // its tuner admission still validates the exact BonDriver/.ch2 binding.
+        foreach (var tuner in tunerProfiles
+            .Where(t => !string.IsNullOrWhiteSpace(t.ChannelCh2Path)
+                && !string.IsNullOrWhiteSpace(t.BonDriverFileName)
+                && string.Equals(IniSettingsService.NormalizeTunerRole(t.Role), "Recording", StringComparison.OrdinalIgnoreCase)))
+        {
+            var group = NormalizeGroup(tuner.Group);
+            // A HYBRID tuner can receive both existing broadcast groups, but its
+            // physical capability is not a broadcast-wave identity. Only classify
+            // a direct transport when its ONID unambiguously identifies an
+            // existing Japanese GR/BSCS wave; never guess for ISDB-C/unknown ONID.
+            if (group is not ("GR" or "BSCS" or "HYBRID")) continue;
+            // Optional per-BonDriver source paths are user supplied.  An invalid
+            // path must not abort the entire normal EPG plan, including the
+            // already valid legacy ChSet transports.  ChannelFileLoader owns
+            // validation and construction of the direct-source snapshot.
+            string source;
+            try
+            {
+                source = Path.GetFullPath(tuner.ChannelCh2Path.Trim());
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                continue;
+            }
+            var records = load.DirectSourceServices.Where(r =>
+                    string.Equals(r.BonDriverIdentity, tuner.BonDriverFileName, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(r.SourceCh2Path, source, StringComparison.OrdinalIgnoreCase))
+                .GroupBy(r => (r.Service.NetworkId, r.Service.TransportStreamId));
+            foreach (var transport in records)
+            {
+                var routes = transport.ToArray();
+                var transportGroup = BroadcastNetworkIdentity.TryResolveWave(transport.Key.NetworkId, out var knownWave)
+                    ? knownWave : group;
+                if (!ChannelServiceAccessSnapshot.SupportsGroup(group, transportGroup)) continue;
+                if (routes.Select(r => (r.TuningSpace, r.ChannelIndex)).Distinct().Count() != 1) continue;
+                var identities = routes.Select(r => r.Service).Distinct().ToArray();
+                if (identities.Length != routes.Length) continue;
+                if (load.BonDriverRoutes is null || !load.BonDriverRoutes.TryResolveTransportForSource(
+                    tuner.BonDriverFileName, source, identities, out _)) continue;
+                var targets = routes.Select(r => new ChannelTarget
+                {
+                    Group = transportGroup,
+                    OriginalNetworkId = r.Service.NetworkId,
+                    TransportStreamId = r.Service.TransportStreamId,
+                    ServiceId = r.Service.ServiceId,
+                    Name = r.ServiceName,
+                    Ch2FileName = Path.GetFileName(source),
+                    BonDriverChannel = r.ChannelIndex,
+                    Ch2TuningSpace = r.TuningSpace,
+                    Ch2ChannelIndex = r.ChannelIndex,
+                    ResolvedSpace = r.TuningSpace,
+                    ResolvedChannelIndex = r.ChannelIndex,
+                    ChannelArgument = $"/chspace {r.TuningSpace} /chi {r.ChannelIndex}",
+                    SameTransportServiceCount = identities.Length,
+                    ChannelBuildSource = "explicit_bondriver_epg_plan"
+                }).ToArray();
+                var key = $"direct:{transportGroup}:{tuner.BonDriverFileName}:{source}:{transport.Key.NetworkId}:{transport.Key.TransportStreamId}";
+                if (groups.Any(g => g.Key == key)) continue;
+                groups.Add(new TsGroup(key, transportGroup, transport.Key.TransportStreamId, tuner.BonDriverFileName, targets));
+            }
+        }
+        return groups;
     }
 
     internal List<TsGroup> BuildGroups(

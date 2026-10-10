@@ -128,7 +128,7 @@ public sealed class NormalEpgWaveOccupation
     }
 
     private static string NormalizeGroup(string group)
-        => string.Equals(group, "BSCS", StringComparison.OrdinalIgnoreCase) ? "BSCS" : "GR";
+        => TvAIr.Core.TunerDisplayName.NormalizeGroup(group);
 }
 
 public sealed record NormalEpgWaveOccupationSnapshot(

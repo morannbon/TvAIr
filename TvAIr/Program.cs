@@ -301,10 +301,10 @@ builder.Services.Configure<EpgSettings>(builder.Configuration.GetSection("Epg"))
 
 // TunerProfile リスト: iniが存在すればini個別設定を使用、初回起動時はappsettings.jsonから読む
 List<TunerProfile> tunerProfiles;
-if (!iniSettings.IsFirstRun && iniSettings.Tuners.Count > 0)
+if (!iniSettings.IsFirstRun && iniSettings.GetEffectiveTuners().Count > 0)
 {
     // ini個別設定 → TunerProfile 1本1エントリ
-    tunerProfiles = iniSettings.Tuners.Select(t =>
+    tunerProfiles = iniSettings.GetEffectiveTuners().Select(t =>
     {
         var group = TunerDisplayName.NormalizeGroup(t.Group);
         var role = IniSettingsService.NormalizeTunerRole(t.Role);
@@ -312,6 +312,7 @@ if (!iniSettings.IsFirstRun && iniSettings.Tuners.Count > 0)
         {
             Name              = TunerDisplayName.ForUi(t.Name, group, t.Did),
             BonDriverFileName = TunerIsolationPolicy.NormalizeBonDriverForRole(t.BonDriverFileName, group, role),
+            ChannelCh2Path = (t.ChannelCh2Path ?? string.Empty).Trim(),
             Group             = group,
             Did               = (t.Did ?? string.Empty).Trim().ToUpperInvariant(),
             Role              = role,
@@ -337,6 +338,7 @@ else
             {
                 Name = TunerDisplayName.ForUi(t.Name, group, did),
                 BonDriverFileName = TunerIsolationPolicy.NormalizeBonDriverForRole(t.BonDriverFileName, group, role),
+                ChannelCh2Path = (t.ChannelCh2Path ?? string.Empty).Trim(),
                 Group = group,
                 Did = did,
                 Role = role,
@@ -861,7 +863,7 @@ app.MapGet("/network-login", (HttpContext context) =>
     context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'self'; base-uri 'none'";
     var html = $$$"""
 <!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>TvAIr 接続</title><link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.5"></head><body class="tvair-generated-login"><main><h1>TvAIrへ接続</h1><form id="login"><label for="password">接続用パスワード</label><input id="password" type="password" autocomplete="current-password" required minlength="12"><button type="submit">接続</button><div id="message" class="message" role="status"></div></form></main>
+<title>TvAIr 接続</title><link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.6"></head><body class="tvair-generated-login"><main><h1>TvAIrへ接続</h1><form id="login"><label for="password">接続用パスワード</label><input id="password" type="password" autocomplete="current-password" required minlength="12"><button type="submit">接続</button><div id="message" class="message" role="status"></div></form></main>
 <script>
 const form=document.getElementById('login'),password=document.getElementById('password'),message=document.getElementById('message');
 form.addEventListener('submit',async e=>{e.preventDefault();message.textContent='確認しています…';try{const r=await fetch('/api/network-auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:password.value}),credentials:'same-origin'});const j=await r.json().catch(()=>({}));if(!r.ok){message.textContent=j.message||'接続できませんでした。';return;}location.replace({{{returnUrlJson}}});}catch{message.textContent='接続できませんでした。';}});
@@ -1517,8 +1519,8 @@ static string ProgramGuideWaveGroupFromNetworkId(ushort networkId)
     // are NID 6/7. Terrestrial original_network_id values are much larger, so do not use
     // a simple >4 rule here.
     if (networkId == 4) return "BS";
-    if (networkId == 6 || networkId == 7) return "CS";
-    return "GR";
+    if (networkId == 6 || networkId == 7 || networkId == 10) return "CS";
+    return BroadcastNetworkIdentity.TryResolveWave(networkId, out var wave) && wave == "GR" ? "GR" : "CATV";
 }
 
 
@@ -1972,7 +1974,7 @@ static IResult RenderPluginWindowHost(string windowId, HttpRequest http, PluginW
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{title}}</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.5">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.6">
 </head>
 <body class="tvair-plugin-window-page">
 <div class="{{hostClass}}" data-window-id="{{encodedWindowId}}" data-window-revision="{{initialRevision}}" data-tool-host="{{toolHost.ToString().ToLowerInvariant()}}">
@@ -2369,10 +2371,10 @@ static IResult RenderPluginVersionInfoPage(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-notification.css?v=1.2.5">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.2.6">
 </head>
 <body>
-<script src="/tvair-notification.js?v=1.2.5"></script>
+<script src="/tvair-notification.js?v=1.2.6"></script>
 <script>
 document.addEventListener('DOMContentLoaded',function(){
   if(window.TvAIrNotify){ TvAIrNotify({ title:'{{safeTitle}}', message:'{{safeVersion}}', onOk:function(){ location.replace('{{safeReturn}}'); } }); }
@@ -2426,7 +2428,7 @@ static IResult RenderPluginDefaultMenuInfo(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeName}} 情報</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.5">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.6">
 </head>
 <body class="tvair-plugin-info-page"><div class="card"><h1>{{safeName}} 情報</h1><div class="row"><div class="k">Version</div><div class="v">{{safeVersion}}</div></div><div class="row"><div class="k">Route</div><div class="v">{{safeRoute}}</div></div><div class="row"><div class="k">Action</div><div class="v">{{safeKind}}</div></div><p>{{safeDescription}}</p><a class="button" href="/">番組表へ戻る</a></div></body>
 </html>
@@ -2447,7 +2449,7 @@ static IResult PluginHtmlMessage(string title, string message, int statusCode, s
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.5">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.6">
 </head>
 <body class="tvair-message-page"><div class="card"><h1>{{safeTitle}}</h1><p>{{safeMessage}}</p><a class="button" href="{{safeHref}}">{{safeLinkText}}</a></div></body>
 </html>
@@ -2507,7 +2509,7 @@ static string BuildPluginFloatingButtonsHtml(RuntimeUiRenderContext context, str
     if (normalized.Length == 0) return string.Empty;
 
     var sb = new System.Text.StringBuilder();
-    sb.Append("<link rel=\"stylesheet\" href=\"/tvair-generated-surfaces.css?v=1.2.5\">");
+    sb.Append("<link rel=\"stylesheet\" href=\"/tvair-generated-surfaces.css?v=1.2.6\">");
 
     foreach (var group in normalized.GroupBy(x => x.Item.Position))
     {
@@ -3528,7 +3530,7 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
 #else
     var developerBeaconBody = "return;";
 #endif
-    return $$$$"""
+    var html = $$$$"""
 <!doctype html>
 <html lang="ja" class="{{{{themeClass}}}}" data-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme="{{{{safeSelectedTheme}}}}" data-tvair-selected-theme="{{{{safeSelectedTheme}}}}" data-tvair-effective-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme-generation="{{{{safeThemeGeneration}}}}" data-tvair-theme-revision="{{{{themeRevision}}}}" data-tvair-theme-scope="all" data-tvair-theme-update-mode="{{{{themeUpdateModeToken}}}}">
 <head>
@@ -3537,16 +3539,16 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; media-src 'self' data:">
 <title>{{{{safeTitle}}}} - TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.5">
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.5">
-<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.2.5">
-<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.5">
-<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.2.5">
-<link rel="stylesheet" href="/tvair-notification.css?v=1.2.5">
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.5">
-<link rel="stylesheet" href="/tvair-settings-host.css?v=1.2.5">
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.6">
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.6">
+<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.2.6">
+<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.6">
+<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.2.6">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.2.6">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.6">
+<link rel="stylesheet" href="/tvair-settings-host.css?v=1.2.6">
 {{{{developerThemeDiagnosticScript}}}}
-<script src="/tvair-theme.js?v=1.2.5"></script>
+<script src="/tvair-theme.js?v=1.2.6"></script>
 </head>
 <body class="tvair-non-program-page tvair-plugin-shell-page {{{{themeClass}}}}{{{{contentOnlyClass}}}}" data-plugin-route="{{{{safeRoute}}}}" data-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme="{{{{safeSelectedTheme}}}}" data-tvair-selected-theme="{{{{safeSelectedTheme}}}}" data-tvair-effective-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme-generation="{{{{safeThemeGeneration}}}}" data-tvair-theme-revision="{{{{themeRevision}}}}" data-tvair-theme-scope="all" data-tvair-theme-update-mode="{{{{themeUpdateModeToken}}}}">
 <div id="nav">
@@ -3568,11 +3570,11 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
   </main>
 </div>
 {{{{themeHotApplyScriptTag}}}}
-<script src="/tvair-notification.js?v=1.2.5"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.5"></script>
-<script src="/tvair-safe-event-host.js?v=1.2.5"></script>
-<script src="/tvair-menu-spine.js?v=1.2.5"></script>
-<script src="/tvair-settings-host.js?v=1.2.5"></script>
+<script src="/tvair-notification.js?v=1.2.6"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.6"></script>
+<script src="/tvair-safe-event-host.js?v=1.2.6"></script>
+<script src="/tvair-menu-spine.js?v=1.2.6"></script>
+<script src="/tvair-settings-host.js?v=1.2.6"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -3830,7 +3832,33 @@ function tvairBootSafeEvents(){try{tvairBindSafeEvents();tvairStartActionTokenKe
 </body>
 </html>
 """;
+#if !TVAIR_DEVELOPER_DIAGNOSTICS
+    return RemoveDeveloperSafeEventJavaScript(html);
+#else
+    return html;
+#endif
 }
+
+
+#if !TVAIR_DEVELOPER_DIAGNOSTICS
+static string RemoveDeveloperSafeEventJavaScript(string html)
+{
+    // These statements are emitted by the shared WebBrowser script templates.
+    // Remove them only for the Public configuration; do not leave no-op helpers
+    // or evaluate diagnostics-only arguments during user interaction.
+    html = System.Text.RegularExpressions.Regex.Replace(html,
+        @"function tvairDebug(?:Set|Get)\([^)]*\)\s*\{[^{}]*\}\s*", string.Empty);
+    html = System.Text.RegularExpressions.Regex.Replace(html,
+        @"function tvairClientBeacon\([^)]*\)\s*\{[^{}]*\}\s*", string.Empty);
+    html = System.Text.RegularExpressions.Regex.Replace(html,
+        @"(?:var\s+(?:previousInteractionId|requestInteractionId)\s*=\s*[^;]*;)", string.Empty);
+    html = System.Text.RegularExpressions.Regex.Replace(html,
+        @"if\(submitResponseMode==='patchWindow'\|\|tvairFeedbackEnabled\(el\)\)tvairDebugSet\([^;]*;", string.Empty);
+    html = System.Text.RegularExpressions.Regex.Replace(html,
+        @"tvairDebugSet\([^;]*;|tvairClientBeacon\([^;]*;", string.Empty);
+    return html;
+}
+#endif
 
 static string BuildPluginToolWindowContentHtml(string title, string route, string pluginBody, string selectedTheme, string effectiveTheme, string themeGeneration, long themeRevision, RuntimeUiThemeUpdateMode themeUpdateMode)
 {
@@ -3870,17 +3898,17 @@ static string BuildPluginToolWindowContentHtml(string title, string route, strin
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; media-src 'self' data:">
 <title>{{safeTitle}} - TvAIr Tool Window</title>
-<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.5">
+<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.6">
 {{developerThemeDiagnosticScript}}
-<script src="/tvair-theme.js?v=1.2.5"></script>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.5">
+<script src="/tvair-theme.js?v=1.2.6"></script>
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.6">
 {{pluginHead}}
 </head>
 <body class="tvair-plugin-toolwindow-content-only {{themeClass}}" data-plugin-route="{{safeRoute}}" data-theme="{{safeEffectiveTheme}}" data-tvair-theme="{{safeSelectedTheme}}" data-tvair-selected-theme="{{safeSelectedTheme}}" data-tvair-effective-theme="{{safeEffectiveTheme}}" data-tvair-theme-generation="{{safeThemeGeneration}}" data-tvair-theme-revision="{{themeRevision}}" data-tvair-theme-scope="all" data-tvair-theme-update-mode="{{themeUpdateModeToken}}" data-tvair-host-kind="winforms_webbrowser_fallback_direct_content" data-tvair-toolwindow-contract="release_contract">
 <div class="tvair-toolwindow-content-root">
 {{pluginContent}}
 </div>
-<script src="/tvair-safe-event-host.js?v=1.2.5"></script>
+<script src="/tvair-safe-event-host.js?v=1.2.6"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -3944,7 +3972,7 @@ function tvairBootSafeEvents(){try{tvairBindSafeEvents();tvairStartActionTokenKe
 </body>
 </html>
 """;
-    return template
+    var html = template
         .Replace("{{safeTitle}}", safeTitle, StringComparison.Ordinal)
         .Replace("{{safeRoute}}", safeRoute, StringComparison.Ordinal)
         .Replace("{{safeSelectedTheme}}", safeSelectedTheme, StringComparison.Ordinal)
@@ -3958,6 +3986,11 @@ function tvairBootSafeEvents(){try{tvairBindSafeEvents();tvairStartActionTokenKe
         .Replace("{{developerDebugSetBody}}", developerDebugSetBody, StringComparison.Ordinal)
         .Replace("{{developerDebugGetBody}}", developerDebugGetBody, StringComparison.Ordinal)
         .Replace("{{developerBeaconBody}}", developerBeaconBody, StringComparison.Ordinal);
+#if !TVAIR_DEVELOPER_DIAGNOSTICS
+    return RemoveDeveloperSafeEventJavaScript(html);
+#else
+    return html;
+#endif
 }
 
 static (string Head, string Body) NormalizePluginToolWindowContent(string? html, string? routeSegment)
@@ -5208,7 +5241,7 @@ app.MapPost("/api/epg/cancel", (HttpRequest request, EpgScheduler scheduler) =>
 });
 
 // 番組表データ取得（日付指定）
-app.MapGet("/api/epg/events", (string? date, EpgStore store, ReservationStore reservations, ChannelServiceAccessPolicy serviceAccess, LogRepository log, IProgramEventSource programEvents, HttpResponse response) =>
+app.MapGet("/api/epg/events", (string? date, EpgStore store, ReservationStore reservations, ChannelServiceAccessPolicy serviceAccess, IniSettingsService ini, LogRepository log, IProgramEventSource programEvents, HttpResponse response) =>
 {
 #if TVAIR_DEVELOPER_DIAGNOSTICS
     var requestStopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -5228,9 +5261,10 @@ app.MapGet("/api/epg/events", (string? date, EpgStore store, ReservationStore re
         System.Globalization.CultureInfo.GetCultureInfo("ja-JP"));
 
     var access = serviceAccess.Capture();
-    var channels = access.ActiveTargets.ToList();
+    var channels = access.GetProgramGuideDisplayTargets(ini.GetEffectiveTuners()).ToList();
+    var enabledKeys = BuildProgramGuideChannelServiceKeySet(channels);
     var events = programEvents.GetByRange(dayStart, dayEnd)
-        .Where(e => access.IsOperational(e.NetworkId, e.TransportStreamId, e.ServiceId))
+        .Where(e => enabledKeys.Contains(ProgramGuideServiceKey3(e.NetworkId, e.TransportStreamId, e.ServiceId)))
         .ToList();
 
     var chOrder = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -5310,9 +5344,10 @@ app.MapGet("/api/epg/events", (string? date, EpgStore store, ReservationStore re
 app.MapGet("/api/epg/event", (
     ushort networkId, ushort tsId, ushort serviceId, ushort eventId,
     IProgramEventSource programEvents,
-    ChannelServiceAccessPolicy serviceAccess) =>
+    ChannelServiceAccessPolicy serviceAccess,
+    IniSettingsService ini) =>
 {
-    if (!BuildProgramGuideChannelServiceKeySet(BuildCurrentProgramGuideChannels(serviceAccess))
+    if (!BuildProgramGuideChannelServiceKeySet(BuildCurrentProgramGuideChannels(serviceAccess, ini))
         .Contains(ProgramGuideServiceKey3(networkId, tsId, serviceId)))
         return Results.NotFound();
     var ev = programEvents.GetByEventKey(networkId, tsId, serviceId, eventId);
@@ -5330,9 +5365,12 @@ app.MapGet("/api/epg/search", (
     string?  dateFrom,     // 期間開始 yyyy-MM-dd
     string?  dateTo,       // 期間終了 yyyy-MM-dd
     IProgramEventSource programEvents,
-    ChannelServiceAccessPolicy serviceAccess) =>
+    ChannelServiceAccessPolicy serviceAccess,
+    IniSettingsService ini) =>
 {
     var access = serviceAccess.Capture();
+    var channels = access.GetProgramGuideDisplayTargets(ini.GetEffectiveTuners()).ToList();
+    var enabledKeys = BuildProgramGuideChannelServiceKeySet(channels);
     var serviceKeys = new HashSet<ServiceIdentityContract.Key>();
     foreach (var token in (services ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
     {
@@ -5349,7 +5387,6 @@ app.MapGet("/api/epg/search", (
     var to   = DateOnly.TryParse(dateTo,   out var dt)
         ? dt.ToDateTime(TimeOnly.MaxValue) : (DateTime?)null;
 
-    var channels = access.ActiveTargets.ToList();
     var daySet = days?.ToHashSet();
     var keyword = (q ?? string.Empty).Trim();
     var searchFrom = from ?? DateTime.Now;
@@ -5357,7 +5394,7 @@ app.MapGet("/api/epg/search", (
 
     IEnumerable<ProjectedProgramEvent> query = programEvents.GetByRange(searchFrom, searchTo)
         .Where(e => e.End >= DateTime.Now)
-        .Where(e => access.IsOperational(e.NetworkId, e.TransportStreamId, e.ServiceId));
+        .Where(e => enabledKeys.Contains(ProgramGuideServiceKey3(e.NetworkId, e.TransportStreamId, e.ServiceId)));
 
     if (serviceKeys.Count > 0)
         query = query.Where(e => serviceKeys.Contains(new ServiceIdentityContract.Key(e.NetworkId, e.TransportStreamId, e.ServiceId)));
@@ -5415,9 +5452,12 @@ app.MapGet("/api/epg/search", (
 app.MapGet("/api/epg/tagged", (
     string kind,
     IProgramEventSource programEvents,
-    ChannelServiceAccessPolicy serviceAccess) =>
+    ChannelServiceAccessPolicy serviceAccess,
+    IniSettingsService ini) =>
 {
     var access = serviceAccess.Capture();
+    var channels = access.GetProgramGuideDisplayTargets(ini.GetEffectiveTuners()).ToList();
+    var enabledKeys = BuildProgramGuideChannelServiceKeySet(channels);
     var now = DateTime.Now;
     var to = now.AddDays(7);
     // The tagged candidate lists use the same seven-day window over the canonical
@@ -5426,7 +5466,7 @@ app.MapGet("/api/epg/tagged", (
     // instead of rebuilding the DB + External EPG merge for each tagged tab read.
     var events = programEvents.GetAll()
         .Where(e => e.End > now && e.Start < to)
-        .Where(e => access.IsOperational(e.NetworkId, e.TransportStreamId, e.ServiceId))
+        .Where(e => enabledKeys.Contains(ProgramGuideServiceKey3(e.NetworkId, e.TransportStreamId, e.ServiceId)))
         .ToList();
 
     Func<ProjectedProgramEvent, bool> match = kind?.ToLowerInvariant() switch
@@ -5444,7 +5484,6 @@ app.MapGet("/api/epg/tagged", (
         _ => _ => false
     };
 
-    var channels = access.ActiveTargets.ToList();
     var chOrder = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
     for (var i = 0; i < channels.Count; i++)
     {
@@ -5795,13 +5834,14 @@ app.MapGet("/api/recording-quality/logs", (int? count, LogRepository log) =>
 app.MapGet("/api/channels", (ChannelFileLoader loader) =>
 {
     var result = loader.Load();
+    var channels = loader.GetDisplayTargets();
     return Results.Ok(new
     {
         result.Message,
         result.Files,
         result.Warnings,
-        count    = result.Targets.Count,
-        channels = result.Targets.Select(t => new
+        count    = channels.Count,
+        channels = channels.Select(t => new
         {
             t.Group,
             t.ServiceId,
@@ -6123,7 +6163,7 @@ app.MapGet("/api/reservations", (ReservationPresentationService presenter, LogRe
 // therefore an invalid recovery path for stale UI state.
 
 // 予約追加（番組表からの直接予約）
-app.MapPost("/api/reservations", (HttpRequest request, Reservation r, ReservationStore store, ReservationPresentationService presentation, IProgramEventSource programEvents, ReservationProjectionMetadataStore projectionMetadataStore, ChannelServiceAccessPolicy serviceAccess, ReservationAllocationRouteService allocationRoute, PluginTypedEventHub typedEvents, LogRepository log) =>
+app.MapPost("/api/reservations", (HttpRequest request, Reservation r, ReservationStore store, ReservationPresentationService presentation, IProgramEventSource programEvents, ReservationProjectionMetadataStore projectionMetadataStore, ChannelServiceAccessPolicy serviceAccess, IniSettingsService ini, ReservationAllocationRouteService allocationRoute, PluginTypedEventHub typedEvents, LogRepository log) =>
 {
     try
     {
@@ -6158,17 +6198,17 @@ app.MapPost("/api/reservations", (HttpRequest request, Reservation r, Reservatio
         // but no operational reservation may be created for a service that TVTest disables or
         // that cannot currently resolve to the ChSet route.
         var serviceSnapshot = serviceAccess.Capture();
-        var ch = serviceSnapshot.ResolveOperationalTarget(r.NetworkId, r.TransportStreamId, r.ServiceId);
-        if (ch is null)
+        if (!serviceSnapshot.TryResolveRecordingAdmission(r.NetworkId, r.TransportStreamId,
+                r.ServiceId, ini.GetEffectiveTuners(), out var resolvedServiceName, out var resolvedChannelArgument))
         {
             var eligibility = serviceSnapshot.GetEligibility(r.NetworkId, r.TransportStreamId, r.ServiceId);
             log.Add("SERVICE_ACCESS_POLICY", sourceText,
                 $"result=REJECT operation=reservation_add nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eligibility={eligibility} reason={serviceSnapshot.GetRejectReason(r.NetworkId, r.TransportStreamId, r.ServiceId)} rule=service_access_single_source_contract");
             return Results.Conflict(new { message = "TVTestで有効なサービスとして利用できないため予約できません。", eligibility = eligibility.ToString() });
         }
-        r.ChannelArgument = ch.ChannelArgument;
+        r.ChannelArgument = resolvedChannelArgument;
         if (string.IsNullOrWhiteSpace(r.ServiceName))
-            r.ServiceName = ch.Name;
+            r.ServiceName = resolvedServiceName;
 
         // フロントからUTC('Z'サフィックス)で来るstartTime/endTimeをローカル時刻に統一
         r.StartTime = r.StartTime.ToLocalTime();
@@ -6387,17 +6427,17 @@ app.MapPost("/api/reservations/chain", (HttpRequest request, Reservation r, Rese
         r.UserChainRootId = predecessor.UserChainRootId ?? predecessor.Id;
 
         var serviceSnapshot = serviceAccess.Capture();
-        var ch = serviceSnapshot.ResolveOperationalTarget(r.NetworkId, r.TransportStreamId, r.ServiceId);
-        if (ch is null)
+        if (!serviceSnapshot.TryResolveRecordingAdmission(r.NetworkId, r.TransportStreamId, r.ServiceId,
+                ini.GetEffectiveTuners(), out var chainServiceName, out var chainChannelArgument))
         {
             var eligibility = serviceSnapshot.GetEligibility(r.NetworkId, r.TransportStreamId, r.ServiceId);
             log.Add("SERVICE_ACCESS_POLICY", "UserChain",
                 $"result=REJECT operation=chain_reservation_add nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eligibility={eligibility} reason={serviceSnapshot.GetRejectReason(r.NetworkId, r.TransportStreamId, r.ServiceId)} rule=service_access_single_source_contract");
             return Results.Conflict(new { message = "TVTestで有効なサービスとして利用できないためチェーン予約できません。", eligibility = eligibility.ToString() });
         }
-        r.ChannelArgument = ch.ChannelArgument;
+        r.ChannelArgument = chainChannelArgument;
         if (string.IsNullOrWhiteSpace(r.ServiceName))
-            r.ServiceName = ch.Name;
+            r.ServiceName = chainServiceName;
 
         var chainExecutionMode = "ContinuousChainCapture";
 
@@ -7768,8 +7808,8 @@ static string ProgramGuideServiceKey3(ushort networkId, ushort transportStreamId
 static string ProgramGuideChannelServiceKey(ChannelTarget ch)
     => ProgramGuideServiceKey3(ch.OriginalNetworkId, ch.TransportStreamId, ch.ServiceId);
 
-static IReadOnlyList<ChannelTarget> BuildCurrentProgramGuideChannels(ChannelServiceAccessPolicy serviceAccess)
-    => serviceAccess.Capture().ActiveTargets.ToList();
+static IReadOnlyList<ChannelTarget> BuildCurrentProgramGuideChannels(ChannelServiceAccessPolicy serviceAccess, IniSettingsService ini)
+    => serviceAccess.Capture().GetProgramGuideDisplayTargets(ini.GetEffectiveTuners());
 
 static HashSet<string> BuildProgramGuideChannelServiceKeySet(IEnumerable<ChannelTarget> channels)
     => channels.Select(ProgramGuideChannelServiceKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -8481,7 +8521,7 @@ static class ViewerProfileContract
             if (string.IsNullOrWhiteSpace(logicalId)) continue;
             var profileId = $"viewer-slot-{logicalId}";
             var name = $"TVTest{frameIndex}";
-            var isShared = supportedGroups.Count == 2;
+            var isShared = supportedGroups.Count > 1;
             var note = $"logicalViewerSlotId={logicalId}; supportedGroups={string.Join(",", supportedGroups)}; tuner={tuner.Name}; deviceNumber={frameIndex}; source=settings_device_number";
             profiles.Add(new ViewerProfileContractDto(profileId, name, true, order == 0, ++order, false,
                 $"viewer-profile:{profileId}", "tunerpool-viewing-logical-slot", note,
@@ -8539,7 +8579,7 @@ static class ViewerProfileContract
         {
             "GR" => new[] { "GR" },
             "BSCS" => new[] { "BSCS" },
-            "HYBRID" => new[] { "GR", "BSCS" },
+            "HYBRID" => new[] { "GR", "BSCS", "HYBRID" },
             _ => Array.Empty<string>()
         };
     }

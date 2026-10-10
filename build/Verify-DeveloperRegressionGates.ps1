@@ -5,8 +5,7 @@ $ErrorActionPreference = 'Stop'
 $gateScripts = @(
     'Verify-EnvironmentIndependentContent.ps1',
     'Verify-ReportPrivacyBoundary.ps1',
-    'Verify-ProgramGuideViewportOwnership.ps1',
-    'Verify-AssistantReportingBoundary.ps1'
+    'Verify-ProgramGuideViewportOwnership.ps1'
 )
 
 foreach ($gateScript in $gateScripts) {

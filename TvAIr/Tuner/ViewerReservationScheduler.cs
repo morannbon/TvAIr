@@ -103,7 +103,7 @@ public sealed class ViewerReservationScheduler : BackgroundService
     private void ExecuteDue(ViewerReservationRecord row, DateTimeOffset now)
     {
         var access = _serviceAccess.Capture();
-        if (!access.IsOperational(row.NetworkId, row.TransportStreamId, row.ServiceId))
+        if (!access.IsAvailableForDisplay(row.NetworkId, row.TransportStreamId, row.ServiceId))
         {
             Fail(row, "serviceUnavailable", access.GetRejectReason(row.NetworkId, row.TransportStreamId, row.ServiceId));
             return;

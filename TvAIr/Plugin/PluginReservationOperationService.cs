@@ -1,4 +1,4 @@
-﻿using TvAIr.Channel;
+using TvAIr.Channel;
 using TvAIr.Core;
 using TvAIr.Schedule;
 
@@ -42,8 +42,10 @@ internal sealed class PluginReservationOperationService
         {
             var owner = PluginIdentity.Normalize(pluginId);
             var access = _serviceAccess.Capture();
-            var target = access.ResolveOperationalTarget(draft.NetworkId, draft.TransportStreamId, draft.ServiceId);
-            if (target is null)
+            var admissible = access.TryResolveRecordingAdmission(draft.NetworkId,
+                draft.TransportStreamId, draft.ServiceId, _ini.GetEffectiveTuners(),
+                out var resolvedServiceName, out var resolvedChannelArgument);
+            if (!admissible)
             {
                 var reason = access.GetRejectReason(draft.NetworkId, draft.TransportStreamId, draft.ServiceId);
                 AddAuditLog(owner, "AddReservation",
@@ -59,7 +61,7 @@ internal sealed class PluginReservationOperationService
                 Title = draft.Title,
                 // SERVICE_IDENTITY_CONTRACT: plugin-supplied ServiceName/ChannelArgument are never authoritative.
                 // Service-access admission above already resolved the exact active Host target, so persist that target only.
-                ServiceName = string.IsNullOrWhiteSpace(target.Name) ? draft.ServiceName : target.Name,
+                ServiceName = string.IsNullOrWhiteSpace(resolvedServiceName) ? draft.ServiceName : resolvedServiceName,
                 StartTime = draft.StartTime.AddMinutes(-Math.Max(0, draft.PreMarginMinutes)),
                 EndTime = draft.EndTime.AddMinutes(Math.Max(0, draft.PostMarginMinutes)),
                 // BROADCAST_SLOT_EVENT_REBIND_INVARIANT: Plugin固有の録画前マージンをStartTimeへ適用しても、
@@ -70,7 +72,7 @@ internal sealed class PluginReservationOperationService
                 Intent = draft.Intent,
                 CreatedThrough = "Plugin",
                 CreatedByPluginId = owner,
-                ChannelArgument = target.ChannelArgument ?? string.Empty,
+                ChannelArgument = resolvedChannelArgument,
                 IsEnabled = true,
                 SourceRuleName = string.Empty,
                 IsUserChain = false,

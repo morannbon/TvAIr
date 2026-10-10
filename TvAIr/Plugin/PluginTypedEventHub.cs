@@ -272,7 +272,7 @@ public sealed class PluginTypedEventHub : IDisposable
         try
         {
             return ServiceIdentityContract.ResolveReservationServiceName(
-                channelLoader.Load().Targets,
+                channelLoader.GetDisplayTargets(),
                 networkId,
                 transportStreamId,
                 serviceId,

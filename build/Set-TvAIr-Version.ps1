@@ -159,7 +159,7 @@ foreach ($path in $projectionFiles) {
     if (-not [string]::IsNullOrWhiteSpace($oldProductVersion)) {
         $escapedOld = [regex]::Escape($oldProductVersion)
         $updated = [regex]::Replace($updated, "(?<=\?v=)$escapedOld", $product)
-        $updated = $updated.Replace("TVA_IR_UI_VERSION=\"$oldProductVersion\"", "TVA_IR_UI_VERSION=\"$product\"")
+        $updated = $updated.Replace("TVA_IR_UI_VERSION=`"$oldProductVersion`"", "TVA_IR_UI_VERSION=`"$product`"")
         $updated = $updated.Replace("version:'$oldProductVersion'", "version:'$product'")
     }
     if ($updated -ne $text) {

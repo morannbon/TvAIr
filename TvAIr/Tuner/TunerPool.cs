@@ -1,4 +1,5 @@
 ﻿using TvAIr.Core;
+using TvAIr.Channel;
 
 namespace TvAIr.Tuner;
 
@@ -20,6 +21,7 @@ public sealed class TunerPool : IDisposable
     {
         public string Name              { get; }   // チューナー表示名（TunerProfile.Name）
         public string BonDriverFileName { get; }
+        public string ChannelCh2Path { get; }
         public string Did               { get; }   // 物理チューナー識別子 (A/B/C…)
         public string Group             { get; }
         public string Role              { get; }
@@ -40,10 +42,11 @@ public sealed class TunerPool : IDisposable
         // BonDriver名だけでは判定しない。
         public bool IsViewingReserved => string.Equals(Role, "Viewing", StringComparison.OrdinalIgnoreCase);
 
-        public Slot(string name, string bonDriverFileName, string did, string group, string role, string logicalViewerSlotId, int slotIndex)
+        public Slot(string name, string bonDriverFileName, string channelCh2Path, string did, string group, string role, string logicalViewerSlotId, int slotIndex)
         {
             Name              = name;
             BonDriverFileName = bonDriverFileName;
+            ChannelCh2Path = channelCh2Path;
             Did               = did;
             Group             = group;
             Role              = IniSettingsService.NormalizeTunerRole(role);
@@ -177,7 +180,7 @@ public sealed class TunerPool : IDisposable
                 rejected++;
                 continue;
             }
-            _slots.Add(new Slot(p.Name, normalizedBonDriver, p.Did, normalizedGroup, normalizedRole, p.LogicalViewerSlotId, idx++));
+            _slots.Add(new Slot(p.Name, normalizedBonDriver, p.ChannelCh2Path, p.Did, normalizedGroup, normalizedRole, p.LogicalViewerSlotId, idx++));
         }
 
         _log.Add("TunerPool", "Init",
@@ -432,7 +435,8 @@ public sealed class TunerPool : IDisposable
     /// </summary>
     public TunerLease? AcquireForEpg(
         string group,
-        DateTime plannedEndTime)
+        DateTime plannedEndTime,
+        bool legacySourcesOnly = false)
     {
         TunerLease? lease = null;
         string? resultLog = null;
@@ -447,7 +451,7 @@ public sealed class TunerPool : IDisposable
             else
             {
 
-            var slot = FindFreeForEpg(group);
+            var slot = FindFreeForEpg(group, legacySourcesOnly);
             if (slot is not null)
             {
                 var elapsedMs = GetElapsedSinceReleaseMs(slot);
@@ -466,12 +470,71 @@ public sealed class TunerPool : IDisposable
     }
 
     /// <summary>
+    /// Acquire an EPG tuner and its physical channel coordinates as one atomic decision.
+    /// Only explicitly configured BonDriver/.ch2 routes are eligible. This method does
+    /// not change the legacy acquisition policy; callers must opt in to service routing.
+    /// The returned route is bound to the acquired physical lease, not a wave-wide index.
+    /// </summary>
+    public TunerLease? AcquireForEpgService(
+        string group,
+        IReadOnlyCollection<BroadcastServiceKey> services,
+        DateTime plannedEndTime,
+        BonDriverChannelRouteCatalog catalog,
+        out BonDriverChannelRoute? route)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        ArgumentNullException.ThrowIfNull(catalog);
+        route = null;
+        if (services.Count == 0 || services.Any(service => !service.IsValid)) return null;
+        var requested = services.Distinct().ToArray();
+        var firstService = requested[0];
+        if (requested.Any(service => service.NetworkId != firstService.NetworkId
+            || service.TransportStreamId != firstService.TransportStreamId)) return null;
+
+        TunerLease? lease = null;
+        BonDriverChannelRoute? resolvedRoute = null;
+        string? rejectionLog = null;
+        string? successLog = null;
+        lock (_gate)
+        {
+            if (CanAcquireUnsafe("acquire_epg_service", out rejectionLog))
+            {
+                foreach (var slot in _slots
+                    .Where(s => MatchGroup(s, group) && s.IsFree && !s.IsViewingReserved
+                        && !string.IsNullOrWhiteSpace(s.BonDriverFileName)
+                        && !string.IsNullOrWhiteSpace(s.ChannelCh2Path))
+                    .OrderBy(s => s.LastReleasedAt ?? DateTime.MinValue))
+                {
+                    // Check the exact same canonical transport contract used by an
+                    // already allocated lease. No representative-SID shortcut.
+                    if (!catalog.TryResolveTransportForSource(
+                        slot.BonDriverFileName, slot.ChannelCh2Path, requested, out var representative))
+                        continue;
+
+                    var elapsedMs = GetElapsedSinceReleaseMs(slot);
+                    var leaseIdentity = slot.Occupy(TunerUsageKind.Epg, null, null, plannedEndTime);
+                    PublishStateChangeUnsafe();
+                    lease = new TunerLease(slot, this, elapsedMs, leaseIdentity);
+                    resolvedRoute = representative;
+                    successLog = $"EPG transport route acquired: slot={slot.SlotIndex} did={slot.Did} networkId={firstService.NetworkId} tsid={firstService.TransportStreamId} services={requested.Length}";
+                    break;
+                }
+            }
+        }
+        if (rejectionLog is not null) _log.Add("TUNER_LEASE_REJECTED", group, rejectionLog);
+        if (successLog is not null) _log.Add("TunerPool", group, successLog);
+        route = resolvedRoute;
+        return lease;
+    }
+
+    /// <summary>
     /// EPG用の空きスロット検索。TvAIr自身のTunerPoolだけを正本にする。
     /// </summary>
-    private Slot? FindFreeForEpg(string group)
+    private Slot? FindFreeForEpg(string group, bool legacySourcesOnly = false)
     {
         return _slots
             .Where(s => MatchGroup(s, group) && s.IsFree && !s.IsViewingReserved && !string.IsNullOrWhiteSpace(s.BonDriverFileName))
+            .Where(s => !legacySourcesOnly || string.IsNullOrWhiteSpace(s.ChannelCh2Path))
             .OrderBy(s => s.LastReleasedAt ?? DateTime.MinValue)
             .FirstOrDefault();
     }
@@ -1207,6 +1270,7 @@ public sealed class TunerLease : IDisposable
 
     public string Name              => _slot.Name;
     public string BonDriverFileName => _slot.BonDriverFileName;
+    public string ChannelCh2Path => _slot.ChannelCh2Path;
     public string Did               => _slot.Did;
     public string Group             => _slot.Group;
     public string LogicalViewerSlotId => _slot.LogicalViewerSlotId;

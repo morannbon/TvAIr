@@ -19,20 +19,16 @@ public static class ViewerRetuneFailureClassifier
 #if TVAIR_DEVELOPER_DIAGNOSTICS
 public static class ViewerRetuneDelayedDeathAudit
 {
-#if TVAIR_DEVELOPER_DIAGNOSTICS
     private sealed record State(DateTime RetunedAt, ushort NetworkId, ushort TransportStreamId, ushort ServiceId, string Group, string Did, string BonDriver);
 
     private static readonly ConcurrentDictionary<int, State> LastRetuneByPid = new();
     private static readonly TimeSpan Retention = TimeSpan.FromHours(24);
-#endif
 
     // 長期連続稼働保護: この監査状態は直近の再同調後にTVTestが遅延死したかを判定するためだけの一時情報。
     // 正常停止・再起動で必ず除去し、異常経路でも24時間を超えたPIDを保持しない。
 
-    [System.Diagnostics.Conditional("TVAIR_DEVELOPER_DIAGNOSTICS")]
     public static void MarkRetuned(int pid, ushort networkId, ushort transportStreamId, ushort serviceId, string? group, string? did, string? bonDriver)
     {
-#if TVAIR_DEVELOPER_DIAGNOSTICS
         if (pid <= 0) return;
         PruneExpired(DateTime.Now);
         LastRetuneByPid[pid] = new State(
@@ -43,19 +39,14 @@ public static class ViewerRetuneDelayedDeathAudit
             string.IsNullOrWhiteSpace(group) ? "-" : group.Trim(),
             string.IsNullOrWhiteSpace(did) ? "-" : did.Trim(),
             string.IsNullOrWhiteSpace(bonDriver) ? "-" : Path.GetFileName(bonDriver.Trim()));
-#endif
     }
 
-    [System.Diagnostics.Conditional("TVAIR_DEVELOPER_DIAGNOSTICS")]
     public static void MarkProcessEnded(int pid)
     {
-#if TVAIR_DEVELOPER_DIAGNOSTICS
         if (pid > 0)
             LastRetuneByPid.TryRemove(pid, out _);
-#endif
     }
 
-#if TVAIR_DEVELOPER_DIAGNOSTICS
     private static void PruneExpired(DateTime now)
     {
         foreach (var pair in LastRetuneByPid)
@@ -64,12 +55,10 @@ public static class ViewerRetuneDelayedDeathAudit
                 LastRetuneByPid.TryRemove(pair.Key, out _);
         }
     }
-#endif
 
     public static DelayedDeathResult MarkDetectedDead(int pid)
     {
         var detectedAt = DateTime.Now;
-#if TVAIR_DEVELOPER_DIAGNOSTICS
         PruneExpired(detectedAt);
         if (pid > 0 && LastRetuneByPid.TryRemove(pid, out var state))
         {
@@ -86,7 +75,6 @@ public static class ViewerRetuneDelayedDeathAudit
                 state.Did,
                 state.BonDriver);
         }
-#endif
         return new DelayedDeathResult(
             "UNKNOWN_LAST_RETUNE", "-", detectedAt.ToString("O", CultureInfo.InvariantCulture),
             "-", "-", "-", "-", "-", "-", "-");

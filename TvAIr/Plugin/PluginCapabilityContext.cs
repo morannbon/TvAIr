@@ -1,4 +1,4 @@
-﻿using System.Globalization;
+using System.Globalization;
 using System.Text.Json;
 using TvAIr.Channel;
 using TvAIr.Core;
@@ -479,7 +479,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
                 };
             }
             var access = serviceAccess.Capture();
-            if (!access.IsOperational(networkId, transportStreamId, serviceId))
+            if (!access.IsAvailableForRecording(networkId, transportStreamId, serviceId))
             {
                 return new TvAirReservationPreviewDto
                 {
@@ -545,7 +545,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
                 return new TvAirChainPreviewDto { CanChain = false, Message = "NID/TSID/SIDは0～65535の完全な局identityで指定してください。" };
             }
             var access = serviceAccess.Capture();
-            if (!access.IsOperational(networkId, transportStreamId, serviceId))
+            if (!access.IsAvailableForRecording(networkId, transportStreamId, serviceId))
             {
                 return new TvAirChainPreviewDto
                 {
@@ -585,7 +585,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             }
 
             var access = serviceAccess.Capture();
-            if (!access.IsOperational(networkId, transportStreamId, serviceId))
+            if (!access.IsAvailableForRecording(networkId, transportStreamId, serviceId))
             {
                 return new TvAirReservationOperationResultDto
                 {
@@ -986,7 +986,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
                 var access = serviceAccess.Capture();
                 foreach (var e in readModels.GetProgramEvents(now.LocalDateTime, now.AddSeconds(maximumSeconds).LocalDateTime)
                     .Where(x => x.Start <= now.LocalDateTime && x.End > now.LocalDateTime)
-                    .Where(x => access.IsOperational(x.NetworkId, x.TransportStreamId, x.ServiceId)))
+                    .Where(x => access.IsAvailableForDisplay(x.NetworkId, x.TransportStreamId, x.ServiceId)))
                 {
                     var remaining = Math.Max(0, (long)(e.End - now.LocalDateTime).TotalSeconds);
                     if (remaining > maximumSeconds || (!string.IsNullOrWhiteSpace(e.Genre) && excluded.Contains(e.Genre))) continue;
@@ -1070,7 +1070,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             query ??= new TvAirProgramGuideQueryDto();
             var access = serviceAccess.Capture();
             IEnumerable<ProjectedProgramEvent> rows = readModels.GetAllProgramEvents()
-                .Where(e => access.IsOperational(e.NetworkId, e.TransportStreamId, e.ServiceId));
+                .Where(e => access.IsAvailableForDisplay(e.NetworkId, e.TransportStreamId, e.ServiceId));
             if (query.From.HasValue) rows = rows.Where(e => e.End > query.From.Value.LocalDateTime);
             if (query.To.HasValue) rows = rows.Where(e => e.Start < query.To.Value.LocalDateTime);
             if (query.NetworkId.HasValue) rows = rows.Where(e => e.NetworkId == query.NetworkId.Value);
@@ -1079,7 +1079,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             if (!string.IsNullOrWhiteSpace(query.ServiceName)) rows = rows.Where(e => Contains(readModels.ResolveCurrentServiceName(e.NetworkId, e.TransportStreamId, e.ServiceId, e.ServiceName), query.ServiceName));
             if (!string.IsNullOrWhiteSpace(query.Keyword)) rows = rows.Where(e => Contains(e.Title, query.Keyword) || Contains(e.ShortText, query.Keyword) || Contains(e.ExtendedText, query.Keyword));
             if (!string.IsNullOrWhiteSpace(query.Genre)) rows = rows.Where(e => Contains(e.Genre, query.Genre) || Contains(e.GenreCodes, query.Genre));
-            var displayOrder = access.ActiveTargets
+            var displayOrder = access.DisplayTargets
                 .Select((channel, index) => new
                 {
                     Key = (channel.OriginalNetworkId, channel.TransportStreamId, channel.ServiceId),
@@ -1108,7 +1108,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             if (!TryToUShort(key.TransportStreamId, out var transportStreamId)) return null;
             if (!TryToUShort(key.ServiceId, out var serviceId)) return null;
             if (!TryToUShort(key.EventNumber, out var eventId)) return null;
-            if (!serviceAccess.Capture().IsOperational(networkId, transportStreamId, serviceId)) return null;
+            if (!serviceAccess.Capture().IsAvailableForDisplay(networkId, transportStreamId, serviceId)) return null;
             return readModels.GetProgramEvent(networkId, transportStreamId, serviceId, eventId) is { } e ? ToDto(e, readModels) : null;
         }
 
@@ -1119,7 +1119,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             var access = serviceAccess.Capture();
             return readModels.GetAllProgramEvents()
                 .FirstOrDefault(e => string.Equals(e.Key.Value, projectedEventId.Trim(), StringComparison.Ordinal)
-                                     && access.IsOperational(e.NetworkId, e.TransportStreamId, e.ServiceId)) is { } e
+                                     && access.IsAvailableForDisplay(e.NetworkId, e.TransportStreamId, e.ServiceId)) is { } e
                 ? ToDto(e, readModels)
                 : null;
         }
@@ -1417,7 +1417,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
                 return disabled;
             }
 
-            IEnumerable<(ChannelTarget Target, int DisplayOrder)> targets = access.ActiveTargets.Select((target, index) => (target, index));
+            IEnumerable<(ChannelTarget Target, int DisplayOrder)> targets = access.DisplayTargets.Select((target, index) => (target, index));
             if (!string.IsNullOrWhiteSpace(query.BroadcastType)) targets = targets.Where(x => Contains(x.Target.Group, query.BroadcastType));
             return targets.Select(x => new TvAirServiceDto
             {
@@ -1442,7 +1442,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         {
             permissions.Require(nameof(ServiceMetadataApi), PluginPermission.ReadChannels);
             query ??= new TvAirServiceMetadataQueryDto();
-            IEnumerable<ChannelTarget> targets = serviceAccess.Capture().ActiveTargets;
+            IEnumerable<ChannelTarget> targets = serviceAccess.Capture().DisplayTargets;
             if (!string.IsNullOrWhiteSpace(query.BroadcastType)) targets = targets.Where(t => Contains(t.Group, query.BroadcastType));
             return targets.Select((t, i) => new TvAirServiceMetadataDto
             {
@@ -1517,7 +1517,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
                 };
             }
             var access = serviceAccess.Capture();
-            if (!access.IsOperational(nid, tsid, sid))
+            if (!access.IsAvailableForDisplay(nid, tsid, sid))
             {
                 return new TvAirViewerReservationMutationResultDto
                 {
@@ -1799,7 +1799,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             if (!TryTriplet(request.NetworkId, request.TransportStreamId, request.ServiceId, out var nid, out var tsid, out var sid))
                 return InvalidTarget();
             var access = serviceAccess.Capture();
-            if (!access.IsOperational(nid, tsid, sid))
+            if (!access.IsAvailableForDisplay(nid, tsid, sid))
                 return UnavailableTarget(access.GetRejectReason(nid, tsid, sid));
             return ToDto(viewerOperations.Start(new ViewerOperationStartRequest(
                 pluginId,
@@ -1818,7 +1818,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             if (!TryTriplet(request.NetworkId, request.TransportStreamId, request.ServiceId, out var nid, out var tsid, out var sid))
                 return InvalidTarget();
             var access = serviceAccess.Capture();
-            if (!access.IsOperational(nid, tsid, sid))
+            if (!access.IsAvailableForDisplay(nid, tsid, sid))
                 return UnavailableTarget(access.GetRejectReason(nid, tsid, sid));
             return ToDto(viewerOperations.EnsureTuned(new ViewerOperationEnsureTunedRequest(
                 pluginId,
@@ -1837,7 +1837,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             if (!TryTriplet(request.NetworkId, request.TransportStreamId, request.ServiceId, out var nid, out var tsid, out var sid))
                 return InvalidTarget();
             var access = serviceAccess.Capture();
-            if (!access.IsOperational(nid, tsid, sid))
+            if (!access.IsAvailableForDisplay(nid, tsid, sid))
                 return UnavailableTarget(access.GetRejectReason(nid, tsid, sid));
             return ToDto(viewerOperations.Retune(new ViewerOperationRetuneRequest(
                 pluginId,
@@ -1981,7 +1981,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             if (!nid.HasValue || !tsid.HasValue || !sid.HasValue) return string.Empty;
             try
             {
-                return readModels.GetChannelLoad().Targets.FirstOrDefault(x => x.OriginalNetworkId == nid.Value && x.TransportStreamId == tsid.Value && x.ServiceId == sid.Value)?.Name ?? string.Empty;
+                return readModels.ResolveCurrentServiceName(nid.Value, tsid.Value, sid.Value);
             }
             catch { return string.Empty; }
         }
@@ -2948,7 +2948,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
 
     private static TvAirReservationDto ToDto(Reservation r, PluginReadModelSource readModels, ChannelServiceAccessSnapshot? serviceAccess = null)
     {
-        var serviceOperational = serviceAccess?.IsOperational(r) ?? true;
+        var serviceOperational = serviceAccess?.IsAvailableForRecording(r) ?? true;
         var serviceAccessReason = serviceOperational || serviceAccess is null
             ? string.Empty
             : serviceAccess.GetRejectReason(r);

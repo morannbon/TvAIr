@@ -3772,6 +3772,9 @@ internal static class BonDriverNativeProbe
     private static string NormalizeEpgNativeBoundaryGroup(string? group)
         => string.Equals(group, "BSCS", StringComparison.OrdinalIgnoreCase) ? "BSCS"
             : string.Equals(group, "GR", StringComparison.OrdinalIgnoreCase) ? "GR"
+            // Explicit BonDriver/.ch2 HYBRID transports share the same physical
+            // Open/Close boundary as GR and BSCS; do not bypass it as UNKNOWN.
+            : string.Equals(group, "HYBRID", StringComparison.OrdinalIgnoreCase) ? "HYBRID"
             : "UNKNOWN";
 
     private static bool UsesEpgNativeBoundary(TsReadProbeSummary summary)

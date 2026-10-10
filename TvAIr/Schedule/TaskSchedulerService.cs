@@ -1,4 +1,4 @@
-// Windows Task Scheduler には起床時刻スロットだけを登録する。
+﻿// Windows Task Scheduler には起床時刻スロットだけを登録する。
 // 予約・EPG・チェーン等の意味は WakeCoverage としてTvAIr内部に保持し、起床後は各共通経路で再評価する。
 // Wake計画は世代単位で差分適用し、現行世代の必要タスクを保護したまま旧世代・余剰タスクを整理する。
 // 登録結果は実体を再読取して検証し、資格情報方式が使えない場合だけ対話トークン方式へ限定フォールバックする。
@@ -687,9 +687,14 @@ public sealed class TaskSchedulerService
     private List<WakeTaskSpec> BuildDesiredTasks(DateTime now, bool emitAudit = true)
     {
         var serviceAccessSnapshot = _serviceAccess.Capture();
+        // Wake coverage must use the same tuner-aware eligibility as recording allocation.
+        // A ChSet-free direct service can be recordable even without a legacy global route.
+        var recordingTuners = _runtimeTunerProfiles
+            .Where(t => !string.Equals(IniSettingsService.NormalizeTunerRole(t.Role), "Viewing", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
         var allScheduled = _store.GetByStatus(ReservationStatus.Scheduled)
             .Where(r => r.IsEnabled)
-            .Where(r => r.Source == ReservationSource.Epg || serviceAccessSnapshot.IsOperational(r))
+            .Where(r => serviceAccessSnapshot.IsOperationalForRecording(r, recordingTuners))
             .Where(r => r.StartTime > now)
             .ToList();
 

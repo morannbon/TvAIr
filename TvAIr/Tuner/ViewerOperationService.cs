@@ -99,8 +99,12 @@ public sealed class ViewerOperationService
             return ViewerOperationPreparationResult.Denied("missingViewerPayload", "ViewerStart payload is incomplete.");
 
         var channelAccess = _serviceAccess.Capture();
-        var channel = channelAccess.ResolveOperationalTarget(request.NetworkId, request.TransportStreamId, request.ServiceId);
-        if (channel is null)
+        var physicalTuner = TunerRuntimeProfileSource.Build(_ini, _tunerProfiles)
+            .FirstOrDefault(t => string.Equals(t.Role, "Viewing", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(LogicalViewerSlotIdentity.Normalize(t.LogicalViewerSlotId),
+                    LogicalViewerSlotIdentity.Normalize(profile.LogicalViewerSlotId), StringComparison.OrdinalIgnoreCase));
+        if (physicalTuner is null || !channelAccess.TryResolveTargetForProfile(physicalTuner,
+                new BroadcastServiceKey(request.NetworkId, request.TransportStreamId, request.ServiceId), out var channel))
             return ViewerOperationPreparationResult.Denied("serviceUnavailable", channelAccess.GetRejectReason(request.NetworkId, request.TransportStreamId, request.ServiceId));
 
         var group = string.IsNullOrWhiteSpace(channel.Group)
@@ -114,12 +118,12 @@ public sealed class ViewerOperationService
         var pathKey = ViewerProfileContract.TvTestPathKeyForResolvedProfile(profile);
         var channelArgument = $"/chspace {channel.ResolvedSpace} /chi {channel.ResolvedChannelIndex} /sid {request.ServiceId}";
         var identityArgument = $"/nid {request.NetworkId} /tsid {request.TransportStreamId} /sid {request.ServiceId}";
-        var sameTransportServices = channelAccess.ActiveTargets
+        var sameTransportServices = channelAccess.GetProgramGuideDisplayTargets(_ini.GetEffectiveTuners())
             .Where(c => c.OriginalNetworkId == request.NetworkId && c.TransportStreamId == request.TransportStreamId)
             .OrderBy(c => c.ServiceId)
             .ToArray();
         var sameTransportServiceIds = string.Join(",", sameTransportServices.Select(c => c.ServiceId.ToString(System.Globalization.CultureInfo.InvariantCulture)));
-        const string selectedChannelSource = "ProgramGuideProjectionTriplet(.ch2/chset resolved)";
+        var selectedChannelSource = channel.ChannelBuildSource;
 
         var plan = new ViewerOperationPlan(
             profile,
@@ -1234,8 +1238,8 @@ public sealed class ViewerOperationService
                 // with registry/lease/session state instead of leaving an event subscription behind.
                 DisarmViewerProcessExitWatch(lease.LeaseId, stalePid);
                 TvAirManagedProcessRegistry.Unregister(stalePid);
-#if TVAIR_DEVELOPER_DIAGNOSTICS
-                ViewerRetuneDelayedDeathAudit.MarkProcessEnded(stalePid);
+    #if TVAIR_DEVELOPER_DIAGNOSTICS
+            ViewerRetuneDelayedDeathAudit.MarkProcessEnded(stalePid);
 #endif
             }
             var released = _leases.Release(lease.LeaseId, "viewer_activate_stale_recovery");

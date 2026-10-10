@@ -1,5 +1,7 @@
 ﻿using TvAIr.Core;
 
+using TvAIr.Channel;
+
 namespace TvAIr.Tuner;
 
 /// <summary>
@@ -15,6 +17,7 @@ public sealed class ExternalTunerLeaseService
     private readonly TunerPool _tunerPool;
     private readonly LogRepository _log;
     private readonly ApplicationOperationGate _applicationGate;
+    private readonly ChannelServiceAccessPolicy _serviceAccess;
     private readonly object _gate = new();
     private readonly object _requestGate = new();
     private readonly Dictionary<string, ExternalTunerLeaseEntry> _leases = new(StringComparer.OrdinalIgnoreCase);
@@ -24,11 +27,12 @@ public sealed class ExternalTunerLeaseService
     private string? _lastPeriodicReconcileSignature;
     private DateTime _lastPeriodicReconcileLogAt = DateTime.MinValue;
 
-    public ExternalTunerLeaseService(TunerPool tunerPool, LogRepository log, ApplicationOperationGate applicationGate)
+    public ExternalTunerLeaseService(TunerPool tunerPool, LogRepository log, ApplicationOperationGate applicationGate, ChannelServiceAccessPolicy serviceAccess)
     {
         _tunerPool = tunerPool;
         _log = log;
         _applicationGate = applicationGate;
+        _serviceAccess = serviceAccess;
     }
 
     public ExternalTunerLeaseResult Request(ExternalTunerLeaseRequest request)
@@ -80,6 +84,9 @@ public sealed class ExternalTunerLeaseService
                 }
             }
 
+            if (existing is not null && reusableDto is not null && !existing.MatchesChannelRoute(_serviceAccess.Capture(), request, group))
+                return ExternalTunerLeaseResult.Denied("viewerChannelRouteUnavailable", _tunerPool.GetStatusSummary());
+
             if (existing is not null && reusableDto is not null)
             {
                 _log.Add("EXTERNAL_TUNER", "Reuse",
@@ -102,6 +109,17 @@ public sealed class ExternalTunerLeaseService
                 _log.Add("EXTERNAL_TUNER", "Denied",
                     $"source={source} clientId={clientId ?? "-"} group={group} reason=no_free_tuner status={status} rule=release_contract");
                 return ExternalTunerLeaseResult.Denied("tunerUnavailable", status);
+            }
+
+            if (!string.IsNullOrWhiteSpace(lease.ChannelCh2Path)
+                && (!_serviceAccess.Capture().TryResolveDirectTargetForLease(lease,
+                    request.NetworkId ?? 0, request.TransportStreamId ?? 0, request.ServiceId ?? 0,
+                    group, out var physicalTarget)
+                    || request.ChannelSpace != physicalTarget.ResolvedSpace
+                    || request.ChannelIndex != physicalTarget.ResolvedChannelIndex))
+            {
+                lease.Dispose();
+                return ExternalTunerLeaseResult.Denied("viewerChannelRouteUnavailable", _tunerPool.GetStatusSummary());
             }
 
             var id = Guid.NewGuid().ToString("N");
@@ -432,7 +450,7 @@ public sealed class ExternalTunerLeaseService
 
     private static ExternalTunerLeaseCompatibility EvaluateReuseCompatibility(ExternalTunerLeaseEntry existing, ExternalTunerLeaseRequest request, string requiredGroup)
     {
-        if (!string.Equals(NormalizeGroup(existing.Group), requiredGroup, StringComparison.OrdinalIgnoreCase))
+        if (!ChannelServiceAccessSnapshot.SupportsGroup(existing.PhysicalGroup, requiredGroup))
             return ExternalTunerLeaseCompatibility.Blocked("group_mismatch");
 
         var requestedProfileId = (request.ViewerProfileId ?? string.Empty).Trim();
@@ -716,6 +734,12 @@ internal sealed class ExternalTunerLeaseEntry
     public Guid PoolLeaseId => _lease.PoolLeaseId;
     public long OccupancyGeneration => _lease.OccupancyGeneration;
     public bool PoolLeaseCurrent => IsActive && _lease.IsCurrent;
+    public string PhysicalGroup => _lease.Group;
+    public bool MatchesChannelRoute(ChannelServiceAccessSnapshot channels, ExternalTunerLeaseRequest request, string group)
+        => PoolLeaseCurrent && (string.IsNullOrWhiteSpace(_lease.ChannelCh2Path)
+            || (channels.TryResolveDirectTargetForLease(_lease, request.NetworkId ?? 0,
+                request.TransportStreamId ?? 0, request.ServiceId ?? 0, group, out var target)
+                && request.ChannelSpace == target.ResolvedSpace && request.ChannelIndex == target.ResolvedChannelIndex));
 
     public bool TryBeginViewerAttach()
     {

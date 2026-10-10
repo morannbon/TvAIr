@@ -167,7 +167,8 @@ private readonly ReservationStore _store;
         DateTime Start,
         DateTime End,
         DateTime ObservedAt,
-        string LastSuppressedProjectionKey);
+        string LastSuppressedProjectionKey,
+        bool LivePresentBoundaryAuthoritative = false);
 
     private sealed class ChainBoundaryExecutionEntry
     {
@@ -1937,7 +1938,8 @@ private readonly ReservationStore _store;
         var serviceAccessSnapshot = _serviceAccess.Capture();
         var scheduled = OrderDueReservationsForTransportBatchLaunch(_store.GetByStatus(ReservationStatus.Scheduled)
             .Where(r => r.IsEnabled)
-            .Where(serviceAccessSnapshot.IsOperational)
+            .Where(r => serviceAccessSnapshot.IsOperationalForRecording(r, _tunerProfiles
+                .Where(t => string.Equals(t.Role, "Recording", StringComparison.OrdinalIgnoreCase)).ToArray()))
             // source=Epg は予約リスト表示・Wake計算用のシステムエントリであり、
             // 通常録画のTvAIrEpgRec起動ルートには入れない。
             // ch未設定のEPG確認エントリが /rec 起動に流入すると、失敗ログと不要な状態変更を起こすため安全側で除外する。
@@ -2534,10 +2536,13 @@ private readonly ReservationStore _store;
                 && !string.IsNullOrWhiteSpace(r.TunerName))
             .ToList();
 
+        var channelSnapshot = _serviceAccess.Capture();
         var candidates = _tunerPool.GetStatus()
-            .Where(slot => string.Equals(NormalizePreRecordAdmissionGroup(slot.Group), normalizedGroup, StringComparison.OrdinalIgnoreCase)
+            .Where(slot => ChannelServiceAccessSnapshot.SupportsGroup(slot.Group, normalizedGroup)
                 && !string.Equals(IniSettingsService.NormalizeTunerRole(slot.Role), "Viewing", StringComparison.OrdinalIgnoreCase)
                 && slot.UsageKind == TunerUsageKind.Free
+                && _tunerProfiles.Any(t => string.Equals(t.Name, slot.Name, StringComparison.OrdinalIgnoreCase)
+                    && channelSnapshot.CanTune(t, parent))
                 && (excludedTuners is null || !excludedTuners.Contains(slot.Name)))
             .Select(slot =>
             {
@@ -3510,53 +3515,79 @@ private readonly ReservationStore _store;
         var channelAccess = _serviceAccess.Capture();
         var serviceEligibility = channelAccess.GetEligibility(r.NetworkId, r.TransportStreamId, r.ServiceId);
         var resolvedChannel = channelAccess.ResolveOperationalTarget(r.NetworkId, r.TransportStreamId, r.ServiceId);
-        if (serviceEligibility != ChannelServiceEligibility.Active || resolvedChannel is null)
+        var assignedProfile = _tunerProfiles.FirstOrDefault(t =>
+            string.Equals(t.Name, r.TunerName, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(t.Role, "Recording", StringComparison.OrdinalIgnoreCase));
+        // Direct-only services cannot have a global ChannelArgument. Admit only when
+        // the already assigned physical tuner owns an explicit compatible .ch2 source.
+        // The actual tuning coordinates remain unresolved until its lease is acquired.
+        var directOnly = resolvedChannel is null
+            && assignedProfile is not null
+            && !string.IsNullOrWhiteSpace(assignedProfile.ChannelCh2Path)
+            && serviceEligibility != ChannelServiceEligibility.Disabled
+            && channelAccess.TryResolveDirectRouteForConfiguredSource(
+                assignedProfile.BonDriverFileName, assignedProfile.ChannelCh2Path,
+                new BroadcastServiceKey(r.NetworkId, r.TransportStreamId, r.ServiceId));
+        if (!directOnly)
         {
-            var reason = serviceEligibility switch
+            if (serviceEligibility != ChannelServiceEligibility.Active || resolvedChannel is null)
             {
-                ChannelServiceEligibility.Disabled => "tvtest_ch2_service_disabled",
-                ChannelServiceEligibility.ActiveRouteUnavailable => "active_service_route_unavailable",
-                _ => "service_not_enabled_in_tvtest_ch2"
-            };
+                var reason = serviceEligibility switch
+                {
+                    ChannelServiceEligibility.Disabled => "tvtest_ch2_service_disabled",
+                    ChannelServiceEligibility.ActiveRouteUnavailable => "active_service_route_unavailable",
+                    _ => "service_not_enabled_in_tvtest_ch2"
+                };
+                _log.Add("CH2_CHANNEL_MATCH", $"R{r.Id}",
+                    $"result=REJECT service={SafeValue(r.ServiceName)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eligibility={serviceEligibility} beforeArg={SafeValue(r.ChannelArgument)} action=do_not_use_stale_channel_argument rule=recording_service_activation_contract");
+                _log.Add("REC_START_DECISION", $"R{r.Id}", $"result=FAIL reason={reason}");
+                Fail(r, $"TVTestで有効な録画対象サービスとして解決できないため録画をスキップしました。service_id={r.ServiceId}");
+                return false;
+            }
+
+            var beforeChannelArg = r.ChannelArgument ?? "";
+            var baseChannelArg = resolvedChannel.ChannelArgument ?? "";
+            var recordingChannelArg = BuildRecordingChannelArgumentWithServiceIdentity(
+                baseChannelArg,
+                resolvedChannel.OriginalNetworkId,
+                resolvedChannel.TransportStreamId,
+                resolvedChannel.ServiceId);
+            r.ChannelArgument = recordingChannelArg;
+            if (string.IsNullOrWhiteSpace(r.ServiceName)) r.ServiceName = resolvedChannel.Name;
+
             _log.Add("CH2_CHANNEL_MATCH", $"R{r.Id}",
-                $"result=REJECT service={SafeValue(r.ServiceName)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eligibility={serviceEligibility} beforeArg={SafeValue(r.ChannelArgument)} action=do_not_use_stale_channel_argument rule=recording_service_activation_contract");
-            _log.Add("REC_START_DECISION", $"R{r.Id}", $"result=FAIL reason={reason}");
-            Fail(r, $"TVTestで有効な録画対象サービスとして解決できないため録画をスキップしました。service_id={r.ServiceId}");
-            return false;
+                $"result=OK service={SafeValue(r.ServiceName)} ch2Name={SafeValue(resolvedChannel.Name)} " +
+                $"group={SafeValue(resolvedChannel.Group)} nid={resolvedChannel.OriginalNetworkId} tsid={resolvedChannel.TransportStreamId} sid={resolvedChannel.ServiceId} " +
+                $"ch2File={SafeValue(resolvedChannel.Ch2FileName)} ch2Line={resolvedChannel.Ch2LineNumber} " +
+                $"bonCh={resolvedChannel.BonDriverChannel} resolvedSpace={resolvedChannel.ResolvedSpace} resolvedChi={resolvedChannel.ResolvedChannelIndex} " +
+                $"sameTsServices={resolvedChannel.SameTransportServiceCount} buildSource={SafeValue(resolvedChannel.ChannelBuildSource)} " +
+                $"baseArg={SafeValue(baseChannelArg)} generatedArg={SafeValue(recordingChannelArg)} beforeArg={SafeValue(beforeChannelArg)} rule=recording_service_activation_contract");
+
+            if (!string.Equals(beforeChannelArg, r.ChannelArgument, StringComparison.OrdinalIgnoreCase))
+            {
+                _log.Add("CHANNEL_RESOLVE", $"R{r.Id}",
+                    $"launch_re_resolved service={SafeValue(r.ServiceName)} svcId={r.ServiceId} before={SafeValue(beforeChannelArg)} after={SafeValue(r.ChannelArgument)} source=current_tvtest_ch2_active_service");
+            }
+
+            _log.Add("RESERVATION_PIPELINE_AUDIT", $"R{r.Id}",
+                BuildReservationPipelineAudit(r, "channel_resolved", group: group, plannedTuner: EffectiveTunerName(r), resolvedChannel: resolvedChannel, finalGuardApplied: false, note: "tvtest_ch2_service_activation_revalidation_complete"));
+
+            if (string.IsNullOrWhiteSpace(r.ChannelArgument))
+            {
+                _log.Add("REC_START_DECISION", $"R{r.Id}", "result=FAIL reason=active_service_empty_channel_argument invariant=True");
+                Fail(r, $"有効サービスのチャンネル引数を生成できないため録画をスキップしました。service_id={r.ServiceId}");
+                return false;
+            }
+
         }
-
-        var beforeChannelArg = r.ChannelArgument ?? "";
-        var baseChannelArg = resolvedChannel.ChannelArgument ?? "";
-        var recordingChannelArg = BuildRecordingChannelArgumentWithServiceIdentity(
-            baseChannelArg,
-            resolvedChannel.OriginalNetworkId,
-            resolvedChannel.TransportStreamId,
-            resolvedChannel.ServiceId);
-        r.ChannelArgument = recordingChannelArg;
-        if (string.IsNullOrWhiteSpace(r.ServiceName)) r.ServiceName = resolvedChannel.Name;
-
-        _log.Add("CH2_CHANNEL_MATCH", $"R{r.Id}",
-            $"result=OK service={SafeValue(r.ServiceName)} ch2Name={SafeValue(resolvedChannel.Name)} " +
-            $"group={SafeValue(resolvedChannel.Group)} nid={resolvedChannel.OriginalNetworkId} tsid={resolvedChannel.TransportStreamId} sid={resolvedChannel.ServiceId} " +
-            $"ch2File={SafeValue(resolvedChannel.Ch2FileName)} ch2Line={resolvedChannel.Ch2LineNumber} " +
-            $"bonCh={resolvedChannel.BonDriverChannel} resolvedSpace={resolvedChannel.ResolvedSpace} resolvedChi={resolvedChannel.ResolvedChannelIndex} " +
-            $"sameTsServices={resolvedChannel.SameTransportServiceCount} buildSource={SafeValue(resolvedChannel.ChannelBuildSource)} " +
-            $"baseArg={SafeValue(baseChannelArg)} generatedArg={SafeValue(recordingChannelArg)} beforeArg={SafeValue(beforeChannelArg)} rule=recording_service_activation_contract");
-
-        if (!string.Equals(beforeChannelArg, r.ChannelArgument, StringComparison.OrdinalIgnoreCase))
+        else
         {
-            _log.Add("CHANNEL_RESOLVE", $"R{r.Id}",
-                $"launch_re_resolved service={SafeValue(r.ServiceName)} svcId={r.ServiceId} before={SafeValue(beforeChannelArg)} after={SafeValue(r.ChannelArgument)} source=current_tvtest_ch2_active_service");
-        }
-
-        _log.Add("RESERVATION_PIPELINE_AUDIT", $"R{r.Id}",
-            BuildReservationPipelineAudit(r, "channel_resolved", group: group, plannedTuner: EffectiveTunerName(r), resolvedChannel: resolvedChannel, finalGuardApplied: false, note: "tvtest_ch2_service_activation_revalidation_complete"));
-
-        if (string.IsNullOrWhiteSpace(r.ChannelArgument))
-        {
-            _log.Add("REC_START_DECISION", $"R{r.Id}", "result=FAIL reason=active_service_empty_channel_argument invariant=True");
-            Fail(r, $"有効サービスのチャンネル引数を生成できないため録画をスキップしました。service_id={r.ServiceId}");
-            return false;
+            // Do not reuse persisted ChSet arguments or invent cross-driver coordinates.
+            r.ChannelArgument = string.Empty;
+            _log.Add("CH2_CHANNEL_MATCH", $"R{r.Id}",
+                $"result=DEFER source=assigned_bondriver_ch2 tuner={SafeValue(r.TunerName)} " +
+                $"nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} " +
+                "action=resolve_after_physical_lease");
         }
 
         var pt3StartLockWaitAt = DateTime.Now;
@@ -3624,6 +3655,45 @@ private readonly ReservationStore _store;
                 $"result=DEFER reason=assigned_tuner_unavailable_no_fallback assignedTuner={SafeValue(r.TunerName)} group={group} chain={chainContinuation} " +
                 $"rollbackApplied={rollback.Applied} rollbackReason={SafeValue(rollback.Reason)} dataVersion={rollback.PreviousDataVersion}->{rollback.CurrentDataVersion} " +
                 $"status={_tunerPool.GetStatusSummary()} commonRoute=ALLOC_ROUTE/TUNER_ALLOC nextTick=True rule=common_allocation_start_barrier");
+            return false;
+        }
+
+        // Resolve the actual physical BonDriver's channel coordinates after acquiring its lease.
+        // A direct .ch2 source must never inherit coordinates from the wave-global ChSet route.
+        // This guard is deliberately confined to the launch boundary; reservation admission
+        // and allocation still require the common service-capability contract.
+        if (!string.IsNullOrWhiteSpace(lease.ChannelCh2Path))
+        {
+            if (!channelAccess.TryResolveDirectTargetForLease(
+                    lease, r.NetworkId, r.TransportStreamId, r.ServiceId, group,
+                    out var leaseChannel))
+            {
+                _log.Add("REC_START_DECISION", $"R{r.Id}",
+                    $"result=REJECT reason=assigned_bondriver_service_route_unavailable tuner={SafeValue(lease.Name)} " +
+                    $"nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} action=no_worker_launch");
+                ReleaseRejectedRecordingStartLease(r.Id, lease, "assigned_bondriver_service_route_unavailable");
+                Fail(r, $"割当チューナーのチャンネル定義から録画対象サービスを解決できません。service_id={r.ServiceId}");
+                return false;
+            }
+
+            resolvedChannel = leaseChannel;
+            r.ChannelArgument = BuildRecordingChannelArgumentWithServiceIdentity(
+                leaseChannel.ChannelArgument ?? string.Empty,
+                leaseChannel.OriginalNetworkId,
+                leaseChannel.TransportStreamId,
+                leaseChannel.ServiceId);
+            _log.Add("CH2_CHANNEL_MATCH", $"R{r.Id}",
+                $"result=OK source=assigned_bondriver_ch2 tuner={SafeValue(lease.Name)} " +
+                $"nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} " +
+                $"space={leaseChannel.ResolvedSpace} chi={leaseChannel.ResolvedChannelIndex} rule=physical_lease_route");
+        }
+
+        if (string.IsNullOrWhiteSpace(r.ChannelArgument))
+        {
+            _log.Add("REC_START_DECISION", $"R{r.Id}",
+                "result=REJECT reason=physical_lease_channel_argument_unresolved action=no_worker_launch");
+            ReleaseRejectedRecordingStartLease(r.Id, lease, "physical_lease_channel_argument_unresolved");
+            Fail(r, $"割当チューナーの選局情報を解決できません。service_id={r.ServiceId}");
             return false;
         }
 
@@ -4728,7 +4798,7 @@ private readonly ReservationStore _store;
 
     private (string sids, string names) BuildRecordingWorkerTsGroupText(ChannelTarget target)
     {
-        var targets = _serviceAccess.Capture().ActiveTargets
+        var targets = _serviceAccess.Capture().DisplayTargets
             .Where(t => t.OriginalNetworkId == target.OriginalNetworkId && t.TransportStreamId == target.TransportStreamId)
             .OrderBy(t => t.ServiceId)
             .ToList();
@@ -6890,20 +6960,27 @@ private readonly ReservationStore _store;
             }
 
             // RECORDING_LIVE_EIT_FOLLOW_INVARIANT:
-            // 正式な時刻変更は、同じ録画workerが受信したcurrent EIT p/f present(section=0)の
-            // 同一EventIdentityだけを採用する。終了時刻は延長方向だけ。present継続だけの場合は
-            // Reservation/ProgramGuide/plannedEndを変更せず、終了判定時の停止保留Evidenceとしてだけ扱う。
+            // 同一録画workerのcurrent EIT p/f actual presentに限り、延長と短縮を両方向で採用する。
+            // schedule/ProgramGuide投影だけの短縮は、古い情報による途中切れを防ぐため採用しない。
+            // 短縮はpresentの同一EIDと有効期間が実観測で確認できた場合だけ許可する。
             if (hasLiveEvidence
                 && liveEvidence.HasFreshExpectedEvent(now)
-                && liveEvidence.End > ev.End.AddSeconds(1))
+                && liveEvidence.IsFreshTargetPresent(r, now)
+                && liveEvidence.End > liveEvidence.Start
+                && Math.Abs((liveEvidence.End - ev.End).TotalSeconds) > 1)
             {
                 var previousEnd = ev.End;
+                var shortening = liveEvidence.End < ev.End;
                 ev = CloneEpgEventWithEnd(ev, liveEvidence.End);
+                _recordingTimeFollowEvidence[r.Id] = new RecordingTimeFollowEvidence(
+                    r.NetworkId, r.TransportStreamId, r.ServiceId, r.EventId,
+                    ev.Start, liveEvidence.End, liveEvidence.ObservedAt, string.Empty,
+                    LivePresentBoundaryAuthoritative: true);
                 _log.Add("REC_FOLLOW_LIVE_EIT", $"R{r.Id}",
-                    $"result=EXTEND source=recording_worker_current_present_eit table=0x{liveEvidence.TableId:X2} section={liveEvidence.SectionNumber} currentNext={liveEvidence.CurrentNextIndicator} runningStatus={liveEvidence.RunningStatus} " +
+                    $"result={(shortening ? "SHORTEN" : "EXTEND")} source=recording_worker_current_present_eit table=0x{liveEvidence.TableId:X2} section={liveEvidence.SectionNumber} currentNext={liveEvidence.CurrentNextIndicator} runningStatus={liveEvidence.RunningStatus} " +
                     $"event={r.NetworkId}/{r.TransportStreamId}/{r.ServiceId}/{r.EventId} projectedEnd={previousEnd:MM/dd HH:mm:ss} liveEnd={liveEvidence.End:MM/dd HH:mm:ss} " +
                     $"observedAt={liveEvidence.ObservedAt:MM/dd HH:mm:ss} ageSec={(now - liveEvidence.ObservedAt).TotalSeconds:F1} tuner={SafeValue(session.Lease.Name)} pid={session.ProcessId} " +
-                    "direction=extend_only extraTunerLease=0 rule=recording_live_eit_time_follow_contract");
+                    "direction=live_present_both extraTunerLease=0 rule=recording_live_eit_time_follow_contract");
             }
 
             var singleProgramFollowedEnd = ev.End.AddSeconds(session.PostEndMarginSeconds);
@@ -7208,11 +7285,18 @@ private readonly ReservationStore _store;
         // PreRecの実観測値より前へ戻す投影は録画欠落を生むため採用しない。
         // 後ろへの開始移動・終了延長は安全側の新しい追従として採用し、その最大境界を証拠へ昇格する。
         var resolvedStart = projectedEvent.Start < resolvedEvidence.Start ? resolvedEvidence.Start : projectedEvent.Start;
-        var resolvedEnd = projectedEvent.End < resolvedEvidence.End ? resolvedEvidence.End : projectedEvent.End;
+        // Once current p/f present has established a boundary, a cached ProgramGuide projection
+        // cannot extend it again. Only a later verified live observation may replace it.
+        var resolvedEnd = resolvedEvidence.LivePresentBoundaryAuthoritative
+            ? resolvedEvidence.End
+            : (projectedEvent.End < resolvedEvidence.End ? resolvedEvidence.End : projectedEvent.End);
         if (resolvedEnd <= resolvedStart)
             resolvedEnd = resolvedEvidence.End;
 
-        var rollbackSuppressed = projectedEvent.Start < resolvedEvidence.Start || projectedEvent.End < resolvedEvidence.End;
+        var rollbackSuppressed = projectedEvent.Start < resolvedEvidence.Start
+            || (resolvedEvidence.LivePresentBoundaryAuthoritative
+                ? projectedEvent.End != resolvedEvidence.End
+                : projectedEvent.End < resolvedEvidence.End);
         var suppressionKey = $"{projectedEvent.Start.Ticks}:{projectedEvent.End.Ticks}";
         var evidenceChanged = false;
         if (rollbackSuppressed && !string.Equals(resolvedEvidence.LastSuppressedProjectionKey, suppressionKey, StringComparison.Ordinal))
@@ -7225,7 +7309,7 @@ private readonly ReservationStore _store;
             evidenceChanged = true;
         }
 
-        if (resolvedStart > resolvedEvidence.Start || resolvedEnd > resolvedEvidence.End)
+        if (resolvedStart > resolvedEvidence.Start || (!resolvedEvidence.LivePresentBoundaryAuthoritative && resolvedEnd > resolvedEvidence.End))
         {
             resolvedEvidence = resolvedEvidence with
             {
@@ -9172,7 +9256,7 @@ private readonly ReservationStore _store;
                 g => g.OrderBy(x => x.StartTime).ThenBy(x => x.ReservationId).First(),
                 StringComparer.OrdinalIgnoreCase);
 
-        foreach (var group in new[] { "GR", "BSCS" })
+        foreach (var group in new[] { "GR", "BSCS", "HYBRID" })
         {
             if (!targets.TryGetValue(group, out var rec))
             {
@@ -9217,10 +9301,18 @@ private readonly ReservationStore _store;
     {
         var result = new List<UpcomingRecording>();
         var serviceAccessSnapshot = _serviceAccess.Capture();
+        // Protect the EPG admission boundary for both legacy ChSet routes and
+        // tuner-bound .ch2 routes. Filtering only by global IsOperational would
+        // overlook a valid direct-route recording and permit an EPG overlap.
+        var recordingTuners = _tunerProfiles
+            .Where(t => string.Equals(t.Role, "Recording", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
         foreach (var r in scheduled)
         {
             var dueStart = r.StartTime.AddSeconds(-_ini.PreStartMarginSeconds);
-            if (!r.IsEnabled || r.Source == ReservationSource.Epg || !serviceAccessSnapshot.IsOperational(r) || dueStart > horizon)
+            if (!r.IsEnabled || r.Source == ReservationSource.Epg
+                || !serviceAccessSnapshot.IsOperationalForRecording(r, recordingTuners)
+                || dueStart > horizon)
                 continue;
 
             var group = ResolveGroup(r);
@@ -9298,7 +9390,7 @@ private readonly ReservationStore _store;
 
     /// <summary>予約の正規チャンネル／チューナーIdentityから放送波グループを解決する。</summary>
     private string? ResolveGroup(Reservation r)
-        => ReservationTunerGroupResolver.Resolve(r, _tunerProfiles);
+        => _serviceAccess.Capture().ResolveSchedulingGroup(r, _tunerProfiles);
 
     private List<Reservation> OrderDueReservationsForTransportBatchLaunch(List<Reservation> reservations)
     {

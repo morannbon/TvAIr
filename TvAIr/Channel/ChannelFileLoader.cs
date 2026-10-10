@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using Microsoft.Extensions.Options;
 using TvAIr.Core;
 
@@ -26,6 +26,8 @@ public sealed class ChannelFileLoader
         this.ini = ini;
     }
 
+    public IReadOnlyList<ChannelTarget> GetDisplayTargets() => new ChannelServiceAccessPolicy(this).Capture().DisplayTargets;
+
     public void Invalidate()
     {
         lock (cacheLock)
@@ -33,6 +35,14 @@ public sealed class ChannelFileLoader
             cache = null;
         }
     }
+
+    internal IReadOnlyList<TunerProfileDto> CaptureConfiguredTuners()
+        => ini.GetEffectiveTuners().Select(t => new TunerProfileDto
+        {
+            Name = t.Name, BonDriverFileName = t.BonDriverFileName, ChannelCh2Path = t.ChannelCh2Path,
+            Group = t.Group, Role = t.Role, Did = t.Did, DeviceNumber = t.DeviceNumber,
+            LogicalViewerSlotId = t.LogicalViewerSlotId
+        }).ToArray();
 
     /// <summary>
     /// ch2 + ChSet.txt を読み込む。
@@ -48,6 +58,20 @@ public sealed class ChannelFileLoader
         }
 
         var result = new ChannelLoadResult();
+        // The same snapshot that guards legacy channels also owns all explicitly
+        // configured BonDriver channel tables. Never publish a cached route table
+        // after a tuner setting or its .ch2 contents change.
+        try
+        {
+            result.BonDriverRoutes = BonDriverChannelRouteCatalog.FromConfiguredTuners(ini.GetEffectiveTuners());
+            result.Warnings.AddRange(result.BonDriverRoutes.SourceErrors);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidDataException)
+        {
+            // A failed direct source must never fall back to another driver's route.
+            // Legacy ChSet channels remain independently available.
+            result.Warnings.Add($"BonDriver channel source unavailable: {ex.GetType().Name}");
+        }
         var grChSet   = LoadGrChSet(result, snapshot);
         var bscsChSet = LoadBscsChSet(result, snapshot);
 
@@ -58,6 +82,17 @@ public sealed class ChannelFileLoader
             ParseFile(grPath, "GR", grChSet, bscsChSet, result);
         if (!string.IsNullOrWhiteSpace(bscsPath))
             ParseFile(bscsPath, "BSCS", grChSet, bscsChSet, result);
+
+        // Explicit BonDriver tables are independent inputs. Keep their service
+        // inventory separate from legacy ActiveTargets: direct tuning requires
+        // a real tuner lease, so making these globally routable would allow
+        // the wrong BonDriver to receive a legacy channel number.
+        if (result.BonDriverRoutes is { } directCatalog)
+        {
+            result.DirectSourceServices.AddRange(directCatalog.SourceRoutes);
+            result.Files.AddRange(directCatalog.SourceRoutes.Select(r => Path.GetFileName(r.SourceCh2Path))
+                .Distinct(StringComparer.OrdinalIgnoreCase).Where(f => !result.Files.Contains(f)));
+        }
 
         // ch2 記載順を維持しながら重複除去
         var seen = new HashSet<(string, ushort, ushort, ushort)>();
@@ -72,8 +107,8 @@ public sealed class ChannelFileLoader
         var gr = result.Targets.Count(x => x.Group == "GR");
         var bs = result.Targets.Count(x => x.Group == "BS");
         var cs = result.Targets.Count(x => x.Group == "CS");
-        result.Message = result.Targets.Count > 0
-            ? $"Loaded {result.Targets.Count} channels. GR={gr} BS={bs} CS={cs} (ch2順)"
+        result.Message = result.Targets.Count > 0 || result.DirectSourceServices.Count > 0
+            ? $"Loaded legacy={result.Targets.Count} direct={result.DirectSourceServices.Count} channels. GR={gr} BS={bs} CS={cs} (ch2順)"
             : "No valid channels loaded.";
         lock (cacheLock) { cache = new ChannelLoadCache(snapshot, result); }
         return result;
@@ -93,7 +128,20 @@ public sealed class ChannelFileLoader
             FileStamp(grCh2),
             FileStamp(grChSet),
             FileStamp(bscsCh2),
-            FileStamp(bscsChSet));
+            FileStamp(bscsChSet),
+            BuildDirectRouteSnapshot(ini.GetEffectiveTuners()));
+    }
+
+    // Include tuner identity AND the corresponding channel-table revision in the
+    // cache key. The order is stable and changes to the tuner set also invalidate.
+    private static string BuildDirectRouteSnapshot(IEnumerable<TunerProfileDto> tuners)
+    {
+        return string.Join("\n", tuners
+            .Select(t => (Driver: (t.BonDriverFileName ?? string.Empty).Trim(),
+                          Path: NormalizeKeyPath(t.ChannelCh2Path)))
+            .OrderBy(t => t.Driver, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(t => t.Path, StringComparer.OrdinalIgnoreCase)
+            .Select(t => $"{t.Driver}\t{t.Path}\t{FileStamp(t.Path)}"));
     }
 
     private static string NormalizeKeyPath(string? path)
@@ -127,7 +175,8 @@ public sealed class ChannelFileLoader
         string GrChannelFileStamp,
         string GrChSetFileStamp,
         string BscsChannelFileStamp,
-        string BscsChSetFileStamp);
+        string BscsChSetFileStamp,
+        string DirectRouteSnapshot);
 
     private static string ResolveExistingCh2Path(string path, ChannelLoadResult result)
     {
@@ -210,7 +259,7 @@ public sealed class ChannelFileLoader
     {
         if (string.IsNullOrWhiteSpace(configuredPath))
         {
-            result.Warnings.Add($"{groupLabel} ChSet not configured: source=explicit_settings");
+            // ChSet is optional: automatic BonDriver/ch2 routes remain independent.
             return null;
         }
 
@@ -298,7 +347,7 @@ public sealed class ChannelFileLoader
             var rawLine = entry.Raw;
             var line = rawLine.Trim().TrimStart('\uFEFF');
             if (string.IsNullOrWhiteSpace(line) || line[0] is ';' or '#' or '[') continue;
-            var cols = line.Split(',', StringSplitOptions.TrimEntries);
+            var cols = ParseCh2Columns(line);
             if (cols.Length < 9) continue;
             if (!TryReadServiceState(cols, fileGroup, Path.GetFileName(path), entry.LineNumber, out var serviceState))
             {
@@ -319,7 +368,7 @@ public sealed class ChannelFileLoader
         }
     }
 
-    private static bool TryReadServiceState(string[] cols, string fileGroup, string ch2FileName, int ch2LineNumber,
+    internal static bool TryReadServiceState(string[] cols, string fileGroup, string ch2FileName, int ch2LineNumber,
         out ChannelServiceState serviceState)
     {
         serviceState = new ChannelServiceState();
@@ -361,7 +410,11 @@ public sealed class ChannelFileLoader
         if (!ushort.TryParse(cols[7], out var tsId) || tsId == 0) return false;
         _ = int.TryParse(cols[8], out var state);
         if (state == 0) return false;
-        _ = int.TryParse(cols[2], out var bonCh);
+        // Keep the input coordinates separate from the ChSet-resolved route.
+        // They can only be used with a BonDriver whose channel table matches
+        // the TVTest .ch2 source; existing recordings keep the legacy route.
+        if (!int.TryParse(cols[1], out var ch2Space) || ch2Space < 0) return false;
+        if (!int.TryParse(cols[2], out var bonCh) || bonCh < 0) return false;
         var sameTsServiceCount = serviceCountByTs.TryGetValue((onid, tsId), out var count) ? count : 1;
 
         var group = ResolveGroup(fileGroup, onid);
@@ -380,6 +433,8 @@ public sealed class ChannelFileLoader
             Ch2FileName = ch2FileName,
             Ch2LineNumber = ch2LineNumber,
             BonDriverChannel = bonCh,
+            Ch2TuningSpace = ch2Space,
+            Ch2ChannelIndex = bonCh,
             ResolvedSpace = resolvedSpace,
             ResolvedChannelIndex = resolvedChannelIndex,
             SameTransportServiceCount = sameTsServiceCount,
@@ -390,10 +445,7 @@ public sealed class ChannelFileLoader
 
     private static string ResolveGroup(string fileGroup, ushort onid)
     {
-        if (onid == 4) return "BS";
-        if (onid is 6 or 7 or 10) return "CS";
-        if (onid >= 0x7880) return "GR";
-        return fileGroup;
+        return BroadcastNetworkIdentity.ResolveLegacyChannelGroup(fileGroup, onid);
     }
 
     private static string BuildArg(string group, int bonCh, ushort onid, ushort tsId, ushort sid, int sameTsServiceCount,
@@ -440,12 +492,49 @@ public sealed class ChannelFileLoader
         return sameTsServiceCount > 1 ? $"{arg} /sid {sid}" : arg;
     }
 
+    // TVTest .ch2 is CSV: a quoted channel name may contain a comma or escaped quote.
+    // Use this single parser for both route resolution and active-service counting.
+    internal static string[] ParseCh2Columns(string line)
+    {
+        var fields = new List<string>();
+        var value = new StringBuilder();
+        var quoted = false;
+        for (var i = 0; i < line.Length; i++)
+        {
+            var c = line[i];
+            if (c == '"')
+            {
+                if (quoted && i + 1 < line.Length && line[i + 1] == '"')
+                {
+                    value.Append('"');
+                    i++;
+                }
+                else
+                {
+                    quoted = !quoted;
+                }
+            }
+            else if (c == ',' && !quoted)
+            {
+                fields.Add(value.ToString().Trim());
+                value.Clear();
+            }
+            else
+            {
+                value.Append(c);
+            }
+        }
+        if (quoted) return Array.Empty<string>();
+        fields.Add(value.ToString().Trim());
+        return fields.ToArray();
+    }
+
     private static bool TryReadActiveServiceTriplet(string rawLine, out ushort onid, out ushort tsid, out ushort sid)
     {
         onid = tsid = sid = 0;
         var line = rawLine.Trim().TrimStart('\uFEFF');
         if (string.IsNullOrWhiteSpace(line) || line[0] is ';' or '#' or '[') return false;
-        var cols = line.Split(',', StringSplitOptions.TrimEntries);
+        var cols = ParseCh2Columns(line);
         if (cols.Length < 9) return false;
         var name = cols[0];
         if (string.IsNullOrWhiteSpace(name) || name is "－" or "-") return false;
@@ -501,6 +590,13 @@ public sealed class ChannelServiceState
 public sealed class ChannelLoadResult
 {
     public List<ChannelTarget> Targets { get; set; } = new();
+    // Direct routes are bound to their explicit BonDriver/.ch2 source. They do
+    // not make a legacy ChannelTarget globally routable until a physical tuner
+    // is selected and the route is resolved for that tuner.
+    public BonDriverChannelRouteCatalog? BonDriverRoutes { get; internal set; }
+    // ChSet-independent service inventory. Never merge into Targets/ServiceStates
+    // until an operation has selected a compatible physical tuner.
+    public List<BonDriverChannelRoute> DirectSourceServices { get; } = new();
     public List<ChannelServiceState> ServiceStates { get; } = new();
     public List<string> Files    { get; init; } = new();
     public List<string> Warnings { get; init; } = new();

@@ -1,4 +1,4 @@
-﻿using TvAIr.Core;
+using TvAIr.Core;
 
 namespace TvAIr.Tuner;
 
@@ -12,9 +12,9 @@ public static class TunerRuntimeProfileSource
         IniSettingsService ini,
         IReadOnlyList<TunerProfile>? fallback)
     {
-        if (ini?.Tuners is { Count: > 0 })
+        if (ini?.GetEffectiveTuners() is { Count: > 0 })
         {
-            return ini.Tuners
+            return ini.GetEffectiveTuners()
                 .Select(t =>
                 {
                     var group = TunerDisplayName.NormalizeGroup(t.Group);
@@ -24,6 +24,7 @@ public static class TunerRuntimeProfileSource
                     {
                         Name = TunerDisplayName.ForUi(t.Name, group, did),
                         BonDriverFileName = TunerIsolationPolicy.NormalizeBonDriverForRole(t.BonDriverFileName, group, role),
+                        ChannelCh2Path = (t.ChannelCh2Path ?? string.Empty).Trim(),
                         Group = group,
                         Did = did,
                         Role = role,

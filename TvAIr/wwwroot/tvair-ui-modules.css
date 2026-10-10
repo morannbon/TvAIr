@@ -2454,11 +2454,14 @@ body.tvair-guide-page .prog.prog-action-unsafe .program-cell-action-btn{
    Owner: Web settings tuner table geometry and action semantics.
    The table owns its column widths through colgroup classes; cells use semantic
    classes so adding/removing columns does not depend on positional column overrides. */
+body.tvair-guide-page #cfg-overlay .cfg-tuner-table-scroll{max-width:100%;overflow-x:auto;}
+body.tvair-guide-page #cfg-overlay #cfg-tuner-table{min-width:580px;}
 body.tvair-guide-page #cfg-overlay #cfg-tuner-table col.cfg-tuner-name-col{width:20%;}
 body.tvair-guide-page #cfg-overlay #cfg-tuner-table col.cfg-tuner-bon-col{width:36%;}
 body.tvair-guide-page #cfg-overlay #cfg-tuner-table col.cfg-tuner-wave-col{width:20%;}
 body.tvair-guide-page #cfg-overlay #cfg-tuner-table col.cfg-tuner-role-col{width:14%;}
 body.tvair-guide-page #cfg-overlay #cfg-tuner-table col.cfg-tuner-action-col{width:10%;}
+body.tvair-guide-page #cfg-overlay #cfg-tuner-table th{word-break:normal;white-space:nowrap;}
 body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-name-col,
 body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-name-cell,
 body.tvair-guide-page #cfg-overlay #cfg-tuner-table .cfg-tuner-wave-col,

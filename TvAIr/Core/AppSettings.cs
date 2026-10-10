@@ -1,4 +1,4 @@
-namespace TvAIr.Core;
+﻿namespace TvAIr.Core;
 
 /// <summary>
 /// アプリ全体の設定。appsettings.json の各セクションにバインドされる。
@@ -135,6 +135,9 @@ public sealed class TunerProfile
 
     /// <summary>BonDriverのDLLファイル名。未設定の場合は実行候補にしない。</summary>
     public string BonDriverFileName { get; set; } = "";
+
+    /// <summary>Optional .ch2 produced for this BonDriver. Empty means legacy channel resolution.</summary>
+    public string ChannelCh2Path { get; set; } = "";
 
     /// <summary>グループ (GR / BSCS / HYBRID)</summary>
     public string Group { get; set; } = "";

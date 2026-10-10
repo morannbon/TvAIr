@@ -255,6 +255,7 @@ public sealed class ReservationPresentationService
         var chainMap = BuildChainMap();
         var items = new List<ReservationPresentationItem>(reservations.Count);
         var serviceAccessSnapshot = _serviceAccess.Capture();
+        var recordingTuners = GetRecordingTuners();
 
         foreach (var r in reservations)
         {
@@ -263,7 +264,7 @@ public sealed class ReservationPresentationService
                 chainMap.TryGetValue(r.Id, out var chainInfo);
 
                 var sourceLabel = ReservationOriginClassifier.GetUserSourceLabel(r);
-                var serviceOperational = serviceAccessSnapshot.IsOperational(r);
+                var serviceOperational = serviceAccessSnapshot.IsOperationalForRecording(r, recordingTuners);
                 var serviceAccessReason = serviceOperational ? string.Empty : serviceAccessSnapshot.GetRejectReason(r);
                 var displayStatusLabel = BuildDisplayStatusLabel(r, sourceLabel, serviceOperational);
                 // RESERVATION_CONFLICT_PROJECTION_SINGLE_SOURCE:
@@ -272,7 +273,7 @@ public sealed class ReservationPresentationService
                 var conflictPrefix = string.Empty;
                 var priorityName = priorityOverrides is not null && priorityOverrides.TryGetValue(r.Id, out var projectedPriority)
                     ? projectedPriority
-                    : ResolvePresentationTunerName(r);
+                    : ResolvePresentationPriorityName(r, recordingTuners);
                 var title = ResolveReservationTitle(r);
                 if (IsPreRecordEpgRow(r) && !string.IsNullOrWhiteSpace(priorityName))
                     title = $"EPG確認（{priorityName}）";
@@ -336,6 +337,15 @@ public sealed class ReservationPresentationService
         }
 
         return items;
+    }
+
+    private static string ResolvePresentationPriorityName(Reservation reservation, IReadOnlyList<TunerProfile> tuners)
+    {
+        var physicalName = ResolvePresentationTunerName(reservation);
+        var profile = tuners.FirstOrDefault(t => string.Equals(t.Name, physicalName, StringComparison.OrdinalIgnoreCase));
+        if (profile is null) return physicalName;
+        var peers = tuners.Where(t => TunerDisplayName.NormalizeGroup(t.Group) == TunerDisplayName.NormalizeGroup(profile.Group)).ToList();
+        return TunerDisplayName.PrioritySlotName(profile.Group, peers.IndexOf(profile) + 1);
     }
 
     private static string ResolvePresentationTunerName(Reservation reservation)
@@ -486,7 +496,7 @@ public sealed class ReservationPresentationService
         {
             var projectedServiceName = ResolveProjectedEvent(reservation)?.ServiceName;
             return ServiceIdentityContract.ResolveReservationServiceName(
-                _channelLoader.Load().Targets,
+                _channelLoader.GetDisplayTargets(),
                 reservation.NetworkId,
                 reservation.TransportStreamId,
                 reservation.ServiceId,

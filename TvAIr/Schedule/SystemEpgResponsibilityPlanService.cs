@@ -1,6 +1,7 @@
 ﻿using TvAIr.Core;
 using TvAIr.Epg;
 using TvAIr.Tuner;
+using TvAIr.Channel;
 
 namespace TvAIr.Schedule;
 
@@ -32,13 +33,16 @@ public sealed class SystemEpgResponsibilityPlanService
 {
     private readonly IniSettingsService _ini;
     private readonly IReadOnlyList<TunerProfile> _tunerProfiles;
+    private readonly ChannelServiceAccessPolicy _serviceAccess;
 
     public SystemEpgResponsibilityPlanService(
         IniSettingsService ini,
-        IReadOnlyList<TunerProfile> tunerProfiles)
+        IReadOnlyList<TunerProfile> tunerProfiles,
+        ChannelServiceAccessPolicy serviceAccess)
     {
         _ini = ini;
         _tunerProfiles = tunerProfiles;
+        _serviceAccess = serviceAccess;
     }
 
     public SystemEpgResponsibilityPlan Build(IReadOnlyList<Reservation> reservations, DateTime now)
@@ -143,6 +147,7 @@ public sealed class SystemEpgResponsibilityPlanService
                 noCandidateDailyFallbackTuners);
         }
 
+        var channelSnapshot = _serviceAccess.Capture();
         var nearHorizon = now.AddHours(3);
         var selected = new List<SystemEpgPreRecordResponsibility>();
 
@@ -160,7 +165,8 @@ public sealed class SystemEpgResponsibilityPlanService
                 continue;
 
             var groupCandidates = candidates
-                .Where(x => string.Equals(x.Group, group, StringComparison.OrdinalIgnoreCase))
+                .Where(x => !selected.Any(s => s.ParentReservationId == x.Parent.Id)
+                    && groupPriorities.Any(t => channelSnapshot.CanTune(t, x.Parent)))
                 .ToList();
             if (groupCandidates.Count == 0)
                 continue;
@@ -182,7 +188,9 @@ public sealed class SystemEpgResponsibilityPlanService
                 var count = Math.Min(stage1.Count, groupPriorities.Count);
                 for (var i = 0; i < count; i++)
                 {
-                    var candidate = stage1[i];
+                    var candidate = stage1.FirstOrDefault(x => !selected.Any(s => s.ParentReservationId == x.Parent.Id)
+                        && channelSnapshot.CanTune(groupPriorities[i], x.Parent));
+                    if (candidate is null) continue;
                     var priority = groupPriorities[i].Name;
                     if (CanOwnPreRecordBeforeDaily(candidate, priority, activeDailyRowsByPriority))
                     {
@@ -207,7 +215,9 @@ public sealed class SystemEpgResponsibilityPlanService
             if (stage2 is null)
                 continue;
 
-            var stage2Priority = groupPriorities[0].Name;
+            var stage2Owner = groupPriorities.FirstOrDefault(t => channelSnapshot.CanTune(t, stage2.Parent));
+            if (stage2Owner is null) continue;
+            var stage2Priority = stage2Owner.Name;
             if (CanOwnPreRecordBeforeDaily(stage2, stage2Priority, activeDailyRowsByPriority))
             {
                 selected.Add(new SystemEpgPreRecordResponsibility(
@@ -307,8 +317,8 @@ public sealed class SystemEpgResponsibilityPlanService
     private static bool IsDailyEpgRow(Reservation r)
         => ReservationIntentContract.IsDailyEpg(r);
 
-    private static string ResolveGroup(Reservation reservation, IReadOnlyList<TunerProfile> recordingTuners)
-        => NormalizeGroup(ReservationTunerGroupResolver.Resolve(reservation, recordingTuners));
+    private string ResolveGroup(Reservation reservation, IReadOnlyList<TunerProfile> recordingTuners)
+        => NormalizeGroup(_serviceAccess.Capture().ResolveSchedulingGroup(reservation, recordingTuners));
 
     private static int LogicalPriorityOrder(string? tunerName)
     {

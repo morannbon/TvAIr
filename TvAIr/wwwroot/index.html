@@ -6,22 +6,22 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.5"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.5"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.6"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.6"/>
 
-<link href="/tvair-ui-foundation.css?v=1.2.5" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.5" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.5" rel="stylesheet"/>
-<link href="/tvair-epg-panel.css?v=1.2.5" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.5" rel="stylesheet"/>
-<link href="/tvair-settings-host.css?v=1.2.5" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.2.6" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.6" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.6" rel="stylesheet"/>
+<link href="/tvair-epg-panel.css?v=1.2.6" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.6" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.6" rel="stylesheet"/>
 
-<script src="/tvair-theme.js?v=1.2.5"></script>
-<script src="/tvair-page-view-state.js?v=1.2.5"></script>
-<script src="/tvair-action-button-state.js?v=1.2.5"></script>
-<script src="/tvair-reservation-action-state.js?v=1.2.5"></script>
-<script>var TVA_IR_UI_VERSION="1.2.5";</script>
-<script src="/genre-shared.js?v=1.2.5"></script>
+<script src="/tvair-theme.js?v=1.2.6"></script>
+<script src="/tvair-page-view-state.js?v=1.2.6"></script>
+<script src="/tvair-action-button-state.js?v=1.2.6"></script>
+<script src="/tvair-reservation-action-state.js?v=1.2.6"></script>
+<script>var TVA_IR_UI_VERSION="1.2.6";</script>
+<script src="/genre-shared.js?v=1.2.6"></script>
 
 
 
@@ -230,10 +230,11 @@
 </div>
 </div>
 <div class="cfg-row">
-<label>地上波 ChSet.txt ファイルパス</label>
+<label>地上波 ChSet.txt ファイルパス（任意）</label>
 <div class="cfg-input-wrap">
 <input autocapitalize="off" autocomplete="off" id="cfg-gr-chset" spellcheck="false" type="text"/>
 <button class="cfg-browse" onclick="browseFile('chset','cfg-gr-chset',this)">参照...</button>
+<button class="cfg-browse" type="button" onclick="document.getElementById('cfg-gr-chset').value=''">ChSetを使わない</button>
 </div>
 </div>
 <div class="cfg-row">
@@ -244,11 +245,13 @@
 </div>
 </div>
 <div class="cfg-row">
-<label>BS/CS ChSet.txt ファイルパス</label>
+<label>BS/CS ChSet.txt ファイルパス（任意）</label>
 <div class="cfg-input-wrap">
 <input autocapitalize="off" autocomplete="off" id="cfg-bscs-chset" spellcheck="false" type="text"/>
 <button class="cfg-browse" onclick="browseFile('chset','cfg-bscs-chset',this)">参照...</button>
+<button class="cfg-browse" type="button" onclick="document.getElementById('cfg-bscs-chset').value=''">ChSetを使わない</button>
 </div>
+<div class="cfg-note">ISDB-CではChSet.txtは不要です。空欄にすると、選択したBonDriver名に対応するch2をBonDriverフォルダ、次にTVTestフォルダから自動で読み込みます。DLL名の拡張子をch2に置き換えたファイルを使用します。ChSetの使用有無を切り替えたら保存後に再起動してください。PT3の既存設定はそのまま使えます。</div>
 
 </div>
 </div>
@@ -264,6 +267,7 @@
 </div>
 <div class="cfg-note">地デジ/BS/CSは3波を1つのBonDriverで扱える特定のチューナー向けです。</div>
 </div>
+<div class="cfg-tuner-table-scroll" tabindex="0" aria-label="チューナー設定一覧。幅が足りない場合は横にスクロールできます。">
 <table id="cfg-tuner-table">
 <colgroup>
 <col class="cfg-tuner-name-col"/>
@@ -283,6 +287,10 @@
 </thead>
 <tbody id="cfg-tuner-tbody"></tbody>
 </table>
+</div>
+<div class="cfg-note">ISDB-Cでは「TVTest」設定でChSet.txtを空欄にしてください。選択したBonDriverと同じ名前のch2を、指定済みのBonDriverフォルダ、次にTVTestフォルダから読み込みます。チューナーごとのファイル入力は不要です。</div>
+<div class="cfg-note">ChSetを使う／使わないの切替は保存後に再起動してください。同じパスのch2更新は次のチャンネル読込で反映します。</div>
+<div class="cfg-note">局名・選局番号の変更は更新したch2から読み込みます。局の識別番号（ONID／TSID／SID）が変わる移動ではEPGの再取得と予約の確認が必要です。旧番号の予約は自動移行しません。</div>
 <div class="cfg-note">録画用は予約録画、定時EPG取得、録画前EPG確認に使用します。視聴用は視聴専用です。</div>
 <div class="cfg-note">BonDriverが未設定のチューナーは使用されません。</div>
 
@@ -408,6 +416,7 @@
 <button class="wave-btn gr-btn wave-gr on" data-action-context="program-guide-toolbar" data-button-role="wave" data-wave="GR" type="button">地上波</button>
 <button class="wave-btn bs-btn wave-bs on" data-action-context="program-guide-toolbar" data-button-role="wave" data-wave="BS" type="button">BS</button>
 <button class="wave-btn cs-btn wave-cs on" data-action-context="program-guide-toolbar" data-button-role="wave" data-wave="CS" type="button">CS</button>
+<button class="wave-btn on" data-action-context="program-guide-toolbar" data-button-role="wave" data-wave="CATV" type="button">CATV</button>
 </div>
 </div>
 <div id="time-nav">
@@ -449,9 +458,9 @@
 </div>
 </div>
 </div>
-<script src="/tvair-notification.js?v=1.2.5"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.5"></script>
-<script src="/tvair-epg-widget.js?v=1.2.5"></script>
+<script src="/tvair-notification.js?v=1.2.6"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.6"></script>
+<script src="/tvair-epg-widget.js?v=1.2.6"></script>
 <script>
 const PROGRAM_GUIDE_GEOMETRY=Object.freeze({
   dayStartHour:4,
@@ -2008,7 +2017,7 @@ function guideDomSummary(){
 
 // ── 放送波フィルター ──────────────────────────────────────────────
 // ON状態のgroupセット（デフォルト全ON）
-const waveFilterState={GR:true, BS:true, CS:true};
+const waveFilterState={GR:true, BS:true, CS:true, CATV:true};
 
 function setWaveButtonState(group, btn){
   if(!btn) return;
@@ -3400,8 +3409,9 @@ function resolveProgramGuideWaveGroup(group, networkId, fallback){
     // ChannelFileLoader exposes satellite channels through the BSCS group projection.
     // ProgramGuide display/coloring splits it into BS and CS by NID.
     if(g==='BSCS' || g==='BS/CS' || g==='S' || g==='SATELLITE') return nid===4 ? 'BS' : 'CS';
+    if(g==='HYBRID' || g==='CATV') return 'CATV';
   }
-  return nid===4 ? 'BS' : ((nid===6 || nid===7) ? 'CS' : 'GR');
+  return nid===4 ? 'BS' : ((nid===6 || nid===7 || nid===10) ? 'CS' : ((nid>=0x7880 && nid<=0x7FE8) ? 'GR' : 'CATV'));
 }
 
 function buildServiceColumns(events){
@@ -4764,7 +4774,7 @@ function completeCfgSave(){
   hideCfgModal();
 }
 window.TvAIrSettingsModule = window.TvAIrSettingsModule || {
-  version:'1.2.5',
+  version:'1.2.6',
   open:()=>showCfgModal(),
   close:()=>hideCfgModal(),
   contract:'single-settings-module-web-modal-basis'
@@ -4909,6 +4919,7 @@ function defaultTunerData(index, total){
     group: '',
     did: nextDid(index),
     role: '',
+    channelCh2Path: '',
   };
 }
 function refreshTunerVirtualNames(){
@@ -5781,8 +5792,8 @@ if(!tvairSettingsFrameMode){
   bindGuideTopOperationUi();
 }
 </script>
-<script src="/tvair-settings-host.js?v=1.2.5"></script>
-<script src="/tvair-menu-spine.js?v=1.2.5"></script>
+<script src="/tvair-settings-host.js?v=1.2.6"></script>
+<script src="/tvair-menu-spine.js?v=1.2.6"></script>
 <script>
 (function(){
   try{

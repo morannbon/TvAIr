@@ -51,6 +51,10 @@ public sealed class ChannelTarget
     public string Ch2FileName { get; set; } = "";
     public int Ch2LineNumber { get; set; }
     public int BonDriverChannel { get; set; }
+    // Raw TVTest .ch2 tuning coordinates. Do not substitute these for the
+    // resolved legacy route: they belong to the BonDriver that produced .ch2.
+    public int Ch2TuningSpace { get; set; } = -1;
+    public int Ch2ChannelIndex { get; set; } = -1;
     public int ResolvedSpace { get; set; }
     public int ResolvedChannelIndex { get; set; }
     public int SameTransportServiceCount { get; set; }

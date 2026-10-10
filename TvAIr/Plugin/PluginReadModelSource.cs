@@ -54,7 +54,8 @@ internal sealed class PluginReadModelSource
         {
             new PluginProgramGuideWaveFilterSnapshot("GR", "GR", "地上波", 0, true),
             new PluginProgramGuideWaveFilterSnapshot("BS", "BS", "BS", 1, true),
-            new PluginProgramGuideWaveFilterSnapshot("CS", "CS", "CS", 2, true)
+            new PluginProgramGuideWaveFilterSnapshot("CS", "CS", "CS", 2, true),
+            new PluginProgramGuideWaveFilterSnapshot("CATV", "HYBRID", "CATV", 3, true)
         };
 
     public IReadOnlyList<Reservation> GetReservations()
@@ -62,7 +63,7 @@ internal sealed class PluginReadModelSource
 
     public string ResolveCurrentServiceName(ushort networkId, ushort transportStreamId, ushort serviceId, string? storedFallback = null)
         => ServiceIdentityContract.ResolveCurrentServiceName(
-            GetChannelLoad().Targets,
+            _channelLoader.GetDisplayTargets(),
             networkId,
             transportStreamId,
             serviceId,
@@ -78,7 +79,7 @@ internal sealed class PluginReadModelSource
                 reservation.ServiceId,
                 reservation.EventId);
         return ServiceIdentityContract.ResolveReservationServiceName(
-            GetChannelLoad().Targets,
+            _channelLoader.GetDisplayTargets(),
             reservation.NetworkId,
             reservation.TransportStreamId,
             reservation.ServiceId,

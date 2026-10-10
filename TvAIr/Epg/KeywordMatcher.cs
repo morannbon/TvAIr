@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using System.Globalization;
 using System.Text.RegularExpressions;
 using TvAIr.Channel;
@@ -77,7 +77,7 @@ public sealed class KeywordMatcher
         var result = new KeywordRulePreviewResult();
         var now = DateTime.Now;
         var channelMap = _serviceAccess.Capture();
-        var channelTargets = channelMap.ActiveTargets.ToList();
+        var channelTargets = channelMap.DisplayTargets.ToList();
         var events = GetFutureAutoReservationEvents(now, channelMap)
             .OrderBy(e => e.Start)
             .ThenBy(e => e.ServiceName)
@@ -304,13 +304,13 @@ public sealed class KeywordMatcher
             : "committed_ts_future_programmes_x_all_enabled_rules";
 
         // EPGは受信TS上の全サービスを保持する。一方、自動検索・予約・録画対象は
-        // TVTest .ch2 の有効状態(state!=0)を正本とし、さらに現在のChSet経路へ解決できる
-        // サービスだけに限定する。録画ファイルの「現在サービスのみ保存」とは独立した契約。
+        // TVTest .ch2 の有効状態(state!=0)を正本とし、ChSet経路または
+        // 録画用BonDriverに明示的に結び付いた.ch2経路へ解決できるサービスに限定する。録画ファイルの「現在サービスのみ保存」とは独立した契約。
         var channelMap = _serviceAccess.Capture();
-        var channelTargets = channelMap.ActiveTargets.ToList();
+        var channelTargets = channelMap.DisplayTargets.ToList();
         var safeFutureEvents = GetFutureSafeEvents(futureEvents, now);
         var events = safeFutureEvents
-            .Where(e => channelMap.IsOperational(e.NetworkId, e.TransportStreamId, e.ServiceId))
+            .Where(e => IsRecordingServiceAvailable(channelMap, e.NetworkId, e.TransportStreamId, e.ServiceId))
             .ToList();
         var disabledFutureCount = safeFutureEvents.Count(e => channelMap.GetEligibility(e.NetworkId, e.TransportStreamId, e.ServiceId) == ChannelServiceEligibility.Disabled);
         var routeUnavailableFutureCount = safeFutureEvents.Count(e => channelMap.GetEligibility(e.NetworkId, e.TransportStreamId, e.ServiceId) == ChannelServiceEligibility.ActiveRouteUnavailable);
@@ -1124,9 +1124,14 @@ public sealed class KeywordMatcher
             ? string.Empty
             : text.Trim().Normalize(NormalizationForm.FormKC);
 
+    private bool IsRecordingServiceAvailable(ChannelServiceAccessSnapshot channelMap,
+        ushort networkId, ushort transportStreamId, ushort serviceId)
+        => channelMap.IsOperationalForConfiguredRecordingTuners(
+            networkId, transportStreamId, serviceId, _ini.GetEffectiveTuners());
+
     private IReadOnlyList<ProjectedProgramEvent> GetFutureAutoReservationEvents(DateTime now, ChannelServiceAccessSnapshot channelMap)
         => GetFutureSafeEvents(now)
-            .Where(e => channelMap.IsOperational(e.NetworkId, e.TransportStreamId, e.ServiceId))
+            .Where(e => IsRecordingServiceAvailable(channelMap, e.NetworkId, e.TransportStreamId, e.ServiceId))
             .ToList();
 
     private int ReconcileInactiveScheduledKeywordReservations(ChannelServiceAccessSnapshot channelMap)
@@ -1135,7 +1140,7 @@ public sealed class KeywordMatcher
             .Where(r => r.Source == ReservationSource.Keyword
                         && r.Status == ReservationStatus.Scheduled
                         && r.SourceRuleId.HasValue
-                        && !channelMap.IsTvTestEnabled(r.NetworkId, r.TransportStreamId, r.ServiceId))
+                        && !channelMap.IsEnabledForConfiguredRecordingTuners(r.NetworkId, r.TransportStreamId, r.ServiceId, _ini.GetEffectiveTuners()))
             .GroupBy(r => r.SourceRuleId!.Value)
             .ToList();
 
