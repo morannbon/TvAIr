@@ -307,27 +307,28 @@ internal static class Program
         summary.CardReaderTvTestDirectory = tvTestDir;
         summary.CardReaderReferenceRule = "release_contract";
 
-        if (string.IsNullOrWhiteSpace(tvTestDir))
-        {
-            summary.CardReaderReferenceResult = "SKIP_TVTEST_DIR_NOT_RESOLVED";
-            return;
-        }
-
-        var winscardPath = Path.Combine(tvTestDir, "winscard.dll");
+        // Prefer the explicitly configured TVTest card-reader shim when present.  If there is
+        // no shim, pin the Windows PC/SC provider before initializing B25Decoder.dll.
+        // The system DLL is selected from System32 by the Windows loader, not from an
+        // application-controlled search directory.  B25Decoder still owns card connection.
+        var winscardPath = !string.IsNullOrWhiteSpace(tvTestDir)
+            ? Path.Combine(tvTestDir, "winscard.dll")
+            : null;
         summary.CardReaderWinscardPath = winscardPath;
-        if (!File.Exists(winscardPath))
-        {
-            summary.CardReaderReferenceResult = "SKIP_TVTEST_WINSCARD_DLL_MISSING";
-            return;
-        }
+        var shimPresent = winscardPath is not null && File.Exists(winscardPath);
+        var module = shimPresent
+            ? NativeMethods.LoadLibraryExW(winscardPath!, IntPtr.Zero, NativeMethods.LOAD_WITH_ALTERED_SEARCH_PATH)
+            : NativeMethods.LoadLibraryExW("winscard.dll", IntPtr.Zero, NativeMethods.LOAD_LIBRARY_SEARCH_SYSTEM32);
 
-        var module = NativeMethods.LoadLibraryExW(winscardPath, IntPtr.Zero, NativeMethods.LOAD_WITH_ALTERED_SEARCH_PATH);
         summary.CardReaderWinscardLoaded = module != IntPtr.Zero;
-        summary.CardReaderReferenceResult = module != IntPtr.Zero ? "OK_TVTEST_WINSCARD_PRELOADED" : $"NG_LOADLIBRARYEX_LASTERROR_{Marshal.GetLastWin32Error()}";
+        summary.CardReaderReferenceResult = module != IntPtr.Zero
+            ? shimPresent ? "OK_TVTEST_WINSCARD_PRELOADED" : "OK_SYSTEM_WINSCARD_PRELOADED"
+            : shimPresent ? $"NG_TVTEST_WINSCARD_LOAD_LASTERROR_{Marshal.GetLastWin32Error()}"
+                          : $"NG_SYSTEM_WINSCARD_LOAD_LASTERROR_{Marshal.GetLastWin32Error()}";
         summary.CardReaderLoadedModulePath = module != IntPtr.Zero ? NativeMethods.GetModulePath(module) : null;
 
-        // Intentionally keep the module loaded for the worker lifetime.  This pins the TVTest-directory
-        // card-reader shim before any B25/libaribb25 path can initialize, without copying winscard.* into TvAIr.
+        // Keep the selected module loaded for the worker lifetime. Do not silently replace
+        // a configured-but-broken shim with the system DLL; report that failure instead.
         if (module != IntPtr.Zero) NativeMethods.RegisterPinnedCardReaderModule(module);
     }
 
@@ -1187,6 +1188,7 @@ internal sealed class CliOptions
 internal static class NativeMethods
 {
     internal const uint LOAD_WITH_ALTERED_SEARCH_PATH = 0x00000008;
+    internal const uint LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x00000800;
     private static readonly List<IntPtr> PinnedCardReaderModules = new();
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -1376,13 +1378,15 @@ internal sealed class ExternalB25DecoderRuntime : IDisposable
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate IntPtr CreateB25DecoderDelegate();
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    // IB25Decoder virtual members are C++ instance methods. On x86, self must
+    // be passed in ECX (ThisCall), unlike the exported Cdecl factory above.
+    [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
     private delegate int B25InitializeDelegate(IntPtr self, uint round);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
     private delegate void B25ReleaseDelegate(IntPtr self);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
     private delegate int B25DecodeDelegate(IntPtr self, IntPtr src, uint srcSize, out IntPtr dst, out uint dstSize);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
     private delegate int B25FlushDelegate(IntPtr self, out IntPtr dst, out uint dstSize);
 }
 

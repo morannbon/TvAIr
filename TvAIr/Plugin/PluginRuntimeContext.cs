@@ -58,7 +58,7 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
         WebRuntime = _webRuntimeManager;
         _videoOverlayHost = new VideoOverlayHost(pluginId, resolveViewerTarget ?? (_ => null), log, permissions);
         VideoOverlay = _videoOverlayHost;
-        Data = new DataApi(hostApis.Reservations, hostApis.Recordings, hostApis.ProgramGuide, hostApis.Channels, hostApis.Tuners);
+        Data = new DataApi(hostApis.Reservations, hostApis.Recordings, hostApis.ProgramGuide, hostApis.Channels, hostApis.Tuners, log);
         Notifications = new NotificationHost(hostApis.Notifications);
         PathPicker = new RuntimePathPickerApi(pluginId, permissions, pathPickerHost);
         Storage = scopedServices.CreateRuntimeStorage(pluginId);
@@ -773,14 +773,21 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
         private readonly ITvAirTunersApi _tuners;
         private readonly ConcurrentDictionary<string, SnapshotState> _snapshots = new(StringComparer.Ordinal);
         private readonly object _captureGate = new();
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        private readonly TvAIr.Core.LogRepository _diagnostics;
+#endif
 
         public DataApi(
             ITvAirReservationsApi reservations,
             ITvAirRecordingsApi recordings,
             ITvAirProgramGuideApi programGuide,
             ITvAirChannelsApi channels,
-            ITvAirTunersApi tuners)
+            ITvAirTunersApi tuners,
+            TvAIr.Core.LogRepository diagnostics)
         {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+            _diagnostics = diagnostics;
+#endif
             _reservations = reservations;
             _recordings = recordings;
             _programGuide = programGuide;
@@ -908,13 +915,29 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
         private StableCapture? CaptureStable(IReadOnlyList<TvAirDataSourceDescriptor> sources)
         {
             CapturedSources? previous = null;
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+            var changedSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var captureWatch = global::System.Diagnostics.Stopwatch.StartNew();
+#endif
             for (var attempt = 0; attempt < StableCaptureAttempts; attempt++)
             {
                 var current = CaptureSources(sources);
-                if (previous is not null && RevisionsEqual(previous.SourceRevisions, current.SourceRevisions))
-                    return current.ToStableCapture();
+                if (previous is not null)
+                {
+                    if (RevisionsEqual(previous.SourceRevisions, current.SourceRevisions))
+                        return current.ToStableCapture();
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+                    foreach (var source in sources)
+                        if (!string.Equals(previous.SourceRevisions[source.SourceId], current.SourceRevisions[source.SourceId], StringComparison.Ordinal))
+                            changedSources.Add(source.SourceId);
+#endif
+                }
                 previous = current;
             }
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+            _diagnostics.Add("PLUGIN_SNAPSHOT_CAPTURE_CONFLICT", "DataApi",
+                $"result=REVISION_CONFLICT sources=[{string.Join(',', sources.Select(x => x.SourceId))}] changed=[{string.Join(',', changedSources.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))}] elapsedMs={captureWatch.ElapsedMilliseconds} attempts={StableCaptureAttempts} rule=runtime_snapshot_consistency_diagnostic");
+#endif
             return null;
         }
 

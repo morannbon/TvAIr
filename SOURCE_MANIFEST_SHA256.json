@@ -1,0 +1,1332 @@
+[
+  {
+    "path": "AribDecodeBridge/AribDecodeBridge.cpp",
+    "bytes": 35022,
+    "sha256": "e1044d52beb2615142e48cc4c6b11c0eb602de954c761d8e7629af58bb1f345c"
+  },
+  {
+    "path": "AribDecodeBridge/AribDecodeBridge.h",
+    "bytes": 116,
+    "sha256": "7bfdf3a1e18d8db3f4fd395bc3bf0169404102540c8d34352923ef38ae312d4a"
+  },
+  {
+    "path": "AribDecodeBridge/AribDecodeBridge.vcxproj",
+    "bytes": 6025,
+    "sha256": "c2ed5e2e91ccfc224ed007a447313bfa4d3376bd9b2d08da198a586c12f0c123"
+  },
+  {
+    "path": "AribDecodeBridge/AribDecodeBridge.vcxproj.filters",
+    "bytes": 509,
+    "sha256": "f945467ef1f8109586e18b7205aaf6a13205718f7982d9671cbd580122a3d1c4"
+  },
+  {
+    "path": "build/Set-TvAIr-Version.ps1",
+    "bytes": 7496,
+    "sha256": "0eae38c35689b719e6ed0bcd5220052a7df3683fb707f269157f857e842aae40"
+  },
+  {
+    "path": "build/Verify-AssistantReportingBoundary.ps1",
+    "bytes": 3545,
+    "sha256": "db12b0ce1ac9f5dd6a8c2dc8fc5345f91d9129e7973c472950fabe10b6978d17"
+  },
+  {
+    "path": "build/Verify-DeveloperRegressionGates.ps1",
+    "bytes": 559,
+    "sha256": "9823206891fdf89aaac06881d132f33495981e84b35dc18eebf30368f885fcb1"
+  },
+  {
+    "path": "build/Verify-EnvironmentIndependentContent.ps1",
+    "bytes": 5029,
+    "sha256": "d5dd2e6b81170a71ed2eda81ef0d53fac275c1aa1994a01a8a81d99d74ee5b66"
+  },
+  {
+    "path": "build/Verify-GeneralLogReportBoundary.ps1",
+    "bytes": 803,
+    "sha256": "5daa3c99b3bbffbe922a73ea0632b3a3a314502558f953bb455e4ad58fc8d3bf"
+  },
+  {
+    "path": "build/Verify-ProgramGuideViewportOwnership.ps1",
+    "bytes": 5503,
+    "sha256": "dc27d412719daca679dce0a484d3271caa8bd82eede606e65050a80c126289ab"
+  },
+  {
+    "path": "build/Verify-ReportPrivacyBoundary.ps1",
+    "bytes": 3554,
+    "sha256": "12eb12fbc1bac1f5c68f8b46184f8106555b152bd4a13ea21a508f8ddf21c074"
+  },
+  {
+    "path": "build/Verify-TvAIr-Version.ps1",
+    "bytes": 6329,
+    "sha256": "44b8534764ca38604d3ac032e98c78e1f14f60620ac0ea049a908b706403117a"
+  },
+  {
+    "path": "Directory.Build.props",
+    "bytes": 1198,
+    "sha256": "7de42ecdfb5eaec0dc4d9a933e311b93c6fc04c3592d20a67805c81d6f1f2a9a"
+  },
+  {
+    "path": "Directory.Build.targets",
+    "bytes": 1022,
+    "sha256": "ed110c10b934fd83619f33a246435ce4ead0c8f8ea93bf6baad18c1c854ccc50"
+  },
+  {
+    "path": "LICENSE",
+    "bytes": 1183,
+    "sha256": "13d96cccfaa26d1177fa3ba39b9eae085b76fa2fc66f6fba6685d8ed8fa72237"
+  },
+  {
+    "path": "README.md",
+    "bytes": 20589,
+    "sha256": "fc37b6dc45239761230a811b08c983d7a94986600ec7775924035310cb701435"
+  },
+  {
+    "path": "README.txt",
+    "bytes": 20589,
+    "sha256": "fc37b6dc45239761230a811b08c983d7a94986600ec7775924035310cb701435"
+  },
+  {
+    "path": "Shared/EitEventGroupContract.cs",
+    "bytes": 1436,
+    "sha256": "18a47628099f59b86a2096bc0faa3aac8ce18e97252eedf76fed1ec9d0c5ea86"
+  },
+  {
+    "path": "Tests/TvAIr.B25Abi.Tests/MockB25.cpp",
+    "bytes": 795,
+    "sha256": "07d3e59846dac4b140672402185c06802e41aee7f704c722e300428bcbb98550"
+  },
+  {
+    "path": "Tests/TvAIr.B25Abi.Tests/MockB25.def",
+    "bytes": 65,
+    "sha256": "6d6769e1768a216d354cec39ef790fbf78f842449fa8c5dcb1d5d4f839330dcf"
+  },
+  {
+    "path": "Tests/TvAIr.B25Abi.Tests/Program.cs",
+    "bytes": 2196,
+    "sha256": "23ac94421867aae34a100c938fdc9cca8c5d695bcecd50d735d7c02b2075a457"
+  },
+  {
+    "path": "Tests/TvAIr.B25Abi.Tests/README.md",
+    "bytes": 882,
+    "sha256": "e8a1dec1eb5e0066effc8f7f5af4c027c86ad5e09c225d37df97f28404124d64"
+  },
+  {
+    "path": "Tests/TvAIr.B25Abi.Tests/TvAIr.B25Abi.Tests.csproj",
+    "bytes": 373,
+    "sha256": "1031848c1d99b75744e8110bc16983baa3fe14b304e0fdd998c66fb6dd1338cd"
+  },
+  {
+    "path": "Tests/TvAIr.IsdbC.Tests/Program.cs",
+    "bytes": 39111,
+    "sha256": "93a7a632ff572b786bdea4550570f4db787aa261c127b64ea06a8e7a818d3a3a"
+  },
+  {
+    "path": "Tests/TvAIr.IsdbC.Tests/TvAIr.IsdbC.Tests.csproj",
+    "bytes": 731,
+    "sha256": "a3303ee0ea14695a14fb55eb2f00f579669d02fc36b56b1a235b72a1e19d5b89"
+  },
+  {
+    "path": "TvAIr.sln",
+    "bytes": 5236,
+    "sha256": "f86ca01cd5dc987d5898944bce0fad6e7463f5c369ab13b4f66d4506af3dada7"
+  },
+  {
+    "path": "TvAIr/appsettings.example.json",
+    "bytes": 686,
+    "sha256": "724a8008542bb89842f9eff1a6fbf0f235249835344977992448a7de34b6a1ad"
+  },
+  {
+    "path": "TvAIr/Channel/BonDriverChannelRouteCatalog.cs",
+    "bytes": 17559,
+    "sha256": "474e8931aced3ea081f8e9edc42773606c955c0d7edd356542f54c6b24f6cb76"
+  },
+  {
+    "path": "TvAIr/Channel/BonDriverChannelSourceResolver.cs",
+    "bytes": 1374,
+    "sha256": "bae1567c4ebadc48db790d6640bb25ab138496e6db3a8e6a071e79d61724f310"
+  },
+  {
+    "path": "TvAIr/Channel/ChannelFileLoader.cs",
+    "bytes": 27438,
+    "sha256": "ed6d00f96475eb5df274a694d28c113175344daeb1688cbd0f330a37e72378b4"
+  },
+  {
+    "path": "TvAIr/Channel/ChannelServiceAccessPolicy.cs",
+    "bytes": 20658,
+    "sha256": "b533d954df8d350b647c9f372337cdc4919305867cab0317c087ea4d2a7ff4ff"
+  },
+  {
+    "path": "TvAIr/Core/ApplicationExitWatchdog.cs",
+    "bytes": 1551,
+    "sha256": "d319417ee14c7d28f186797babb2273a85c3b421535f4354d367ac70f3e9ed8f"
+  },
+  {
+    "path": "TvAIr/Core/ApplicationOperationGate.cs",
+    "bytes": 3910,
+    "sha256": "892f06f95b602b51813ec7b2eea5bcc3d97eadecf9f8d525c7cf5dbc55ff350e"
+  },
+  {
+    "path": "TvAIr/Core/AppSettings.cs",
+    "bytes": 7199,
+    "sha256": "67a5df94d90aa4735de463782387f0837fa0b934c8c94fb8d188bdd38dda7a21"
+  },
+  {
+    "path": "TvAIr/Core/BroadcastNetworkIdentity.cs",
+    "bytes": 1305,
+    "sha256": "26efcb8e0f99aa4647328f161d4decebb069922ba789fe366def7d24605f55c0"
+  },
+  {
+    "path": "TvAIr/Core/ChainReservationContract.cs",
+    "bytes": 5079,
+    "sha256": "bfa2b98df32a2b4614d7a19068cf26162ce595596857e674d00680304c583430"
+  },
+  {
+    "path": "TvAIr/Core/ChainReservationEligibilityContract.cs",
+    "bytes": 8260,
+    "sha256": "c53ea450562309a54bd69dfe727c9a044bd008dd2eaa15ee44bf6c99781caf6b"
+  },
+  {
+    "path": "TvAIr/Core/CredentialProtector.cs",
+    "bytes": 1866,
+    "sha256": "6fa9191507151e2c47abb61da3d7140f74537fead4091dc92dca47bf744aba66"
+  },
+  {
+    "path": "TvAIr/Core/Database.cs",
+    "bytes": 32629,
+    "sha256": "add070a77b2dc3ed239457c0a475f5ed242bb9efd229f84905b898a40f8685fe"
+  },
+  {
+    "path": "TvAIr/Core/DeveloperDiagnostics.cs",
+    "bytes": 822,
+    "sha256": "3788b23d5677d63c71e9f1b5c972b9cf0d754b3a6492484f9cc0d6531244c429"
+  },
+  {
+    "path": "TvAIr/Core/EpgDurationPolicy.cs",
+    "bytes": 3394,
+    "sha256": "33f2add771602a6add1222231de4cfa4f13a724a9f3938c31d6c07c764318b7f"
+  },
+  {
+    "path": "TvAIr/Core/EpgRecordingHandoffPolicy.cs",
+    "bytes": 971,
+    "sha256": "81654f04057787c96ae0caa0be68fa321d47b871b2479acb8d8d57c22657ac06"
+  },
+  {
+    "path": "TvAIr/Core/HostThemeStateContract.cs",
+    "bytes": 1387,
+    "sha256": "2b9b7cbfa031680f2394784e6e9753b8cb5e1243340f2315488f8babeb13239e"
+  },
+  {
+    "path": "TvAIr/Core/IniSettingsService.cs",
+    "bytes": 93705,
+    "sha256": "7d79044d7df3b430c9776af92fbb64e5d6a7f1a1e9356116f2080659cc3fb5f1"
+  },
+  {
+    "path": "TvAIr/Core/LogicalViewerSlotIdentity.cs",
+    "bytes": 1435,
+    "sha256": "cb9d00505961c89ba4491dd4d681b025d93d1c4a6be6a8fde037c0767f9df551"
+  },
+  {
+    "path": "TvAIr/Core/LogRepository.cs",
+    "bytes": 19539,
+    "sha256": "6d2a8b78cacbeb1cc370a275c3dd6039798a819d340487e0ad2f276314758082"
+  },
+  {
+    "path": "TvAIr/Core/Models.cs",
+    "bytes": 17149,
+    "sha256": "a9cdba87cda111d6aa7cba2ade8e103d092d9312146b5037b2355458b5ac31a6"
+  },
+  {
+    "path": "TvAIr/Core/NativeDialogThemePalette.cs",
+    "bytes": 2086,
+    "sha256": "da0bf5a32033ed16608f009eb3bb30c5d94fdef7f5146d0702ecdc8fafe933f0"
+  },
+  {
+    "path": "TvAIr/Core/NetworkAccessSecurity.cs",
+    "bytes": 12291,
+    "sha256": "d597d1eb2b324b94e8da13916dd55fd2be6a10f478524ece3884ce5aeadbe65e"
+  },
+  {
+    "path": "TvAIr/Core/NetworkEndpointBindingConfiguration.cs",
+    "bytes": 7458,
+    "sha256": "ac9c47e16816bac43ad7a9eee60e47c22fe770f21f94a2318b3b380699f769da"
+  },
+  {
+    "path": "TvAIr/Core/NetworkUsageGate.cs",
+    "bytes": 2980,
+    "sha256": "9033e3175c18bb6e05d063779dec2d6f5f8a41931c6b32ff08ae574cbcc8ad67"
+  },
+  {
+    "path": "TvAIr/Core/RecordingTsVerifier.cs",
+    "bytes": 18218,
+    "sha256": "197ef316a035a699919b81c01b3093129f3dfcd7c9b6c500fa22246e8a831a5a"
+  },
+  {
+    "path": "TvAIr/Core/ReservationTitleDisplayContract.cs",
+    "bytes": 1162,
+    "sha256": "ff2938fc66ff42b44abe848b389b892f17a32a17521b497617947e3f87485421"
+  },
+  {
+    "path": "TvAIr/Core/ReservationTunerGroupResolver.cs",
+    "bytes": 2770,
+    "sha256": "4de6e31e930c578bbb1785bf00c0d050001f033ddd6d7d5863f06dd8041cfc6d"
+  },
+  {
+    "path": "TvAIr/Core/ServiceIdentityContract.cs",
+    "bytes": 4087,
+    "sha256": "36d92015f41826421a4b83def2ed680d0c5dee223ebea94e5034d9e7441cc2cf"
+  },
+  {
+    "path": "TvAIr/Core/SettingsChangeApplicationService.cs",
+    "bytes": 53112,
+    "sha256": "e65adafe73d03869b9c4d830a0275c1b0472c5c1e918dc3f8bf66bafc2ad611a"
+  },
+  {
+    "path": "TvAIr/Core/SettingsDefaults.cs",
+    "bytes": 10128,
+    "sha256": "ca4945c361e06d3c1a12b3b923774baf7adccf9f1a21c9b35fe808f995fd78c7"
+  },
+  {
+    "path": "TvAIr/Core/SettingsUiCommitHub.cs",
+    "bytes": 2751,
+    "sha256": "f3fbc1380abea85581ec915a27e001d375934088e08af091a0a2c79a3db2c963"
+  },
+  {
+    "path": "TvAIr/Core/SystemSleepInhibitionService.cs",
+    "bytes": 7622,
+    "sha256": "cf6a8eecf0cb78494e357da0f6bb3205762fc5baeebacef702c53888b291fa81"
+  },
+  {
+    "path": "TvAIr/Core/TrayIconService.cs",
+    "bytes": 55651,
+    "sha256": "9bf03b262cc78b7b93dc3df7780c6ad4dc3277a455408f5badd38c794c60f063"
+  },
+  {
+    "path": "TvAIr/Core/TunerIsolationPolicy.cs",
+    "bytes": 2962,
+    "sha256": "e2701cf2ef11d5f6e5e7bafc348e39ad157d5179df70c0bcde7f5004c02c7d7c"
+  },
+  {
+    "path": "TvAIr/Core/TvAirManagedProcessRegistry.cs",
+    "bytes": 6951,
+    "sha256": "c3c32d88dd50b1c2f03f6e512f158b20ad63c95396aa6214a3e23e39000ec32d"
+  },
+  {
+    "path": "TvAIr/Core/TvAIrNotificationDialog.cs",
+    "bytes": 11816,
+    "sha256": "f5c5e32077e16ad2fc4fb7ce2df9daf5b77ca3535c439f5e16629f0641db1dc1"
+  },
+  {
+    "path": "TvAIr/Core/TvAIrVersionContract.generated.cs",
+    "bytes": 1997,
+    "sha256": "ff77870b6e79a1a27978b54d612718508b1fcd0debdf35832a1be5bf935664ee"
+  },
+  {
+    "path": "TvAIr/Core/TvTestActivityKeeper.cs",
+    "bytes": 19767,
+    "sha256": "2201096f801d748593ed03072ba91df7c9a252df76f1c246681f3b2a526bb3ba"
+  },
+  {
+    "path": "TvAIr/Core/TvTestProcessAuditor.cs",
+    "bytes": 11607,
+    "sha256": "a1a63fcf6351ae7cd139d38bb3376326cac708cb6ab449dfdf97d9a0de4fd921"
+  },
+  {
+    "path": "TvAIr/Core/TvTestRecordFileNameFormatter.cs",
+    "bytes": 11426,
+    "sha256": "7f8b127d96c716c4cbd0983d93be9829cf78b080767c7be690aeeab3fb365472"
+  },
+  {
+    "path": "TvAIr/Core/TvTestRecordFileNameTemplateResolver.cs",
+    "bytes": 6328,
+    "sha256": "a4061a6c8963ac7854ed407056ad7a0d04a8f444156cb399654ba1d98f850c05"
+  },
+  {
+    "path": "TvAIr/Core/TvTestRecordingDirectoryResolver.cs",
+    "bytes": 7545,
+    "sha256": "e4fc09ba418ab69c30e4d0511d3fd11fe6b56aee541c0bc9c33d42d824e56d66"
+  },
+  {
+    "path": "TvAIr/Core/UiThemeRoleContract.cs",
+    "bytes": 5348,
+    "sha256": "132af6871ba293370af96b570364b52059ab281b8ed50f7cb55c94b691dc10dd"
+  },
+  {
+    "path": "TvAIr/Core/UserEventLogService.cs",
+    "bytes": 110801,
+    "sha256": "c2fcc1189ae5ef67074fe8a554c46f97b9ce6a5f93858296ea120cd49ffa05dc"
+  },
+  {
+    "path": "TvAIr/Core/UserLogProjectionService.cs",
+    "bytes": 16475,
+    "sha256": "de3ebd4f83233e0a4868c2b0f827ae6083679dd8fdb7f2c3c5cbed5f69663ca3"
+  },
+  {
+    "path": "TvAIr/Core/WindowsAutoStartService.cs",
+    "bytes": 6191,
+    "sha256": "50a9bcce6735bfcd6395c1b7311d06aec18971ce68e71072a5db3762abf53911"
+  },
+  {
+    "path": "TvAIr/Core/WorkerProcessStartInfoFactory.cs",
+    "bytes": 3452,
+    "sha256": "f3c590d29cd73445ffe41a5c3b8b92db1703ddff7bbf7f7c7f9fb2aac73277cc"
+  },
+  {
+    "path": "TvAIr/Epg/AribEventNameTrace.cs",
+    "bytes": 7080,
+    "sha256": "0dfd4dfc5d99955302e7dc291e23cc690b9133a55bfe1696b14028e5192ba4cc"
+  },
+  {
+    "path": "TvAIr/Epg/AribPsiSiDecoder.cs",
+    "bytes": 2709,
+    "sha256": "a2741423771ac7387912e3598ce9dd19a7cf64c7e755be9dd058a12481655a02"
+  },
+  {
+    "path": "TvAIr/Epg/BroadcastTimeReference.cs",
+    "bytes": 8183,
+    "sha256": "c1785f27fe0bfd273f243530188d17acc679211731172bc6f9d580972f494377"
+  },
+  {
+    "path": "TvAIr/Epg/DailyEpgRunState.cs",
+    "bytes": 6252,
+    "sha256": "c7df049449118f0c7a203acbccf349809da2d37c710a3f61d307f3931f74610b"
+  },
+  {
+    "path": "TvAIr/Epg/EitSectionReader.cs",
+    "bytes": 58520,
+    "sha256": "c37623ae250d1908b28708b4b058b8e95ac2adbb35095cf1adba98d58ed6d568"
+  },
+  {
+    "path": "TvAIr/Epg/EitTableContract.cs",
+    "bytes": 2565,
+    "sha256": "4757c7fa9c2aec0a89930cf30c63e4c4c663dab4c0f3687b5b91137faca9b298"
+  },
+  {
+    "path": "TvAIr/Epg/EpgAnalyzer.cs",
+    "bytes": 10871,
+    "sha256": "1b4797991ed003d50d7ab0633ebb37e2169e02a98a93797757467eee2350670c"
+  },
+  {
+    "path": "TvAIr/Epg/EpgCapture.cs",
+    "bytes": 386163,
+    "sha256": "e6424d7800918e270f0830413b12ea157cb0dec73d54b9274344eb6e654fc40b"
+  },
+  {
+    "path": "TvAIr/Epg/EpgCoverageAttributionDiagnosticStore.cs",
+    "bytes": 15525,
+    "sha256": "4965c76ebc94c4a196ee2ddc4aeed93156d5818e859ff0884ac7f9e6b1d3e8f5"
+  },
+  {
+    "path": "TvAIr/Epg/EpgLogoExtractor.cs",
+    "bytes": 21235,
+    "sha256": "125f8559a17921fe65472baeb61c65c9d01e16a71f032ec98ab22bf3d80ad12a"
+  },
+  {
+    "path": "TvAIr/Epg/EpgModels.cs",
+    "bytes": 9449,
+    "sha256": "1c940d11ef977f03eb4ef399e1a05ca01497d0ff30140c10a290455e5249cc2f"
+  },
+  {
+    "path": "TvAIr/Epg/EpgProjection.cs",
+    "bytes": 2136,
+    "sha256": "4bfac5b9735c64460b5d5d9a4383ad7d235123f04ed2b8f07867040c7e045d87"
+  },
+  {
+    "path": "TvAIr/Epg/EpgScheduler.cs",
+    "bytes": 166363,
+    "sha256": "8a9d4b1c1915c4cb7b547db9c4c1922380c85f2c0c8ad7d28f2269ec5d94bd8f"
+  },
+  {
+    "path": "TvAIr/Epg/EpgStore.cs",
+    "bytes": 38915,
+    "sha256": "f31d6c24a989c362db806341b318f0266c31fe908ca681c18531e74ada59dd53"
+  },
+  {
+    "path": "TvAIr/Epg/EpgTitleProjectionGuard.cs",
+    "bytes": 1046,
+    "sha256": "467cf9f4eed3a0b3a3d7df95a0a0df5cc4b782e8beb8876bef0ae0ef15a916d6"
+  },
+  {
+    "path": "TvAIr/Epg/KeywordMatcher.cs",
+    "bytes": 102615,
+    "sha256": "b435f2579fb0416c56081759f75b09b684938ccf8bd842f06f338c13d13a21ec"
+  },
+  {
+    "path": "TvAIr/Epg/NormalEpgWaveOccupation.cs",
+    "bytes": 4488,
+    "sha256": "1395e57b05a86694e17d75795f634e7e2aaf4106da9efcbef2ed2484b0f1ebd7"
+  },
+  {
+    "path": "TvAIr/Epg/PersistentEitSectionCache.cs",
+    "bytes": 9488,
+    "sha256": "1e803b6323f11586d1acd8511d87a0e3b2431402a900586c2d0628784e186fbf"
+  },
+  {
+    "path": "TvAIr/Epg/PreRecordProbeExecutionContract.cs",
+    "bytes": 790,
+    "sha256": "fafcef57af9aabf01ac026834df37bd2d9dfbdcff7d9bed15d55237242fe4c0b"
+  },
+  {
+    "path": "TvAIr/Epg/ProgramGuideCellTextDecoder.cs",
+    "bytes": 17195,
+    "sha256": "853d536adce223a836439950d076c64fb95b484cbc55f05b04d39fc0f7bc5500"
+  },
+  {
+    "path": "TvAIr/Epg/Projection/DbProgramEventSource.cs",
+    "bytes": 8347,
+    "sha256": "e30bcc134300d04bddd6810817e705f35a3443a31d91a40c74ee17d88b1e538f"
+  },
+  {
+    "path": "TvAIr/Epg/Projection/ExternalEpgEvent.cs",
+    "bytes": 1293,
+    "sha256": "e5164ac3c79225791727d58b3c41fb0576771d3c69ee556300da33cd261d10c3"
+  },
+  {
+    "path": "TvAIr/Epg/Projection/ExternalEpgSourceStore.cs",
+    "bytes": 7242,
+    "sha256": "7102dc5f6c1161ce2adf70748ba8dcad5159a7f3424b6d38b5346828d76d7593"
+  },
+  {
+    "path": "TvAIr/Epg/Projection/IProgramEventSource.cs",
+    "bytes": 717,
+    "sha256": "023149aef68efd95f1549a44b13bc119d1a9c5e324bc0a7706d772c0d1133493"
+  },
+  {
+    "path": "TvAIr/Epg/Projection/ProgramEventProjectionGuard.cs",
+    "bytes": 2014,
+    "sha256": "5e851097c1f74955c08e91071a76aec5e6fe1f2d49889dcb968f7e5a4a743d9f"
+  },
+  {
+    "path": "TvAIr/Epg/Projection/ProgramGuideProjectionService.cs",
+    "bytes": 38000,
+    "sha256": "431b9a1ab9edc2dad391fce153d7987ba2c2b2d4a5aa54d586acc34fb6b053cc"
+  },
+  {
+    "path": "TvAIr/Epg/Projection/ProjectedEventKey.cs",
+    "bytes": 4517,
+    "sha256": "73749bf8248415d7ba665a08926ca05c38d3c242c63b106d5643586307f16310"
+  },
+  {
+    "path": "TvAIr/Epg/Projection/ProjectedProgramEvent.cs",
+    "bytes": 3507,
+    "sha256": "351d19b402068bf8fb8b92b785c8ed309473fd276e233f61cc29c9881dfdbdb1"
+  },
+  {
+    "path": "TvAIr/Epg/Projection/ProjectedProgramEventExtensions.cs",
+    "bytes": 2088,
+    "sha256": "2dce73ea3336ccbd1b103cb8a2dc219e7aedcd80ec7c2b15917cf58b09bdec56"
+  },
+  {
+    "path": "TvAIr/Epg/PsiSectionAssembler.cs",
+    "bytes": 6521,
+    "sha256": "cc51a0e2d60631914d4721af2bc84624f0c58ca62f87a0d544249f02b2f1d0da"
+  },
+  {
+    "path": "TvAIr/Epg/ServiceLogoStore.cs",
+    "bytes": 12707,
+    "sha256": "b08a6ca8bee96818158b48ede3f3bb497f19344d2a7e11883743a5341c0682a1"
+  },
+  {
+    "path": "TvAIr/Epg/ShortEventDescriptorReader.cs",
+    "bytes": 3694,
+    "sha256": "5a5d203c3e608b2ad05a83ca7c525485d7cf917ad1b183036b9e42e1a686e8a8"
+  },
+  {
+    "path": "TvAIr/Epg/TsPacketReader.cs",
+    "bytes": 1945,
+    "sha256": "f9819118e169da961ad68bb259dea7db9fddb986b53419441d287d6a49d66633"
+  },
+  {
+    "path": "TvAIr/Plugin/LogPresentationStore.cs",
+    "bytes": 20385,
+    "sha256": "8122c4f595ac9ddf4c952be1909e80bea8a56bccd469176c208177d530760d77"
+  },
+  {
+    "path": "TvAIr/Plugin/PlaybackProgressStore.cs",
+    "bytes": 5156,
+    "sha256": "6f149917a43234f84a0323db702c279fa34b5a8d841ce2c7cdb9b58e31f44bbe"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginActionTokenStore.cs",
+    "bytes": 4829,
+    "sha256": "761a5467031221a34cc413c1a522f922e916163b43ba40abb6ae9da5acc3408c"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginAllowList.cs",
+    "bytes": 1508,
+    "sha256": "ab13ea372d9625b183385338dd02c546360ceb79639f5a66db64fa128b96a9bd"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginBoundaryGate.cs",
+    "bytes": 6723,
+    "sha256": "fff40359c480e87c44c5192e469aa392ff649269ad8a9e404c735783e918709c"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginCapabilityContext.cs",
+    "bytes": 173395,
+    "sha256": "1ded3af8c2d77519af74a26a4f2349452fccaedb36bdcd3be74386de8f6710f6"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginDefaultMenuActionService.cs",
+    "bytes": 6943,
+    "sha256": "ce74c6a95d703905dafaf86f06c0daf52a0057e14f32545e75f0e8e1df15bf51"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginExternalJobHost.cs",
+    "bytes": 19109,
+    "sha256": "71ad81531f7bf7f31e6d0b624dc700ab216afdd9e9831a552076d7d8cd32b825"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginExternalLookupCredentialStore.cs",
+    "bytes": 5463,
+    "sha256": "00fb13bee189d9e0ea7b06a0efca3ae01b121a395b23fcd9f0f0aed99a054c4a"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginExternalLookupGateway.cs",
+    "bytes": 5964,
+    "sha256": "ae81381131606847e17ca1b0d16c89ee0c816c12edcdf94a5495b2b1e513293d"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginHtmlSanitizer.cs",
+    "bytes": 1699,
+    "sha256": "5bdd9db15a46fa76ab0a5a64ddfe27795ecab437d2a5cf223ca08acc989da1e3"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginIdentity.cs",
+    "bytes": 564,
+    "sha256": "a54a393ce162503ce1611d7efb1e97f818e2d6949038ba0787cb1a8bf44a9bbc"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginInternetAccessGate.cs",
+    "bytes": 2503,
+    "sha256": "19399b63b15f84f53da648d8b8e44b3dc3ec225ad1c8606b8646df32a1b213bc"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginInternetAccessPermissionStore.cs",
+    "bytes": 3127,
+    "sha256": "057ec0f72effe712dce02741985eb2c72d5591493f588e1942b7bc3292c00060"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginLoader.cs",
+    "bytes": 26091,
+    "sha256": "9e236a20a73e37b1c22b4b5051c6a921c9a27e0fa61c6d179de1941a3033ce97"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginLogService.cs",
+    "bytes": 1887,
+    "sha256": "52d6c27c14b1806fefcfd9d9056a0b372a513942a0c531520b0c68c78bb9eb56"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginManagedExternalLookupHost.cs",
+    "bytes": 35998,
+    "sha256": "ebec2a4e98ccfcbac04978acbd488799010a636eed522beeafd72b76d248adf2"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginOperationalReadService.cs",
+    "bytes": 1549,
+    "sha256": "7cc4608b75f1311a30587fce0761de7a54e8f10d2d9ef5c7e81a6607124cc7bb"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginOwnedFileStore.cs",
+    "bytes": 2742,
+    "sha256": "5d915a31c3054aaee162908c65cf9895ab2551f449b8e2c2ec6368655fd45eab"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginPermissionResolver.cs",
+    "bytes": 850,
+    "sha256": "d2dae1aeecb041476266ca65b1413b05a1d68dc32b49dee0973be35aec208d8e"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginPresentationReadService.cs",
+    "bytes": 662,
+    "sha256": "139badaf8bf950ffb4e7e73d777c2d48a56472765a56717c685b4c73aaf5cdaa"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginPresentationText.cs",
+    "bytes": 2582,
+    "sha256": "54699706ee86acc88a3e192b09401bd4a22d91bad0e0e35a5bfb130f30ac3e37"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginReadModelSource.cs",
+    "bytes": 3878,
+    "sha256": "519123315f7cc7abf02132ceaa496709db7352e0f1d4b52f9c71d97e9acc24a8"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginRegistry.cs",
+    "bytes": 3015,
+    "sha256": "4107633ee667bbaacea67e744ccd0b65dc74647ce225b3881efaf65f4adbb7a2"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginReservationOperationService.cs",
+    "bytes": 14899,
+    "sha256": "aeec26acc30187627d1cf3ae86143a30f19d675c6b6c66c86611c6d0f377a591"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginReservationPlanningService.cs",
+    "bytes": 7520,
+    "sha256": "1552e01acb54ce2b4b843cfda38dabdfdff5f930f82d560d1ac393bee5fcf63d"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginRuntimeContext.cs",
+    "bytes": 58177,
+    "sha256": "6441a26f571dde169b1f3d25377495ac77cc10c8a18daa185abad332d2895903"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginScopedServiceFactory.cs",
+    "bytes": 1782,
+    "sha256": "e2ce88121b2935b8404c1fec084b7feae49b1bde1fdf381c9c280bf48b2e518e"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginSystemReadService.cs",
+    "bytes": 2095,
+    "sha256": "a0a1eb1b211a1eb0f4e497b932f2e03f878ee7c927c92ee07bf8ccb4964138b6"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginToolWindowHostService.cs",
+    "bytes": 100916,
+    "sha256": "e7987699f9ce65ccd9c2547a4d41cb6a38cef5a47a360260d7cd43584027f45b"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginTypedEventHub.cs",
+    "bytes": 23337,
+    "sha256": "9db2a9a2799d3d257bd2f0849860960bcd8780de4566d740dae031674e527805"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginWindowPlacementStore.cs",
+    "bytes": 16299,
+    "sha256": "139539f860ee98aa1f30d8cc2a4abc01a2857b23f7efa1e0e934b49a14db2d50"
+  },
+  {
+    "path": "TvAIr/Plugin/PluginWindowSessionStore.cs",
+    "bytes": 33389,
+    "sha256": "8835fd31a02949f9b25930f35d214a0937448d788fb2fe6e6c8ab361f04f40c7"
+  },
+  {
+    "path": "TvAIr/Plugin/RecordingResultStore.cs",
+    "bytes": 14638,
+    "sha256": "81477722b1ba18cb2f3d479e93e5c058802703f733de7e3d8c583a339cc65919"
+  },
+  {
+    "path": "TvAIr/Plugin/RuntimeHost/GenericVideoOverlayRenderer.cs",
+    "bytes": 18315,
+    "sha256": "dbd6bc018163aba61997aaa07fd75794b199d28120366d017cc85450860935da"
+  },
+  {
+    "path": "TvAIr/Plugin/RuntimeHost/HostSurfaceRegistry.cs",
+    "bytes": 10592,
+    "sha256": "31fe0d86f3337ef99af1f9e91a90bfc454c623cc09060702acd2a67fb99f5468"
+  },
+  {
+    "path": "TvAIr/Plugin/RuntimeHost/PersistentPluginStorage.cs",
+    "bytes": 14212,
+    "sha256": "16be45d423ff17f24db5683bb9f3f11e989c6200ef66c66cd3340cfb3776f821"
+  },
+  {
+    "path": "TvAIr/Plugin/RuntimeHost/PluginAssetCatalog.cs",
+    "bytes": 11490,
+    "sha256": "863a70be6f74683c72e147dcb3577e0a6dcd2f532599dd3e52d64efe1c085d53"
+  },
+  {
+    "path": "TvAIr/Plugin/RuntimeHost/PluginBridgeManager.cs",
+    "bytes": 7611,
+    "sha256": "3a7cd0f80731475c45994dc93120e247535598448a790ff46337d998d0da2331"
+  },
+  {
+    "path": "TvAIr/Plugin/RuntimeHost/PluginEventChannel.cs",
+    "bytes": 7813,
+    "sha256": "3e7314356c2f90ffad6bced8474a7427f31aaee72d4a65515adde139fd141f43"
+  },
+  {
+    "path": "TvAIr/Plugin/RuntimeHost/PluginNativeWindowHost.cs",
+    "bytes": 9289,
+    "sha256": "0437506eb2c62ff2b43b25bd49c49097f2d05c730f3e85ccefb49022eb3bc02d"
+  },
+  {
+    "path": "TvAIr/Plugin/RuntimeHost/PluginPathPickerHostService.cs",
+    "bytes": 8925,
+    "sha256": "331e3e04ed953e2e0d9ed02f5114584ddb9d6e9065cbcf98fb6e9fba6c7a16d8"
+  },
+  {
+    "path": "TvAIr/Plugin/RuntimeHost/PluginRuntimeManager.cs",
+    "bytes": 974,
+    "sha256": "224943ae5ab195e806599f961794f2bb1cede1a7080cb7a293ec45602992243c"
+  },
+  {
+    "path": "TvAIr/Plugin/RuntimeHost/PluginSurfaceManager.cs",
+    "bytes": 6571,
+    "sha256": "7d25f2f4366a711ad5f6da9290454fe7668886ae0c74d0b05566641d260f3b3d"
+  },
+  {
+    "path": "TvAIr/Plugin/RuntimeHost/PluginWebRuntimeManager.cs",
+    "bytes": 24697,
+    "sha256": "adf7a508a678ceeb19d990ce2376b9b7d2f723e2d915dc69f6b276a00829f1b3"
+  },
+  {
+    "path": "TvAIr/Plugin/RuntimeHost/PluginWindowManager.cs",
+    "bytes": 8877,
+    "sha256": "552df3b341964386abdd495265d29912b379b5697349bc1a6844d557d4ce203b"
+  },
+  {
+    "path": "TvAIr/Plugin/RuntimeHost/RuntimeUiPatchContract.cs",
+    "bytes": 4564,
+    "sha256": "7954eb0c2278f0e69e18cc547d38b306e7f9a29bd9ca04cbffeb991bdb044553"
+  },
+  {
+    "path": "TvAIr/Plugin/RuntimeHost/VideoOverlayHost.cs",
+    "bytes": 16724,
+    "sha256": "4bb257efa78bcbe0e5a38aff55dea983c6043af862f276ed2a1581b37862638c"
+  },
+  {
+    "path": "TvAIr/Plugin/TimedTextStreamStore.cs",
+    "bytes": 6200,
+    "sha256": "d2836a10e57a2803e272d8100b7db556cd282d63bdee4bc50bae0eae3a00e43b"
+  },
+  {
+    "path": "TvAIr/Program.cs",
+    "bytes": 540686,
+    "sha256": "03a9d2c4a82d6cb2b27ba3b495c4b255e2e11327a4b754a8e78a84a58615a512"
+  },
+  {
+    "path": "TvAIr/Properties/launchSettings.json",
+    "bytes": 279,
+    "sha256": "a9fcff10f5aa26bbe384f3ead5b69a12c08754afc8c99def64aaff58e6bf48a0"
+  },
+  {
+    "path": "TvAIr/Schedule/ChainLifecycleCoordinator.cs",
+    "bytes": 3220,
+    "sha256": "1e372ae26aa3860ae5a5f380795dbfba7f37cbed68ed6c31c683217166e7be2f"
+  },
+  {
+    "path": "TvAIr/Schedule/ChainRuntimeSnapshot.cs",
+    "bytes": 3458,
+    "sha256": "d52f3178198cb4019a16546298953e8ef767fc67959c26435b9aae64f0b2e5ec"
+  },
+  {
+    "path": "TvAIr/Schedule/ChainRuntimeSnapshotRegistry.cs",
+    "bytes": 1930,
+    "sha256": "98b3046f6a42011e3be5699eee5fa680693c4a3f47c734e1aca7144db45df04b"
+  },
+  {
+    "path": "TvAIr/Schedule/ProgramProjectionReservationSyncService.cs",
+    "bytes": 9876,
+    "sha256": "6d85d9ce22036178785b86823053e413adfbf761eba3b7b9197ecea5ea0d30e6"
+  },
+  {
+    "path": "TvAIr/Schedule/RecordingLifecycleGate.cs",
+    "bytes": 5721,
+    "sha256": "5f4dd2bc41309c8314bfa8e28b4f78da387815ed71a00279bae0b5766496e529"
+  },
+  {
+    "path": "TvAIr/Schedule/RecordingPowerResponsibilityGuardService.cs",
+    "bytes": 17417,
+    "sha256": "d78d04f99aae4a2cfae7f071dd331b1dc64846ea56b5185f56de78a0c84bf2d8"
+  },
+  {
+    "path": "TvAIr/Schedule/RecordingResponsibilityTiming.cs",
+    "bytes": 357,
+    "sha256": "7e7fecfbdbdeffd01d822eaa0750187c7756669961fb61c0054d837006b397be"
+  },
+  {
+    "path": "TvAIr/Schedule/ReservationAllocationRouteService.cs",
+    "bytes": 37838,
+    "sha256": "93cf297fc96b120a59c194ac6236a8ad0e92c0ef5b2a88d6110f779f2f8409d8"
+  },
+  {
+    "path": "TvAIr/Schedule/ReservationLifecycleContract.cs",
+    "bytes": 1162,
+    "sha256": "45ccdfb8525e1ae85c9a7ea783a70b219c4c6f1a1433e20c4b6b46c23016e9fb"
+  },
+  {
+    "path": "TvAIr/Schedule/ReservationMutationJournal.cs",
+    "bytes": 8356,
+    "sha256": "95919238535a11f11b9f31600b66620ea0afb8eed46f4c81287e463058cb1732"
+  },
+  {
+    "path": "TvAIr/Schedule/ReservationMutationSideEffectProjection.cs",
+    "bytes": 13674,
+    "sha256": "70cbd26e3d036d057cab446ee8b29d2577c27f61ce6db2d4a65ed19b7f620eff"
+  },
+  {
+    "path": "TvAIr/Schedule/ReservationOperationPolicy.cs",
+    "bytes": 1463,
+    "sha256": "d20621f062e67b4a04cc097efe967f57302b1acbb446a1f679ae727519d9bcb2"
+  },
+  {
+    "path": "TvAIr/Schedule/ReservationOriginClassifier.cs",
+    "bytes": 6424,
+    "sha256": "44449c821ee1f88b03502281e83c37ac523559eb68da66bb55481c3ad511a650"
+  },
+  {
+    "path": "TvAIr/Schedule/ReservationPresentationService.cs",
+    "bytes": 26013,
+    "sha256": "4f4aa58a62f4392418d7b86a58e2f659564ac81cf8e767ad7b050b8afea2bf1f"
+  },
+  {
+    "path": "TvAIr/Schedule/ReservationProjectionMetadataStore.cs",
+    "bytes": 17346,
+    "sha256": "1d6e980688b949f07a97746c1f4c473b516053dec656b8876103926e76f52b72"
+  },
+  {
+    "path": "TvAIr/Schedule/ReservationProjectionPromotionService.cs",
+    "bytes": 4460,
+    "sha256": "f6d15104bb232d2a01692e04703db2a0bc5c8a0a1e88f399ef3fe7be15a1ad30"
+  },
+  {
+    "path": "TvAIr/Schedule/ReservationRuntimeResponsibilityPolicy.cs",
+    "bytes": 2918,
+    "sha256": "3bcf70a60c5b162d0b2c67a037a4e2e244481a44cdf1ecf7aeb96caccfdf64a8"
+  },
+  {
+    "path": "TvAIr/Schedule/ReservationScheduler.cs",
+    "bytes": 645480,
+    "sha256": "f6002206f42bd30261f4fe70e2ecd5ac226f669b3aef23501ddaca6f66030f81"
+  },
+  {
+    "path": "TvAIr/Schedule/ReservationStore.cs",
+    "bytes": 494183,
+    "sha256": "b4fa344f2c70d28b46cdadcf0a1550dbb73cb3bc3b15f64af52c62c66dc23392"
+  },
+  {
+    "path": "TvAIr/Schedule/StopPhaseGate.cs",
+    "bytes": 7799,
+    "sha256": "92e33d6a0ecbfd8e9afd1db3e6bd268b48a71f4d5995a881691a9a1078ff74be"
+  },
+  {
+    "path": "TvAIr/Schedule/SystemEpgResponsibilityPlanService.cs",
+    "bytes": 16728,
+    "sha256": "b7c049a19deb0f53adea629094085797f9ad5fa0d04d0bf72c04e91f2394c432"
+  },
+  {
+    "path": "TvAIr/Schedule/TaskSchedulerService.cs",
+    "bytes": 114400,
+    "sha256": "0e6e84528fbb32ce9ae922a2738437fb988671175fae47aee9667f3f8b1a0367"
+  },
+  {
+    "path": "TvAIr/Schedule/TunerAllocationDebugModels.cs",
+    "bytes": 3578,
+    "sha256": "1ecd9556ad4924c240cc6c2c9867801495ebd75287fff5dc942cc9d12056671b"
+  },
+  {
+    "path": "TvAIr/Schedule/WakeSignalMonitorService.cs",
+    "bytes": 17928,
+    "sha256": "5523cfe1de792329d93301da6cfba4fae6abc713a2018e4e47184154dd62ec00"
+  },
+  {
+    "path": "TvAIr/Tuner/ExternalTunerLeaseService.cs",
+    "bytes": 41352,
+    "sha256": "1a081f065f942ceb304a48c1a67655452401e102a2437d66acae8aaf1b96768d"
+  },
+  {
+    "path": "TvAIr/Tuner/PowerResumeSignalHub.cs",
+    "bytes": 1390,
+    "sha256": "4b120102510f132711b2d5cc78813be9e8bf77258fa54969f9e292205b7c0ee9"
+  },
+  {
+    "path": "TvAIr/Tuner/PowerResumeTunerReconciliationService.cs",
+    "bytes": 7076,
+    "sha256": "89d5b8d222b5e0f6813cc3d5809bdde912322e6b7aa47ba2056d28dcb7aeb5db"
+  },
+  {
+    "path": "TvAIr/Tuner/TunerDeviceAccessGate.cs",
+    "bytes": 10328,
+    "sha256": "cde39a5fcf1a6d80f06645ee983bbc7409c39fceace90fbbc403b5c8f1a624f8"
+  },
+  {
+    "path": "TvAIr/Tuner/TunerOwnershipReconciliationCoordinator.cs",
+    "bytes": 17275,
+    "sha256": "1411cdfbc0bd99e2102e54391b1dac5fb50439666124a056f93fc29f7a75e81e"
+  },
+  {
+    "path": "TvAIr/Tuner/TunerPool.cs",
+    "bytes": 66374,
+    "sha256": "488f45bc258c042e122d81b88d8cc2b6d3892e2bc7219f147beb0419c363e260"
+  },
+  {
+    "path": "TvAIr/Tuner/TunerRuntimeProfileSource.cs",
+    "bytes": 1675,
+    "sha256": "8cc14b75c1c0875a48c29528350edcb5af31a51ada1e00dcfbe6d8b25f96fdb8"
+  },
+  {
+    "path": "TvAIr/Tuner/TvTestLauncher.cs",
+    "bytes": 56411,
+    "sha256": "dc578c508109d7f43dc599983040dadfdaa605bdad4157cc84a406acfe64f8dd"
+  },
+  {
+    "path": "TvAIr/Tuner/ViewerManagedLeaseScope.cs",
+    "bytes": 3148,
+    "sha256": "bbce4b1f3291697924d840ac35664c67882edf388bee883f6c3b0094dd81efff"
+  },
+  {
+    "path": "TvAIr/Tuner/ViewerOperationPreemptionHub.cs",
+    "bytes": 3970,
+    "sha256": "faaa28228165c0d12b0b5728897aba88e808f6926048f8783cc25d649de8b1da"
+  },
+  {
+    "path": "TvAIr/Tuner/ViewerOperationService.cs",
+    "bytes": 116616,
+    "sha256": "d665c3859655e1e99fc0e999e539d3cd9855928b8277cdc19431807b8974ed2c"
+  },
+  {
+    "path": "TvAIr/Tuner/ViewerOwnershipService.cs",
+    "bytes": 14647,
+    "sha256": "496085de2d1b54f1ad122ac86cf7ec240589f4584d48780bd41eb77347a89f31"
+  },
+  {
+    "path": "TvAIr/Tuner/ViewerReservationContract.cs",
+    "bytes": 914,
+    "sha256": "9951bfb16d81710a37c2817a1d2f4f174dfbba3fc28bf2dd79ecbaae7788e408"
+  },
+  {
+    "path": "TvAIr/Tuner/ViewerReservationScheduler.cs",
+    "bytes": 11146,
+    "sha256": "c668f7a5be5ac5841a2fc2ebf6a52e257449d114b0bf41f08ae98674e2b1fb94"
+  },
+  {
+    "path": "TvAIr/Tuner/ViewerReservationStore.cs",
+    "bytes": 15315,
+    "sha256": "a14fab349f6bb5d38b30514893fb27e2504feefb64c07f7bf94c2f46d56d9e61"
+  },
+  {
+    "path": "TvAIr/Tuner/ViewerRetuneDiagnostics.cs",
+    "bytes": 3659,
+    "sha256": "726901c7e11f9f77bd6d1c696e48cb52e13dd24a5647fb5d995c95a4db6ad99f"
+  },
+  {
+    "path": "TvAIr/Tuner/ViewerRetuneScope.cs",
+    "bytes": 3047,
+    "sha256": "215d8787efaccf6adb1c4dad21913442c0bd5c27ca7d15fbeda0cb08e6f9708c"
+  },
+  {
+    "path": "TvAIr/Tuner/ViewerSessionRegistry.cs",
+    "bytes": 7860,
+    "sha256": "20147f86d2c180ecccf9e77af0d9fbacd9770d75df76664387521984c14b533c"
+  },
+  {
+    "path": "TvAIr/TvAIr_Idle.ico",
+    "bytes": 360414,
+    "sha256": "ce71c82c16e48e0769511e3e57ac75a8a3c6d6bddb1ed8f8c1d8550e98d5a539"
+  },
+  {
+    "path": "TvAIr/TvAIr_Recording.ico",
+    "bytes": 360414,
+    "sha256": "018aa5a42ef5804e7720952c32fbb814127ecd1ef4085f739bbbf0a100489ffb"
+  },
+  {
+    "path": "TvAIr/TvAIr.csproj",
+    "bytes": 9485,
+    "sha256": "5ba5aeb4f686a3a7e5c4a703d132175b332dc3becc4ebe4cfda2fc44ee6c409b"
+  },
+  {
+    "path": "TvAIr/wwwroot/favicon.ico",
+    "bytes": 360414,
+    "sha256": "ce71c82c16e48e0769511e3e57ac75a8a3c6d6bddb1ed8f8c1d8550e98d5a539"
+  },
+  {
+    "path": "TvAIr/wwwroot/genre-shared.js",
+    "bytes": 9501,
+    "sha256": "83f1ce25dcf79a1b75eaa49ac397be06e132bf7b5f6a4569d699e9b06d74b25b"
+  },
+  {
+    "path": "TvAIr/wwwroot/help.html",
+    "bytes": 24229,
+    "sha256": "d3315eef2e0a1803923ce512a2e8f0eb6afed772bfddfb01b85848354fa3c497"
+  },
+  {
+    "path": "TvAIr/wwwroot/index.html",
+    "bytes": 279502,
+    "sha256": "4646c39993bb1baa3989c849511957c802a0fbcd51cca752bef8c00471d675c6"
+  },
+  {
+    "path": "TvAIr/wwwroot/keyword.html",
+    "bytes": 17010,
+    "sha256": "2563661a08cbea0cdfbfeefd0d974e4db98ea1e4a6b93d9602c212c7d5dcebff"
+  },
+  {
+    "path": "TvAIr/wwwroot/nav-home.ico",
+    "bytes": 360414,
+    "sha256": "ce71c82c16e48e0769511e3e57ac75a8a3c6d6bddb1ed8f8c1d8550e98d5a539"
+  },
+  {
+    "path": "TvAIr/wwwroot/new-reservation.html",
+    "bytes": 23222,
+    "sha256": "ab024c3316e5052e1decae1f2a71c5efac9458efc7baee07cc1fed0e8b2f3d86"
+  },
+  {
+    "path": "TvAIr/wwwroot/plugins.html",
+    "bytes": 1481,
+    "sha256": "0cfe4bb36e72f89d665ac3b69bbdf83b8401b0fdb9c1a410a57d610437335706"
+  },
+  {
+    "path": "TvAIr/wwwroot/program-rules.html",
+    "bytes": 37405,
+    "sha256": "3120ce7bd82e7e233e492ff589c1e10470569e9e4e3d3b71be637650b8efef45"
+  },
+  {
+    "path": "TvAIr/wwwroot/reservations.html",
+    "bytes": 86960,
+    "sha256": "9919e867f262af4c5e6e4e9425b1fc6f5a024b8fae7db257fc64a0ed94021a60"
+  },
+  {
+    "path": "TvAIr/wwwroot/timed-text-streams.html",
+    "bytes": 6785,
+    "sha256": "3d3ac9888448db6a43fd34816b67800f50f831d9aa65fe88d801ad77d83be4b4"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-action-button-state.js",
+    "bytes": 873,
+    "sha256": "35d31317fb16ed06ca6f33dbf5db04151ef9f5625ee33cb6fa6dee5bd51e79e4"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-epg-panel.css",
+    "bytes": 4465,
+    "sha256": "45f8d0410e6173bc3e2f9874401924ff01bdbed894330031e6c2bf7285b76e98"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-epg-run-contract.js",
+    "bytes": 3898,
+    "sha256": "44492b76909d31a6b65475929b9a57b8548e5a4ad129b1b0b0b232f2bf81b013"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-epg-widget.js",
+    "bytes": 19446,
+    "sha256": "8ecc5f2134321fb7e422dc33e3aeb2cf0ca62d7baa3ff2cc4407feeafa14994e"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-generated-surfaces.css",
+    "bytes": 12788,
+    "sha256": "94d8c8a3e1915b36a2fc742510e5a2a28cd3766355bff6d8f5cfeb51608e1f50"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-help.css",
+    "bytes": 6688,
+    "sha256": "36d2dd5474b2bb62fed7e442ccc968b35776ced6f5b3725dd264d5303917f675"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-keyword.css",
+    "bytes": 5678,
+    "sha256": "72bf132b8da8e9afc25e8c7a7cb0f3e7914113beb34e037eb7ad3aaf4c0fc23b"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-list-module.css",
+    "bytes": 69563,
+    "sha256": "49fda341d286faf691e0cb0aad425e06f6543b5897c8670b3593fd54f3712c7e"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-menu-spine.js",
+    "bytes": 26028,
+    "sha256": "f5497d71233f9935488e5b4eed466b984b167767084d6c3fafa3d9f7b538a28a"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-notification.css",
+    "bytes": 4925,
+    "sha256": "36bb793ca109171fba27ea5aca50b236b4f19bc08da4d3ca2d6536a6228c582f"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-notification.js",
+    "bytes": 6493,
+    "sha256": "c865ba033fcd141002af79f75ecebf82c557ddbb130d1f8f71de6715fe0d5956"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-page-view-state.js",
+    "bytes": 4133,
+    "sha256": "0c375fbe4e09e37b9a53b6c967abd5a4bbaac6a9efca99789e3e45f5b532009f"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-program-reservation.css",
+    "bytes": 9056,
+    "sha256": "1a2e1ce4b9e25d9cb2b814fba426f6b12115b9e8fcc51ec2b5154ef94e486cc2"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-program-rules.css",
+    "bytes": 14245,
+    "sha256": "5cb39aacf13a8a1bee18846c59156fe95617c72ced8aab6ec0b1c7440e80cbf8"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-program-time-action.js",
+    "bytes": 1095,
+    "sha256": "68315a7aa52bf6d806f98463c43e22e50303227ec518e3112268f6069c91d781"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-reservation-action-state.js",
+    "bytes": 1191,
+    "sha256": "994336e60b87bcf52c0ca2a990efdc7b680e81c87a4574c97d6762011c8e789f"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-reservations.css",
+    "bytes": 9038,
+    "sha256": "19ab87622dae8ead6a66534a0f72710aa705c3e6da5e49e51566ccacd52020cc"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-search-enter.js",
+    "bytes": 1484,
+    "sha256": "1ee37c336e110e73307c6d1f220684aefb67a3526539202020a074e0141a10ec"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-settings-host.css",
+    "bytes": 475,
+    "sha256": "b5e1fe0f304ceb624a8deee8366b33800790a6cd804556facde31e4af17d7af4"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-settings-host.js",
+    "bytes": 6111,
+    "sha256": "e1bcfef03fb3bf2cb43bdf99633cf0e7b065acadef3120d4608641542ad5d2c9"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-theme-contract.css",
+    "bytes": 92832,
+    "sha256": "d5046ae2597a930dccac31557e0dadca76cb0184d2dd4f1851c264bf2e954a94"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-theme.js",
+    "bytes": 30312,
+    "sha256": "d1ee5b4700822fac66dc2f716e517d4de5dc4586d37af69afc10c36a1507f5cb"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-timed-text-streams.css",
+    "bytes": 2341,
+    "sha256": "d657e4f8d1e2b88c141a75d51914f64695a652559010bdebf001ece7cecc9950"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-ui-foundation.css",
+    "bytes": 1360,
+    "sha256": "7440105c87b9f275dbc822c779284bb8339815b5ef04d1d1ae8bb2fda309805c"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-ui-modules.css",
+    "bytes": 131595,
+    "sha256": "23475d44b4827f50216b00f108d14d7d6aad1445a6daba9e9d780a74627a8992"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-user-log.css",
+    "bytes": 8510,
+    "sha256": "493c6675163522f6396a4f650d89cf033206f24f60117df08ab0a5dd754565a2"
+  },
+  {
+    "path": "TvAIr/wwwroot/tvair-user-log.js",
+    "bytes": 2385,
+    "sha256": "40b4f8ff7c8787e1a273ed02c9f5af7d886f49f82a58cb4b1bdcd1ff33466e48"
+  },
+  {
+    "path": "TvAIrEpgRec/CommonTsRoute/CommonTsRouteFacade.cs",
+    "bytes": 5707,
+    "sha256": "d798cf13609cf016265d88999c0fc572a3aa6f55074cd2d5760c9214b04265dd"
+  },
+  {
+    "path": "TvAIrEpgRec/CommonTsRoute/ServiceRouteContracts.cs",
+    "bytes": 1627,
+    "sha256": "26863bebae3627ea116675504b67d56019567c143e2d795f019357d4d36fd545"
+  },
+  {
+    "path": "TvAIrEpgRec/Program.cs",
+    "bytes": 343636,
+    "sha256": "0684f9d60ac2036aa90f9b06dcdfb3fe25058ed625fb1a41145beec066c60357"
+  },
+  {
+    "path": "TvAIrEpgRec/TvAIrEpgRec.csproj",
+    "bytes": 1984,
+    "sha256": "6cdd7a847b68f24a9d13439cc7835c48e53ed553332adc890e36d9fc8545c0df"
+  },
+  {
+    "path": "TvAIrEpgRec/TvAIrEpgRec.ico",
+    "bytes": 23811,
+    "sha256": "e8340ee5596b415eb3dd82411643579191f980be75ead9f3e5d14fefd66da2a9"
+  },
+  {
+    "path": "TvAIrEpgRec/WorkerPresentation.cs",
+    "bytes": 16873,
+    "sha256": "1b478f139a99c8a09dc6f8695226b879febb0608a6aa17e7bc66c09b97cc8bf3"
+  },
+  {
+    "path": "TvAIrPlugin/Assets/AssetContracts.cs",
+    "bytes": 992,
+    "sha256": "dafe330f21308e263c656f8aab09655a6e075473fd327dbc0006217edec394c9"
+  },
+  {
+    "path": "TvAIrPlugin/Bridge/BridgeContracts.cs",
+    "bytes": 1135,
+    "sha256": "6e581dacd339e71787eae3936578f9dd3d6407dbce959e8d3a712f3fa21aa3e6"
+  },
+  {
+    "path": "TvAIrPlugin/Capability/CapabilityApis.cs",
+    "bytes": 78479,
+    "sha256": "8e793e28afca9dc20462c78c8fbeab52a6c4f03a282822197448d9ffde9b9d0e"
+  },
+  {
+    "path": "TvAIrPlugin/Capability/ExternalLookupContracts.cs",
+    "bytes": 2409,
+    "sha256": "4289436d7a7429ba9db2537c13220aed8994daf4782cb0f76eb00007ab1220f4"
+  },
+  {
+    "path": "TvAIrPlugin/Capability/InternetAccessContracts.cs",
+    "bytes": 734,
+    "sha256": "52d1133fec0915df8bb2cb68176c440b64d1b983326ab5ac02fc22810dc09978"
+  },
+  {
+    "path": "TvAIrPlugin/Data/DataContracts.cs",
+    "bytes": 2191,
+    "sha256": "22ac39ce55df5b2d4b79c1a7b98fc0ad41977d04f5e9f3a6504dab8341353942"
+  },
+  {
+    "path": "TvAIrPlugin/Events/EventContracts.cs",
+    "bytes": 1362,
+    "sha256": "e502a480bd0926769fab362eb6dea11a6310362dafd8927081c2b9cd13f5fb77"
+  },
+  {
+    "path": "TvAIrPlugin/Notifications/NotificationContracts.cs",
+    "bytes": 2973,
+    "sha256": "d06e5a00ac0d99f5d1391952436a53a7a422365b895b21a34acdd0eef7bcfad4"
+  },
+  {
+    "path": "TvAIrPlugin/Overlay/OverlayContracts.cs",
+    "bytes": 2655,
+    "sha256": "53f6c23c27e1735f6159eb1ef7c8e2a82bef778a813fc3c1b8b5611b8f39462d"
+  },
+  {
+    "path": "TvAIrPlugin/Pickers/PathPickerContracts.cs",
+    "bytes": 1894,
+    "sha256": "4b6e1a9cfdb7fa675b13af5c6caf6dce4eef35ff975a14be44653fcc3fdee6bb"
+  },
+  {
+    "path": "TvAIrPlugin/PluginContracts.cs",
+    "bytes": 33983,
+    "sha256": "d53394b42fe79a6578ba66c649b2fd92418753d252f41cae46712f3ec1826ca3"
+  },
+  {
+    "path": "TvAIrPlugin/Runtime/RuntimeContracts.cs",
+    "bytes": 27985,
+    "sha256": "b61f3b22f49db5df808792163f7b0d144a7ad06e72d2360a85013fade5a9a5ad"
+  },
+  {
+    "path": "TvAIrPlugin/Storage/StorageContracts.cs",
+    "bytes": 910,
+    "sha256": "9ee95ceadac171ff20f69ee8dcc5961f6d6ac3e852c0f5774e24290ef703b00d"
+  },
+  {
+    "path": "TvAIrPlugin/Surfaces/SurfaceContracts.cs",
+    "bytes": 3200,
+    "sha256": "674f99841ee49f127cc0f21cb3615e6931319cbd53ef1c55890a938af6ad42c9"
+  },
+  {
+    "path": "TvAIrPlugin/TvAIrPlugin.csproj",
+    "bytes": 963,
+    "sha256": "eb430999b2edc2da92c1d861c295575e76594774b2979726e4c78907ce77c4b7"
+  },
+  {
+    "path": "TvAIrPlugin/TvAIrPluginSdkContract.generated.cs",
+    "bytes": 1163,
+    "sha256": "94c4ea2d451fc569ab5b0b7d1c80fe47aa2749a703989ea0c03fecff307fd26b"
+  },
+  {
+    "path": "TvAIrPlugin/Viewers.ViewerContracts.cs",
+    "bytes": 9746,
+    "sha256": "15930d75b17d5c11d69d093c0d668c385d3906bfc82f48ee6a333a4895b60c1a"
+  },
+  {
+    "path": "TvAIrPlugin/WebRuntime/WebRuntimeContracts.cs",
+    "bytes": 1441,
+    "sha256": "de067d20eb9999e9895f5ecfc3a77785d83ffd8821303c52f9cba54b39a7e35d"
+  },
+  {
+    "path": "TvAIrPlugin/Windows/WindowContracts.cs",
+    "bytes": 6544,
+    "sha256": "8277410d6b519ca5b37c39875122d302651eb34913521e3e8ec1b24642f2d432"
+  }
+]
