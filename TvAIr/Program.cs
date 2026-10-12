@@ -863,7 +863,7 @@ app.MapGet("/network-login", (HttpContext context) =>
     context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'self'; base-uri 'none'";
     var html = $$$"""
 <!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>TvAIr 接続</title><link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.7"></head><body class="tvair-generated-login"><main><h1>TvAIrへ接続</h1><form id="login"><label for="password">接続用パスワード</label><input id="password" type="password" autocomplete="current-password" required minlength="12"><button type="submit">接続</button><div id="message" class="message" role="status"></div></form></main>
+<title>TvAIr 接続</title><link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.8"></head><body class="tvair-generated-login"><main><h1>TvAIrへ接続</h1><form id="login"><label for="password">接続用パスワード</label><input id="password" type="password" autocomplete="current-password" required minlength="12"><button type="submit">接続</button><div id="message" class="message" role="status"></div></form></main>
 <script>
 const form=document.getElementById('login'),password=document.getElementById('password'),message=document.getElementById('message');
 form.addEventListener('submit',async e=>{e.preventDefault();message.textContent='確認しています…';try{const r=await fetch('/api/network-auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:password.value}),credentials:'same-origin'});const j=await r.json().catch(()=>({}));if(!r.ok){message.textContent=j.message||'接続できませんでした。';return;}location.replace({{{returnUrlJson}}});}catch{message.textContent='接続できませんでした。';}});
@@ -1974,7 +1974,7 @@ static IResult RenderPluginWindowHost(string windowId, HttpRequest http, PluginW
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{title}}</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.7">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.8">
 </head>
 <body class="tvair-plugin-window-page">
 <div class="{{hostClass}}" data-window-id="{{encodedWindowId}}" data-window-revision="{{initialRevision}}" data-tool-host="{{toolHost.ToString().ToLowerInvariant()}}">
@@ -2371,10 +2371,10 @@ static IResult RenderPluginVersionInfoPage(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-notification.css?v=1.2.7">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.2.8">
 </head>
 <body>
-<script src="/tvair-notification.js?v=1.2.7"></script>
+<script src="/tvair-notification.js?v=1.2.8"></script>
 <script>
 document.addEventListener('DOMContentLoaded',function(){
   if(window.TvAIrNotify){ TvAIrNotify({ title:'{{safeTitle}}', message:'{{safeVersion}}', onOk:function(){ location.replace('{{safeReturn}}'); } }); }
@@ -2428,7 +2428,7 @@ static IResult RenderPluginDefaultMenuInfo(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeName}} 情報</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.7">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.8">
 </head>
 <body class="tvair-plugin-info-page"><div class="card"><h1>{{safeName}} 情報</h1><div class="row"><div class="k">Version</div><div class="v">{{safeVersion}}</div></div><div class="row"><div class="k">Route</div><div class="v">{{safeRoute}}</div></div><div class="row"><div class="k">Action</div><div class="v">{{safeKind}}</div></div><p>{{safeDescription}}</p><a class="button" href="/">番組表へ戻る</a></div></body>
 </html>
@@ -2449,7 +2449,7 @@ static IResult PluginHtmlMessage(string title, string message, int statusCode, s
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.7">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.8">
 </head>
 <body class="tvair-message-page"><div class="card"><h1>{{safeTitle}}</h1><p>{{safeMessage}}</p><a class="button" href="{{safeHref}}">{{safeLinkText}}</a></div></body>
 </html>
@@ -2509,7 +2509,7 @@ static string BuildPluginFloatingButtonsHtml(RuntimeUiRenderContext context, str
     if (normalized.Length == 0) return string.Empty;
 
     var sb = new System.Text.StringBuilder();
-    sb.Append("<link rel=\"stylesheet\" href=\"/tvair-generated-surfaces.css?v=1.2.7\">");
+    sb.Append("<link rel=\"stylesheet\" href=\"/tvair-generated-surfaces.css?v=1.2.8\">");
 
     foreach (var group in normalized.GroupBy(x => x.Item.Position))
     {
@@ -3539,16 +3539,16 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; media-src 'self' data:">
 <title>{{{{safeTitle}}}} - TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.7">
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.7">
-<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.2.7">
-<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.7">
-<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.2.7">
-<link rel="stylesheet" href="/tvair-notification.css?v=1.2.7">
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.7">
-<link rel="stylesheet" href="/tvair-settings-host.css?v=1.2.7">
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.8">
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.8">
+<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.2.8">
+<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.8">
+<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.2.8">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.2.8">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.8">
+<link rel="stylesheet" href="/tvair-settings-host.css?v=1.2.8">
 {{{{developerThemeDiagnosticScript}}}}
-<script src="/tvair-theme.js?v=1.2.7"></script>
+<script src="/tvair-theme.js?v=1.2.8"></script>
 </head>
 <body class="tvair-non-program-page tvair-plugin-shell-page {{{{themeClass}}}}{{{{contentOnlyClass}}}}" data-plugin-route="{{{{safeRoute}}}}" data-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme="{{{{safeSelectedTheme}}}}" data-tvair-selected-theme="{{{{safeSelectedTheme}}}}" data-tvair-effective-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme-generation="{{{{safeThemeGeneration}}}}" data-tvair-theme-revision="{{{{themeRevision}}}}" data-tvair-theme-scope="all" data-tvair-theme-update-mode="{{{{themeUpdateModeToken}}}}">
 <div id="nav">
@@ -3570,11 +3570,11 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
   </main>
 </div>
 {{{{themeHotApplyScriptTag}}}}
-<script src="/tvair-notification.js?v=1.2.7"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.7"></script>
-<script src="/tvair-safe-event-host.js?v=1.2.7"></script>
-<script src="/tvair-menu-spine.js?v=1.2.7"></script>
-<script src="/tvair-settings-host.js?v=1.2.7"></script>
+<script src="/tvair-notification.js?v=1.2.8"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.8"></script>
+<script src="/tvair-safe-event-host.js?v=1.2.8"></script>
+<script src="/tvair-menu-spine.js?v=1.2.8"></script>
+<script src="/tvair-settings-host.js?v=1.2.8"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -3872,17 +3872,17 @@ static string BuildPluginToolWindowContentHtml(string title, string route, strin
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; media-src 'self' data:">
 <title>{{safeTitle}} - TvAIr Tool Window</title>
-<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.7">
+<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.8">
 {{developerThemeDiagnosticScript}}
-<script src="/tvair-theme.js?v=1.2.7"></script>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.7">
+<script src="/tvair-theme.js?v=1.2.8"></script>
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.8">
 {{pluginHead}}
 </head>
 <body class="tvair-plugin-toolwindow-content-only {{themeClass}}" data-plugin-route="{{safeRoute}}" data-theme="{{safeEffectiveTheme}}" data-tvair-theme="{{safeSelectedTheme}}" data-tvair-selected-theme="{{safeSelectedTheme}}" data-tvair-effective-theme="{{safeEffectiveTheme}}" data-tvair-theme-generation="{{safeThemeGeneration}}" data-tvair-theme-revision="{{themeRevision}}" data-tvair-theme-scope="all" data-tvair-theme-update-mode="{{themeUpdateModeToken}}" data-tvair-host-kind="winforms_webbrowser_fallback_direct_content" data-tvair-toolwindow-contract="release_contract">
 <div class="tvair-toolwindow-content-root">
 {{pluginContent}}
 </div>
-<script src="/tvair-safe-event-host.js?v=1.2.7"></script>
+<script src="/tvair-safe-event-host.js?v=1.2.8"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -8475,14 +8475,22 @@ static class ViewerProfileContract
     public static IReadOnlyList<ViewerProfileContractDto> BuildProfiles(TvTestSettings settings, IniSettingsService ini, IReadOnlyList<TunerProfile> tunerProfiles)
     {
         var profiles = new List<ViewerProfileContractDto>();
-        var viewingTuners = TunerRuntimeProfileSource.Build(ini, tunerProfiles)
+        var runtimeTuners = TunerRuntimeProfileSource.Build(ini, tunerProfiles);
+        var cableRoutes = runtimeTuners.Any(t => TunerDisplayName.NormalizeGroup(t.Group) == "CATV")
+            ? BonDriverChannelRouteCatalog.FromConfiguredTuners(runtimeTuners.Select(t => new TunerProfileDto
+            {
+                Name = t.Name, BonDriverFileName = t.BonDriverFileName,
+                ChannelCh2Path = t.ChannelCh2Path, Group = t.Group, Role = t.Role
+            }))
+            : null;
+        var viewingTuners = runtimeTuners
             .Where(t => string.Equals(IniSettingsService.NormalizeTunerRole(t.Role), "Viewing", StringComparison.OrdinalIgnoreCase))
             .ToList();
 
         var order = 0;
         foreach (var tuner in viewingTuners)
         {
-            var supportedGroups = SupportedGroupsForTuner(tuner.Group);
+            var supportedGroups = SupportedGroupsForTuner(tuner, cableRoutes);
             var frameIndex = tuner.DeviceNumber;
             if (frameIndex <= 0) continue;
 
@@ -8504,7 +8512,17 @@ static class ViewerProfileContract
         var profiles = BuildProfiles(settings, ini, tunerProfiles);
         var raw = (requested ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(raw) || raw.Equals("auto", StringComparison.OrdinalIgnoreCase) || raw.Equals("default", StringComparison.OrdinalIgnoreCase))
-            return profiles.FirstOrDefault(p => p.IsDefault) ?? Disabled("", "viewer_profile_unavailable");
+        {
+            // Only automatic selection may switch profiles. An explicitly requested
+            // profile is never silently replaced by a different physical tuner.
+            var group = NormalizeProfileGroup(requestedGroup);
+            var compatible = string.IsNullOrWhiteSpace(group)
+                ? profiles
+                : profiles.Where(p => ProfileSupportsGroup(p, group)).ToList();
+            return compatible.FirstOrDefault(p => p.IsDefault)
+                ?? compatible.FirstOrDefault()
+                ?? Disabled(raw, "viewer_profile_unavailable");
+        }
 
         var stable = profiles.FirstOrDefault(p => string.Equals(p.Id, raw, StringComparison.OrdinalIgnoreCase));
         if (stable is not null) return stable;
@@ -8541,6 +8559,26 @@ static class ViewerProfileContract
     private static ViewerProfileContractDto Disabled(string requested, string errorCode)
         => new(requested, requested, false, false, 0, false, string.Empty, "not-configured", errorCode, 0, Array.Empty<string>(), string.Empty, false, errorCode);
 
+    private static IReadOnlyList<string> SupportedGroupsForTuner(TunerProfile tuner, BonDriverChannelRouteCatalog? routes)
+    {
+        if (TunerDisplayName.NormalizeGroup(tuner.Group) != "CATV")
+            return SupportedGroupsForTuner(tuner.Group);
+        var groups = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "CATV" };
+        if (routes is null || string.IsNullOrWhiteSpace(tuner.ChannelCh2Path)) return groups.ToArray();
+        string source;
+        try { source = Path.GetFullPath(tuner.ChannelCh2Path.Trim()); }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        { return groups.ToArray(); }
+        foreach (var route in routes.SourceRoutes)
+        {
+            if (!string.Equals(route.BonDriverIdentity, tuner.BonDriverFileName, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(route.SourceCh2Path, source, StringComparison.OrdinalIgnoreCase)
+                || !routes.TryResolveTransportForSource(tuner.BonDriverFileName, source, new[] { route.Service }, out _))
+                continue;
+            groups.Add(BroadcastNetworkIdentity.ResolveLegacyChannelGroup("CATV", route.Service.NetworkId));
+        }
+        return new[] { "GR", "BS", "CS", "CATV" }.Where(groups.Contains).ToArray();
+    }
     private static IReadOnlyList<string> SupportedGroupsForTuner(string? tunerGroup)
     {
         var group = TunerDisplayName.NormalizeGroup(tunerGroup);
@@ -8548,6 +8586,7 @@ static class ViewerProfileContract
         {
             "GR" => new[] { "GR" },
             "BSCS" => new[] { "BSCS" },
+            "CATV" => new[] { "CATV" },
             "HYBRID" => new[] { "GR", "BSCS", "HYBRID" },
             _ => Array.Empty<string>()
         };

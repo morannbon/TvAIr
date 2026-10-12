@@ -41,6 +41,12 @@ public sealed record TvAirSnapshotPage(
 }
 public sealed record TvAirSnapshotCloseRequest(string SnapshotId);
 
+/// <summary>
+/// Provides an immutable, revision-addressed materialized view of each selected
+/// data source. A multi-source snapshot pins all returned rows for subsequent
+/// paging; it does not claim an atomic transaction across the independently
+/// committed Host stores. Revisions describe the exact published rows.
+/// </summary>
 public interface ITvAirDataApi
 {
     IReadOnlyList<TvAirDataSourceDescriptor> ListSources();

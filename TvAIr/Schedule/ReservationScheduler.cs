@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Collections.Concurrent;
 using System.Management;
 using System.Text.Json;
@@ -6983,6 +6983,32 @@ private readonly ReservationStore _store;
                     "direction=live_present_both extraTunerLease=0 rule=recording_live_eit_time_follow_contract");
             }
 
+            // Recording boundary is resolved once before the common CAS/worker control path.
+            // For standalone recordings, a fresh actual-present successor also proves that
+            // the target program has ended, even when the previously observed duration is stale.
+            // Shared/explicit chains retain their separately approved boundary contract.
+            if (!session.IsSharedChainCapture
+                && !r.IsUserChain
+                && !HasScheduledDirectChainSuccessor(r)
+                && hasLiveEvidence
+                && TryResolveActualPresentSuccessorBoundary(liveEvidence, r, now, out var successorBoundary)
+                && successorBoundary < ev.End)
+            {
+                var oldEnd = ev.End;
+                ev = CloneEpgEventWithEnd(ev, successorBoundary);
+                _recordingTimeFollowEvidence[r.Id] = new RecordingTimeFollowEvidence(
+                    r.NetworkId, r.TransportStreamId, r.ServiceId, r.EventId,
+                    ev.Start, successorBoundary, liveEvidence.PresentObservedAt, string.Empty,
+                    LivePresentBoundaryAuthoritative: true);
+                _log.Add("REC_FOLLOW_LIVE_EIT", $"R{r.Id}",
+                    $"result=EARLY_END_CONFIRMED source=recording_worker_actual_present_successor " +
+                    $"event={r.NetworkId}/{r.TransportStreamId}/{r.ServiceId}/{r.EventId} " +
+                    $"successorEid={liveEvidence.PresentEventId} successorStart={successorBoundary:MM/dd HH:mm:ss} " +
+                    $"previousEnd={oldEnd:MM/dd HH:mm:ss} " +
+                    $"observedAt={liveEvidence.PresentObservedAt:MM/dd HH:mm:ss} " +
+                    "action=apply_common_follow_cas_and_worker_deadline rule=recording_boundary_single_source_contract");
+            }
+
             var singleProgramFollowedEnd = ev.End.AddSeconds(session.PostEndMarginSeconds);
             var followedEnd = session.IsSharedChainCapture
                 ? singleProgramFollowedEnd
@@ -7386,6 +7412,34 @@ private readonly ReservationStore _store;
                 && PresentObservedAt != default
                 && PresentObservedAt <= now.AddSeconds(5)
                 && now - PresentObservedAt <= TimeSpan.FromSeconds(30);
+    }
+
+    private static bool TryResolveActualPresentSuccessorBoundary(
+        LiveRecordingEventEvidence live,
+        Reservation target,
+        DateTime now,
+        out DateTime boundary)
+    {
+        boundary = default;
+        // ARIB actual EIT p/f section 0 is the live present evidence. A schedule
+        // projection alone must never terminate an in-progress live broadcast.
+        if (live.PresentTableId != 0x4E
+            || live.PresentSectionNumber != 0
+            || live.PresentCurrentNextIndicator != 1
+            || live.PresentEventId == 0
+            || live.PresentEventId == target.EventId
+            || live.PresentObservedAt == default
+            || live.PresentObservedAt > now.AddSeconds(5)
+            || now - live.PresentObservedAt > TimeSpan.FromSeconds(30)
+            || live.PresentStart <= target.StartTime
+            || live.PresentEnd <= live.PresentStart
+            || live.PresentStart > now
+            || now - live.PresentStart < TimeSpan.FromSeconds(15)
+            || live.PresentStart >= target.EndTime)
+            return false;
+
+        boundary = live.PresentStart;
+        return true;
     }
 
     private static EpgEvent CloneEpgEventWithEnd(EpgEvent source, DateTime end)

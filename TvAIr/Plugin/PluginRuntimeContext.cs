@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
@@ -459,10 +459,20 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
                     case "CS":
                         groups.Add("CS");
                         break;
+                    case "CATV":
+                        // Report only explicitly configured CATV capability; never infer it from BS/CS.
+                        groups.Add("CATV");
+                        break;
+                    case "HYBRID":
+                        // Current Host HYBRID tuner contract means GR + BSCS, not CATV.
+                        groups.Add("GR");
+                        groups.Add("BS");
+                        groups.Add("CS");
+                        break;
                 }
             }
 
-            return new[] { "GR", "BS", "CS" }.Where(groups.Contains).ToArray();
+            return new[] { "GR", "BS", "CS", "CATV" }.Where(groups.Contains).ToArray();
         }
 
         private static TvAIrPlugin.Viewers.TvAirViewerSessionDto ToRuntimeSession(global::TvAIrPlugin.TvAirViewerSessionDto source)
@@ -765,7 +775,6 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
 
         private static readonly TimeSpan SnapshotLifetime = TimeSpan.FromMinutes(5);
         private const int MaxSnapshots = 8;
-        private const int StableCaptureAttempts = 3;
         private readonly ITvAirReservationsApi _reservations;
         private readonly ITvAirRecordingsApi _recordings;
         private readonly ITvAirProgramGuideApi _programGuide;
@@ -805,14 +814,11 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
             if (selectedSources.Count == 0)
                 return TvAirOperationResult<TvAirSnapshotDescriptor>.Fail(TvAirErrorCode.EntityNotFound, "Data source was not found.");
 
-            StableCapture? capture;
+            StableCapture capture;
             lock (_captureGate)
             {
-                capture = CaptureStable(selectedSources);
+                capture = CapturePublished(selectedSources);
             }
-            if (capture is null)
-                return TvAirOperationResult<TvAirSnapshotDescriptor>.Fail(TvAirErrorCode.RevisionConflict, "Data changed while the snapshot was being captured.");
-
             var capturedAt = capture.CapturedAtUtc;
             var expiresAt = capturedAt.Add(SnapshotLifetime);
             var compositeRevision = ComputeCompositeRevision(selectedSources, capture.SourceRevisions);
@@ -912,34 +918,14 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
             return result;
         }
 
-        private StableCapture? CaptureStable(IReadOnlyList<TvAirDataSourceDescriptor> sources)
-        {
-            CapturedSources? previous = null;
-#if TVAIR_DEVELOPER_DIAGNOSTICS
-            var changedSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var captureWatch = global::System.Diagnostics.Stopwatch.StartNew();
-#endif
-            for (var attempt = 0; attempt < StableCaptureAttempts; attempt++)
-            {
-                var current = CaptureSources(sources);
-                if (previous is not null)
-                {
-                    if (RevisionsEqual(previous.SourceRevisions, current.SourceRevisions))
-                        return current.ToStableCapture();
-#if TVAIR_DEVELOPER_DIAGNOSTICS
-                    foreach (var source in sources)
-                        if (!string.Equals(previous.SourceRevisions[source.SourceId], current.SourceRevisions[source.SourceId], StringComparison.Ordinal))
-                            changedSources.Add(source.SourceId);
-#endif
-                }
-                previous = current;
-            }
-#if TVAIR_DEVELOPER_DIAGNOSTICS
-            _diagnostics.Add("PLUGIN_SNAPSHOT_CAPTURE_CONFLICT", "DataApi",
-                $"result=REVISION_CONFLICT sources=[{string.Join(',', sources.Select(x => x.SourceId))}] changed=[{string.Join(',', changedSources.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))}] elapsedMs={captureWatch.ElapsedMilliseconds} attempts={StableCaptureAttempts} rule=runtime_snapshot_consistency_diagnostic");
-#endif
-            return null;
-        }
+        // Materialize each exposed source once; pin the exact rows and their
+        // revisions in one immutable, paged publication. Multiple independent
+        // source APIs do NOT provide a shared storage transaction. A second
+        // capture compared by hash cannot create one; it only rejects valid
+        // snapshots while the EPG writer is active. Never re-read a source to
+        // create a revision or page after publication.
+        private StableCapture CapturePublished(IReadOnlyList<TvAirDataSourceDescriptor> sources)
+            => CaptureSources(sources).ToStableCapture();
 
         private CapturedSources CaptureSources(IReadOnlyList<TvAirDataSourceDescriptor> sources)
         {
@@ -955,9 +941,6 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
             }
             return new CapturedSources(DateTimeOffset.UtcNow, sources, sourceItems, sourceRevisions, sourceCounts);
         }
-
-        private static bool RevisionsEqual(IReadOnlyDictionary<string, string> left, IReadOnlyDictionary<string, string> right)
-            => left.Count == right.Count && left.All(pair => right.TryGetValue(pair.Key, out var value) && string.Equals(pair.Value, value, StringComparison.Ordinal));
 
         private TvAirDataSourceDescriptor? FindSource(string? sourceId)
             => Sources.FirstOrDefault(x => string.Equals(x.SourceId, sourceId, StringComparison.OrdinalIgnoreCase));

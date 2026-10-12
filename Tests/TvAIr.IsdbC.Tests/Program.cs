@@ -9,6 +9,8 @@ using TvAIr.Epg;
 using TvAIr.Plugin;
 using TvAIr.Schedule;
 using TvAIr.Tuner;
+using TvAIrPlugin;
+using TvAIrPlugin.Data;
 
 // No BonDriver, TVTest or tuner is opened. All cases use synthetic .ch2 and SQLite stores.
 var root = Path.Combine(Path.GetFullPath(args.FirstOrDefault() ?? Path.GetTempPath()), "TvAIr-IsdbC-" + Guid.NewGuid().ToString("N"));
@@ -166,6 +168,16 @@ Case("known wave must fit configured physical capability", () => {
     var p=Profile("GR-only","BonDriver_A.dll",a,"GR"); var ctx=Context("incompatible",p);
     Check(!ctx.Policy.Capture().TryResolveRecordingAdmission(4,200,201,ctx.Ini.Tuners,out _,out _),"BS admitted to GR tuner");
     var r=Reserve(ctx.Store,4,200,201); Evaluate(ctx.Store,ctx.Pool,new[]{p}); Check(ctx.Store.GetById(r.Id)!.TunerName=="" && !ctx.Policy.Capture().CanTune(p,r),"incompatible physical assigned");
+});
+Case("CATV physical viewer route takes precedence over retransmitted NID wave", () => {
+    var p=Profile("C4", "BonDriver_A.dll", a, "CATV", "Viewing");
+    var ctx=Context("catv-viewer-physical",p);
+    var policy=ctx.Policy.Capture();
+    var carriedBs=new BroadcastServiceKey(4,200,201);
+    Check(policy.CanTune(p,new Reservation { NetworkId=4,TransportStreamId=200,ServiceId=201 }),"explicit CATV source rejected carried satellite identity");
+    Check(policy.TryResolveTargetForProfile(p,carriedBs,out var target) && target.Group=="CATV" && target.ResolvedSpace==7 && target.ResolvedChannelIndex==41,"CATV physical coordinates incorrectly inferred from wave");
+    Check(policy.ResolveSchedulingGroup(new Reservation { NetworkId=4,TransportStreamId=200,ServiceId=201 },new[]{p})=="CATV","CATV physical group lost");
+    Check(!policy.CanTune(p,new Reservation { NetworkId=4,TransportStreamId=999,ServiceId=201 }),"CATV unlisted service admitted");
 });
 Case("normal EPG occupation preserves hybrid wave and generation", () => {
     var occupation=new NormalEpgWaveOccupation(); occupation.Set("GR",at,at.AddMinutes(10),"fixture",false,1);
@@ -418,6 +430,46 @@ Case("viewer preparation selects the requested physical profile table", () => {
     var rejected=operations.Prepare(new ViewerOperationPreparationRequest("test","start","viewer-slot-view",null,null,0x7880,100,101));
     Check(!rejected.Success,"viewer borrowed recording/other driver route");
 });
+Case("automatic CATV viewer uses physical route without wave hint", () => {
+    var gr = Profile("gview", "BonDriver_B.dll", b, "GR", "Viewing"); gr.DeviceNumber=1;
+    var catv = Profile("cview", "BonDriver_A.dll", a, "CATV", "Viewing"); catv.DeviceNumber=2;
+    var ctx=Context("viewer-auto-catv", gr, catv);
+    ctx.Ini.Tuners[0].DeviceNumber=1; ctx.Ini.Tuners[1].DeviceNumber=2;
+    var log=new LogRepository(); var appGate=new ApplicationOperationGate(log);
+    using var hub=new PluginTypedEventHub(log,new ReservationMutationJournal(),ctx.Loader);
+    var leases=new ExternalTunerLeaseService(ctx.Pool,log,appGate,ctx.Policy);
+    var operations=new ViewerOperationService(ctx.Policy,leases,ctx.Pool,new ViewerSessionRegistry(log,hub),null!,Options.Create(new TvTestSettings{ExecutablePath=Path.Combine(root,"TVTest.exe")}),ctx.Ini,new[]{gr,catv},log,appGate);
+    var prepared=operations.Prepare(new ViewerOperationPreparationRequest("test","start","auto",null,null,4,200,201));
+    Check(prepared.Success && prepared.Plan!.Profile.LogicalViewerSlotId=="cview" && prepared.Plan.Group=="CATV", "auto viewer missed physically routable CATV profile: "+prepared.ErrorCode);
+    var explicitGr=operations.Prepare(new ViewerOperationPreparationRequest("test","start","viewer-slot-gview",null,null,4,200,201));
+    Check(!explicitGr.Success,"explicit GR profile was silently switched to CATV");
+});
+Case("plugin snapshot materialization pins content and revision under live guide updates", () => {
+    var counter=0;
+    var guide=DispatchProxy.Create<ITvAirProgramGuideApi, SnapshotTestProxy>();
+    ((SnapshotTestProxy)(object)guide).Invoker=(method,arguments) => method.Name switch
+    {
+        "ListEvents" => new List<TvAirProgramEventDto> { new() { EventId="event-"+(++counter), Title="live-version-"+counter } },
+        _ => throw new InvalidOperationException("Unexpected guide API method: "+method.Name)
+    };
+    var dataType=typeof(ViewerOperationService).Assembly.GetType("TvAIr.Plugin.PluginRuntimeContext")!.GetNestedType("DataApi",BindingFlags.NonPublic)!;
+    var data=Activator.CreateInstance(dataType,BindingFlags.Instance|BindingFlags.NonPublic|BindingFlags.Public,null,
+        new object?[] { null,null,guide,null,null,new LogRepository() },null)!;
+    var opened=Invoke(data,"OpenSnapshot",new TvAirSnapshotOpenRequest("program-guide"));
+    Check(Get<bool>(opened,"Succeeded") && counter==1,"snapshot performed repeated live captures");
+    var descriptor=Get<TvAirSnapshotDescriptor>(opened,"Value");
+    Check(!descriptor.NotModified && descriptor.ItemCount==1 && descriptor.SnapshotId is not null,"snapshot descriptor invalid");
+    var first=Invoke(data,"ReadSnapshot",new TvAirSnapshotReadRequest(descriptor.SnapshotId!));
+    var page=Get<TvAirSnapshotPage>(first,"Value");
+    Check(Get<bool>(first,"Succeeded") && page.Revision==descriptor.Revision
+        && ((TvAirProgramEventDto)page.Items.Single()).Title=="live-version-1" && counter==1,"published snapshot mutated on read");
+    var second=Invoke(data,"OpenSnapshot",new TvAirSnapshotOpenRequest("program-guide",descriptor.Revision));
+    var secondDescriptor=Get<TvAirSnapshotDescriptor>(second,"Value");
+    Check(Get<bool>(second,"Succeeded") && counter==2 && secondDescriptor.Revision!=descriptor.Revision,"new guide version was not published");
+    var oldAgain=Invoke(data,"ReadSnapshot",new TvAirSnapshotReadRequest(descriptor.SnapshotId!));
+    var oldPage=Get<TvAirSnapshotPage>(oldAgain,"Value");
+    Check(((TvAirProgramEventDto)oldPage.Items.Single()).Title=="live-version-1" && oldPage.Revision==descriptor.Revision,"old snapshot not immutable across update");
+});
 Case("early-end evidence retains actual present freshness and event identity", () => {
     var scheduler=typeof(ReservationStore).Assembly.GetType("TvAIr.Schedule.ReservationScheduler")!;
     var evidence=scheduler.GetNestedType("LiveRecordingEventEvidence",BindingFlags.NonPublic)!;
@@ -431,6 +483,29 @@ Case("early-end evidence retains actual present freshness and event identity", (
     var clone=(EpgEvent)scheduler.GetMethod("CloneEpgEventWithEnd",BindingFlags.NonPublic|BindingFlags.Static)!.Invoke(null,new object[]{original,now})!;
     Check(clone.End==now && clone.DurationSeconds==600 && clone.EventId==100 && clone.RawDescriptorLoopHex=="abc" && original.End!=clone.End,"early-end clone lost identity or mutated store");
 });
+Case("CATV direct display and viewer groups preserve carried broadcast categories", () => {
+    var ch=Ch2("catv-carried",Row("GR",1,10,0x7880,300,301)+Row("BS",2,20,4,200,201)+Row("Cable",3,30,0xf000,400,401)+Row("disabled-CS",4,40,6,500,501,false));
+    var p=Profile("cview","BonDriver_Cable.dll",ch,"CATV","Viewing"); p.DeviceNumber=1;
+    var ctx=Context("catv-carried",p); ctx.Ini.Tuners[0].DeviceNumber=1;
+    var targets=ctx.Policy.Capture().DisplayTargets;
+    Check(targets.Count==3 && targets.Single(x=>x.ServiceId==301).Group=="GR" && targets.Single(x=>x.ServiceId==201).Group=="BS" && targets.Single(x=>x.ServiceId==401).Group=="CATV","CATV display categories or enabled filter lost");
+    Check(!ChannelServiceAccessSnapshot.SupportsGroup("HYBRID","CATV"),"HYBRID accidentally gained cable capability");
+    var type=typeof(ViewerOperationService).Assembly.GetType("ViewerProfileContract")!;
+    var profiles=(IEnumerable)type.GetMethod("BuildProfiles",BindingFlags.Static|BindingFlags.Public)!.Invoke(null,new object[]{new TvTestSettings(),ctx.Ini,new[]{p}})!;
+    var profile=profiles.Cast<object>().Single();
+    var groups=Get<IReadOnlyList<string>>(profile,"AvailableGroups");
+    Check(groups.SequenceEqual(new[]{"GR","BS","CATV"}),"viewer capabilities include absent/disabled/foreign services: "+string.Join(',',groups));
+    File.WriteAllText(ch,Row("only-Cable",3,30,0xf000,400,401),Encoding.GetEncoding(932));
+    var updated=(IEnumerable)type.GetMethod("BuildProfiles",BindingFlags.Static|BindingFlags.Public)!.Invoke(null,new object[]{new TvTestSettings(),ctx.Ini,new[]{p}})!;
+    Check(Get<IReadOnlyList<string>>(updated.Cast<object>().Single(),"AvailableGroups").SequenceEqual(new[]{"CATV"}),"ch2 update did not refresh viewer capabilities");
+});
 File.WriteAllText(Path.Combine(root,"results.json"),System.Text.Json.JsonSerializer.Serialize(new{total=results.Count,failed,cases=results},new System.Text.Json.JsonSerializerOptions{WriteIndented=true}));
 Console.WriteLine($"{results.Count-failed}/{results.Count} passed; synthetic inputs only; no RF verification. Results: {root}");
 return failed==0 ? 0 : 1;
+
+public class SnapshotTestProxy : DispatchProxy
+{
+    public Func<MethodInfo, object?[]?, object?> Invoker { get; set; } = (_, _) => throw new NotImplementedException();
+    protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        => Invoker(targetMethod ?? throw new ArgumentNullException(nameof(targetMethod)), args);
+}

@@ -1,4 +1,4 @@
-﻿using TvAIr.Core;
+using TvAIr.Core;
 
 namespace TvAIr.Channel;
 
@@ -76,7 +76,7 @@ public sealed class ChannelServiceAccessSnapshot
                 continue;
             var group = (tuner.Group ?? string.Empty).Trim().ToUpperInvariant();
             // Unknown/hybrid grouping must not be guessed from a cable ONID.
-            if (group is not ("GR" or "BSCS" or "HYBRID"))
+            if (group is not ("GR" or "BSCS" or "HYBRID" or "CATV"))
                 continue;
             // The display row must belong to the same explicit BonDriver/.ch2
             // source as the route admitted for this tuner.  Matching the service
@@ -101,7 +101,8 @@ public sealed class ChannelServiceAccessSnapshot
                     continue;
                 var displayGroup = BroadcastNetworkIdentity.TryResolveWave(route.Service.NetworkId, out var wave)
                     ? wave : group;
-                if (!SupportsGroup(group, displayGroup)) continue;
+                if (group == "CATV") displayGroup = BroadcastNetworkIdentity.ResolveLegacyChannelGroup("CATV", route.Service.NetworkId);
+                if (group != "CATV" && !SupportsGroup(group, displayGroup)) continue;
                 seen.Add(route.Service);
                 result.Add(new ChannelTarget
                 {
@@ -127,6 +128,14 @@ public sealed class ChannelServiceAccessSnapshot
     public bool CanTune(TunerProfile tuner, Reservation reservation)
     {
         if (GetEligibility(reservation) == ChannelServiceEligibility.Disabled) return false;
+        // CATV routing is an explicitly configured BonDriver/.ch2 physical route.
+        // A cable retransmission can retain the original terrestrial/satellite NID;
+        // its NID must not override the configured physical CATV tuner group.
+        if (TunerDisplayName.NormalizeGroup(tuner.Group) == "CATV")
+            return !string.IsNullOrWhiteSpace(tuner.ChannelCh2Path)
+                && TryResolveDirectRouteForConfiguredSource(tuner.BonDriverFileName,
+                    tuner.ChannelCh2Path, new BroadcastServiceKey(reservation.NetworkId,
+                        reservation.TransportStreamId, reservation.ServiceId));
         var group = ResolveSchedulingGroup(reservation, new[] { tuner });
         if (!SupportsGroup(tuner.Group, group)) return false;
         if (!string.IsNullOrWhiteSpace(tuner.ChannelCh2Path))
@@ -145,8 +154,12 @@ public sealed class ChannelServiceAccessSnapshot
 
     public string ResolveSchedulingGroup(Reservation reservation, IReadOnlyList<TunerProfile> tuners)
     {
-        if (BroadcastNetworkIdentity.TryResolveWave(reservation.NetworkId, out var wave)) return wave;
         var key = new BroadcastServiceKey(reservation.NetworkId, reservation.TransportStreamId, reservation.ServiceId);
+        if (tuners.Count > 0 && tuners.All(t => TunerDisplayName.NormalizeGroup(t.Group) == "CATV")
+            && tuners.Any(t => !string.IsNullOrWhiteSpace(t.ChannelCh2Path)
+                && TryResolveDirectRouteForConfiguredSource(t.BonDriverFileName, t.ChannelCh2Path, key)))
+            return "CATV";
+        if (BroadcastNetworkIdentity.TryResolveWave(reservation.NetworkId, out var wave)) return wave;
         var boundGroups = tuners.Where(t => !string.IsNullOrWhiteSpace(t.ChannelCh2Path)
                 && TryResolveDirectRouteForConfiguredSource(t.BonDriverFileName, t.ChannelCh2Path, key))
             .Select(t => TunerDisplayName.NormalizeGroup(t.Group)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();

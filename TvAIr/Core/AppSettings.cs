@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Core;
+namespace TvAIr.Core;
 
 /// <summary>
 /// アプリ全体の設定。appsettings.json の各セクションにバインドされる。
@@ -65,7 +65,7 @@ public static class TunerDisplayName
     public static bool IsKnownGroup(string? group)
     {
         var normalized = NormalizeGroup(group);
-        return normalized is "GR" or "BSCS" or "HYBRID";
+        return normalized is "GR" or "BSCS" or "CATV" or "HYBRID";
     }
 
     public static string GroupLabel(string? group)
@@ -73,6 +73,7 @@ public static class TunerDisplayName
         {
             "GR" => "地上波",
             "BSCS" => "BS/CS",
+            "CATV" => "CATV",
             "HYBRID" => "地デジ/BS/CS",
             "" => "未設定",
             var raw => raw
@@ -85,6 +86,7 @@ public static class TunerDisplayName
         {
             "GR" => $"T{index}",
             "BSCS" => $"S{index}",
+            "CATV" => $"C{index}",
             "HYBRID" => $"H{index}",
             _ => $"T{index}"
         };

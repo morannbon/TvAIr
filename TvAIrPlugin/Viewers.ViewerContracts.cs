@@ -1,4 +1,4 @@
-﻿using TvAIrPlugin.Runtime;
+using TvAIrPlugin.Runtime;
 
 namespace TvAIrPlugin.Viewers;
 
@@ -22,6 +22,11 @@ public sealed record TvAirViewerProfileDto
     public required string DisplayName { get; init; }
     public required bool IsAvailable { get; init; }
     public required bool IsDefault { get; init; }
+    /// <summary>
+    /// Available service display groups for this physical viewer. CATV requires an
+    /// explicitly configured CATV tuner. Its enabled BonDriver/ch2 routes can also advertise GR, BS or CS retransmissions. HYBRID does not imply CATV.
+    /// BS and CS can be reported individually for a configured BSCS tuner.
+    /// </summary>
     public required IReadOnlyList<string> BroadcastGroups { get; init; }
     public required string LogicalViewerSlotId { get; init; }
     /// <summary>TvAIr設定でこのViewerに割り当てられた各放送波内の実デバイス番号。</summary>
