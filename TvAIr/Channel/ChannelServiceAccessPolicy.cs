@@ -67,7 +67,7 @@ public sealed class ChannelServiceAccessSnapshot
         var seen = result.Select(t => new BroadcastServiceKey(
             t.OriginalNetworkId, t.TransportStreamId, t.ServiceId)).ToHashSet();
         if (_channels.BonDriverRoutes is not { } catalog)
-            return result;
+            return OrderProgramGuideDisplayTargets(result);
 
         foreach (var tuner in configuredTuners)
         {
@@ -119,8 +119,26 @@ public sealed class ChannelServiceAccessSnapshot
                 });
             }
         }
-        return result;
+        return OrderProgramGuideDisplayTargets(result);
     }
+
+    // Single owner of ProgramGuide service-column order. Keep the TVTest .ch2
+    // encounter order within each broadcast wave, while making wave precedence
+    // independent of the channel file/tuner enumeration order. Only presentation
+    // targets are ordered here; tuning and recording routes remain unchanged.
+    private static IReadOnlyList<ChannelTarget> OrderProgramGuideDisplayTargets(List<ChannelTarget> targets)
+        => targets.OrderBy(t => ProgramGuideWaveOrder(
+            BroadcastNetworkIdentity.ResolveDisplayWave(t.Group, t.OriginalNetworkId))).ToArray();
+
+    private static int ProgramGuideWaveOrder(string? group)
+        => group?.Trim().ToUpperInvariant() switch
+        {
+            "GR" => 0,
+            "BS" => 1,
+            "CS" => 2,
+            "CATV" => 3,
+            _ => 4
+        };
 
     public IReadOnlyList<ChannelServiceState> ServiceStates => _channels.ServiceStates;
 

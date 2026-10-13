@@ -511,6 +511,91 @@ Case("program guide filter API advertises CATV as CATV instead of physical HYBRI
         Check(key==group,"filter key and display classification disagree: "+key+"/"+group);
     }
 });
+Case("direct CATV display preserves ch2 row order inside canonical wave groups",()=>{
+    var path=Ch2("catv-order",Row("BS first",0,10,4,900,900)+Row("GR first",0,20,0x7fe8,700,700)+Row("CATV first",0,30,0xf010,800,800)+Row("GR second",0,40,0x7880,100,100)+Row("BS second",0,50,4,100,100)+Row("CS first",0,60,7,500,500)+Row("CATV second",0,70,0xf000,200,200));
+    var p=Profile("Cable","BonDriver_Cable.dll",path,"CATV");var ctx=Context("catv-order",p);
+    var rows=ctx.Policy.Capture().DisplayTargets;
+    var expected=new[]{"GR first","GR second","BS first","BS second","CS first","CATV first","CATV second"};
+    Check(rows.Select(x=>x.Name).SequenceEqual(expected),"ch2 display order lost: "+string.Join(",",rows.Select(x=>x.Name)));
+    Check(ctx.Policy.Capture().CanTune(p,new Reservation{NetworkId=4,TransportStreamId=900,ServiceId=900}),"ordered display broke tuning");
+});
+Case("direct display excludes disabled and duplicate rows without sorting survivors",()=>{
+    var path=Ch2("order-disabled",Row("First",0,10,4,900,900)+Row("Disabled",0,20,4,500,500,false)+Row("Duplicate",0,10,4,900,900)+Row("Second",0,30,4,100,100));
+    var ctx=Context("order-disabled",Profile("Cable","BonDriver_Cable.dll",path,"CATV"));
+    Check(ctx.Policy.Capture().DisplayTargets.Select(x=>x.Name).SequenceEqual(new[]{"First","Second"}),"survivor order changed");
+});
+Case("multiple driver channel files follow configured source order within each wave",()=>{
+    var z=Ch2("order-z",Row("Z first",0,10,4,900,900)+Row("Z second",0,20,4,100,100));
+    var a=Ch2("order-a",Row("A first",0,30,4,800,800)+Row("A second",0,40,4,200,200));
+    var ctx=Context("multiple-order",Profile("Z","BonDriver_Z.dll",z,"CATV"),Profile("A","BonDriver_A.dll",a,"CATV"));
+    Check(ctx.Policy.Capture().DisplayTargets.Select(x=>x.Name).SequenceEqual(new[]{"Z first","Z second","A first","A second"}),"multi-file source order lost");
+});
+Case("display reload honors a changed ch2 row order",()=>{
+    var path=Ch2("order-reload",Row("First",0,10,4,900,900)+Row("Second",0,20,4,100,100));
+    var ctx=Context("order-reload",Profile("Cable","BonDriver_Cable.dll",path,"CATV"));
+    Check(ctx.Policy.Capture().DisplayTargets.First().Name=="First","initial row order lost");
+    File.WriteAllText(path,Row("Second",0,20,4,100,100)+Row("First",0,10,4,900,900),Encoding.GetEncoding(932));File.SetLastWriteTimeUtc(path,DateTime.UtcNow.AddMinutes(2));
+    Check(ctx.Policy.Capture().DisplayTargets.First().Name=="Second","updated ch2 order not reloaded");
+});
+object RuntimeApi(string name, ChannelServiceAccessPolicy policy)
+{
+    var context = typeof(ChannelFileLoader).Assembly.GetType("TvAIr.Plugin.PluginCapabilityContext")!;
+    var gateType = context.GetNestedType("CapabilityPermissionGate", BindingFlags.NonPublic)!;
+    var gate = Activator.CreateInstance(gateType, BindingFlags.Instance|BindingFlags.Public|BindingFlags.NonPublic, null,
+        new object[] { "fixture", "Fixture", new LogRepository(), new[] { PluginPermission.ReadChannels } }, null)!;
+    var args = name == "ChannelsApi" ? new object?[] { policy, gate } : new object?[] { null, policy, gate };
+    return Activator.CreateInstance(context.GetNestedType(name, BindingFlags.NonPublic)!,
+        BindingFlags.Instance|BindingFlags.Public|BindingFlags.NonPublic, null, args, null)!;
+}
+Case("runtime channels expose the browser wave classification for HYBRID and BSCS",()=>{
+    var path=Ch2("runtime-waves",Row("Cable",0,10,0xfffe,900,900)+Row("CS",0,20,7,800,800)+Row("BS",0,30,4,700,700)+Row("GR",0,40,0x7880,600,600));
+    var ctx=Context("runtime-waves",Profile("Hybrid","BonDriver_H.dll",path));
+    var api=(ITvAirChannelsApi)RuntimeApi("ChannelsApi",ctx.Policy);
+    var rows=api.ListServices();
+    Check(rows.Single(x=>x.ServiceName=="Cable").BroadcastType=="CATV","browser CATV row not classified as CATV by runtime");
+    Check(rows.Single(x=>x.ServiceName=="CS").BroadcastType=="CS","CS row exposed as BSCS");
+    Check(rows.Select(x=>x.ServiceName).SequenceEqual(new[]{"GR","BS","CS","Cable"}),"canonical wave ordering lost");
+    Check(rows.All(x=>x.IsEnabled) && rows.Select(x=>x.DisplayOrder).SequenceEqual(Enumerable.Range(0,4)),"runtime enabled/order mismatch");
+});
+Case("runtime wave queries and metadata agree on CATV and CS",()=>{
+    var path=Ch2("runtime-queries",Row("Cable",0,10,0xfffe,900,900)+Row("CS",0,20,7,800,800)+Row("Disabled",0,30,0xfffd,700,700,false));
+    var ctx=Context("runtime-queries",Profile("Hybrid","BonDriver_H.dll",path));
+    var api=(ITvAirChannelsApi)RuntimeApi("ChannelsApi",ctx.Policy);
+    var metadata=(ITvAirServiceMetadataApi)RuntimeApi("ServiceMetadataApi",ctx.Policy);
+    var cable=api.ListServices(new(){BroadcastType="CATV"});
+    Check(cable.Count==1 && cable[0].ServiceName=="Cable","CATV query excludes browser CATV row");
+    Check(api.ListServices(new(){BroadcastType="CS"}).Single().ServiceName=="CS","CS query mismatch");
+    Check(metadata.List(new(){BroadcastType="CATV"}).Single().BroadcastType=="CATV","metadata classification mismatch");
+    Check(api.ListServices().Count==2,"disabled row exposed as enabled");
+});
+Case("same retransmitted service stays one display identity with both physical routes",()=>{
+    var aPath=Ch2("runtime-route-a",Row("First",0,10,4,100,100));
+    var bPath=Ch2("runtime-route-b",Row("Second",2,20,4,100,100));
+    var ctx=Context("runtime-routes",Profile("Satellite","BonDriver_A.dll",aPath,"BSCS"),Profile("Cable","BonDriver_B.dll",bPath,"CATV"));
+    var snapshot=ctx.Policy.Capture();
+    var rows=((ITvAirChannelsApi)RuntimeApi("ChannelsApi",ctx.Policy)).ListServices();
+    Check(rows.Count==1 && rows[0].ServiceName=="First" && rows[0].BroadcastType=="BS","retransmission duplicated or reclassified");
+    Check(snapshot.DirectSourceServices.Count==2,"display dedup deleted physical route");
+    Check(snapshot.CanTune(Profile("Satellite","BonDriver_A.dll",aPath,"BSCS"),new Reservation{NetworkId=4,TransportStreamId=100,ServiceId=100}),"satellite route lost");
+    Check(snapshot.CanTune(Profile("Cable","BonDriver_B.dll",bPath,"CATV"),new Reservation{NetworkId=4,TransportStreamId=100,ServiceId=100}),"cable route lost");
+});
+Case("runtime preserves aggregate filters and global metadata display order",()=>{
+    var path=Ch2("runtime-alias",Row("Cable",0,10,0xfffe,900,900)+Row("CS",0,20,7,800,800)+Row("BS",0,30,4,700,700)+Row("GR",0,40,0x7880,600,600));
+    var ctx=Context("runtime-alias",Profile("Hybrid","BonDriver_H.dll",path));
+    var api=(ITvAirChannelsApi)RuntimeApi("ChannelsApi",ctx.Policy);
+    var metadata=(ITvAirServiceMetadataApi)RuntimeApi("ServiceMetadataApi",ctx.Policy);
+    Check(api.ListServices(new(){BroadcastType="BSCS"}).Select(x=>x.BroadcastType).SequenceEqual(new[]{"BS","CS"}),"BSCS aggregate filter lost");
+    Check(api.ListServices(new(){BroadcastType="HYBRID"}).Single().BroadcastType=="CATV","legacy HYBRID filter lost");
+    Check(metadata.List(new(){BroadcastType="CATV"}).Single().DisplayOrder==api.ListServices(new(){BroadcastType="CATV"}).Single().DisplayOrder,"metadata renumbered filtered display order");
+});
+Case("runtime disabled inventory uses displayed wave without changing eligibility",()=>{
+    var ctx=Context("runtime-disabled");
+    ctx.Loader.Load().ServiceStates.Add(new ChannelServiceState{Name="Disabled cable",Group="HYBRID",OriginalNetworkId=0xfffe,TransportStreamId=500,ServiceId=500,IsEnabled=false});
+    var api=(ITvAirChannelsApi)RuntimeApi("ChannelsApi",ctx.Policy);
+    var row=api.ListServices(new(){BroadcastType="CATV",Enabled=false}).Single();
+    Check(row.BroadcastType=="CATV" && !row.IsEnabled,"disabled inventory classification mismatch");
+    Check(api.ListServices().Count==0 && !ctx.Policy.Capture().IsAvailableForDisplay(0xfffe,500,500),"disabled row admitted to guide");
+});
 File.WriteAllText(Path.Combine(root,"results.json"),System.Text.Json.JsonSerializer.Serialize(new{total=results.Count,failed,cases=results},new System.Text.Json.JsonSerializerOptions{WriteIndented=true}));
 Console.WriteLine($"{results.Count-failed}/{results.Count} passed; synthetic inputs only; no RF verification. Results: {root}");
 return failed==0 ? 0 : 1;
@@ -521,3 +606,4 @@ public class SnapshotTestProxy : DispatchProxy
     protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
         => Invoker(targetMethod ?? throw new ArgumentNullException(nameof(targetMethod)), args);
 }
+

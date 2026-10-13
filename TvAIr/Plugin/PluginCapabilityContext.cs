@@ -1388,6 +1388,19 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         }
     }
 
+    private static bool MatchesChannelDisplayWave(string? group, ushort networkId, string? requestedWave)
+    {
+        if (string.IsNullOrWhiteSpace(requestedWave)) return true;
+        var wave = BroadcastNetworkIdentity.ResolveDisplayWave(group, networkId);
+        // Preserve legacy aggregate filter requests without exporting physical groups.
+        return requestedWave.Trim().ToUpperInvariant() switch
+        {
+            "BSCS" or "BS/CS" => wave is "BS" or "CS",
+            "HYBRID" => wave == "CATV",
+            _ => Contains(wave, requestedWave)
+        };
+    }
+
     private sealed class ChannelsApi(ChannelServiceAccessPolicy serviceAccess, CapabilityPermissionGate permissions) : ITvAirChannelsApi
     {
         public IReadOnlyList<TvAirServiceDto> ListServices(TvAirServiceQueryDto? query = null)
@@ -1401,14 +1414,14 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
                     .GroupBy(x => (x.OriginalNetworkId, x.TransportStreamId, x.ServiceId))
                     .Where(g => access.GetEligibility(g.Key.OriginalNetworkId, g.Key.TransportStreamId, g.Key.ServiceId) == ChannelServiceEligibility.Disabled)
                     .Select(g => g.First())
-                    .Where(x => string.IsNullOrWhiteSpace(query.BroadcastType) || Contains(x.Group, query.BroadcastType))
+                    .Where(x => MatchesChannelDisplayWave(x.Group, x.OriginalNetworkId, query.BroadcastType))
                     .Select((x, index) => new TvAirServiceDto
                     {
                         ServiceName = x.Name,
                         NetworkId = x.OriginalNetworkId,
                         TransportStreamId = x.TransportStreamId,
                         ServiceId = x.ServiceId,
-                        BroadcastType = x.Group,
+                        BroadcastType = BroadcastNetworkIdentity.ResolveDisplayWave(x.Group, x.OriginalNetworkId),
                         RemoteControlKeyId = null,
                         DisplayOrder = index,
                         IsEnabled = false
@@ -1418,14 +1431,14 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             }
 
             IEnumerable<(ChannelTarget Target, int DisplayOrder)> targets = access.DisplayTargets.Select((target, index) => (target, index));
-            if (!string.IsNullOrWhiteSpace(query.BroadcastType)) targets = targets.Where(x => Contains(x.Target.Group, query.BroadcastType));
+            if (!string.IsNullOrWhiteSpace(query.BroadcastType)) targets = targets.Where(x => MatchesChannelDisplayWave(x.Target.Group, x.Target.OriginalNetworkId, query.BroadcastType));
             return targets.Select(x => new TvAirServiceDto
             {
                 ServiceName = x.Target.Name,
                 NetworkId = x.Target.OriginalNetworkId,
                 TransportStreamId = x.Target.TransportStreamId,
                 ServiceId = x.Target.ServiceId,
-                BroadcastType = x.Target.Group,
+                BroadcastType = BroadcastNetworkIdentity.ResolveDisplayWave(x.Target.Group, x.Target.OriginalNetworkId),
                 RemoteControlKeyId = null,
                 DisplayOrder = x.DisplayOrder,
                 IsEnabled = true
@@ -1442,17 +1455,17 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         {
             permissions.Require(nameof(ServiceMetadataApi), PluginPermission.ReadChannels);
             query ??= new TvAirServiceMetadataQueryDto();
-            IEnumerable<ChannelTarget> targets = serviceAccess.Capture().DisplayTargets;
-            if (!string.IsNullOrWhiteSpace(query.BroadcastType)) targets = targets.Where(t => Contains(t.Group, query.BroadcastType));
-            return targets.Select((t, i) => new TvAirServiceMetadataDto
+            IEnumerable<(ChannelTarget Target, int DisplayOrder)> targets = serviceAccess.Capture().DisplayTargets.Select((target, index) => (target, index));
+            if (!string.IsNullOrWhiteSpace(query.BroadcastType)) targets = targets.Where(t => MatchesChannelDisplayWave(t.Target.Group, t.Target.OriginalNetworkId, query.BroadcastType));
+            return targets.Select(t => new TvAirServiceMetadataDto
             {
-                ServiceName = t.Name,
-                NetworkId = t.OriginalNetworkId,
-                TransportStreamId = t.TransportStreamId,
-                ServiceId = t.ServiceId,
-                BroadcastType = t.Group,
-                DisplayOrder = i,
-                ChannelArgument = t.ChannelArgument
+                ServiceName = t.Target.Name,
+                NetworkId = t.Target.OriginalNetworkId,
+                TransportStreamId = t.Target.TransportStreamId,
+                ServiceId = t.Target.ServiceId,
+                BroadcastType = BroadcastNetworkIdentity.ResolveDisplayWave(t.Target.Group, t.Target.OriginalNetworkId),
+                DisplayOrder = t.DisplayOrder,
+                ChannelArgument = t.Target.ChannelArgument
             }).ToList();
         }
 

@@ -89,8 +89,8 @@ public sealed class ChannelFileLoader
         // the wrong BonDriver to receive a legacy channel number.
         if (result.BonDriverRoutes is { } directCatalog)
         {
-            result.DirectSourceServices.AddRange(directCatalog.SourceRoutes);
-            result.Files.AddRange(directCatalog.SourceRoutes.Select(r => Path.GetFileName(r.SourceCh2Path))
+            result.DirectSourceServices.AddRange(directCatalog.SourceRoutesInFileOrder);
+            result.Files.AddRange(directCatalog.SourceRoutesInFileOrder.Select(r => Path.GetFileName(r.SourceCh2Path))
                 .Distinct(StringComparer.OrdinalIgnoreCase).Where(f => !result.Files.Contains(f)));
         }
 

@@ -6,7 +6,7 @@ namespace TvAIr.Core;
 internal static class TvAIrVersionContract
 {
     public const string ProductName = "TvAIr";
-    public const string ProductVersion = "1.2.9";
+    public const string ProductVersion = "1.2.10";
     public const string PluginSdkVersion = "1.1.14";
     public const string PluginHostContractVersion = "1.1.14";
     public const string MinimumSupportedPluginHostContractVersion = "1.0.0";

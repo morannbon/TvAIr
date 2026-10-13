@@ -40,6 +40,7 @@ public sealed class BonDriverChannelRouteCatalog
 {
     private readonly Dictionary<(string Driver, BroadcastServiceKey Service), BonDriverChannelRoute> routes = new();
     private readonly HashSet<(string Driver, BroadcastServiceKey Service)> ambiguous = new();
+    private readonly List<(string Driver, BroadcastServiceKey Service)> sourceOrder = new();
     // One transport has one physical tuning route within a single BonDriver.
     // If its enabled services disagree, reject the entire transport rather
     // than letting a single-SID recording pick an arbitrary frequency.
@@ -68,7 +69,11 @@ public sealed class BonDriverChannelRouteCatalog
                     ambiguous.Add(key);
                 }
             }
-            else routes.Add(key, route);
+            else
+            {
+                routes.Add(key, route);
+                sourceOrder.Add(key);
+            }
         }
 
         var byTransport = routes.Values.GroupBy(x => (
@@ -161,7 +166,7 @@ public sealed class BonDriverChannelRouteCatalog
         var routes = new List<BonDriverChannelRoute>();
         foreach (var source in sources.Values.Where(s => !rejected.Contains(NormalizeIdentity(s.BonDriverIdentity))))
         {
-            try { routes.AddRange(FromCh2Sources(new[] { source }).SourceRoutes); }
+            try { routes.AddRange(FromCh2Sources(new[] { source }).SourceRoutesInFileOrder); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
             { errors.Add($"{source.BonDriverIdentity}: channel source unavailable ({ex.GetType().Name})"); }
         }
@@ -169,10 +174,18 @@ public sealed class BonDriverChannelRouteCatalog
     }
 
     /// <summary>
-    /// Services that have an unambiguous explicit BonDriver route. This is a
+    /// Unambiguous services in first-source/first-row order for display. This is a
     /// source inventory only, NOT an operational channel list: a physical tuner
     /// must still be allocated and the route verified against its lease.
     /// </summary>
+    public IReadOnlyList<BonDriverChannelRoute> SourceRoutesInFileOrder
+        => sourceOrder.Where(key => routes.ContainsKey(key))
+            .Select(key => routes[key])
+            .Where(x => !ambiguousTransports.Contains((NormalizeIdentity(x.BonDriverIdentity),
+                x.Service.NetworkId, x.Service.TransportStreamId)))
+            .ToArray();
+
+    // Keep the canonical lookup inventory ordering independent of display ordering.
     public IReadOnlyList<BonDriverChannelRoute> SourceRoutes
         => routes.Values
             .Where(x => !ambiguousTransports.Contains((NormalizeIdentity(x.BonDriverIdentity),

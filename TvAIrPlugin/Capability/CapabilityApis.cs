@@ -934,11 +934,18 @@ public sealed class TvAirEpgRunResultDto
 /// <summary>Operational Host services by default. Set Enabled=false only when the plugin explicitly needs disabled .ch2 service metadata; disabled services never appear in ProgramGuide or operational Viewer/Reservation routes.</summary>
 public interface ITvAirChannelsApi
 {
+    /// <summary>
+    /// Enabled rows use the Host programme-guide channel inventory, independent of EPG presence
+    /// and available viewer profiles. BroadcastType is the displayed wave (GR/BS/CS/CATV),
+    /// not physical tuner capability. DisplayOrder is the global inventory position.
+    /// IsEnabled does not guarantee a selectable route for a requested viewer profile.
+    /// </summary>
     IReadOnlyList<TvAirServiceDto> ListServices(TvAirServiceQueryDto? query = null);
 }
 
 public sealed class TvAirServiceQueryDto
 {
+    /// <summary>Displayed wave GR/BS/CS/CATV. Legacy BSCS (BS/CS) and HYBRID (CATV) filter aliases are accepted.</summary>
     public string? BroadcastType { get; init; }
     public bool? Enabled { get; init; }
 }

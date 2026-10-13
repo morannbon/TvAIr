@@ -8,6 +8,22 @@ namespace TvAIr.Core;
 /// </summary>
 internal static class BroadcastNetworkIdentity
 {
+    /// <summary>
+    /// Display classification shared by channel APIs and programme-guide ordering.
+    /// Mirrors the browser's resolveProgramGuideWaveGroup; it is not tuner capability.
+    /// </summary>
+    internal static string ResolveDisplayWave(string? group, ushort originalNetworkId)
+    {
+        var value = (group ?? string.Empty).Trim().ToUpperInvariant();
+        if (value is "GR" or "地上波" or "TERRESTRIAL") return "GR";
+        if (value == "BS") return "BS";
+        if (value == "CS") return "CS";
+        if (value is "BSCS" or "BS/CS" or "S" or "SATELLITE")
+            return originalNetworkId == 4 ? "BS" : "CS";
+        if (value is "HYBRID" or "CATV") return "CATV";
+        return ResolveLegacyChannelGroup("CATV", originalNetworkId);
+    }
+
     internal static bool TryResolveWave(ushort originalNetworkId, out string wave)
     {
         if (originalNetworkId is 4 or 6 or 7 or 10)
