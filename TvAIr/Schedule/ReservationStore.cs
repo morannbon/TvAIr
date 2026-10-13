@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using System.Text;
 using System.Security.Cryptography;
 using Microsoft.Data.Sqlite;

@@ -1,4 +1,4 @@
-﻿using TvAIr.Core;
+using TvAIr.Core;
 using System.Text;
 
 namespace TvAIr.Channel;

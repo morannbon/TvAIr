@@ -1,4 +1,4 @@
-﻿using TvAIr.Epg.Projection;
+using TvAIr.Epg.Projection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Win32;
 using TvAIr.Channel;

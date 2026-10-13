@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using TvAIr.Core;
 using TvAIr.Epg;

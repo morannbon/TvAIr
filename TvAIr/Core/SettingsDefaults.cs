@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Core;
+namespace TvAIr.Core;
 
 /// <summary>
 /// TvAIr settings defaults shared by persistence, API DTOs, UI projection, and runtime settings.

@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Epg.Projection;
+namespace TvAIr.Epg.Projection;
 
 /// <summary>
 /// 外部EPGイベントの一時保持領域。TvAIr DB / epg_events には書き戻さない。

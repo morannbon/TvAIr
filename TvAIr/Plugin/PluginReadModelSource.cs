@@ -55,7 +55,7 @@ internal sealed class PluginReadModelSource
             new PluginProgramGuideWaveFilterSnapshot("GR", "GR", "地上波", 0, true),
             new PluginProgramGuideWaveFilterSnapshot("BS", "BS", "BS", 1, true),
             new PluginProgramGuideWaveFilterSnapshot("CS", "CS", "CS", 2, true),
-            new PluginProgramGuideWaveFilterSnapshot("CATV", "HYBRID", "CATV", 3, true)
+            new PluginProgramGuideWaveFilterSnapshot("CATV", "CATV", "CATV", 3, true)
         };
 
     public IReadOnlyList<Reservation> GetReservations()

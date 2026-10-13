@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Core;
+namespace TvAIr.Core;
 
 // ─── EPGイベント ─────────────────────────────────────────────────
 

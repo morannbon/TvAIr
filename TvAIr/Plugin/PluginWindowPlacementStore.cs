@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Plugin;
+namespace TvAIr.Plugin;
 
 using System.Drawing;
 using System.Text.Json;

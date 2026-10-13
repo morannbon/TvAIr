@@ -1,4 +1,4 @@
-﻿/* TvTestLauncherはTvAIrから管理するTVTestプロセスの起動・維持に使用し、録画実行はTvAIrEpgRecが担当する。 */
+/* TvTestLauncherはTvAIrから管理するTVTestプロセスの起動・維持に使用し、録画実行はTvAIrEpgRecが担当する。 */
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;

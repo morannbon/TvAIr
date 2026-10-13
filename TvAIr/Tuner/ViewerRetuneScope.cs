@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Tuner;
+namespace TvAIr.Tuner;
 
 /// <summary>
 /// Evaluates whether a profile-owned managed Viewer process is the intended

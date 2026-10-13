@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 共通割り当てルートの不変条件:
  * - 割り当て順序、single-flight、authoritative commit、Mutation/Wake投影はこの経路へ集約する。
  * - 録画実行はTvAIrEpgRec共通TS runtimeへ渡し、別の録画起動・待機・補正経路を作らない。

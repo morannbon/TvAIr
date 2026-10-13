@@ -1,4 +1,4 @@
-﻿using TvAIrPlugin.Runtime;
+using TvAIrPlugin.Runtime;
 
 namespace TvAIr.Plugin.RuntimeHost;
 

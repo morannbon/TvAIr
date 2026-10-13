@@ -1,4 +1,4 @@
-﻿using TvAIrPlugin;
+using TvAIrPlugin;
 
 namespace TvAIr.Plugin;
 

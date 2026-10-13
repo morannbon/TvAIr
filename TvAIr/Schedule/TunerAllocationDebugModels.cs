@@ -1,4 +1,4 @@
-﻿#if TVAIR_DEVELOPER_DIAGNOSTICS
+#if TVAIR_DEVELOPER_DIAGNOSTICS
 using System.Text.Json.Serialization;
 using TvAIr.Core;
 

@@ -1,4 +1,4 @@
-﻿/* release_contract RECORDING_STOP_PHASE_GUARD: 録画停止処理中だけ開始・割当・Wake再構築を共通ゲートで遅延する。 */
+/* release_contract RECORDING_STOP_PHASE_GUARD: 録画停止処理中だけ開始・割当・Wake再構築を共通ゲートで遅延する。 */
 using System;
 using System.Collections.Generic;
 using System.Threading;

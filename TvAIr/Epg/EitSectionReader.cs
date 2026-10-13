@@ -1,4 +1,4 @@
-﻿using TvAIr.Epg.Shared;
+using TvAIr.Epg.Shared;
 
 namespace TvAIr.Epg;
 

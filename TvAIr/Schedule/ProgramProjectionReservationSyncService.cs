@@ -1,4 +1,4 @@
-﻿using TvAIr.Core;
+using TvAIr.Core;
 using TvAIr.Epg;
 using TvAIr.Epg.Projection;
 using System.Collections.Concurrent;

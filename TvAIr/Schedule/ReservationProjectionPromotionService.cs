@@ -1,4 +1,4 @@
-﻿using TvAIr.Core;
+using TvAIr.Core;
 using TvAIr.Epg.Projection;
 
 namespace TvAIr.Schedule;

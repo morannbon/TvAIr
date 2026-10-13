@@ -1,4 +1,4 @@
-﻿using TvAIr.Epg;
+using TvAIr.Epg;
 
 namespace TvAIr.Core;
 

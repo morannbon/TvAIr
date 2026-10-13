@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Epg;
+namespace TvAIr.Epg;
 
 /// <summary>
 /// PreRec 実行の唯一の正本。

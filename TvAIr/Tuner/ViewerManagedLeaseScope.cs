@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using TvAIr.Core;
 
 namespace TvAIr.Tuner;

@@ -1,4 +1,4 @@
-﻿namespace TvAIrPlugin;
+namespace TvAIrPlugin;
 
 /// <summary>
 /// Host-managed external lookup. Plugins never receive a raw network client; they can only request

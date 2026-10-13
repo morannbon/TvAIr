@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Schedule;
+namespace TvAIr.Schedule;
 
 /// <summary>
 /// release_contract: チェーン実行セッションの読み取り用レジストリ。

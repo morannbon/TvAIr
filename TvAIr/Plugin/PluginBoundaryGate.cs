@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Plugin;
+namespace TvAIr.Plugin;
 
 using TvAIr.Core;
 using TvAIrPlugin;

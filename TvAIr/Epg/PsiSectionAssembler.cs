@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Epg;
+namespace TvAIr.Epg;
 
 internal sealed class PsiSectionAssembler
 {

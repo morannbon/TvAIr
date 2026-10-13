@@ -1,4 +1,4 @@
-﻿using TvAIrPlugin;
+using TvAIrPlugin;
 using TvAIrPlugin.Runtime;
 
 

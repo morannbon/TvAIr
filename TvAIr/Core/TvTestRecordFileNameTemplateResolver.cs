@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Core;
+namespace TvAIr.Core;
 
 /// <summary>
 /// TVTest.ini の RecordFileName を、RecordingWorker 側の録画ファイル名生成に使うため起動時基準で読む。

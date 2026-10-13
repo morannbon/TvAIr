@@ -1,4 +1,4 @@
-﻿namespace TvAIr.Epg;
+namespace TvAIr.Epg;
 
 internal readonly record struct TsPacketView(
     int Pid,

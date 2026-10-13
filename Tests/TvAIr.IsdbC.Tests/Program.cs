@@ -499,6 +499,18 @@ Case("CATV direct display and viewer groups preserve carried broadcast categorie
     var updated=(IEnumerable)type.GetMethod("BuildProfiles",BindingFlags.Static|BindingFlags.Public)!.Invoke(null,new object[]{new TvTestSettings(),ctx.Ini,new[]{p}})!;
     Check(Get<IReadOnlyList<string>>(updated.Cast<object>().Single(),"AvailableGroups").SequenceEqual(new[]{"CATV"}),"ch2 update did not refresh viewer capabilities");
 });
+Case("program guide filter API advertises CATV as CATV instead of physical HYBRID", () => {
+    var type=typeof(ChannelServiceAccessPolicy).Assembly.GetType("TvAIr.Plugin.PluginReadModelSource")!;
+    var source=Activator.CreateInstance(type,BindingFlags.Instance|BindingFlags.Public|BindingFlags.NonPublic,null,new object?[]{null,null,null,null},null)!;
+    var filters=((System.Collections.IEnumerable)type.GetMethod("GetProgramGuideWaveFilters")!.Invoke(source,null)!).Cast<object>().ToArray();
+    Check(filters.Length==4,"formal four-wave filter set changed");
+    Check(filters.Select(f=>((string)f.GetType().GetProperty("Key")!.GetValue(f)!, (string)f.GetType().GetProperty("Group")!.GetValue(f)!)).SequenceEqual(new[]{("GR","GR"),("BS","BS"),("CS","CS"),("CATV","CATV")}),"public filter wave classifications mismatch; CATV must not expose HYBRID");
+    foreach(var filter in filters){
+        var key=(string)filter.GetType().GetProperty("Key")!.GetValue(filter)!;
+        var group=(string)filter.GetType().GetProperty("Group")!.GetValue(filter)!;
+        Check(key==group,"filter key and display classification disagree: "+key+"/"+group);
+    }
+});
 File.WriteAllText(Path.Combine(root,"results.json"),System.Text.Json.JsonSerializer.Serialize(new{total=results.Count,failed,cases=results},new System.Text.Json.JsonSerializerOptions{WriteIndented=true}));
 Console.WriteLine($"{results.Count-failed}/{results.Count} passed; synthetic inputs only; no RF verification. Results: {root}");
 return failed==0 ? 0 : 1;

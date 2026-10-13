@@ -1,4 +1,4 @@
-﻿namespace TvAIrEpgRec.CommonTsRoute;
+namespace TvAIrEpgRec.CommonTsRoute;
 
 /// <summary>
 /// release_contract shared route contract boundary.

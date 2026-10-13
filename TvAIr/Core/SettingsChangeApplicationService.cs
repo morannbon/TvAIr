@@ -1,4 +1,4 @@
-﻿using TvAIr.Channel;
+using TvAIr.Channel;
 using TvAIr.Epg;
 using TvAIr.Schedule;
 using TvAIr.Tuner;

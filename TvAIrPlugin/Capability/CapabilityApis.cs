@@ -1,4 +1,4 @@
-﻿namespace TvAIrPlugin;
+namespace TvAIrPlugin;
 
 /// <summary>
 /// TvAIr本体能力をプラグインへ公開する新しい汎用Capability APIの入口。
