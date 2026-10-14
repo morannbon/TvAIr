@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <Platforms>AnyCPU;x86;x64</Platforms>
@@ -44,5 +44,6 @@
   <ItemGroup>
     <Compile Include="..\Shared\EitEventGroupContract.cs" Link="Shared\EitEventGroupContract.cs" />
     <Compile Include="..\Shared\WorkerPresentationPolicy.cs" Link="Shared\WorkerPresentationPolicy.cs" />
+    <Compile Include="..\Shared\WorkerFocusSnapshot.cs" Link="Shared\WorkerFocusSnapshot.cs" />
   </ItemGroup>
 </Project>

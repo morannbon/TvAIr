@@ -4308,10 +4308,18 @@ private readonly ReservationStore _store;
 
         try
         {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+            _log.Add("WORKER_FOCUS_BOUNDARY", $"R{r.Id}",
+                $"phase=record_start_before {TvAIr.Workers.WorkerFocusSnapshot.Capture()}");
+#endif
             if (!process.Start())
             {
                 return new RecordingWorkerStartResult(false, 0, outputPath, seconds, responsePath, stopSignalPath, progressPath, runtimeStatsPath, requestPath, "TvAIrEpgRecの起動に失敗しました。");
             }
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+            _log.Add("WORKER_FOCUS_BOUNDARY", $"R{r.Id}",
+                $"phase=record_start_after workerPid={process.Id} {TvAIr.Workers.WorkerFocusSnapshot.Capture()}");
+#endif
         }
         catch (Exception ex)
         {
@@ -9057,6 +9065,10 @@ private readonly ReservationStore _store;
             {
                 using var p = System.Diagnostics.Process.GetProcessById(pid);
                 exited = await WaitForProcessExitSignalAsync(p, timeoutMs).ConfigureAwait(false);
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+                _log.Add("WORKER_FOCUS_BOUNDARY", $"R{reservationId}",
+                    $"phase=record_stop_wait workerPid={pid} exited={exited} {TvAIr.Workers.WorkerFocusSnapshot.Capture()}");
+#endif
             }
             catch (ArgumentException)
             {

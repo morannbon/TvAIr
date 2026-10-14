@@ -1937,7 +1937,15 @@ public sealed class EpgCapture
 
         try
         {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+            Log("WORKER_FOCUS_BOUNDARY", workerName,
+                $"phase=epg_start_before mode={(isPreRecordCheck ? "epg-check" : "epg")} {TvAIr.Workers.WorkerFocusSnapshot.Capture()}");
+#endif
             var process = Process.Start(psi);
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+            Log("WORKER_FOCUS_BOUNDARY", workerName,
+                $"phase=epg_start_after workerPid={process?.Id ?? 0} mode={(isPreRecordCheck ? "epg-check" : "epg")} {TvAIr.Workers.WorkerFocusSnapshot.Capture()}");
+#endif
             if (process is null)
                 return new EpgWorkerLaunchResult(false, 0, "TvAIrEpgRec.exe の起動に失敗しました。", stopSignalPath, resultPath, progressPath);
 
@@ -2106,6 +2114,10 @@ public sealed class EpgCapture
         identity = GetOwnedWorkerProcessIdentity(finalSnapshot);
         if (identity is EpgWorkerProcessIdentityState.Missing or EpgWorkerProcessIdentityState.ReusedPid)
         {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+            Log("WORKER_FOCUS_BOUNDARY", workerName,
+                $"phase=epg_stop_observed workerPid={pid} {TvAIr.Workers.WorkerFocusSnapshot.Capture()}");
+#endif
             ownerState.MarkProcessExitObserved(expectedAttemptGeneration);
             Log("EPG_CANCEL_PROCESS_EXIT_OK", $"TS{group.TsId}",
                 $"pid={pid} worker={workerName} phase={SafeLog(phase)} action=stopped_owner_task_will_release_tuner rule=epg_worker_route_contract");
@@ -2573,7 +2585,13 @@ public sealed class EpgCapture
 #endif
 
                     if (waitResult is EpgProcessExitWaitResult.Exited or EpgProcessExitWaitResult.NotFound)
+                    {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+                        Log("WORKER_FOCUS_BOUNDARY", workerName,
+                            $"phase=epg_exit_observed workerPid={launch.ProcessId} {TvAIr.Workers.WorkerFocusSnapshot.Capture()}");
+#endif
                         workerTaskState.MarkProcessExitObserved(attemptGeneration);
+                    }
 
                     if (waitResult == EpgProcessExitWaitResult.ProcessMissing)
                     {

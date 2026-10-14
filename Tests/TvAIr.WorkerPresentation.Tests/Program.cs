@@ -40,7 +40,8 @@ internal static class Program
 
         var desktop = Native.CreateDesktop("TvAIrFocusTest_" + Guid.NewGuid().ToString("N"), null, IntPtr.Zero, 0, 0x10000000, IntPtr.Zero);
         if (desktop == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-        var cases = new[] { "baseline", "policy", "window", "hidden", "epg", "record", "repeated-processes" };
+        var cases = new[] { "baseline", "policy", "window", "hidden", "epg", "record", "repeated-processes",
+            "fallback-selection", "chain-updates", "prerec-record-transition", "parallel-workers", "focus-telemetry" };
         var results = new List<JsonElement>();
         try
         {
@@ -77,6 +78,81 @@ internal static class Program
             Check(WorkerPresentationContract.Parse(null) == WorkerPresentationPolicy.Hidden, "missing policy is hidden");
             Check(WorkerPresentationContract.Parse("invalid") == WorkerPresentationPolicy.Hidden, "invalid policy is hidden");
             return;
+        }
+
+        if (name is "prerec-record-transition" or "parallel-workers" or "focus-telemetry")
+        {
+            using var input = new Form { Text = "isolated input during worker transitions" };
+            input.Show(); Native.ShowWindow(input.Handle, 9); Application.DoEvents();
+            var inputHandle = input.Handle;
+            Check(Native.GetActiveWindow() == inputHandle, "transition test input must be active before starting workers");
+            var directory = Path.Combine(Path.GetDirectoryName(workerDll)!, "transition-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            var exe = Path.ChangeExtension(workerDll, ".exe");
+            var steps = name == "prerec-record-transition"
+                ? new[] { ("epg", "taskbar"), ("epg-check", "hidden"), ("record", "taskbar"), ("epg", "taskbar"), ("record", "taskbar") }
+                : new[] { ("runtime", "taskbar"), ("runtime", "hidden"), ("runtime", "taskbar") };
+            var children = new List<(Process Process, string Policy, string Progress)>();
+            var observations = 0;
+            try
+            {
+                foreach (var step in steps)
+                {
+                    var progress = Path.Combine(directory, "progress-" + children.Count + ".jsonl");
+                    // EPG/record execution requires a real TS source. Use contract-only
+                    // runtime to test the selected presentation/process lifetime here;
+                    // epg/record/chain cases exercise the actual mode callbacks below.
+                    var process = Native.Start(exe, new[] { "--mode", "runtime", "--keep-alive-ms", "600",
+                        "--worker-presentation", step.Item2, "--progress", progress },
+                        Native.DesktopName(Native.GetThreadDesktop(Native.GetCurrentThreadId())));
+                    children.Add((process, step.Item2, progress));
+                    if (name != "parallel-workers") Monitor(process, step.Item2);
+                }
+                if (name == "parallel-workers")
+                    while (children.Any(x => !x.Process.HasExited))
+                    {
+                        foreach (var child in children.Where(x => !x.Process.HasExited)) Inspect(child.Process, child.Policy);
+                        Application.DoEvents(); Thread.Sleep(5);
+                    }
+                foreach (var child in children)
+                {
+                    Check(Native.ExitCode(child.Process) == 0, "worker CLI failed");
+                    var rows = File.ReadAllLines(child.Progress).Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => JsonSerializer.Deserialize<JsonElement>(x)).ToArray();
+                    Check(rows.Length > 0 && rows.Last().GetProperty("Stage").GetString() == "completed", "canonical terminal stage changed");
+                    var focus = rows.Where(x => x.GetProperty("Stage").GetString() == "worker_focus").ToArray();
+                    Check(focus.Length > 0, "focus observations absent");
+                    Check(focus.All(x => !x.GetProperty("Message").GetString()!.Contains("phase=window_activated")), "worker activation event observed");
+                    if (child.Policy == "hidden") Check(focus.All(x => !x.GetProperty("Message").GetString()!.Contains("phase=window_created")), "hidden worker created GUI");
+                    else Check(focus.Any(x => x.GetProperty("Message").GetString()!.Contains("phase=window_show_after")), "visible worker not observed");
+                }
+                Check(observations > 0, "visible workers were never sampled");
+                Check(Native.GetActiveWindow() == inputHandle, "input window changed after worker exit");
+                Observations["workerProcesses"] = children.Count; Observations["windowSamples"] = observations;
+                Observations["progressDirectory"] = directory;
+            }
+            finally
+            {
+                foreach (var child in children) { if (!child.Process.HasExited) child.Process.Kill(); child.Process.Dispose(); }
+            }
+            return;
+
+            void Monitor(Process child, string policy)
+            {
+                while (!child.HasExited) { Inspect(child, policy); Application.DoEvents(); Thread.Sleep(5); }
+            }
+            void Inspect(Process child, string policy)
+            {
+                Check(Native.GetActiveWindow() == inputHandle, "input window changed during worker execution");
+                foreach (var hwnd in Native.Windows(child.Id))
+                {
+                    if (!Native.IsTaskbarWindow(hwnd)) continue;
+                    observations++;
+                    Check(policy == "taskbar" && Native.IsIconic(hwnd), "unexpected visible worker");
+                    Check((Native.ExStyle(hwnd) & 0x08000000) != 0, "background worker can be selected for automatic activation");
+                    var info = Native.GuiInfo(hwnd);
+                    Check(info.active == IntPtr.Zero && info.focus == IntPtr.Zero, "worker obtained activation/focus");
+                }
+            }
         }
 
         if (name == "repeated-processes")
@@ -127,7 +203,7 @@ internal static class Program
 
         var assembly = Assembly.LoadFrom(workerDll);
         var presentation = assembly.GetType("TvAIrEpgRec.WorkerPresentation", true)!;
-        if (name == "window")
+        if (name is "window" or "fallback-selection")
         {
             var snapshotType = presentation.GetNestedType("PresentationSnapshot", BindingFlags.NonPublic)!;
             var snapshot = Activator.CreateInstance(snapshotType, "EPG取得 テスト", null, null)!;
@@ -142,6 +218,13 @@ internal static class Program
             Check(window.Visible, "WinForms visibility must track native visibility");
             Check(activations == 0 && Native.GetActiveWindow() == anchorHandle, "initial show must preserve activation");
             Check(window.ShowInTaskbar && window.Owner is null, "single taskbar window");
+            if (name == "fallback-selection")
+            {
+                Check((Native.ExStyle(hwnd) & 0x08000000) != 0, "worker is eligible for automatic foreground fallback");
+                anchor.Close(); Application.DoEvents();
+                Check(Native.GetActiveWindow() != hwnd && activations == 0, "closing input window selected background worker");
+                return;
+            }
             Native.ShowWindow(hwnd, 9); // A deliberate user restore, on the isolated desktop only.
             Application.DoEvents();
             Check(!Native.IsIconic(hwnd) && Native.GetActiveWindow() == hwnd, "user restore remains possible");
@@ -165,7 +248,7 @@ internal static class Program
             return;
         }
 
-        var mode = name == "record" ? "record" : "epg";
+        var mode = name is "record" or "chain-updates" ? "record" : "epg";
         var jobType = assembly.GetType("TvAIrEpgRec.TvAIrEpgRecJob", true)!;
         var job = Activator.CreateInstance(jobType)!;
         jobType.GetProperty("Metadata")!.SetValue(job, new Dictionary<string, string>
@@ -199,6 +282,19 @@ internal static class Program
         var active = Native.GuiInfo(projectedHandle);
         Check(active.active == IntPtr.Zero && active.focus == IntPtr.Zero, "presentation thread must not acquire activation/focus");
         Check(Native.IsIconic(projectedHandle), "presentation remains minimized");
+        if (name == "chain-updates")
+        {
+            for (var reservation = 3; reservation <= 18; reservation++)
+            {
+                opened.Invoke(null, new object?[] { reservation, "chain " + reservation, "same service" });
+                presentation.GetMethod("RecordingClosed", PrivateStatic)!.Invoke(null, new object[] { reservation - 1 });
+                Thread.Sleep(10);
+                Check(projected.Handle == projectedHandle && Native.IsIconic(projectedHandle), "chain update recreated/restored worker");
+                var info = Native.GuiInfo(projectedHandle);
+                Check(info.active == IntPtr.Zero && info.focus == IntPtr.Zero, "chain update acquired input");
+            }
+            Observations["segmentUpdates"] = 16;
+        }
         jobType.GetProperty("Metadata")!.SetValue(job, new Dictionary<string, string> { ["displayTitle"] = "next service" });
         update.Invoke(null, new[] { mode, job });
         Thread.Sleep(100);
@@ -317,4 +413,5 @@ internal static class Native
     }
     internal static bool IsTaskbarWindow(IntPtr hwnd)
         => IsWindowVisible(hwnd) && (GetWindowLong(hwnd, -20) & 0x00040000) != 0;
+    internal static int ExStyle(IntPtr hwnd) => GetWindowLong(hwnd, -20);
 }

@@ -303,8 +303,8 @@ public sealed class BonDriverChannelRouteCatalog
         // HYBRID is only a physical route category for unclassified cable services.
         // It is never inferred as a terrestrial/satellite service identity.
         if (group is not ("GR" or "BS" or "CS" or "BSCS" or "HYBRID" or "CATV")) return false;
-        if (group == "HYBRID" && lease.Group.Trim().ToUpperInvariant() != "HYBRID") return false;
         var leaseGroup = lease.Group.Trim().ToUpperInvariant();
+        if (group == "HYBRID" && leaseGroup != "HYBRID") return false;
         if (group == "CATV" && leaseGroup != "CATV") return false;
         if (leaseGroup == "CATV")
         {

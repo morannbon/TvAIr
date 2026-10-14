@@ -32,3 +32,13 @@ The baseline records whether activation actually reproduced on the isolated
 desktop, separately from verifying the activating show-command selection.
 Passing this suite does not establish that the reported real CATV/game environment
 has been reproduced or that a third-party BonDriver never creates its own UI.
+
+The worker presentation tests include background-window style and OS fallback checks, 16 segment
+presentation updates, serial hidden/taskbar transitions, parallel worker processes,
+and developer focus telemetry checks. Process-transition fixtures run mode=runtime
+without a tuner. The epg/record/chain cases exercise real presentation callbacks,
+not full EPG acquisition or native recording. There is no Explorer taskbar on the
+private desktop. Manual native restore remains covered; this is not an actual
+Explorer taskbar mouse-click test.
+The same progress write puts queued worker_focus records before the canonical
+lifecycle row. The terminal completed stage must remain last.

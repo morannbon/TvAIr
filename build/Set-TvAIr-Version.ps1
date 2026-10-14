@@ -146,8 +146,10 @@ Update-TextFile 'README.md' {
     $text = [regex]::Replace($text, '(?m)^# TvAIr \d+\.\d+\.\d+$', "# TvAIr $product", 1)
     [regex]::Replace($text, 'TvAIr \d+\.\d+\.\d+のVisual Studio 2022用ソース一式です。', "TvAIr $productのVisual Studio 2022用ソース一式です。", 1)
 }
-$readmeCanonical = Get-Content -LiteralPath (Join-Path $root 'README.md') -Raw -Encoding UTF8
-Set-Content -LiteralPath (Join-Path $root 'README.txt') -Value $readmeCanonical -Encoding utf8
+# Preserve the canonical bytes, including its BOM and final newline.
+# Set-Content would add another newline and fail the byte-equivalence gate.
+[IO.File]::WriteAllBytes((Join-Path $root 'README.txt'),
+    [IO.File]::ReadAllBytes((Join-Path $root 'README.md')))
 
 $webFiles = Get-ChildItem -LiteralPath (Join-Path $root 'TvAIr\wwwroot') -Recurse -File |
     Where-Object { $_.Extension -in '.html', '.js', '.css' }

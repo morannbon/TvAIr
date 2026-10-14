@@ -6,7 +6,8 @@ namespace TvAIr.Channel;
 /// Host-wide operational service eligibility SSOT.
 /// EPG storage may contain every observed service, but user-facing/programmatic operations
 /// (display/search/reservation/viewer/recording) may only expose services that are enabled
-/// in the current TVTest .ch2 state and resolvable to the current ChSet route.
+/// in the current TVTest .ch2 state and resolvable through a ChSet or an explicitly
+/// bound BonDriver/.ch2 route. Display projections do not grant tuning authority.
 /// </summary>
 public sealed class ChannelServiceAccessPolicy
 {
@@ -360,12 +361,6 @@ public sealed class ChannelServiceAccessSnapshot
     }
 
     /// <summary>
-    /// Recording eligibility for operations that have the persisted tuner configuration
-    /// rather than physical runtime profiles (e.g. automatic keyword matching).
-    /// Uses the same BonDriver-specific route catalog as reservation allocation.
-    /// Does not imply that a physical tuner has been acquired.
-    /// </summary>
-    /// <summary>
     /// Whether a service remains enabled by a configured channel source.
     /// Keep this separate from operational routing: a temporarily unavailable
     /// tuner/route must not delete an existing automatic reservation.
@@ -381,14 +376,13 @@ public sealed class ChannelServiceAccessSnapshot
         var service = new BroadcastServiceKey(networkId, transportStreamId, serviceId);
         if (!service.IsValid || _channels.BonDriverRoutes is not { } catalog)
             return false;
-        return configuredTuners.Any(t =>
-            string.Equals(t.Role, "Recording", StringComparison.OrdinalIgnoreCase)
-            && !string.IsNullOrWhiteSpace(t.ChannelCh2Path)
-            && (!BroadcastNetworkIdentity.TryResolveWave(networkId, out var wave) || SupportsGroup(t.Group, wave))
-            && catalog.TryResolveTransportForSource(t.BonDriverFileName,
-                t.ChannelCh2Path, new[] { service }, out _));
+        return HasConfiguredRecordingRoute(configuredTuners, catalog, service);
     }
 
+    /// <summary>
+    /// Recording eligibility using persisted tuner configuration, rather than
+    /// physical runtime profiles. This does not acquire a physical tuner.
+    /// </summary>
     public bool IsOperationalForConfiguredRecordingTuners(
         ushort networkId, ushort transportStreamId, ushort serviceId,
         IEnumerable<TunerProfileDto> configuredTuners)
@@ -401,13 +395,21 @@ public sealed class ChannelServiceAccessSnapshot
         var service = new BroadcastServiceKey(networkId, transportStreamId, serviceId);
         if (!service.IsValid)
             return false;
-        return configuredTuners.Any(t =>
+        return HasConfiguredRecordingRoute(configuredTuners, catalog, service);
+    }
+
+    // The two callers retain their distinct enabled/operational early returns.
+    // Only the identical configured-route predicate is shared.
+    private static bool HasConfiguredRecordingRoute(
+        IEnumerable<TunerProfileDto> configuredTuners,
+        BonDriverChannelRouteCatalog catalog,
+        BroadcastServiceKey service)
+        => configuredTuners.Any(t =>
             string.Equals(t.Role, "Recording", StringComparison.OrdinalIgnoreCase)
             && !string.IsNullOrWhiteSpace(t.ChannelCh2Path)
-            && (!BroadcastNetworkIdentity.TryResolveWave(networkId, out var wave) || SupportsGroup(t.Group, wave))
+            && (!BroadcastNetworkIdentity.TryResolveWave(service.NetworkId, out var wave) || SupportsGroup(t.Group, wave))
             && catalog.TryResolveTransportForSource(t.BonDriverFileName,
                 t.ChannelCh2Path, new[] { service }, out _));
-    }
 
     public bool IsOperational(Reservation reservation)
         => reservation.Source == ReservationSource.Epg

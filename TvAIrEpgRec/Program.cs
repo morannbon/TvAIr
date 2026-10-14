@@ -1030,6 +1030,21 @@ internal static class Program
 
         EnsureParentDirectory(path);
         var line = JsonSerializer.Serialize(progress, JsonOptions).ReplaceLineEndings(string.Empty) + Environment.NewLine;
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        var focusRows = WorkerFocusDiagnostics.Drain(progress.Stage);
+        if (focusRows.Length > 0)
+        {
+            var diagnostics = new StringBuilder();
+            foreach (var message in focusRows)
+                diagnostics.AppendLine(JsonSerializer.Serialize(new WorkerProgress
+                {
+                    Timestamp = progress.Timestamp, Version = AppVersion,
+                    JobId = progress.JobId, Mode = progress.Mode, Stage = "worker_focus",
+                    Message = message, ProcessId = Environment.ProcessId
+                }, JsonOptions).ReplaceLineEndings(string.Empty));
+            line = diagnostics.ToString() + line;
+        }
+#endif
         var bytes = System.Text.Encoding.UTF8.GetBytes(line);
 
         // Progress JSONL is live telemetry: TvAIr reads it while this worker appends to it.

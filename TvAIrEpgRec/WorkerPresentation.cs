@@ -25,6 +25,9 @@ internal static class WorkerPresentation
     // thread or window, even when recording/progress state changes afterwards.
     internal static void Start(string? mode, TvAIrEpgRecJob? job, WorkerPresentationPolicy policy)
     {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        WorkerFocusDiagnostics.Record("presentation_start_" + policy);
+#endif
         lock (Gate)
         {
             if (_started) throw new InvalidOperationException("Worker presentation was already started.");
@@ -81,6 +84,9 @@ internal static class WorkerPresentation
 
     private static void RecordingOpened(int reservationId, string? title, string? serviceName)
     {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        WorkerFocusDiagnostics.Record("recording_opened_R" + reservationId);
+#endif
         try
         {
             PresentationSnapshot snapshot;
@@ -104,6 +110,9 @@ internal static class WorkerPresentation
 
     internal static void RecordingClosed(int reservationId)
     {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        WorkerFocusDiagnostics.Record("recording_closed_R" + reservationId);
+#endif
         try
         {
             PresentationSnapshot snapshot;
@@ -257,6 +266,8 @@ internal static class WorkerPresentation
     // but never activated by its initial show. No second display or focus-restoration path.
     private sealed class WorkerWindow : System.Windows.Forms.Form
     {
+        private const int WsExNoActivate = 0x08000000;
+        private const int WsExAppWindow = 0x00040000;
         private readonly System.Windows.Forms.PictureBox _pictureBox = new();
         private Image? _currentImage;
         private Icon? _currentIcon;
@@ -284,12 +295,59 @@ internal static class WorkerPresentation
             Apply(initial);
         }
 
+        // Non-activation belongs to the window itself, not just its first show.
+        // APPWINDOW preserves the taskbar entry; an explicit user restore remains
+        // possible. NOACTIVATE also excludes this background window from Windows'
+        // automatic choice when another foreground window is minimized/closed.
+        protected override System.Windows.Forms.CreateParams CreateParams
+        {
+            get
+            {
+                var parameters = base.CreateParams;
+                parameters.ExStyle |= WsExNoActivate | WsExAppWindow;
+                return parameters;
+            }
+        }
+
+        protected override bool ShowWithoutActivation => true;
+
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            WorkerFocusDiagnostics.SetWindow(Handle);
+            WorkerFocusDiagnostics.Record("window_created");
+        }
+
+        protected override void OnActivated(EventArgs e)
+        {
+            WorkerFocusDiagnostics.Record("window_activated");
+            base.OnActivated(e);
+        }
+
+        protected override void OnDeactivate(EventArgs e)
+        {
+            WorkerFocusDiagnostics.Record("window_deactivated");
+            base.OnDeactivate(e);
+        }
+
+        protected override void OnHandleDestroyed(EventArgs e)
+        {
+            WorkerFocusDiagnostics.Record("window_destroying");
+            WorkerFocusDiagnostics.SetWindow(IntPtr.Zero);
+            base.OnHandleDestroyed(e);
+        }
+#endif
+
         internal void PresentInBackground()
         {
             // Creating the minimized handle while hidden cannot activate it. Unlike
             // ShowWindow, SetWindowPos does not substitute STARTUPINFO.wShowWindow.
-            // No Form.Show, activation timer, focus restoration, or permanent
-            // WS_EX_NOACTIVATE: the user can still restore the taskbar window normally.
+            // No Form.Show, activation timer or focus restoration. The creation
+            // style also protects the window before this show command executes.
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+            WorkerFocusDiagnostics.Record("window_show_before");
+#endif
             var handle = Handle;
             const uint swpNoSize = 0x0001;
             const uint swpNoMove = 0x0002;
@@ -307,6 +365,9 @@ internal static class WorkerPresentation
                 var shown = System.Windows.Forms.Message.Create(handle, 0x0018, new IntPtr(1), IntPtr.Zero);
                 base.WndProc(ref shown);
             }
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+            WorkerFocusDiagnostics.Record("window_show_after");
+#endif
         }
 
         [DllImport("user32.dll", SetLastError = true)]
@@ -317,7 +378,12 @@ internal static class WorkerPresentation
         internal void Apply(PresentationSnapshot snapshot)
         {
             if (!string.Equals(Text, snapshot.Title, StringComparison.Ordinal))
+            {
                 Text = snapshot.Title;
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+                WorkerFocusDiagnostics.Record("window_content_updated");
+#endif
+            }
 
             var visualChanged = !_visualInitialized
                 || !string.Equals(_titleBarLogoPath, snapshot.TitleBarLogoPath, StringComparison.OrdinalIgnoreCase)
