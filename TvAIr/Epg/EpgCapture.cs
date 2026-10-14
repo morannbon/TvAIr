@@ -823,7 +823,7 @@ public sealed class EpgCapture
             var runTitle = runResult == "OK" ? "EPG" : runResult == "BLOCKED" ? "BLOCKED" : "FAILED";
             Log(runEvent, runTitle, msg.Replace("\n", " / ") + " " + detail + " rule=release_contract");
             Log("EPG_RUN_END", runResult, detail + " rule=release_contract");
-            var grGroupKeys = groups.Where(g => g.Group == "GR").Select(g => g.Key).ToList();
+            var grGroupKeys = groups.Where(g => IsEpgGroupWave(g, "GR")).Select(g => g.Key).ToList();
             if (grGroupKeys.Count > 0 && !grGroupKeys.Any(k => completedGroups.Contains(k)))
                 Log("EPG_GR_ALL_EMPTY", "WARN", $"result=WARN grGroups={grGroupKeys.Count} grCompleted=0 rule=release_contract");
 
@@ -1834,7 +1834,7 @@ public sealed class EpgCapture
         var displayLogoPath = displayLogoPaths.TitleBarLogoPath;
         var centerLogoPath = displayLogoPaths.CenterLogoPath;
 
-        var isTerrestrialLogoScope = string.Equals(group.Group, "GR", StringComparison.OrdinalIgnoreCase);
+        var isTerrestrialLogoScope = IsEpgGroupWave(group, "GR");
         var getStreamVariant = isTerrestrialLogoScope
             ? "pointer-vtable6-epg-normalize-gr-logo-opportunistic"
             : "pointer-vtable6-epg-normalize";
@@ -1909,8 +1909,6 @@ public sealed class EpgCapture
                 ["targetSidCount"] = group.Targets.Count.ToString(),
                 ["targetSids"] = string.Join(",", group.Targets.Select(t => t.ServiceId).OrderBy(x => x)),
                 ["rule"] = "release_contract",
-                // TvAIrEpgRec process icon visibility follows the user setting for active EPG workers.
-                ["taskbarIconVisible"] = ini.ShowTvAIrEpgRecTaskbarIcon ? "true" : "false",
                 ["didSelectionTransport"] = "process_command_line_/DID",
                 ["preTuneEnabled"] = isPreRecordCheck && preTuneKeepWorkerUntilSafetyCeiling && !string.IsNullOrWhiteSpace(preferredRecordingTunerName) ? "true" : "false",
                 ["preTuneChainPosition"] = preTuneChainPosition ?? string.Empty,
@@ -4189,7 +4187,7 @@ public sealed class EpgCapture
             EpgAnalyzeResult? otherEpg = null;
             List<EpgEvent> otherSupplementCandidates = new();
             if (!isPreRecordCheck
-                && string.Equals(group.Group, "BSCS", StringComparison.OrdinalIgnoreCase)
+                && IsEpgGroupWave(group, "BSCS")
                 && epg.IgnoredOtherTransportStreamEitSectionCount > 0)
             {
                 try
@@ -4699,14 +4697,23 @@ public sealed class EpgCapture
     {
         return scope switch
         {
-            "GR" => groups.Where(g => g.Group == "GR").ToList(),
-            "BS" => groups.Where(g => g.Group == "BSCS" && g.Targets.Any(t => t.OriginalNetworkId == 4)).ToList(),
-            "CS" => groups.Where(g => g.Group == "BSCS" && g.Targets.All(t => t.OriginalNetworkId != 4)).ToList(),
-            "BSCS" => groups.Where(g => g.Group == "BSCS").ToList(),
-            "HYBRID" => groups.Where(g => g.Group == "HYBRID").ToList(),
+            "GR" => groups.Where(g => IsEpgGroupWave(g, "GR")).ToList(),
+            "BS" => groups.Where(g => IsEpgGroupWave(g, "BSCS") && g.Targets.Any(t => t.OriginalNetworkId == 4)).ToList(),
+            "CS" => groups.Where(g => IsEpgGroupWave(g, "BSCS") && g.Targets.All(t => t.OriginalNetworkId != 4)).ToList(),
+            "BSCS" => groups.Where(g => IsEpgGroupWave(g, "BSCS")).ToList(),
+            // CATV/ISDB-C are historical aliases of this physical acquisition scope.
+            "HYBRID" => groups.Where(g => g.Group is "HYBRID" or "CATV").ToList(),
             _ => groups.ToList()
         };
+
     }
+
+    // Acquisition groups describe physical capacity. Known carried waves select
+    // transports and parser policies without rewriting a CATV lease as GR/BSCS.
+    private static bool IsEpgGroupWave(TsGroup group, string wave)
+        => group.Group == wave || (group.Group == "CATV" && group.Targets.Count > 0
+            && group.Targets.All(t => BroadcastNetworkIdentity.TryResolveWave(t.OriginalNetworkId, out var knownWave)
+                && knownWave == wave));
 
 
     private static List<TsGroup> FilterGroupsForExpectedServiceIdentity(
@@ -5983,7 +5990,7 @@ public sealed class EpgCapture
             // physical capability is not a broadcast-wave identity. Only classify
             // a direct transport when its ONID unambiguously identifies an
             // existing Japanese GR/BSCS wave; never guess for ISDB-C/unknown ONID.
-            if (group is not ("GR" or "BSCS" or "HYBRID")) continue;
+            if (group is not ("GR" or "BSCS" or "HYBRID" or "CATV")) continue;
             // Optional per-BonDriver source paths are user supplied.  An invalid
             // path must not abort the entire normal EPG plan, including the
             // already valid legacy ChSet transports.  ChannelFileLoader owns
@@ -6004,8 +6011,13 @@ public sealed class EpgCapture
             foreach (var transport in records)
             {
                 var routes = transport.ToArray();
-                var transportGroup = BroadcastNetworkIdentity.TryResolveWave(transport.Key.NetworkId, out var knownWave)
-                    ? knownWave : group;
+                // A cable tuner acquires every carried wave through its physical
+                // CATV slot. Preserve that group through queue capacity, admission
+                // and lease materialization; the exact source binding below is
+                // the authority for which transports it can actually receive.
+                var transportGroup = group == "CATV" ? "CATV"
+                    : BroadcastNetworkIdentity.TryResolveWave(transport.Key.NetworkId, out var knownWave)
+                        ? knownWave : group;
                 if (!ChannelServiceAccessSnapshot.SupportsGroup(group, transportGroup)) continue;
                 if (routes.Select(r => (r.TuningSpace, r.ChannelIndex)).Distinct().Count() != 1) continue;
                 var identities = routes.Select(r => r.Service).Distinct().ToArray();

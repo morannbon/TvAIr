@@ -302,10 +302,20 @@ public sealed class BonDriverChannelRouteCatalog
         var group = scheduledGroup.Trim().ToUpperInvariant();
         // HYBRID is only a physical route category for unclassified cable services.
         // It is never inferred as a terrestrial/satellite service identity.
-        if (group is not ("GR" or "BS" or "CS" or "BSCS" or "HYBRID")) return false;
+        if (group is not ("GR" or "BS" or "CS" or "BSCS" or "HYBRID" or "CATV")) return false;
         if (group == "HYBRID" && lease.Group.Trim().ToUpperInvariant() != "HYBRID") return false;
         var leaseGroup = lease.Group.Trim().ToUpperInvariant();
-        if (leaseGroup != "HYBRID" && leaseGroup != group
+        if (group == "CATV" && leaseGroup != "CATV") return false;
+        if (leaseGroup == "CATV")
+        {
+            // The actual CATV BonDriver/source/lease has already proved this route.
+            // Its physical CATV category can also carry a known broadcast wave,
+            // without changing the service identity or borrowing another source.
+            var carriedWave = BroadcastNetworkIdentity.ResolveLegacyChannelGroup("CATV", service.NetworkId);
+            if (group != "CATV" && group != carriedWave
+                && !(group == "BSCS" && carriedWave is "BS" or "CS")) return false;
+        }
+        else if (leaseGroup != "HYBRID" && leaseGroup != group
             && !(leaseGroup == "BSCS" && (group is "BS" or "CS"))) return false;
 
         var siblingCount = SourceRoutes.Count(r =>

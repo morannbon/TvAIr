@@ -9,6 +9,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using TvAIrEpgRec.CommonTsRoute;
 using TvAIr.Epg.Shared;
+using TvAIr.Workers;
 
 namespace TvAIrEpgRec;
 
@@ -46,7 +47,7 @@ internal static class Program
         var cancelPath = parsed.Get("cancel");
         var keepAliveMs = parsed.GetInt("keep-alive-ms", 0);
 
-        WorkerPresentation.UpdateBase(mode, null, ensureWindow: false);
+        var presentationPolicy = WorkerPresentationContract.Parse(parsed.Get(WorkerPresentationContract.ArgumentName));
 
         TvAIrEpgRecJob? job = null;
         try
@@ -62,7 +63,6 @@ internal static class Program
                     : job?.ResultPath ?? job?.OutputPath;
                 cancelPath ??= job?.CancelSignalPath;
 
-                WorkerPresentation.UpdateBase(mode, job, ensureWindow: true);
                 var loadedJobId = FirstNonEmpty(job?.JobId, parsed.Get("job-id"), Guid.NewGuid().ToString("N"));
                 await WriteProgressAsync(progressPath, new WorkerProgress
                 {
@@ -77,7 +77,7 @@ internal static class Program
             }
 
             mode ??= "runtime";
-            WorkerPresentation.UpdateBase(mode, job, ensureWindow: true);
+            WorkerPresentation.Start(mode, job, presentationPolicy);
             if (string.IsNullOrWhiteSpace(resultPath) && !string.Equals(mode, "record", StringComparison.OrdinalIgnoreCase))
             {
                 resultPath = parsed.Get("output");
@@ -172,7 +172,7 @@ internal static class Program
             };
 
             var finalStage = cancelled ? "キャンセル" : (resultSuccess ? "完了" : "確認要");
-            WorkerPresentation.UpdateBase(mode, job, ensureWindow: true);
+            WorkerPresentation.UpdateBase(mode, job);
             await WriteResultAsync(resultPath, result).ConfigureAwait(false);
             await WriteProgressAsync(progressPath, new WorkerProgress
             {
@@ -209,7 +209,7 @@ internal static class Program
                 Arguments = parsed.Values
             };
 
-            WorkerPresentation.UpdateBase(mode, job, ensureWindow: true);
+            WorkerPresentation.UpdateBase(mode, job);
 
             await WriteResultAsync(resultPath, result).ConfigureAwait(false);
             await WriteProgressAsync(progressPath, new WorkerProgress
@@ -832,7 +832,7 @@ internal static class Program
                 ? target
                 : "録画準備";
             job.Metadata["preTuneDisplayLabel"] = targetLabel;
-            WorkerPresentation.UpdateBase(mode, job, ensureWindow: true);
+            WorkerPresentation.UpdateBase(mode, job);
             await WriteProgressAsync(progressPath, new WorkerProgress
             {
                 Timestamp = DateTimeOffset.Now,
@@ -3776,9 +3776,10 @@ internal static class BonDriverNativeProbe
     private static string NormalizeEpgNativeBoundaryGroup(string? group)
         => string.Equals(group, "BSCS", StringComparison.OrdinalIgnoreCase) ? "BSCS"
             : string.Equals(group, "GR", StringComparison.OrdinalIgnoreCase) ? "GR"
-            // Explicit BonDriver/.ch2 HYBRID transports share the same physical
+            // Explicit BonDriver/.ch2 HYBRID and CATV transports share the same physical
             // Open/Close boundary as GR and BSCS; do not bypass it as UNKNOWN.
             : string.Equals(group, "HYBRID", StringComparison.OrdinalIgnoreCase) ? "HYBRID"
+            : string.Equals(group, "CATV", StringComparison.OrdinalIgnoreCase) ? "CATV"
             : "UNKNOWN";
 
     private static bool UsesEpgNativeBoundary(TsReadProbeSummary summary)

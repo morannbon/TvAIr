@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Platforms>x64;x86</Platforms>
+    <PlatformTarget>$(Platform)</PlatformTarget>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../Shared/WorkerPresentationPolicy.cs" Link="Shared/WorkerPresentationPolicy.cs" />
+    <Compile Include="../../TvAIr/Core/WorkerProcessStartInfoFactory.cs" Link="WorkerProcessStartInfoFactory.cs" />
+  </ItemGroup>
+</Project>

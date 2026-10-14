@@ -1,8 +1,8 @@
 <Project>
   <PropertyGroup>
-    <TvAIrProductVersion>1.2.10</TvAIrProductVersion>
-    <TvAIrFileVersion>1.2.10.0</TvAIrFileVersion>
-    <TvAIrAssemblyVersion>1.2.10.0</TvAIrAssemblyVersion>
+    <TvAIrProductVersion>1.2.11</TvAIrProductVersion>
+    <TvAIrFileVersion>1.2.11.0</TvAIrFileVersion>
+    <TvAIrAssemblyVersion>1.2.11.0</TvAIrAssemblyVersion>
     <TvAIrPluginSdkVersion>1.1.14</TvAIrPluginSdkVersion>
     <TvAIrPluginSdkAssemblyVersion>1.0.0.0</TvAIrPluginSdkAssemblyVersion>
     <TvAIrPluginHostContractVersion>1.1.14</TvAIrPluginHostContractVersion>

@@ -1,0 +1,320 @@
+using System.Diagnostics;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.Json;
+using TvAIr.Core;
+using TvAIr.Workers;
+
+internal static class Program
+{
+    private const BindingFlags PrivateStatic = BindingFlags.NonPublic | BindingFlags.Static;
+    private const BindingFlags PrivateInstance = BindingFlags.NonPublic | BindingFlags.Instance;
+    private static readonly Dictionary<string, object> Observations = new();
+
+    [STAThread]
+    private static int Main(string[] args)
+    {
+        if (args.Length < 2) throw new ArgumentException("worker DLL and results directory are required");
+        var workerDll = Path.GetFullPath(args[0]);
+        var resultsDirectory = Path.GetFullPath(args[1]);
+        Directory.CreateDirectory(resultsDirectory);
+        if (args.Length == 4)
+        {
+            var name = args[2];
+            try
+            {
+                var desktopName = Native.DesktopName(Native.GetThreadDesktop(Native.GetCurrentThreadId()));
+                Check(desktopName.StartsWith("TvAIrFocusTest_", StringComparison.Ordinal), "test must run on its isolated desktop");
+                Application.EnableVisualStyles();
+                RunCase(name, workerDll);
+                File.WriteAllText(args[3], JsonSerializer.Serialize(new { name, passed = true, desktopName, observations = Observations }));
+                return 0;
+            }
+            catch (Exception error)
+            {
+                File.WriteAllText(args[3], JsonSerializer.Serialize(new { name, passed = false, error = error.ToString() }));
+                return 1;
+            }
+        }
+
+        var desktop = Native.CreateDesktop("TvAIrFocusTest_" + Guid.NewGuid().ToString("N"), null, IntPtr.Zero, 0, 0x10000000, IntPtr.Zero);
+        if (desktop == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        var cases = new[] { "baseline", "policy", "window", "hidden", "epg", "record", "repeated-processes" };
+        var results = new List<JsonElement>();
+        try
+        {
+            foreach (var name in cases)
+            {
+                var output = Path.Combine(resultsDirectory, name + ".json");
+                using var child = Native.Start(Environment.ProcessPath!,
+                    new[] { workerDll, resultsDirectory, name, output }, Native.DesktopName(desktop));
+                if (!child.WaitForExit(20000)) { child.Kill(); throw new TimeoutException(name); }
+                var result = JsonSerializer.Deserialize<JsonElement>(File.ReadAllText(output));
+                results.Add(result);
+                Console.WriteLine((result.GetProperty("passed").GetBoolean() ? "PASS " : "FAIL ") + name);
+                if (!result.GetProperty("passed").GetBoolean()) Console.WriteLine(result.GetProperty("error").GetString());
+            }
+        }
+        finally { Native.CloseDesktop(desktop); }
+        File.WriteAllText(Path.Combine(resultsDirectory, "results.json"), JsonSerializer.Serialize(results, new JsonSerializerOptions { WriteIndented = true }));
+        return results.All(x => x.GetProperty("passed").GetBoolean()) ? 0 : 1;
+    }
+
+    private static void RunCase(string name, string workerDll)
+    {
+        if (name == "policy")
+        {
+            foreach (var kind in Enum.GetValues<TvAIrEpgRecLaunchKind>())
+            foreach (var enabled in new[] { false, true })
+            {
+                var expected = enabled && kind is TvAIrEpgRecLaunchKind.PrimaryRecord or TvAIrEpgRecLaunchKind.EpgTransportStreamWorker;
+                var psi = WorkerProcessStartInfoFactory.CreateTvAIrEpgRec("worker.exe", kind, enabled);
+                Check(psi.WindowStyle == ProcessWindowStyle.Hidden && psi.CreateNoWindow && !psi.UseShellExecute, "launcher must not show GUI");
+                Check(psi.ArgumentList.SequenceEqual(new[] { "--worker-presentation", expected ? "taskbar" : "hidden" }), "single presentation argument");
+                Check(WorkerProcessStartInfoFactory.IsTaskbarIconVisible(kind, enabled) == expected, "policy matches launch contract");
+            }
+            Check(WorkerPresentationContract.Parse(null) == WorkerPresentationPolicy.Hidden, "missing policy is hidden");
+            Check(WorkerPresentationContract.Parse("invalid") == WorkerPresentationPolicy.Hidden, "invalid policy is hidden");
+            return;
+        }
+
+        if (name == "repeated-processes")
+        {
+            var exe = Path.ChangeExtension(workerDll, ".exe");
+            for (var i = 0; i < 8; i++)
+            {
+                var visible = i % 2 == 0;
+                using var child = Native.Start(exe, new[] { "--mode", "runtime", "--keep-alive-ms", "900", "--worker-presentation", visible ? "taskbar" : "hidden" },
+                    Native.DesktopName(Native.GetThreadDesktop(Native.GetCurrentThreadId())));
+                var sawWindow = false;
+                while (!child.HasExited)
+                {
+                    foreach (var hwnd in Native.Windows(child.Id))
+                    {
+                        if (!Native.IsTaskbarWindow(hwnd)) continue;
+                        sawWindow = true;
+                        Check(visible, "hidden worker created visible window");
+                        Check(Native.IsIconic(hwnd), "worker initial window must be minimized");
+                        var info = Native.GuiInfo(hwnd);
+                        Check(info.active == IntPtr.Zero && info.focus == IntPtr.Zero, "worker process acquired activation/focus");
+                    }
+                    Thread.Sleep(5);
+                }
+                Check(Native.ExitCode(child) == 0, "worker runtime completed");
+                Check(sawWindow == visible, "actual worker CLI visibility");
+            }
+            return;
+        }
+
+        using var anchor = new Form { Text = "isolated test input window" };
+        anchor.Show();
+        Native.ShowWindow(anchor.Handle, 9);
+        Application.DoEvents();
+        var anchorHandle = anchor.Handle;
+        Check(Native.GetActiveWindow() == anchorHandle, "anchor must be active on isolated desktop");
+        if (name == "baseline")
+        {
+            using var baseline = new OldWindow();
+            var showCommand = Convert.ToInt32(typeof(Form).GetProperty("ShowParams", PrivateInstance)!.GetValue(baseline));
+            Check(showCommand == 2, "minimized WinForms selects SW_SHOWMINIMIZED before ShowWithoutActivation");
+            baseline.Show();
+            Application.DoEvents();
+            Observations["selectedShowCommand"] = showCommand;
+            Observations["activationReproducedOnIsolatedDesktop"] = Native.GetActiveWindow() == baseline.Handle;
+            return;
+        }
+
+        var assembly = Assembly.LoadFrom(workerDll);
+        var presentation = assembly.GetType("TvAIrEpgRec.WorkerPresentation", true)!;
+        if (name == "window")
+        {
+            var snapshotType = presentation.GetNestedType("PresentationSnapshot", BindingFlags.NonPublic)!;
+            var snapshot = Activator.CreateInstance(snapshotType, "EPG取得 テスト", null, null)!;
+            var windowType = presentation.GetNestedType("WorkerWindow", BindingFlags.NonPublic)!;
+            using var window = (Form)Activator.CreateInstance(windowType, PrivateInstance, null, new[] { snapshot }, null)!;
+            var activations = 0;
+            window.Activated += (_, _) => activations++;
+            windowType.GetMethod("PresentInBackground", PrivateInstance)!.Invoke(window, null);
+            Application.DoEvents();
+            var hwnd = window.Handle;
+            Check(Native.IsWindowVisible(hwnd) && Native.IsIconic(hwnd), "visible minimized window");
+            Check(window.Visible, "WinForms visibility must track native visibility");
+            Check(activations == 0 && Native.GetActiveWindow() == anchorHandle, "initial show must preserve activation");
+            Check(window.ShowInTaskbar && window.Owner is null, "single taskbar window");
+            Native.ShowWindow(hwnd, 9); // A deliberate user restore, on the isolated desktop only.
+            Application.DoEvents();
+            Check(!Native.IsIconic(hwnd) && Native.GetActiveWindow() == hwnd, "user restore remains possible");
+            Check(window.Controls[0].IsHandleCreated, "restored logo control has a handle");
+            Native.SetActiveWindow(anchorHandle);
+            activations = 0;
+            using var logo = new Bitmap(24, 24);
+            var logoPath = Path.Combine(Path.GetDirectoryName(workerDll)!, "focus-test-logo.png");
+            logo.Save(logoPath);
+            try
+            {
+                var updated = Activator.CreateInstance(snapshotType, "EPG取得 次の局", logoPath, logoPath)!;
+                windowType.GetMethod("Apply", PrivateInstance)!.Invoke(window, new[] { updated });
+                Application.DoEvents();
+                Check(window.Handle == hwnd && window.Text == "EPG取得 次の局", "content update preserves handle");
+                Check(!Native.IsIconic(hwnd), "updates must not minimize a user-restored window");
+                Check(activations == 0 && Native.GetActiveWindow() == anchorHandle, "title/logo update must not activate");
+                Check(((PictureBox)window.Controls[0]).Image is not null && window.Icon is not null, "logo/icon preserved");
+            }
+            finally { File.Delete(logoPath); }
+            return;
+        }
+
+        var mode = name == "record" ? "record" : "epg";
+        var jobType = assembly.GetType("TvAIrEpgRec.TvAIrEpgRecJob", true)!;
+        var job = Activator.CreateInstance(jobType)!;
+        jobType.GetProperty("Metadata")!.SetValue(job, new Dictionary<string, string>
+        {
+            ["taskbarIconVisible"] = name == "hidden" ? "true" : "false",
+            ["displayTitle"] = "first service"
+        }); // Legacy metadata is intentionally contradictory and cannot override the contract.
+        var policyType = assembly.GetType("TvAIr.Workers.WorkerPresentationPolicy", true)!;
+        presentation.GetMethod("Start", PrivateStatic)!.Invoke(null, new[] { mode, job, Enum.Parse(policyType, name == "hidden" ? "Hidden" : "Taskbar") });
+        var update = presentation.GetMethod("UpdateBase", PrivateStatic)!;
+        update.Invoke(null, new[] { mode, job });
+        var opened = presentation.GetMethods(PrivateStatic).Single(x => x.Name == "RecordingOpened" && x.GetParameters().Length == 3);
+        opened.Invoke(null, new object?[] { 1, "first reservation", "first service" });
+        opened.Invoke(null, new object?[] { 2, "second reservation", "second service" });
+        presentation.GetMethod("RecordingClosed", PrivateStatic)!.Invoke(null, new object[] { 2 });
+        Form? projected = null;
+        for (var i = 0; i < 200; i++)
+        {
+            projected = (Form?)presentation.GetField("_window", PrivateStatic)!.GetValue(null);
+            if (projected is not null && projected.IsHandleCreated && Native.IsWindowVisible(projected.Handle)) break;
+            Thread.Sleep(5);
+        }
+        if (name == "hidden")
+        {
+            Check(projected is null && presentation.GetField("_uiThread", PrivateStatic)!.GetValue(null) is null,
+                "hidden progress/recording updates must create no GUI thread/window");
+            return;
+        }
+        Check(projected is not null && projected.IsHandleCreated, "presentation starts");
+        var projectedHandle = projected!.Handle;
+        var active = Native.GuiInfo(projectedHandle);
+        Check(active.active == IntPtr.Zero && active.focus == IntPtr.Zero, "presentation thread must not acquire activation/focus");
+        Check(Native.IsIconic(projectedHandle), "presentation remains minimized");
+        jobType.GetProperty("Metadata")!.SetValue(job, new Dictionary<string, string> { ["displayTitle"] = "next service" });
+        update.Invoke(null, new[] { mode, job });
+        Thread.Sleep(100);
+        Check(projected.Handle == projectedHandle, "updates never recreate presentation");
+        Check(Native.GuiInfo(projectedHandle).active == IntPtr.Zero, "updates remain non-activating");
+        // WinForms also creates native IME/helper windows. Count the actual taskbar
+        // app windows, not those OS-managed surfaces.
+        var visibleWindows = Native.Windows(Environment.ProcessId).Where(x => Native.IsTaskbarWindow(x) && x != anchorHandle).ToArray();
+        Check(visibleWindows.Length == 1, "exactly one visible worker window: " + string.Join(",", visibleWindows.Select(Native.Caption)));
+        projected.Invoke(new Action(projected.Close));
+    }
+
+    private static void Check(bool condition, string message)
+    {
+        if (!condition) throw new InvalidOperationException(message);
+    }
+
+    private sealed class OldWindow : Form
+    {
+        protected override bool ShowWithoutActivation => true;
+        internal OldWindow() { WindowState = FormWindowState.Minimized; ShowInTaskbar = true; }
+    }
+}
+
+internal static class Native
+{
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct StartupInfo
+    {
+        public int size;
+        public string? reserved, desktop, title;
+        public int x, y, width, height, xChars, yChars, fill, flags;
+        public short show, reservedSize;
+        public IntPtr reservedPtr, input, output, error;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessInfo { public IntPtr process, thread; public int pid, tid; }
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct GuiThreadInfo
+    {
+        public int size, flags;
+        public IntPtr active, focus, capture, menu, move, caret;
+        public int left, top, right, bottom;
+    }
+    private delegate bool EnumWindow(IntPtr hwnd, IntPtr param);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    internal static extern IntPtr CreateDesktop(string name, string? device, IntPtr mode, int flags, uint access, IntPtr security);
+    [DllImport("user32.dll")] internal static extern bool CloseDesktop(IntPtr desktop);
+    [DllImport("user32.dll")] internal static extern IntPtr GetThreadDesktop(uint thread);
+    [DllImport("kernel32.dll")] internal static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool GetUserObjectInformation(IntPtr obj, int index, StringBuilder name, int length, out int needed);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CreateProcess(string application, StringBuilder command, IntPtr processSecurity, IntPtr threadSecurity,
+        bool inherit, uint flags, IntPtr environment, string? directory, ref StartupInfo startup, out ProcessInfo info);
+    [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll")] private static extern bool GetExitCodeProcess(IntPtr handle, out int code);
+    [DllImport("user32.dll")] private static extern bool EnumDesktopWindows(IntPtr desktop, EnumWindow callback, IntPtr param);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int size);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] private static extern int GetWindowLong(IntPtr hwnd, int index);
+    [DllImport("user32.dll")] internal static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")] internal static extern bool IsIconic(IntPtr hwnd);
+    [DllImport("user32.dll")] internal static extern IntPtr GetActiveWindow();
+    [DllImport("user32.dll")] internal static extern IntPtr SetActiveWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] internal static extern bool ShowWindow(IntPtr hwnd, int command);
+    [DllImport("user32.dll")] private static extern bool GetGUIThreadInfo(uint thread, ref GuiThreadInfo info);
+    internal static string DesktopName(IntPtr desktop)
+    {
+        var name = new StringBuilder(256);
+        if (!GetUserObjectInformation(desktop, 2, name, name.Capacity * 2, out _)) throw new System.ComponentModel.Win32Exception();
+        return name.ToString();
+    }
+    internal static Process Start(string exe, IEnumerable<string> args, string desktop)
+    {
+        var startup = new StartupInfo { size = Marshal.SizeOf<StartupInfo>(), desktop = desktop, flags = 1, show = 0 };
+        var command = new StringBuilder(string.Join(" ", new[] { exe }.Concat(args).Select(x => "\"" + x.Replace("\"", "\\\"") + "\"")));
+        if (!CreateProcess(exe, command, IntPtr.Zero, IntPtr.Zero, false, 0, IntPtr.Zero, Path.GetDirectoryName(exe), ref startup, out var info))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        try
+        {
+            var process = Process.GetProcessById(info.pid);
+            _ = process.Handle;
+            return process;
+        }
+        finally { CloseHandle(info.process); CloseHandle(info.thread); }
+    }
+    internal static int ExitCode(Process process)
+    {
+        if (!GetExitCodeProcess(process.Handle, out var code)) throw new System.ComponentModel.Win32Exception();
+        return code;
+    }
+    internal static List<IntPtr> Windows(int pid)
+    {
+        var windows = new List<IntPtr>();
+        EnumDesktopWindows(GetThreadDesktop(GetCurrentThreadId()), (hwnd, _) =>
+        {
+            GetWindowThreadProcessId(hwnd, out var owner);
+            if (owner == pid) windows.Add(hwnd);
+            return true;
+        }, IntPtr.Zero);
+        return windows;
+    }
+    internal static GuiThreadInfo GuiInfo(IntPtr hwnd)
+    {
+        var thread = GetWindowThreadProcessId(hwnd, out _);
+        var info = new GuiThreadInfo { size = Marshal.SizeOf<GuiThreadInfo>() };
+        if (!GetGUIThreadInfo(thread, ref info)) throw new System.ComponentModel.Win32Exception();
+        return info;
+    }
+    internal static string Caption(IntPtr hwnd)
+    {
+        var text = new StringBuilder(256);
+        GetWindowText(hwnd, text, text.Capacity);
+        return hwnd + ":" + text;
+    }
+    internal static bool IsTaskbarWindow(IntPtr hwnd)
+        => IsWindowVisible(hwnd) && (GetWindowLong(hwnd, -20) & 0x00040000) != 0;
+}

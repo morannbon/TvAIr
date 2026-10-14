@@ -4269,7 +4269,6 @@ private readonly ReservationStore _store;
                 ["recordExecutionRoute"] = "TvAIrEpgRec",
                 ["chainDecisionOwner"] = "TvAIr common allocation route",
                 ["outputPathPolicy"] = "decided_by_TvAIr_current_recording_filename_policy_before_worker_launch",
-                ["taskbarIconVisible"] = _ini.ShowTvAIrEpgRecTaskbarIcon ? "true" : "false",
                 ["directSetChannelIndex"] = recordingWorkerChannelIndex.ToString(),
                 ["directSetChannelRule"] = recordingWorkerChannelReason,
                 ["rule"] = "release_contract"

@@ -2,6 +2,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
+using TvAIr.Workers;
 
 namespace TvAIrEpgRec;
 
@@ -18,8 +19,37 @@ internal static class WorkerPresentation
     private static long _sequence;
     private static Thread? _uiThread;
     private static WorkerWindow? _window;
+    private static bool _started;
 
-    internal static void UpdateBase(string? mode, TvAIrEpgRecJob? job, bool ensureWindow)
+    // The sole entry that can start presentation. Hidden workers create no GUI
+    // thread or window, even when recording/progress state changes afterwards.
+    internal static void Start(string? mode, TvAIrEpgRecJob? job, WorkerPresentationPolicy policy)
+    {
+        lock (Gate)
+        {
+            if (_started) throw new InvalidOperationException("Worker presentation was already started.");
+            _started = true;
+            _base = BuildBase(mode, job);
+            if (policy == WorkerPresentationPolicy.Hidden) return;
+            try
+            {
+                _uiThread = new Thread(UiThreadMain)
+                {
+                    IsBackground = true,
+                    Name = "TvAIrEpgRecPresentation"
+                };
+                _uiThread.SetApartmentState(ApartmentState.STA);
+                _uiThread.Start();
+            }
+            catch
+            {
+                // Failure to present must never stop capture/recording.
+                _uiThread = null;
+            }
+        }
+    }
+
+    internal static void UpdateBase(string? mode, TvAIrEpgRecJob? job)
     {
         try
         {
@@ -27,8 +57,6 @@ internal static class WorkerPresentation
             lock (Gate)
             {
                 _base = BuildBase(mode, job);
-                if (ensureWindow)
-                    EnsureWindowStartedLocked();
                 snapshot = BuildSnapshotLocked();
             }
             Project(snapshot);
@@ -64,7 +92,6 @@ internal static class WorkerPresentation
                     ++_sequence);
                 ActiveRecordings[reservationId] = display;
                 _lastRecording = display;
-                EnsureWindowStartedLocked();
                 snapshot = BuildSnapshotLocked();
             }
             Project(snapshot);
@@ -159,20 +186,6 @@ internal static class WorkerPresentation
         }
     }
 
-    private static void EnsureWindowStartedLocked()
-    {
-        if (_window is not null && !_window.IsDisposed) return;
-        if (_uiThread is not null && _uiThread.IsAlive) return;
-
-        _uiThread = new Thread(UiThreadMain)
-        {
-            IsBackground = true,
-            Name = "TvAIrEpgRecPresentation"
-        };
-        _uiThread.SetApartmentState(ApartmentState.STA);
-        _uiThread.Start();
-    }
-
     private static void UiThreadMain()
     {
         try
@@ -183,10 +196,11 @@ internal static class WorkerPresentation
             PresentationSnapshot initial;
             lock (Gate) initial = BuildSnapshotLocked();
 
-            // There is exactly one top-level worker window in this process.
-            // Keep its WinForms/DWM behavior identical to the proven pre-rebuild worker window:
-            // no owner/child window, no WS_EX_NOACTIVATE, no secondary preview surface.
+            // A context without MainForm never invokes Form.Show/SetVisibleCore.
+            // Native non-activating presentation is owned by this one window.
             using var form = new WorkerWindow(initial);
+            using var context = new System.Windows.Forms.ApplicationContext();
+            form.FormClosed += (_, _) => context.ExitThread();
             PresentationSnapshot current;
             lock (Gate)
             {
@@ -194,7 +208,8 @@ internal static class WorkerPresentation
                 current = BuildSnapshotLocked();
             }
             form.Apply(current);
-            System.Windows.Forms.Application.Run(form);
+            form.PresentInBackground();
+            System.Windows.Forms.Application.Run(context);
 
             lock (Gate)
             {
@@ -238,8 +253,8 @@ internal static class WorkerPresentation
     private sealed record LogoPaths(string? TitleBarLogoPath, string? CenterLogoPath);
 
     // One and only one top-level user-visible worker window.
-    // Window semantics stay stable while responsibility/state ownership is centralized,
-    // not in inventing new native-window behavior.
+    // Presentation is a background worker surface: visible on the taskbar when configured,
+    // but never activated by its initial show. No second display or focus-restoration path.
     private sealed class WorkerWindow : System.Windows.Forms.Form
     {
         private readonly System.Windows.Forms.PictureBox _pictureBox = new();
@@ -248,12 +263,12 @@ internal static class WorkerPresentation
         private string? _titleBarLogoPath;
         private string? _centerLogoPath;
         private bool _visualInitialized;
-        private bool _minimizeQueued;
 
         internal WorkerWindow(PresentationSnapshot initial)
         {
             Text = initial.Title;
             ShowInTaskbar = true;
+            WindowState = System.Windows.Forms.FormWindowState.Minimized;
             StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen;
             Size = new Size(220, 140);
             MinimumSize = new Size(180, 110);
@@ -268,6 +283,36 @@ internal static class WorkerPresentation
 
             Apply(initial);
         }
+
+        internal void PresentInBackground()
+        {
+            // Creating the minimized handle while hidden cannot activate it. Unlike
+            // ShowWindow, SetWindowPos does not substitute STARTUPINFO.wShowWindow.
+            // No Form.Show, activation timer, focus restoration, or permanent
+            // WS_EX_NOACTIVATE: the user can still restore the taskbar window normally.
+            var handle = Handle;
+            const uint swpNoSize = 0x0001;
+            const uint swpNoMove = 0x0002;
+            const uint swpNoZOrder = 0x0004;
+            const uint swpNoActivate = 0x0010;
+            const uint swpShowWindow = 0x0040;
+            const uint flags = swpNoSize | swpNoMove | swpNoZOrder | swpNoActivate | swpShowWindow;
+            if (!SetWindowPos(handle, IntPtr.Zero, 0, 0, 0, 0, flags))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            // Windows may omit WM_SHOWWINDOW for a minimized show. Deliver its
+            // visibility notification to WinForms so child controls/layout and
+            // managed Visible agree with the native window, without a second show.
+            if (!Visible)
+            {
+                var shown = System.Windows.Forms.Message.Create(handle, 0x0018, new IntPtr(1), IntPtr.Zero);
+                base.WndProc(ref shown);
+            }
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+            int x, int y, int cx, int cy, uint flags);
 
         internal void Apply(PresentationSnapshot snapshot)
         {
@@ -289,24 +334,6 @@ internal static class WorkerPresentation
                 _visualInitialized = true;
             }
 
-            QueueMinimizeOnce();
-        }
-
-        private void QueueMinimizeOnce()
-        {
-            if (_minimizeQueued) return;
-            _minimizeQueued = true;
-            Shown += (_, _) =>
-            {
-                var timer = new System.Windows.Forms.Timer { Interval = 350 };
-                timer.Tick += (_, _) =>
-                {
-                    timer.Stop();
-                    timer.Dispose();
-                    if (!IsDisposed) WindowState = System.Windows.Forms.FormWindowState.Minimized;
-                };
-                timer.Start();
-            };
         }
 
         private void SetWindowIcon(Bitmap source)

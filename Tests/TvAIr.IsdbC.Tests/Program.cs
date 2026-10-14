@@ -596,6 +596,144 @@ Case("runtime disabled inventory uses displayed wave without changing eligibilit
     Check(row.BroadcastType=="CATV" && !row.IsEnabled,"disabled inventory classification mismatch");
     Check(api.ListServices().Count==0 && !ctx.Policy.Capture().IsAvailableForDisplay(0xfffe,500,500),"disabled row admitted to guide");
 });
+IReadOnlyList<string> ViewerGroups(IniSettingsService ini, TunerProfile[] profiles)
+{
+    var type=typeof(ViewerOperationService).Assembly.GetType("ViewerProfileContract")!;
+    var rows=(IEnumerable)type.GetMethod("BuildProfiles",BindingFlags.Static|BindingFlags.Public)!.Invoke(null,new object[]{new TvTestSettings(),ini,profiles})!;
+    return Get<IReadOnlyList<string>>(rows.Cast<object>().Single(),"AvailableGroups");
+}
+Case("hybrid viewer advertises CATV only from its own enabled channel route",()=>{
+    var path=Ch2("hybrid-view",Row("Cable",2,90,0xfffe,500,501)+Row("BS",1,20,4,200,201));
+    var p=Profile("hview","BonDriver_H.dll",path,"HYBRID","Viewing");p.DeviceNumber=1;
+    var ctx=Context("hybrid-view",p);ctx.Ini.Tuners[0].DeviceNumber=1;
+    Check(ViewerGroups(ctx.Ini,new[]{p}).SequenceEqual(new[]{"GR","BSCS","HYBRID","CATV"}),"bound CATV capability absent");
+    var log=new LogRepository();var gate=new ApplicationOperationGate(log);
+    using var hub=new PluginTypedEventHub(log,new ReservationMutationJournal(),ctx.Loader);
+    var leases=new ExternalTunerLeaseService(ctx.Pool,log,gate,ctx.Policy);
+    var operations=new ViewerOperationService(ctx.Policy,leases,ctx.Pool,new ViewerSessionRegistry(log,hub),null!,Options.Create(new TvTestSettings{ExecutablePath=Path.Combine(root,"TVTest.exe")}),ctx.Ini,new[]{p},log,gate);
+    var result=operations.Prepare(new ViewerOperationPreparationRequest("test","start","viewer-slot-hview",null,null,0xfffe,500,501){GroupHint="CATV"});
+    Check(result.Success && result.Plan!.Channel.ResolvedSpace==2 && result.Plan.Channel.ResolvedChannelIndex==90,"CATV-selected hybrid viewer not preparable: "+result.ErrorCode);
+    Check(!ChannelServiceAccessSnapshot.SupportsGroup("HYBRID","CATV"),"physical compatibility broadened without service proof");
+    File.WriteAllText(path,Row("Cable",2,90,0xfffe,500,501,false)+Row("BS",1,20,4,200,201),Encoding.GetEncoding(932));
+    ctx.Loader.Invalidate();
+    Check(!ViewerGroups(ctx.Ini,new[]{p}).Contains("CATV"),"disabled cable capability remained");
+    Check(!operations.Prepare(new ViewerOperationPreparationRequest("test","start","viewer-slot-hview",null,null,0xfffe,500,501){GroupHint="CATV"}).Success,"disabled cable route admitted");
+});
+Case("hybrid viewer does not borrow recording driver's CATV capability",()=>{
+    var viewerPath=Ch2("viewer-no-cable",Row("BS",1,20,4,200,201));
+    var cablePath=Ch2("record-cable",Row("Cable",2,90,0xfffe,500,501));
+    var view=Profile("view","BonDriver_View.dll",viewerPath,"HYBRID","Viewing");view.DeviceNumber=1;
+    var rec=Profile("rec","BonDriver_Rec.dll",cablePath,"HYBRID");
+    var ctx=Context("no-capability-borrow",view,rec);ctx.Ini.Tuners[0].DeviceNumber=1;
+    Check(!ViewerGroups(ctx.Ini,new[]{view,rec}).Contains("CATV"),"recording source enabled foreign viewer");
+});
+Case("ambiguous hybrid cable route cannot grant CATV viewer capability",()=>{
+    var path=Ch2("ambiguous-view",Row("Cable",2,90,0xfffe,500,501)+Row("Cable conflicting",3,91,0xfffe,500,501));
+    var p=Profile("view","BonDriver_H.dll",path,"HYBRID","Viewing");p.DeviceNumber=1;
+    var ctx=Context("ambiguous-view",p);ctx.Ini.Tuners[0].DeviceNumber=1;
+    Check(!ViewerGroups(ctx.Ini,new[]{p}).Contains("CATV"),"ambiguous route granted cable capability");
+});
+Case("leased CATV routes materialize physical and carried groups for recording and EPG",()=>{
+    var path=Ch2("leased-catv",Row("Cable",2,90,0xfffe,500,501)+Row("Cable2",2,90,0xfffe,500,502)+Row("GR",0,10,0x7880,100,101)+Row("BS",1,20,4,200,201)+Row("CS",1,30,7,300,301));
+    var p=Profile("Cable","BonDriver_Cable.dll",path,"CATV");var ctx=Context("leased-catv",p);var access=ctx.Policy.Capture();
+    using(var recording=ctx.Pool.AcquireForRecordingByName(p.Name,1,at)!)
+    {
+        Check(recording is not null,"CATV recording lease absent");
+        foreach(var row in new[]{(nid:(ushort)0xfffe,ts:(ushort)500,sid:(ushort)501,group:"CATV"),(nid:(ushort)0x7880,ts:(ushort)100,sid:(ushort)101,group:"GR"),(nid:(ushort)4,ts:(ushort)200,sid:(ushort)201,group:"BS"),(nid:(ushort)7,ts:(ushort)300,sid:(ushort)301,group:"CS")})
+        {
+            Check(access.TryResolveDirectTargetForLease(recording!,row.nid,row.ts,row.sid,row.group,out var target),"CATV lease cannot materialize "+row.group);
+            Check(target.Group==row.group && target.ServiceId==row.sid,"carried identity/group changed");
+            Check(access.TryResolveDirectTargetForLease(recording!,row.nid,row.ts,row.sid,"CATV",out _),"physical CATV path absent");
+        }
+        Check(!access.TryResolveDirectTargetForLease(recording!,0xfffe,500,501,"GR",out _),"unknown cable inferred as GR");
+        Check(!access.TryResolveDirectTargetForLease(recording!,4,200,201,"CS",out _),"BS mislabeled CS");
+        Check(!access.TryResolveDirectTargetForLease(recording!,0xfffe,500,999,"CATV",out _),"missing SID admitted");
+        Check(!access.TryResolveDirectTargetForLease(recording!,0xfffe,500,501,"HYBRID",out _),"CATV inferred as HYBRID");
+    }
+    using var epg=ctx.Pool.AcquireForEpgByName(p.Name,"CATV",at);
+    Check(epg is not null && access.TryResolveDirectTransportTargetsForLease(epg,new[]{new BroadcastServiceKey(0xfffe,500,501),new BroadcastServiceKey(0xfffe,500,502)},"CATV",out var targets)&&targets.Count==2,"CATV EPG transport cannot materialize");
+});
+Case("CATV group cannot be granted to an unrelated hybrid physical lease",()=>{
+    var p=Profile("Hybrid","BonDriver_H.dll",a);var ctx=Context("no-catv-physical-alias",p);
+    using var lease=ctx.Pool.AcquireForRecording("HYBRID",1,at);
+    Check(lease is not null,"negative fixture lease absent: "+ctx.Pool.GetStatusSummary()); Check(!ctx.Policy.Capture().TryResolveDirectTargetForLease(lease!,0xfffe,300,301,"CATV",out _),"physical group restriction widened: "+lease!.Group);
+});
+Case("normal CATV EPG plans physical capacity and acquires exact transport routes",()=>{
+    var path=Ch2("normal-cable",Row("Cable1",2,90,0xfffe,500,501)+Row("Cable2",2,90,0xfffe,500,502)
+        +Row("GR",3,19,0x7880,100,101)+Row("BS",7,41,4,200,201)+Row("CS",8,51,7,300,301));
+    var p=Profile("Cable","BonDriver_Cable.dll",path,"CATV"); var ctx=Context("normal-cable",p);
+    var capture=CaptureForPlan(new[]{p});
+    foreach(var field in new Dictionary<string,object>{{"tunerPool",ctx.Pool},{"channelLoader",ctx.Loader}})
+        typeof(EpgCapture).GetField(field.Key,BindingFlags.NonPublic|BindingFlags.Instance)!.SetValue(capture,field.Value);
+    var load=ctx.Loader.Load();var groups=Items(Invoke(capture,"BuildNormalEpgGroups",load,false));
+    Check(groups.Length==4 && groups.All(g=>Get<string>(g,"Group")=="CATV"),"CATV normal plan missing or assigned carried wave capacity");
+    var capacity=typeof(EpgCapture).GetMethod("CountPhysicalEpgCapacity",BindingFlags.Static|BindingFlags.NonPublic)!;
+    Check((int)capacity.Invoke(null,new object[]{ctx.Pool.GetStatus(),new[]{"CATV"},true})! ==1,"physical CATV capacity absent");
+    Check(ctx.Pool.CountEpgUsableFreeSlots("CATV")==1,"CATV admission capacity absent");
+    foreach(var group in groups)
+    {
+        var task=(Task)Invoke(capture,"AcquireEpgLeaseWithShortWaitAsync",group,DateTime.Now.AddMinutes(5),"fixture",CancellationToken.None,false,"fixture",null);
+        task.GetAwaiter().GetResult();using var lease=(TunerLease?)task.GetType().GetProperty("Result")!.GetValue(task);
+        Check(lease is not null && lease.Group=="CATV","normal acquisition failed");
+        var targets=Get<IReadOnlyList<ChannelTarget>>(group,"Targets");var identities=targets.Select(t=>new BroadcastServiceKey(t.OriginalNetworkId,t.TransportStreamId,t.ServiceId)).ToArray();
+        Check(load.BonDriverRoutes!.TryBuildTransportTargetsForLease(lease!,identities,"CATV",out var resolved),"normal worker route materialization failed");
+        Check(resolved.Count==targets.Count && resolved.All(t=>t.ResolvedSpace==targets[0].ResolvedSpace && t.ResolvedChannelIndex==targets[0].ResolvedChannelIndex),"worker coordinates changed");
+        Check(ctx.Pool.CountEpgUsableFreeSlots("CATV")==0,"occupied physical slot counted free");
+    }
+    Check(ctx.Pool.CountEpgUsableFreeSlots("CATV")==1,"normal lease not released");
+});
+Case("normal CATV EPG scope filters preserve physical group and existing hybrid scopes",()=>{
+    var path=Ch2("scope-cable",Row("GR",0,1,0x7880,100,101)+Row("BS",0,2,4,200,201)+Row("CS",0,3,7,300,301)+Row("Cable",0,4,0xfffe,500,501));
+    var p=Profile("Cable","BonDriver_Cable.dll",path,"CATV");var hybridPath=Ch2("scope-hybrid",Row("GR",1,1,0x7880,100,101)+Row("BS",1,2,4,200,201)+Row("CS",1,3,7,300,301)+Row("Hybrid",1,4,0xfffe,500,501));var h=Profile("Hybrid","BonDriver_H.dll",hybridPath);var ctx=Context("scope-cable",p,h);
+    var groups=Invoke(CaptureForPlan(new[]{p,h}),"BuildNormalEpgGroups",ctx.Loader.Load(),false);
+    var filter=typeof(EpgCapture).GetMethod("FilterGroupsByScope",BindingFlags.Static|BindingFlags.NonPublic)!;
+    foreach(var scope in new[]{"GR","BS","CS","BSCS"})
+    {
+        var selected=Items(filter.Invoke(null,new[]{groups,(object)scope})!);
+        var cable=selected.Where(g=>Get<string>(g,"Group")=="CATV").ToArray();
+        Check(cable.Length==(scope=="BSCS"?2:1),"carried scope missing: "+scope);
+        var policy=typeof(EpgCapture).GetMethod("IsEpgGroupWave",BindingFlags.Static|BindingFlags.NonPublic)!;
+        Check(cable.All(g=>(bool)policy.Invoke(null,new object[]{g,scope=="GR"?"GR":"BSCS"})!),"carried parser policy lost");
+        Check(cable.All(g=>Get<IReadOnlyList<ChannelTarget>>(g,"Targets").All(t=>t.OriginalNetworkId!=0xfffe)),"unknown cable inferred into known scope");
+        Check(selected.Any(g=>Get<string>(g,"Group")!="CATV"),"legacy hybrid scope lost: "+scope);
+    }
+    var hybrid=Items(filter.Invoke(null,new[]{groups,(object)"HYBRID"})!);
+    Check(hybrid.Count(g=>Get<string>(g,"Group")=="CATV")==4 && hybrid.Any(g=>Get<string>(g,"Group")=="HYBRID"),"historical cable scope dropped physical source");
+    var normalize=typeof(EpgCapture).GetMethod("NormalizeTargetScope",BindingFlags.Static|BindingFlags.NonPublic)!;
+    Check((string)normalize.Invoke(null,new object[]{"CATV"})! =="HYBRID","saved CATV scope compatibility changed");
+});
+Case("normal CATV EPG excludes viewing disabled ambiguous and foreign source routes",()=>{
+    var valid=Ch2("epg-valid",Row("good",0,10,0xfffe,500,501)+Row("disabled",0,11,0xfffe,600,601,false));
+    var amb=Ch2("epg-amb",Row("one",0,20,0xfffe,700,701)+Row("two",0,21,0xfffe,700,702));
+    var view=Ch2("epg-view",Row("view",0,30,0xfffe,800,801));
+    var profiles=new[]{Profile("Cable","BonDriver_C.dll",valid,"CATV"),Profile("Amb","BonDriver_A.dll",amb,"CATV"),Profile("View","BonDriver_V.dll",view,"CATV","Viewing")};
+    var ctx=Context("epg-negative",profiles);var load=ctx.Loader.Load();
+    var groups=Items(Invoke(CaptureForPlan(profiles),"BuildNormalEpgGroups",load,false));
+    Check(groups.Length==1 && Get<IReadOnlyList<ChannelTarget>>(groups[0],"Targets").Single().ServiceId==501,"invalid or viewing transport admitted");
+    using var lease=ctx.Pool.AcquireForEpgService("CATV",new[]{new BroadcastServiceKey(0xfffe,800,801)},DateTime.Now.AddMinutes(1),load.BonDriverRoutes!,out _);
+    Check(lease is null,"normal acquisition borrowed viewing source");
+});
+Case("CATV EPG worker participates in native transition boundary",()=>{
+    var assembly=Assembly.LoadFrom(Path.Combine(AppContext.BaseDirectory,"TvAIrEpgRec.dll"));
+    var probe=assembly.GetType("TvAIrEpgRec.BonDriverNativeProbe") ?? assembly.GetTypes().Single(t=>t.Name=="BonDriverNativeProbe");
+    var summaryType=assembly.GetTypes().Single(t=>t.Name=="TsReadProbeSummary");var summary=Activator.CreateInstance(summaryType)!;
+    object Call(string name, params object[] args)=>probe.GetMethod(name,BindingFlags.Static|BindingFlags.NonPublic)!.Invoke(null,args)!;
+    foreach(var group in new[]{"GR","BSCS","HYBRID","CATV"})
+    {
+        summaryType.GetProperty("Group")!.SetValue(summary,group);
+        summaryType.GetProperty("Mode")!.SetValue(summary,"epg");Check((bool)Call("UsesEpgNativeBoundary",summary),"EPG boundary bypass: "+group);
+        summaryType.GetProperty("Mode")!.SetValue(summary,"record");Check((bool)Call("UsesRecordingNativeTransitionBoundary",summary),"record boundary bypass: "+group);
+    }
+    summaryType.GetProperty("Group")!.SetValue(summary,"UNKNOWN");Check(!(bool)Call("UsesRecordingNativeTransitionBoundary",summary),"unknown physical group admitted");
+    summaryType.GetProperty("Group")!.SetValue(summary,"CATV");summaryType.GetProperty("Mode")!.SetValue(summary,"epg");
+    var observed=new List<string>();Func<string,string,Task> progress=(code,message)=>{observed.Add(code+":"+message);return Task.CompletedTask;};
+    var task=(Task<FileStream>)Call("AcquireEpgNativeBoundaryAsync",summary,progress,"startup","test");
+    using(var lease=task.GetAwaiter().GetResult())
+    {
+        var denied=false;try{using var competing=new FileStream(lease.Name,FileMode.Open,FileAccess.ReadWrite,FileShare.ReadWrite);}catch(IOException){denied=true;}
+        Check(denied && observed.Any(s=>s.Contains("group=CATV")),"CATV native transition did not own exclusive boundary");
+    }
+});
 File.WriteAllText(Path.Combine(root,"results.json"),System.Text.Json.JsonSerializer.Serialize(new{total=results.Count,failed,cases=results},new System.Text.Json.JsonSerializerOptions{WriteIndented=true}));
 Console.WriteLine($"{results.Count-failed}/{results.Count} passed; synthetic inputs only; no RF verification. Results: {root}");
 return failed==0 ? 0 : 1;

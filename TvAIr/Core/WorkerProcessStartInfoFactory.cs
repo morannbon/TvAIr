@@ -1,13 +1,11 @@
 using System.Diagnostics;
+using TvAIr.Workers;
 
 namespace TvAIr.Core;
 
 /// <summary>
-/// Centralized TvAIrEpgRec process launch window policy.
-/// EPG transport-stream workers are not user UI windows, but when the user setting requests
-/// TvAIrEpgRec taskbar visibility they must appear as active worker icons for the currently
-/// running tuner workers.  The separate logo/display host window is controlled by job metadata
-/// and is not enabled for EPG TS workers.
+/// Selects the worker's immutable presentation contract. The worker owns all GUI
+/// creation and visibility; the launcher never requests an activating show state.
 /// </summary>
 public enum TvAIrEpgRecLaunchKind
 {
@@ -25,16 +23,18 @@ public static class WorkerProcessStartInfoFactory
         TvAIrEpgRecLaunchKind launchKind,
         bool showTaskbarIconSetting)
     {
-        var showWindow = IsTaskbarIconVisible(launchKind, showTaskbarIconSetting);
-
-        return new ProcessStartInfo
+        var policy = ResolvePresentation(launchKind, showTaskbarIconSetting);
+        var startInfo = new ProcessStartInfo
         {
             FileName = executablePath,
             WorkingDirectory = Path.GetDirectoryName(executablePath) ?? AppContext.BaseDirectory,
             UseShellExecute = false,
-            CreateNoWindow = !showWindow,
-            WindowStyle = showWindow ? ProcessWindowStyle.Minimized : ProcessWindowStyle.Hidden
+            CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden
         };
+        startInfo.ArgumentList.Add("--" + WorkerPresentationContract.ArgumentName);
+        startInfo.ArgumentList.Add(WorkerPresentationContract.Serialize(policy));
+        return startInfo;
     }
 
 
@@ -71,6 +71,11 @@ public static class WorkerProcessStartInfoFactory
 
     public static bool IsTaskbarIconVisible(TvAIrEpgRecLaunchKind launchKind, bool showTaskbarIconSetting)
     {
-        return showTaskbarIconSetting && launchKind is TvAIrEpgRecLaunchKind.PrimaryRecord or TvAIrEpgRecLaunchKind.EpgTransportStreamWorker;
+        return ResolvePresentation(launchKind, showTaskbarIconSetting) == WorkerPresentationPolicy.Taskbar;
     }
+
+    private static WorkerPresentationPolicy ResolvePresentation(TvAIrEpgRecLaunchKind launchKind, bool enabled)
+        => WorkerPresentationContract.Select(
+            launchKind is TvAIrEpgRecLaunchKind.PrimaryRecord or TvAIrEpgRecLaunchKind.EpgTransportStreamWorker,
+            enabled);
 }

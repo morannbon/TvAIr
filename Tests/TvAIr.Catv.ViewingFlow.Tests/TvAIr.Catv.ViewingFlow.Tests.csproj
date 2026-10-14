@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+<PropertyGroup><OutputType>WinExe</OutputType><TargetFramework>net8.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><Platforms>x64;x86</Platforms><PlatformTarget>$(Platform)</PlatformTarget></PropertyGroup>
+<ItemGroup><ProjectReference Include="../../TvAIr/TvAIr.csproj"/><Reference Include="AIrCon.BasicPlugin"><HintPath>$(AIrConAssemblyPath)</HintPath><Private>true</Private></Reference></ItemGroup>
+<Target Name="RequireAIrConAssembly" BeforeTargets="ResolveReferences"><Error Condition="!Exists('$(AIrConAssemblyPath)')" Text="Specify AIrConAssemblyPath for the AIrCon 1.0.8 assembly matching the selected platform."/></Target>
+<Target Name="RemoveUnusedWebView2WpfFacade" AfterTargets="ResolvePackageAssets" BeforeTargets="ResolveAssemblyReferences"><ItemGroup><Reference Remove="@(Reference)" Condition="'%(Reference.Filename)' == 'Microsoft.Web.WebView2.Wpf'" /></ItemGroup></Target>
+</Project>
