@@ -1,4 +1,4 @@
-using System.Threading.Channels;
+﻿using System.Threading.Channels;
 using TvAIr.Core;
 using TvAIr.Channel;
 using TvAIr.Schedule;
@@ -15,18 +15,14 @@ public sealed class PluginTypedEventHub : IDisposable
     private readonly ReservationMutationJournal reservationMutations;
     private readonly ChannelFileLoader channelLoader;
     private const int OutboxCapacity = 4096;
-    private readonly Channel<TvAirEventDto> outbox = global::System.Threading.Channels.Channel.CreateBounded<TvAirEventDto>(new BoundedChannelOptions(OutboxCapacity)
-    {
-        SingleReader = true,
-        SingleWriter = false,
-        AllowSynchronousContinuations = false,
-        FullMode = BoundedChannelFullMode.Wait
-    });
+    private readonly PluginEventOutbox outbox = new(OutboxCapacity);
     private readonly CancellationTokenSource disposeCts = new();
     private readonly Task dispatchTask;
     private readonly AsyncLocal<OutboxScope?> ambientScope = new();
     [ThreadStatic]
     private static TvAirEventDto? currentDispatchEvent;
+    [ThreadStatic]
+    private static PluginTypedEventHub? dispatchingHub;
     private long sequence;
     private int pendingEventCount;
     private int maxPendingEventCount;
@@ -126,18 +122,16 @@ public sealed class PluginTypedEventHub : IDisposable
         Enqueue(source);
     }
 
-    // TYPED_EVENT_OUTBOX_BACKPRESSURE_INVARIANT:
-    // 型付きイベントは順序と欠落なしを契約とするため、容量超過時にDropOldest/DropNewestへ
-    // 逃がさない。固定wait/sleep/delayを追加せず、4096件の有界outboxが空くまでWriterの
-    // backpressureで生産側を待たせる。TvAIrを使うほど未配送イベントが無制限にメモリへ
-    // 蓄積するCreateUnboundedへ戻さない。配送正本、イベント順序、subscriber契約は変更しない。
+    // Ordinary producers wait at the bounded FIFO. A synchronous dispatch callback
+    // instead spools overflow, including older waiting writers, so it never waits
+    // for its own consumer. Callback delivery and completion remain serial.
     private void Enqueue(TvAirEventDto source)
     {
         var pending = Interlocked.Increment(ref pendingEventCount);
         UpdateMaxQueueDepth(pending);
         try
         {
-            outbox.Writer.WriteAsync(source, disposeCts.Token).AsTask().GetAwaiter().GetResult();
+            outbox.Write(source, ReferenceEquals(dispatchingHub, this));
         }
         catch (OperationCanceledException) when (disposeCts.IsCancellationRequested)
         {
@@ -148,6 +142,13 @@ public sealed class PluginTypedEventHub : IDisposable
         {
             Interlocked.Decrement(ref pendingEventCount);
             log.Add("PLUGIN_TYPED_EVENT_OUTBOX_REJECTED", source.EventType.ToString(), "reason=writer_closed rule=typed_event_outbox");
+        }
+        catch (Exception ex)
+        {
+            Interlocked.Decrement(ref pendingEventCount);
+            log.Add("PLUGIN_TYPED_EVENT_OUTBOX_FAILED", source.EventType.ToString(),
+                $"exceptionType={ex.GetType().Name} message={Safe(ex.Message)} rule=typed_event_outbox");
+            throw;
         }
     }
 
@@ -165,14 +166,27 @@ public sealed class PluginTypedEventHub : IDisposable
     {
         try
         {
-            await foreach (var source in outbox.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+            while (await outbox.ReadAsync(cancellationToken).ConfigureAwait(false) is { } source)
             {
                 Interlocked.Decrement(ref pendingEventCount);
-                Dispatch(source);
+                var previousHub = dispatchingHub;
+                dispatchingHub = this;
+                try { Dispatch(source); }
+                finally { dispatchingHub = previousHub; }
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+        }
+        catch (Exception ex)
+        {
+            log.Add("PLUGIN_TYPED_EVENT_OUTBOX_FAILED", "Dispatch",
+                $"exceptionType={ex.GetType().Name} message={Safe(ex.Message)} pending={Volatile.Read(ref pendingEventCount)} rule=typed_event_outbox");
+            throw;
+        }
+        finally
+        {
+            outbox.Dispose();
         }
     }
 
@@ -431,7 +445,15 @@ public sealed class PluginTypedEventHub : IDisposable
         reservationMutations.Recorded -= PublishReservationMutation;
         log.Add("PLUGIN_TYPED_EVENT_OUTBOX", "Dispose",
             $"result=BEGIN pending={Volatile.Read(ref pendingEventCount)} maxPending={Volatile.Read(ref maxPendingEventCount)} capacity={OutboxCapacity} rule=typed_event_outbox");
-        outbox.Writer.TryComplete();
+        outbox.Complete();
+        if (ReferenceEquals(dispatchingHub, this))
+        {
+            // The current callback must return before its dispatch task can end.
+            // Drain accepted events normally and release the CTS after that task.
+            _ = dispatchTask.ContinueWith(static (_, state) => ((CancellationTokenSource)state!).Dispose(),
+                disposeCts, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            return;
+        }
         try
         {
             if (!dispatchTask.Wait(TimeSpan.FromSeconds(5)))

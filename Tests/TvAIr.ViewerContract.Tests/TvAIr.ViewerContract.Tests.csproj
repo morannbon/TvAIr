@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PlatformTarget Condition="'$(Platform)' != 'x86'">x64</PlatformTarget>
+    <PlatformTarget Condition="'$(Platform)' == 'x86'">x86</PlatformTarget>
+    <Platforms>x64;x86</Platforms>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../TvAIr/TvAIr.csproj" />
+    <ProjectReference Include="../../TvAIrEpgRec/TvAIrEpgRec.csproj" />
+  </ItemGroup>
+  <Target Name="RemoveUnusedWebView2WpfFacade" AfterTargets="ResolvePackageAssets" BeforeTargets="ResolveAssemblyReferences">
+    <ItemGroup>
+      <Reference Remove="@(Reference)" Condition="'%(Reference.Filename)' == 'Microsoft.Web.WebView2.Wpf'" />
+    </ItemGroup>
+  </Target>
+</Project>

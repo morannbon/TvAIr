@@ -5,7 +5,7 @@ namespace TvAIr.Core;
 /// UI/API/保存トポロジー/共通割当/競合/取消/復旧/実行境界で同じ定義を使用する。
 ///
 /// CURRENT INVARIANTS:
-/// 1. トポロジー正本はチェーンボタンで永続化した IsUserChain / UserChainPreviousId / UserChainRootId。
+/// 1. トポロジー正本は明示操作または有効化した自動検索ルールが保存した IsUserChain / UserChainPreviousId / UserChainRootId。
 ///    同一局・隣接時刻・同一Tunerだけを根拠に自動チェーンを再生成しない。
 /// 2. 物理Tunerは、録画開始前はFinalConflictPlanがroot単位で解決し、保存済みTunerNameは再選択可能な候補として扱う。
 ///    shared capture開始後は現在ownerのActualTunerNameをhard pinし、残る全後続を同じ物理Tunerへ固定する。

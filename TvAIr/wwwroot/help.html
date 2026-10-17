@@ -1,18 +1,18 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <!-- release_contract: distributable help must be environment-independent. Examples may use only abstract tokens created for documentation. Never reuse real user rules, names, programme titles, station names, dates, episode numbers, search strings, viewing/recording preferences, or locally observed data. -->
 <html lang="ja">
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
 <title>TvAIr ヘルプ</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.12"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.12"/>
-<link href="/tvair-ui-foundation.css?v=1.2.12" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.12" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.12" rel="stylesheet"/>
-<link href="/tvair-help.css?v=1.2.12" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.12" rel="stylesheet"/>
-<script src="/tvair-theme.js?v=1.2.12"></script>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.13"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.13"/>
+<link href="/tvair-ui-foundation.css?v=1.2.13" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.13" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.13" rel="stylesheet"/>
+<link href="/tvair-help.css?v=1.2.13" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.13" rel="stylesheet"/>
+<script src="/tvair-theme.js?v=1.2.13"></script>
 </head>
 <body class="tvair-non-program-page tvair-page-width-wide tvair-help-page">
 <header class="help-window-bar" aria-label="ヘルプ見出し">
@@ -39,14 +39,14 @@
         <h2>EPG取得</h2>
         <article class="setting-card"><h3>定時EPG取得を有効にする</h3><p>毎日、指定した時刻を基準に番組情報を自動取得します。</p></article>
         <article class="setting-card"><h3>定時EPG取得時刻</h3><p>定時EPG取得の基準時刻を設定します。録画予約と重なる場合は、最大3時間まで取得開始を後ろへ移動します。3時間以内に必要な取得時間を確保できない場合、その日の定時EPG取得は行わず、翌日の定時EPG取得へ進みます。</p></article>
-        <article class="setting-card"><h3>取得深度</h3><p>EPG取得で、1回の取得先に使用する取得時間を選びます。EPG取得中は変更できません。</p><p><strong>浅（120秒）</strong>：取得時間を短くします。</p><p><strong>中（180秒）</strong>：取得時間と取得範囲のバランスを取ります。</p><p><strong>深（240秒）</strong>：より先の番組情報まで取得します。</p><p><strong>最深（300秒）</strong>：取得範囲を優先します。チャンネル数が多い環境では、全体の取得完了まで時間がかかります。</p></article>
+        <article class="setting-card"><h3>取得深度</h3><p>EPG取得で、1回の取得先に使用する取得時間を選びます。EPG取得中は変更できません。</p><p><strong>浅（120秒）</strong>：取得時間を短くします。</p><p><strong>中（180秒）</strong>：通常の取得時間です。</p><p><strong>深（240秒）</strong>：取得時間を長くして番組情報の収集を待ちます。</p><p><strong>最深（300秒）</strong>：最も長く収集を待ちます。全体の取得完了まで時間がかかります。取得できる情報の範囲は放送局と受信状況にも依存します。</p></article>
         <article class="setting-card"><h3>録画前EPG確認を有効にする</h3><p>録画前に番組情報を確認し、番組の開始・終了時刻の変更に追従します。</p></article>
         <article class="setting-card"><h3>録画前EPG確認（時間追従）</h3><p>録画開始の5・10・15・20分前から選択し、番組情報を確認するタイミングを設定します。開始時刻が近い場合は録画を優先します。</p></article>
       </div>
       <div class="help-group">
         <h2>その他</h2>
-        <article class="setting-card"><h3>dataフォルダ</h3><p>番組情報や予約など、TvAIrのデータ保存場所を変更したい場合に指定します。通常は変更する必要はありません。</p></article>
-        <article class="setting-card"><h3>Windows起動時にTvAIrを自動起動する</h3><p>Windowsの起動時にTvAIrを自動起動します。予約録画や定時EPG取得を常時運用する場合に使用します。</p></article>
+        <article class="setting-card"><h3>dataフォルダ</h3><p>番組情報や予約などの保存場所です。通常は変更不要です。変更はTvAIrの再起動後に反映されます。</p></article>
+        <article class="setting-card"><h3>Windowsへのログイン時にTvAIrを自動起動する</h3><p>現在のユーザーがWindowsへログインしたときにTvAIrを自動起動します。予約録画や定時EPG取得を常時運用する場合に使用します。</p></article>
         <article class="setting-card"><h3>WindowsログインID</h3><p>予約録画や定時EPG取得に合わせてWindowsを復帰させるためのタスク設定で使用します。</p></article>
         <article class="setting-card"><h3>Windowsログインパスワード</h3><p>WindowsログインIDに対応するパスワードです。スリープ復帰用のタスク設定に使用します。</p></article>
         <article class="setting-card"><h3>スリープ復帰</h3><p>予約録画や定時EPG取得に合わせたWindowsの復帰準備状態を表示します。</p></article>
@@ -74,13 +74,19 @@
       <header class="help-section-head"><p class="help-kicker">TVTest</p><h1>TVTest</h1></header>
       <div class="help-group">
         <h2>TVTest</h2>
-        <article class="setting-card"><h3>TVTest.exe のフルパス</h3><p>TvAIrで使用する基準となるTVTestの場所を指定します。録画用と視聴用でTVTestを分けない場合は、このTVTestを共通で使用します。</p></article>
+        <article class="setting-card"><h3>TVTest.exe のフルパス</h3><p>録画設定やチャンネル情報を参照する基準となるTVTest.exeを指定します。視聴用を別に指定しない場合は視聴にも使用します。</p></article>
         <article class="setting-card"><h3>視聴用TVTest.exe のフルパス</h3><p>視聴専用のTVTestを別に使用する場合に指定します。指定しない場合は、「TVTest.exe のフルパス」で設定した基準となるTVTestを視聴にも使用します。</p></article>
-        <article class="setting-card"><h3>BonDriver フォルダ</h3><p>TvAIrから起動するTVTestで使用するBonDriverの保存場所を指定します。</p></article>
-        <article class="setting-card"><h3>地上波 ch2 ファイルパス</h3><p>地上波のチャンネル情報を読み込む ch2 ファイルを指定します。放送局への選局に使用します。</p></article>
-        <article class="setting-card"><h3>地上波 ChSet.txt ファイルパス</h3><p>地上波のサービス一覧を読み込む ChSet.txt を指定します。番組表の表示や予約対象の識別に使用します。</p></article>
-        <article class="setting-card"><h3>BS/CS ch2 ファイルパス</h3><p>BS/CSのチャンネル情報を読み込む ch2 ファイルを指定します。放送局への選局に使用します。</p></article>
-        <article class="setting-card"><h3>BS/CS ChSet.txt ファイルパス</h3><p>BS/CSのサービス一覧を読み込む ChSet.txt を指定します。番組表の表示や予約対象の識別に使用します。</p></article>
+        <article class="setting-card"><h3>BonDriver フォルダ</h3><p>使用するBonDriver.dllの保存フォルダを指定します。</p></article>
+        <article class="setting-card"><h3>地上波 ch2 ファイルパス</h3><p>地上波の局一覧・有効状態・表示順を読み込むch2ファイルを指定します。</p></article>
+        <article class="setting-card"><h3>地上波 ChSet.txt ファイルパス（任意）</h3><p>使用中のBonDriverに対応する地上波の選局情報を補うファイルです。ファイルがない環境では空欄にできます。</p></article>
+        <article class="setting-card"><h3>BS/CS ch2 ファイルパス</h3><p>BS/CSの局一覧・有効状態・表示順を読み込むch2ファイルを指定します。</p></article>
+        <article class="setting-card"><h3>BS/CS ChSet.txt ファイルパス（任意）</h3><p>使用中のBonDriverに対応するBS/CSの選局情報を補うファイルです。ファイルがない環境では空欄にできます。</p></article>
+      </div>
+      <div class="help-group">
+        <h2>ChSet.txtがない環境とチャンネル情報の更新</h2>
+        <article class="setting-card"><h3>BonDriver名に対応するch2</h3><p>ChSet.txtを空欄にすると、選択したBonDriverのDLL名をch2に置き換えたファイルを探します。BonDriverフォルダを先に確認し、次に基準となるTVTestのフォルダを確認します。CATV用のBonDriverも同じ方法でch2を読み込みます。</p></article>
+        <article class="setting-card"><h3>設定の切り替え</h3><p>ChSet.txtの使用有無を切り替えたら保存後にTvAIrを再起動してください。</p></article>
+        <article class="setting-card"><h3>再スキャンと局の移動</h3><p>TVTestでチャンネルを再スキャンしてch2を更新すると、次のチャンネル読込で局名や選局情報へ反映します。録画中の選局先を途中で変更する動作ではありません。</p><p>局の識別番号（ONID・TSID・SID）が変わった場合はEPGを再取得して既存予約を確認してください。旧番号の予約は自動移行しません。</p></article>
       </div>
     </section>
 
@@ -88,12 +94,12 @@
       <header class="help-section-head"><p class="help-kicker">チューナー</p><h1>チューナー</h1></header>
       <div class="help-group">
         <h2>チューナー</h2>
-        <article class="setting-card"><h3>チューナー本数</h3><p>TvAIrで管理するチューナー枠の数を設定します。</p></article>
-        <article class="setting-card"><h3>チューナー名</h3><p>TvAIr上で各チューナーを見分けるための名前です。予約リストやログなどに表示されます。</p></article>
+        <article class="setting-card"><h3>チューナー本数</h3><p>録画用と視聴用を合わせた枠数を入力して「設定欄を作成」を押します。</p></article>
+        <article class="setting-card"><h3>チューナー名</h3><p>各枠を見分けるために自動設定される名前です。予約リストやログなどに表示されます。</p></article>
         <article class="setting-card"><h3>BonDriver</h3><p>その枠で使用するBonDriverを指定します。</p></article>
-        <article class="setting-card"><h3>放送波</h3><p>使用するBonDriverが対応する放送波を設定します。</p><p>地上波専用のBonDriverは<strong>地上波</strong>、BS/CS専用のBonDriverは<strong>BS/CS</strong>を選択します。</p><p><strong>地デジ/BS/CS</strong>は、1つのBonDriverで地上波・BS・CSのすべてを扱える構成で使用します。</p></article>
-        <article class="setting-card"><h3>用途</h3><p><strong>録画用</strong>は、予約録画、EPG取得、録画前EPG確認に使用します。</p><p><strong>視聴用</strong>は、番組表やプラグインからTVTestを起動して視聴する際に使用します。</p><p>録画用と視聴用を分けることで、視聴中の選局操作と録画処理を分離できます。</p></article>
-        <article class="setting-card"><h3>操作</h3><p>チューナー設定行を追加または削除します。</p></article>
+        <article class="setting-card"><h3>放送波</h3><p>使用するBonDriverが対応する放送波を設定します。</p><p>地上波専用のBonDriverは<strong>地上波</strong>、BS/CS専用のBonDriverは<strong>BS/CS</strong>を選択します。</p><p><strong>CATV</strong>はケーブルテレビ用のBonDriverで使用します。再送信された地上波・BS・CSもそのBonDriverのch2に従って扱います。</p><p><strong>地デジ/BS/CS</strong>は、1つのBonDriverで複数の放送波を扱う構成で使用します。既に動作している設定は引き続き利用できます。</p></article>
+        <article class="setting-card"><h3>用途</h3><p><strong>録画用</strong>は、予約録画、EPG取得、録画前EPG確認に使用します。</p><p><strong>視聴用</strong>は、AIrConなどの対応プラグインからTVTestで視聴する際に使用します。</p><p>録画用と視聴用を分けることで、視聴中の選局操作と録画処理を分離できます。</p></article>
+        <article class="setting-card"><h3>操作</h3><p>行内の「削除」でそのチューナー枠を削除します。枠数の変更には上部の「設定欄を作成」を使用します。</p></article>
       </div>
     </section>
 
@@ -101,14 +107,14 @@
       <header class="help-section-head"><p class="help-kicker">録画</p><h1>録画</h1></header>
       <div class="help-group">
         <h2>録画</h2>
-        <article class="setting-card"><h3>録画・EPG処理のタスクバーアイコンを表示する</h3><p>録画、EPG取得、録画前の番組情報確認を実行している間、タスクバーに処理中のアイコンを表示します。</p></article>
+        <article class="setting-card"><h3>録画・EPG処理のタスクバーアイコンを表示する</h3><p>録画と通常のEPG取得で処理中のアイコンを表示します。録画前EPG確認では表示しません。変更は次に起動する処理から適用されます。</p></article>
         <article class="setting-card"><h3>録画開始マージン（秒前）</h3><p>番組の開始時刻より何秒前から録画を開始するかを設定します。</p></article>
         <article class="setting-card"><h3>録画終了マージン（秒後）</h3><p>番組の終了時刻から何秒後まで録画を続けるかを設定します。</p></article>
         <article class="setting-card"><h3>録画終了後アクション</h3><p>最後に残っている録画が正常完了した後の動作を「何もしない」「スリープ」「シャットダウン」から選びます。手動停止や録画失敗では実行しません。</p><p>実行1分前になると確認画面を表示します。「中止」でその回の動作を取り消し、「今すぐ実行」で直ちに実行できます。確認画面を閉じた場合も中止します。</p><p>待機中または確認中に新しい録画、EPG取得、視聴などが始まった場合は実行しません。</p></article>
         <article class="setting-card"><h3>録画終了後アクション待機</h3><p>最後に残っている録画が正常完了してから、録画終了後アクションを実行するまでの待機時間を設定します。</p></article>
         <article class="setting-card"><h3>前番組優先（デフォルト）</h3><p>同じチューナーで前後の録画時間が重なる場合に前の番組を優先します。</p><p>録画マージンが重なる場合は前の番組の終了側を優先します。</p></article>
         <article class="setting-card"><h3>後番組を優先する</h3><p>同じチューナーで前後の録画時間が重なる場合に後の番組を優先します。</p><p>録画マージンが重なる場合は後の番組の開始側を優先します。</p><p>「後番組を優先する」を選ぶと「チェーン予約を実行する」を設定できます。</p></article>
-        <article class="setting-card"><h3>チェーン予約を実行する</h3><p>「後番組を優先する」を選んだ場合に利用できるオプションです。</p><p>同じ放送局で連続する番組を前後とも欠損なく録画します。前後の録画マージンが重なる場合も受信を継続し各番組をマージンを確保した別のTSファイルとして保存します。</p><p>有効にすると番組表にチェーンボタンを表示しチェーン予約は予約リストで「(C)」と表示します。</p><p>無効にしても未開始の予約は削除せず通常予約として残します。録画中の番組は設定変更だけでは中断しません。</p></article>
+        <article class="setting-card"><h3>チェーン予約を実行する</h3><p>「後番組を優先する」を選んだ場合に利用できるオプションです。</p><p>同じ局の連続番組を番組境界で受信を止めずに録画します。重なる録画マージンも各番組の別TSファイルへ保存します。</p><p>有効にすると番組表にチェーンボタンを表示しチェーン予約は予約リストで「(C)」と表示します。</p><p>無効にしても未開始の予約は削除せず通常予約として残します。録画中の番組は設定変更だけでは中断しません。</p></article>
       </div>
     </section>
 
@@ -199,8 +205,9 @@
   if(window.self !== window.top){ document.body.classList.add('in-modal'); }
 })();
 </script>
-<script src="/tvair-settings-host.js?v=1.2.12"></script>
-<script src="/tvair-notification.js?v=1.2.12"></script>
+<script src="/tvair-settings-host.js?v=1.2.13"></script>
+<script src="/tvair-notification.js?v=1.2.13"></script>
 </body>
 </html>
+
 

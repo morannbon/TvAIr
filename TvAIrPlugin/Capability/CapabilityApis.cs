@@ -1,4 +1,4 @@
-namespace TvAIrPlugin;
+﻿namespace TvAIrPlugin;
 
 /// <summary>
 /// TvAIr本体能力をプラグインへ公開する新しい汎用Capability APIの入口。
@@ -1209,11 +1209,14 @@ public sealed class TvAirViewerOperationResultDto
     public int? ForegroundAfterRetunePid { get; init; }
     public long? ForegroundFinalHwnd { get; init; }
     public int? ForegroundFinalPid { get; init; }
+    /// <summary>Legacy diagnostic. False is not evidence of unchanged focus when foreground handles are null.</summary>
     public bool ForegroundChanged { get; init; }
     public bool ChangedToTargetViewer { get; init; }
     public bool RestorationAttempted { get; init; }
     public bool RestorationSucceeded { get; init; }
+    /// <summary>Legacy diagnostic. True requires an observed preservation result. The current Host returns false with not_measured; this does not mean observed focus loss.</summary>
     public bool FocusPreserved { get; init; }
+    /// <summary>not_measured means focus was not observed. It is not a Viewer operation error; use OperationCompleted, HasWarning and ContinuationRecommended for operation outcomes.</summary>
     public string FocusPreserveFailureReason { get; init; } = string.Empty;
     /// <summary>True when the requested Viewer transition completed authoritatively.</summary>
     public bool OperationCompleted { get; init; }

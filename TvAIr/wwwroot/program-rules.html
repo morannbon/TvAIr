@@ -6,21 +6,21 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>自動検索予約リスト — TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.12"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.12"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.13"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.13"/>
 
-<link href="/tvair-ui-foundation.css?v=1.2.12" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.12" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.12" rel="stylesheet"/>
-<link href="/tvair-list-module.css?v=1.2.12" rel="stylesheet"/>
-<link href="/tvair-program-rules.css?v=1.2.12" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.12" rel="stylesheet"/>
-<link href="/tvair-settings-host.css?v=1.2.12" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.2.13" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.13" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.13" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.2.13" rel="stylesheet"/>
+<link href="/tvair-program-rules.css?v=1.2.13" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.13" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.13" rel="stylesheet"/>
 
-<script src="/tvair-theme.js?v=1.2.12"></script>
-<script src="/tvair-page-view-state.js?v=1.2.12"></script>
-<script src="/tvair-action-button-state.js?v=1.2.12"></script>
-<script src="/tvair-search-enter.js?v=1.2.12"></script>
+<script src="/tvair-theme.js?v=1.2.13"></script>
+<script src="/tvair-page-view-state.js?v=1.2.13"></script>
+<script src="/tvair-action-button-state.js?v=1.2.13"></script>
+<script src="/tvair-search-enter.js?v=1.2.13"></script>
 
 
 
@@ -125,7 +125,7 @@
 <div class="row">
 <label class="check"><input id="auto-chain-reservations" type="checkbox"/> 同じ条件で同局の連続番組を自動でチェーン予約にする</label>
 </div>
-<div class="note mt6" id="auto-chain-note">同じ自動検索ルールで同じ局の番組が真正隣接する場合だけ、既存のチェーン予約操作を自動適用します。</div>
+<div class="note mt6" id="auto-chain-note">このルールで作成した同じ局の予約で、前の番組の終了時刻と次の番組の開始時刻が一致する場合にチェーン予約を組みます。</div>
 </div>
 <div class="panel full">
 <div class="panel-title">ジャンル</div>
@@ -150,7 +150,7 @@
 <select id="end-time"></select>
 </div>
 <div class="days mt8 tvair-choice-row tvair-weekday-row" id="days-wrap"></div>
-<div class="note mt6">未チェック時は 24時間365日対象です。チェック時のみ曜日と時間帯を使用します。</div>
+<div class="note mt6">曜日は選択があれば適用され、未選択なら毎日が対象です。曜日を編集するには「時間帯指定」をONにしてください。時刻の範囲はONの場合だけ適用します。</div>
 </div>
 </div>
 </div>
@@ -383,7 +383,7 @@ function syncAutoChainAvailability(){
   if(!cb||!note) return;
   cb.disabled=!chainFeatureAvailable;
   note.textContent=chainFeatureAvailable
-    ? '同じ自動検索ルールで同じ局の番組が真正隣接する場合だけ、既存のチェーン予約操作を自動適用します。'
+    ? 'このルールで作成した同じ局の予約で、前の番組の終了時刻と次の番組の開始時刻が一致する場合にチェーン予約を組みます。'
     : '設定 > 録画で「後番組を優先する」と「チェーン予約を実行する」の両方を有効にすると使用できます。保存済みの選択は保持されます。';
   const panel=cb.closest('.panel');
   if(panel) panel.style.opacity=chainFeatureAvailable?'1':'0.58';
@@ -473,10 +473,11 @@ Promise.all([loadChannels(), loadRules(), loadChainFeatureAvailability()])
 
 </script>
 
-<script src="/tvair-notification.js?v=1.2.12"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.12"></script>
-<script src="/tvair-settings-host.js?v=1.2.12"></script>
-<script src="/tvair-menu-spine.js?v=1.2.12"></script>
+<script src="/tvair-notification.js?v=1.2.13"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.13"></script>
+<script src="/tvair-settings-host.js?v=1.2.13"></script>
+<script src="/tvair-menu-spine.js?v=1.2.13"></script>
 </body>
 </html>
+
 

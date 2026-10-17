@@ -1,12 +1,11 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Diagnostics;
 
 namespace TvAIr.Core;
 
 /// <summary>
 /// TvAIr が起動・所有している TVTest 系 PID の軽量レジストリ。
-/// RecordingWorker本線ではTVTestに録画本体を任せないが、録画/EPG中のタスクバー表示と
-/// SleepGuard監視用にTvAIr所有TVTestを起動するため、外部視聴プロセスと誤分類しないようにする。
+/// 録画ワーカーと視聴プロセスを所有情報で識別する。
 /// </summary>
 public static class TvAirManagedProcessRegistry
 {
@@ -19,28 +18,9 @@ public static class TvAirManagedProcessRegistry
             processId,
             ManagedTvTestProcessPurpose.RecordingWorker,
             reservationId,
-            null,
-            null,
             did,
             bonDriverFileName,
             recordingFilePath,
-            DateTime.Now,
-            null,
-            CaptureIdentity(processId));
-    }
-
-    public static void RegisterActivity(int processId, string reason, string? serviceName)
-    {
-        if (processId <= 0) return;
-        Processes[processId] = new ManagedTvTestProcess(
-            processId,
-            ManagedTvTestProcessPurpose.ActivityKeeper,
-            null,
-            string.IsNullOrWhiteSpace(reason) ? null : reason.Trim(),
-            string.IsNullOrWhiteSpace(serviceName) ? null : serviceName.Trim(),
-            null,
-            null,
-            null,
             DateTime.Now,
             null,
             CaptureIdentity(processId));
@@ -53,8 +33,6 @@ public static class TvAirManagedProcessRegistry
         Processes[processId] = new ManagedTvTestProcess(
             processId,
             ManagedTvTestProcessPurpose.Viewer,
-            null,
-            "Viewer",
             null,
             string.IsNullOrWhiteSpace(did) ? null : did.Trim(),
             string.IsNullOrWhiteSpace(bonDriverFileName) ? null : Path.GetFileName(bonDriverFileName.Trim()),
@@ -143,17 +121,14 @@ public static class TvAirManagedProcessRegistry
 
 public enum ManagedTvTestProcessPurpose
 {
-    RecordingWorker,
-    ActivityKeeper,
-    Viewer
+    RecordingWorker = 0,
+    Viewer = 2
 }
 
 public sealed record ManagedTvTestProcess(
     int ProcessId,
     ManagedTvTestProcessPurpose Purpose,
     int? ReservationId,
-    string? ActivityReason,
-    string? ActivityServiceName,
     string? Did,
     string? BonDriverFileName,
     string? RecordingFilePath,
@@ -161,7 +136,6 @@ public sealed record ManagedTvTestProcess(
     string? OwnershipId,
     ManagedProcessIdentity Identity)
 {
-    public bool IsActivityOnly => Purpose == ManagedTvTestProcessPurpose.ActivityKeeper;
     public bool IsViewer => Purpose == ManagedTvTestProcessPurpose.Viewer;
 }
 

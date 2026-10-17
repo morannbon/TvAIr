@@ -1,4 +1,4 @@
-/* release_contract gr-cdt-data-module-logo-save-bscs-no-deep: Wakeタスク起動時は --wake-task を単一インスタンス合流シグナルとして扱い、既存TvAIrがいる場合は本体二重起動せず signal ファイルを書いて終了する。 */
+﻿/* release_contract single_instance_wake_signal: Wakeタスク起動時は --wake-task を単一インスタンス合流シグナルとして扱い、既存TvAIrがいる場合は本体二重起動せず signal ファイルを書いて終了する。 */
 /* TvAIrEpgRecの表示ON/OFFを含む起動ポリシーは共通ヘルパーで管理する。 */
 /* release_contract wake-plan-hash-trigger-limit: limit Wake task rebuild triggers by in-process plan hash and periodic validation. */
 /* release_contract wake-task-nochange-skip: skip full Wake task delete/register when the desired plan is unchanged and existing managed tasks match. */
@@ -381,7 +381,7 @@ builder.Services.AddSingleton<Database>(_ =>
 // ─── チャンネル ──────────────────────────────────────────────────
 builder.Services.AddSingleton<ChannelFileLoader>();
 builder.Services.AddSingleton<ChannelServiceAccessPolicy>();
-builder.Services.AddSingleton<TvTestActivityKeeper>();
+builder.Services.AddSingleton<WorkerTitleTracker>();
 
 // ─── チューナー ──────────────────────────────────────────────────
 builder.Services.AddSingleton<TvTestLauncher>();
@@ -429,8 +429,6 @@ builder.Services.AddSingleton<ExternalEpgSourceStore>();
 builder.Services.AddSingleton<IProgramEventSource, ProgramGuideProjectionService>();
 builder.Services.AddSingleton<ViewerReservationScheduler>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ViewerReservationScheduler>());
-builder.Services.AddSingleton<ServiceLogoStore>();
-builder.Services.AddSingleton<EpgLogoExtractor>();
 builder.Services.AddSingleton<SystemSleepInhibitionService>();
 // EpgCaptureのappsettings項目は起動時静的設定。ユーザー操作で変わるEPG深度はIniSettingsServiceから
 // UpdateRuntimeDepth()へ投影し、Options側へ副正本を持たない。
@@ -446,9 +444,7 @@ builder.Services.AddSingleton<EpgCapture>(sp =>
         sp.GetRequiredService<ReservationStore>(),
         sp.GetRequiredService<IniSettingsService>(),
         sp.GetRequiredService<Database>(),
-        sp.GetRequiredService<TvTestActivityKeeper>(),
-        sp.GetRequiredService<ServiceLogoStore>(),
-        sp.GetRequiredService<EpgLogoExtractor>(),
+        sp.GetRequiredService<WorkerTitleTracker>(),
         sp.GetRequiredService<ReservationProjectionPromotionService>(),
         sp.GetRequiredService<KeywordMatcher>(),
 #if TVAIR_DEVELOPER_DIAGNOSTICS
@@ -516,9 +512,7 @@ builder.Services.AddSingleton<ReservationScheduler>(sp =>
         sp.GetRequiredService<IProgramEventSource>(),
         sp.GetRequiredService<EpgCapture>(),
         sp.GetRequiredService<EpgStore>(),
-        sp.GetRequiredService<TvTestActivityKeeper>(),
         sp.GetRequiredService<ChainRuntimeSnapshotRegistry>(),
-        sp.GetRequiredService<ServiceLogoStore>(),
         sp.GetRequiredService<UserEventLogService>(),
         sp.GetRequiredService<PluginTypedEventHub>(),
         sp.GetRequiredService<RecordingResultStore>(),
@@ -863,7 +857,7 @@ app.MapGet("/network-login", (HttpContext context) =>
     context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'self'; base-uri 'none'";
     var html = $$$"""
 <!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>TvAIr 接続</title><link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.12"></head><body class="tvair-generated-login"><main><h1>TvAIrへ接続</h1><form id="login"><label for="password">接続用パスワード</label><input id="password" type="password" autocomplete="current-password" required minlength="12"><button type="submit">接続</button><div id="message" class="message" role="status"></div></form></main>
+<title>TvAIr 接続</title><link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.13"></head><body class="tvair-generated-login"><main><h1>TvAIrへ接続</h1><form id="login"><label for="password">接続用パスワード</label><input id="password" type="password" autocomplete="current-password" required minlength="12"><button type="submit">接続</button><div id="message" class="message" role="status"></div></form></main>
 <script>
 const form=document.getElementById('login'),password=document.getElementById('password'),message=document.getElementById('message');
 form.addEventListener('submit',async e=>{e.preventDefault();message.textContent='確認しています…';try{const r=await fetch('/api/network-auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:password.value}),credentials:'same-origin'});const j=await r.json().catch(()=>({}));if(!r.ok){message.textContent=j.message||'接続できませんでした。';return;}location.replace({{{returnUrlJson}}});}catch{message.textContent='接続できませんでした。';}});
@@ -1974,7 +1968,7 @@ static IResult RenderPluginWindowHost(string windowId, HttpRequest http, PluginW
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{title}}</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.12">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.13">
 </head>
 <body class="tvair-plugin-window-page">
 <div class="{{hostClass}}" data-window-id="{{encodedWindowId}}" data-window-revision="{{initialRevision}}" data-tool-host="{{toolHost.ToString().ToLowerInvariant()}}">
@@ -2371,10 +2365,10 @@ static IResult RenderPluginVersionInfoPage(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-notification.css?v=1.2.12">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.2.13">
 </head>
 <body>
-<script src="/tvair-notification.js?v=1.2.12"></script>
+<script src="/tvair-notification.js?v=1.2.13"></script>
 <script>
 document.addEventListener('DOMContentLoaded',function(){
   if(window.TvAIrNotify){ TvAIrNotify({ title:'{{safeTitle}}', message:'{{safeVersion}}', onOk:function(){ location.replace('{{safeReturn}}'); } }); }
@@ -2428,7 +2422,7 @@ static IResult RenderPluginDefaultMenuInfo(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeName}} 情報</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.12">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.13">
 </head>
 <body class="tvair-plugin-info-page"><div class="card"><h1>{{safeName}} 情報</h1><div class="row"><div class="k">Version</div><div class="v">{{safeVersion}}</div></div><div class="row"><div class="k">Route</div><div class="v">{{safeRoute}}</div></div><div class="row"><div class="k">Action</div><div class="v">{{safeKind}}</div></div><p>{{safeDescription}}</p><a class="button" href="/">番組表へ戻る</a></div></body>
 </html>
@@ -2449,7 +2443,7 @@ static IResult PluginHtmlMessage(string title, string message, int statusCode, s
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.12">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.13">
 </head>
 <body class="tvair-message-page"><div class="card"><h1>{{safeTitle}}</h1><p>{{safeMessage}}</p><a class="button" href="{{safeHref}}">{{safeLinkText}}</a></div></body>
 </html>
@@ -2509,7 +2503,7 @@ static string BuildPluginFloatingButtonsHtml(RuntimeUiRenderContext context, str
     if (normalized.Length == 0) return string.Empty;
 
     var sb = new System.Text.StringBuilder();
-    sb.Append("<link rel=\"stylesheet\" href=\"/tvair-generated-surfaces.css?v=1.2.12\">");
+    sb.Append("<link rel=\"stylesheet\" href=\"/tvair-generated-surfaces.css?v=1.2.13\">");
 
     foreach (var group in normalized.GroupBy(x => x.Item.Position))
     {
@@ -3539,16 +3533,16 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; media-src 'self' data:">
 <title>{{{{safeTitle}}}} - TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.12">
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.12">
-<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.2.12">
-<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.12">
-<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.2.12">
-<link rel="stylesheet" href="/tvair-notification.css?v=1.2.12">
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.12">
-<link rel="stylesheet" href="/tvair-settings-host.css?v=1.2.12">
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.13">
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.13">
+<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.2.13">
+<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.13">
+<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.2.13">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.2.13">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.13">
+<link rel="stylesheet" href="/tvair-settings-host.css?v=1.2.13">
 {{{{developerThemeDiagnosticScript}}}}
-<script src="/tvair-theme.js?v=1.2.12"></script>
+<script src="/tvair-theme.js?v=1.2.13"></script>
 </head>
 <body class="tvair-non-program-page tvair-plugin-shell-page {{{{themeClass}}}}{{{{contentOnlyClass}}}}" data-plugin-route="{{{{safeRoute}}}}" data-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme="{{{{safeSelectedTheme}}}}" data-tvair-selected-theme="{{{{safeSelectedTheme}}}}" data-tvair-effective-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme-generation="{{{{safeThemeGeneration}}}}" data-tvair-theme-revision="{{{{themeRevision}}}}" data-tvair-theme-scope="all" data-tvair-theme-update-mode="{{{{themeUpdateModeToken}}}}">
 <div id="nav">
@@ -3570,11 +3564,11 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
   </main>
 </div>
 {{{{themeHotApplyScriptTag}}}}
-<script src="/tvair-notification.js?v=1.2.12"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.12"></script>
-<script src="/tvair-safe-event-host.js?v=1.2.12"></script>
-<script src="/tvair-menu-spine.js?v=1.2.12"></script>
-<script src="/tvair-settings-host.js?v=1.2.12"></script>
+<script src="/tvair-notification.js?v=1.2.13"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.13"></script>
+<script src="/tvair-safe-event-host.js?v=1.2.13"></script>
+<script src="/tvair-menu-spine.js?v=1.2.13"></script>
+<script src="/tvair-settings-host.js?v=1.2.13"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -3872,17 +3866,17 @@ static string BuildPluginToolWindowContentHtml(string title, string route, strin
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; media-src 'self' data:">
 <title>{{safeTitle}} - TvAIr Tool Window</title>
-<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.12">
+<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.13">
 {{developerThemeDiagnosticScript}}
-<script src="/tvair-theme.js?v=1.2.12"></script>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.12">
+<script src="/tvair-theme.js?v=1.2.13"></script>
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.13">
 {{pluginHead}}
 </head>
 <body class="tvair-plugin-toolwindow-content-only {{themeClass}}" data-plugin-route="{{safeRoute}}" data-theme="{{safeEffectiveTheme}}" data-tvair-theme="{{safeSelectedTheme}}" data-tvair-selected-theme="{{safeSelectedTheme}}" data-tvair-effective-theme="{{safeEffectiveTheme}}" data-tvair-theme-generation="{{safeThemeGeneration}}" data-tvair-theme-revision="{{themeRevision}}" data-tvair-theme-scope="all" data-tvair-theme-update-mode="{{themeUpdateModeToken}}" data-tvair-host-kind="winforms_webbrowser_fallback_direct_content" data-tvair-toolwindow-contract="release_contract">
 <div class="tvair-toolwindow-content-root">
 {{pluginContent}}
 </div>
-<script src="/tvair-safe-event-host.js?v=1.2.12"></script>
+<script src="/tvair-safe-event-host.js?v=1.2.13"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -6175,7 +6169,7 @@ app.MapPost("/api/reservations", (HttpRequest request, Reservation r, Reservatio
         // User-facing reservation entry shares the Host-wide service-access SSOT with
         // ProgramGuide/search/Plugin APIs/recording launch. EPG may retain disabled services,
         // but no operational reservation may be created for a service that TVTest disables or
-        // that cannot currently resolve to the ChSet route.
+        // that cannot resolve to an enabled legacy or explicitly bound BonDriver route.
         var serviceSnapshot = serviceAccess.Capture();
         if (!serviceSnapshot.TryResolveRecordingAdmission(r.NetworkId, r.TransportStreamId,
                 r.ServiceId, ini.GetEffectiveTuners(), out var resolvedServiceName, out var resolvedChannelArgument))
@@ -8670,5 +8664,6 @@ sealed class RuntimeUiActionHttpRequest
     public string RefreshTarget { get; set; } = "content";
     public bool PreserveScroll { get; set; } = true;
 }
+
 
 

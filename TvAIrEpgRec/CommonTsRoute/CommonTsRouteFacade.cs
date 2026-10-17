@@ -50,12 +50,12 @@ internal static class CommonTsRouteFacade
                 "NID/TSID/SID identity",
                 "PAT/PMT/SDT service confirmation",
                 "TargetServiceReady()",
-                normalizedMode == "record" ? "service-scoped TS packets" : "transport-stream SI/EIT packets, preserving PID 0x0029 for logo capture",
+                normalizedMode == "record" ? "service-scoped TS packets" : "transport-stream SI/EIT packets",
                 "CloseTuner/Release/FreeLibrary in TvAIrEpgRec process"
             ],
             ModeSpecificStages = normalizedMode switch
             {
-                "epg" => ["transport-stream schedule EIT extraction", "preserve SI/CDT PID 0x0029 for service-logo extraction", "ARIB decode via AribDecodeBridge", "intermediate EPG model", "validated return to TvAIr body"],
+                "epg" => ["transport-stream schedule EIT extraction", "ARIB decode via AribDecodeBridge", "intermediate EPG model", "validated return to TvAIr body"],
                 "epg-check" => ["short target-program timing confirmation", "dbWrite=false"],
                 "record" => ["TvAIrEpgRec record execution"],
                 _ => ["no production mode-specific stage attached"]

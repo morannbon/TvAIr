@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Text;
 using System.Security.Cryptography;
 using Microsoft.Data.Sqlite;
@@ -5122,7 +5122,7 @@ WHERE source <> 'Epg'
             .ToDictionary(g => g.Key, g => g.Single(), StringComparer.OrdinalIgnoreCase);
         var roleBindingRecordingTunerNamesByGroup = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         var configuredTunerNameToPrioritySlotName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var g in new[] { "GR", "BSCS", "HYBRID" })
+        foreach (var g in new[] { "GR", "BSCS", "HYBRID", "CATV" })
         {
             roleBindingRecordingTunerNamesByGroup[g] = recordingTunerProfiles
                 .Where(p => SupportsReservationGroup(p.Group, g) && recordingProfileByPrioritySlot.ContainsKey(p.Name))
@@ -5158,11 +5158,10 @@ WHERE source <> 'Epg'
         var serviceAccessSnapshot = allocationServiceSnapshot;
         // The physical BonDriver's source table is authoritative for a direct-route tuner.
         // Legacy ChSet tuners retain their existing admission rules.
-        // This check applies only to independent reservations; explicit-chain physical
-        // placement is governed by its separate approved lifecycle contract.
+        // Candidate routes are checked for both independent reservations and explicit-chain
+        // members; chain construction and lifecycle rules remain separate.
         bool HasDirectServiceRoute(string logicalTunerName, Reservation reservation)
             => recordingProfileByPrioritySlot.TryGetValue(logicalTunerName, out var profile)
-               && SupportsReservationGroup(profile.Group, ResolveGroup(reservation))
                && serviceAccessSnapshot.CanTune(profile, reservation);
 
         var scheduledCandidates = allScheduled
@@ -5808,7 +5807,7 @@ WHERE source <> 'Epg'
                 // normal_epg_wave intervalは別に保持し、Process/Leaseの物理正本自体は変更しない。
                 var epgOccupations = new Dictionary<string, NormalEpgWaveOccupationSnapshot>(StringComparer.OrdinalIgnoreCase);
                 var normalEpgIntervals = new List<(string TunerName, DateTime Start, DateTime End, string Group)>();
-                foreach (var epgGroup in new[] { "GR", "BSCS", "HYBRID" })
+                foreach (var epgGroup in new[] { "GR", "BSCS", "HYBRID", "CATV" })
                 {
                     if (!normalEpgWaveOccupation.TryGet(epgGroup, out var epgOccupation)) continue;
                     epgOccupations[epgGroup] = epgOccupation;

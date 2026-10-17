@@ -433,11 +433,11 @@ internal static class Program
             "arib-short-event-pointer" => "pointer-vtable6-eit-arib-decode",
             "arib-short-event-buffer" => "buffer-vtable7-eit-arib-decode",
             "pointer-vtable6-epg-normalize" => "pointer-vtable6-epg-normalize",
-            "pointer-vtable6-epg-normalize-gr-logo-opportunistic" => "pointer-vtable6-epg-normalize-gr-logo-opportunistic",
-            "epg-normalize-gr-logo" => "pointer-vtable6-epg-normalize-gr-logo-opportunistic",
-            "pointer-vtable6-epg-normalize-logo-pid29" => "pointer-vtable6-epg-normalize-logo-pid29",
-            "epg-normalize-logo-pid29" => "pointer-vtable6-epg-normalize-logo-pid29",
-            "logo-pid29-pointer" => "pointer-vtable6-epg-normalize-logo-pid29",
+            "pointer-vtable6-epg-normalize-gr-logo-opportunistic" => "pointer-vtable6-epg-normalize",
+            "epg-normalize-gr-logo" => "pointer-vtable6-epg-normalize",
+            "pointer-vtable6-epg-normalize-logo-pid29" => "pointer-vtable6-epg-normalize",
+            "epg-normalize-logo-pid29" => "pointer-vtable6-epg-normalize",
+            "logo-pid29-pointer" => "pointer-vtable6-epg-normalize",
             "buffer-vtable7-epg-normalize" => "buffer-vtable7-epg-normalize",
             "epg-normalize-pointer" => "pointer-vtable6-epg-normalize",
             "epg-normalize-buffer" => "buffer-vtable7-epg-normalize",
@@ -1780,9 +1780,6 @@ internal sealed class TsReadProbeSummary
     public List<int> PmtPids { get; set; } = new();
     public List<int> StreamPids { get; set; } = new();
     public Dictionary<int, long> PidCounts { get; set; } = new();
-    public long InputCdtPid29Packets { get; set; }
-    public long OutputCdtPid29Packets { get; set; }
-    public bool EpgLogoPid29PreserveRequested { get; set; }
     public Dictionary<int, long> TableIdCounts { get; set; } = new();
     public bool EitMinimalDecodeProbe { get; set; }
     public bool EitMinimalDecodeOk { get; set; }
@@ -3595,14 +3592,6 @@ internal static class BonDriverNativeProbe
         if (pid == 0x0012) return true;        // EIT
         if (pid == 0x0014) return true;        // TDT/TOT
 
-        // EPG/EPG-check outputs are also used by the TvAIr-side service-logo
-        // extractor. ARIB logo data is carried by CDT on PID 0x0029; without
-        // preserving this PID, SDT logo mappings can be observed but the actual
-        // logo payload can never be saved. Keep this scoped to EPG-like modes so
-        // normal recording output remains service-scoped and unchanged.
-        var normalizedMode = summary.Mode?.Trim().ToLowerInvariant();
-        if ((normalizedMode == "epg" || normalizedMode == "epg-check") && pid == 0x0029) return true;
-
         if (pid == summary.RecordTargetPmtPid) return true;
         if (pid == summary.RecordTargetPcrPid) return true;
         if (!saveSubtitles && summary.RecordSubtitlePids.Contains(pid)) return false;
@@ -3717,8 +3706,7 @@ internal static class BonDriverNativeProbe
         bool TargetServiceEit,
         bool EitMinimal,
         bool AribDecode,
-        bool EpgNormalize,
-        bool LogoPid29Preserve);
+        bool EpgNormalize);
 
     // Canonical capability map for the common TS route. Mode-specific code consumes flags from
     // here rather than repeating variant-name lists in multiple branches.
@@ -3731,36 +3719,34 @@ internal static class BonDriverNativeProbe
             "pointer-vtable6-eit-minimal-decode" or "buffer-vtable7-eit-minimal-decode" or
             "pointer-vtable6-eit-target-service" or "buffer-vtable7-eit-target-service" or
             "pointer-vtable6-eit-arib-decode" or "buffer-vtable7-eit-arib-decode" or
-            "pointer-vtable6-epg-normalize" or "pointer-vtable6-epg-normalize-gr-logo-opportunistic" or
-            "pointer-vtable6-epg-normalize-logo-pid29" or "buffer-vtable7-epg-normalize";
+            "pointer-vtable6-epg-normalize" or
+            "buffer-vtable7-epg-normalize";
         var isPointer = variant is
             "pointer-vtable6-ready-threshold-continuous" or "pointer-vtable6-psi-minimal" or
             "pointer-vtable6-eit-minimal-decode" or "pointer-vtable6-eit-target-service" or
-            "pointer-vtable6-eit-arib-decode" or "pointer-vtable6-epg-normalize" or
-            "pointer-vtable6-epg-normalize-gr-logo-opportunistic" or "pointer-vtable6-epg-normalize-logo-pid29";
+            "pointer-vtable6-eit-arib-decode" or "pointer-vtable6-epg-normalize";
         var psiMinimal = variant is
             "pointer-vtable6-psi-minimal" or "buffer-vtable7-psi-minimal" or
             "pointer-vtable6-eit-minimal-decode" or "buffer-vtable7-eit-minimal-decode" or
             "pointer-vtable6-eit-target-service" or "buffer-vtable7-eit-target-service" or
             "pointer-vtable6-eit-arib-decode" or "buffer-vtable7-eit-arib-decode" or
-            "pointer-vtable6-epg-normalize" or "pointer-vtable6-epg-normalize-gr-logo-opportunistic" or
-            "pointer-vtable6-epg-normalize-logo-pid29" or "buffer-vtable7-epg-normalize";
+            "pointer-vtable6-epg-normalize" or
+            "buffer-vtable7-epg-normalize";
         var targetServiceEit = variant is
             "pointer-vtable6-eit-target-service" or "buffer-vtable7-eit-target-service" or
             "pointer-vtable6-eit-arib-decode" or "buffer-vtable7-eit-arib-decode" or
-            "pointer-vtable6-epg-normalize" or "pointer-vtable6-epg-normalize-gr-logo-opportunistic" or
-            "pointer-vtable6-epg-normalize-logo-pid29" or "buffer-vtable7-epg-normalize";
+            "pointer-vtable6-epg-normalize" or
+            "buffer-vtable7-epg-normalize";
         var eitMinimal = targetServiceEit || variant is "pointer-vtable6-eit-minimal-decode" or "buffer-vtable7-eit-minimal-decode";
         var aribDecode = variant is
             "pointer-vtable6-eit-arib-decode" or "buffer-vtable7-eit-arib-decode" or
-            "pointer-vtable6-epg-normalize" or "pointer-vtable6-epg-normalize-gr-logo-opportunistic" or
-            "pointer-vtable6-epg-normalize-logo-pid29" or "buffer-vtable7-epg-normalize";
+            "pointer-vtable6-epg-normalize" or
+            "buffer-vtable7-epg-normalize";
         var epgNormalize = variant is
-            "pointer-vtable6-epg-normalize" or "pointer-vtable6-epg-normalize-gr-logo-opportunistic" or
-            "pointer-vtable6-epg-normalize-logo-pid29" or "buffer-vtable7-epg-normalize";
+            "pointer-vtable6-epg-normalize" or
+            "buffer-vtable7-epg-normalize";
         return new TsVariantCapabilities(
-            supported, isPointer, psiMinimal, targetServiceEit, eitMinimal, aribDecode, epgNormalize,
-            variant == "pointer-vtable6-epg-normalize-logo-pid29");
+            supported, isPointer, psiMinimal, targetServiceEit, eitMinimal, aribDecode, epgNormalize);
     }
 
     private static bool IsRecordStopRequested(TsReadProbeSummary summary)
@@ -4158,7 +4144,6 @@ internal static class BonDriverNativeProbe
                         var isEpgNormalize = variantCapabilities.EpgNormalize;
                         var isFullNormalEpgMode = string.Equals(summary.Mode, "epg", StringComparison.OrdinalIgnoreCase);
                         summary.EpgIntermediateModelProbe = isEpgNormalize;
-                        summary.EpgLogoPid29PreserveRequested = variantCapabilities.LogoPid29Preserve;
                         summary.AribShortEventDecodeProbe = isAribDecode;
                         summary.TargetServiceEitPriorityProbe = isTargetServiceEit;
                         summary.TargetServiceEitWaitProbe = isTargetServiceEit;
@@ -4574,7 +4559,7 @@ internal static class BonDriverNativeProbe
                             await MarkRecordShutdownStageAsync(summary, progress, "record_stream_flush_exit", "result=OK").ConfigureAwait(false);
                         }
 
-                        await progress("tsvariant_continuous_summary", $"result={(summary.BytesRead > 0 && summary.PacketsRead > 0 && summary.SyncErrors == 0 ? "OK" : "NG")} variant={summary.Variant} calls={summary.GetTsCalls} empty={summary.EmptyReads} bytes={summary.BytesRead} chunks={summary.ChunksRead} packets={summary.PacketsRead} syncErrors={summary.SyncErrors} tei={summary.TransportErrorPackets} scrambledLike={summary.ScrambledLikePackets} readyNonZero={summary.NonZeroReadyCountSamples}/{summary.ReadyCountSamples} threshold={summary.ReadyThreshold} reached={summary.ReadyThresholdReached} lastReady={summary.LastReadyCount} lastRemain={summary.LastRemain} readSecondsLimit={readSecondsLimit} hardDeadline={(summary.PreRecordHardDeadlineUtc?.ToString("O") ?? "-")} maxChunks={maxChunks} highThroughputTsDrain={tsDrainPolicy.HighThroughput} waitMs={tsDrainPolicy.WaitMs} idleDelayMs={tsDrainPolicy.IdleDelayMs} backlogImmediateDrain={tsDrainPolicy.BacklogImmediateDrain} externalB25Available={summary.ExternalB25Available} externalB25Loaded={summary.ExternalB25LoadedPath ?? "-"} externalB25DecodeCalls={summary.ExternalB25DecodeCalls} externalB25DecodeOk={summary.ExternalB25DecodeOk} externalB25Passthrough={summary.ExternalB25Passthrough} externalB25FlushBytes={summary.ExternalB25FlushBytes} cdtPid29In={summary.InputCdtPid29Packets} cdtPid29Out={summary.OutputCdtPid29Packets} logoPid29Preserve={summary.EpgLogoPid29PreserveRequested} rule=release_contract").ConfigureAwait(false);
+                        await progress("tsvariant_continuous_summary", $"result={(summary.BytesRead > 0 && summary.PacketsRead > 0 && summary.SyncErrors == 0 ? "OK" : "NG")} variant={summary.Variant} calls={summary.GetTsCalls} empty={summary.EmptyReads} bytes={summary.BytesRead} chunks={summary.ChunksRead} packets={summary.PacketsRead} syncErrors={summary.SyncErrors} tei={summary.TransportErrorPackets} scrambledLike={summary.ScrambledLikePackets} readyNonZero={summary.NonZeroReadyCountSamples}/{summary.ReadyCountSamples} threshold={summary.ReadyThreshold} reached={summary.ReadyThresholdReached} lastReady={summary.LastReadyCount} lastRemain={summary.LastRemain} readSecondsLimit={readSecondsLimit} hardDeadline={(summary.PreRecordHardDeadlineUtc?.ToString("O") ?? "-")} maxChunks={maxChunks} highThroughputTsDrain={tsDrainPolicy.HighThroughput} waitMs={tsDrainPolicy.WaitMs} idleDelayMs={tsDrainPolicy.IdleDelayMs} backlogImmediateDrain={tsDrainPolicy.BacklogImmediateDrain} externalB25Available={summary.ExternalB25Available} externalB25Loaded={summary.ExternalB25LoadedPath ?? "-"} externalB25DecodeCalls={summary.ExternalB25DecodeCalls} externalB25DecodeOk={summary.ExternalB25DecodeOk} externalB25Passthrough={summary.ExternalB25Passthrough} externalB25FlushBytes={summary.ExternalB25FlushBytes} rule=release_contract").ConfigureAwait(false);
                         if (isPsiMinimal)
                         {
                             await progress("tsvariant_psi_minimal_summary", $"result={(summary.PsiMinimalOk ? "OK" : "NG")} pat={summary.PatSeen}/{summary.PatSections} pmt={summary.PmtSeen}/{summary.PmtSections} sdt={summary.SdtSeen}/{summary.SdtSections} eit={summary.EitSeen}/{summary.EitSections} nitPackets={summary.NitPackets} pmtPids={string.Join(',', summary.PmtPids)} streamPids={string.Join(',', summary.StreamPids.Take(16))}").ConfigureAwait(false);
@@ -4967,7 +4952,6 @@ internal static class BonDriverNativeProbe
             if (packet[0] == 0x47)
             {
                 var outputPid = ((packet[1] & 0x1F) << 8) | packet[2];
-                if (outputPid == 0x0029) summary.OutputCdtPid29Packets++;
                 // RECORDING_TARGET_MEDIA_SCRAMBLE_SINGLE_SOURCE:
                 // Overall output scramble remains a diagnostic for every written PID, but recording
                 // completion is determined only by target-service ES packets.  PSI/SI packets that
@@ -4996,7 +4980,6 @@ internal static class BonDriverNativeProbe
             var packet = new ReadOnlySpan<byte>(buffer, offset, 188);
             var pid = ((buffer[offset + 1] & 0x1F) << 8) | buffer[offset + 2];
             Increment(summary.PidCounts, pid);
-            if (pid == 0x0029) summary.InputCdtPid29Packets++;
             if ((buffer[offset + 1] & 0x80) != 0) summary.TransportErrorPackets++;
             if ((buffer[offset + 3] & 0xC0) != 0) summary.ScrambledLikePackets++;
             if (string.Equals(summary.Mode, "record", StringComparison.OrdinalIgnoreCase))

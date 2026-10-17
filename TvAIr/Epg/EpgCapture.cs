@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Options;
+﻿using Microsoft.Extensions.Options;
 using TvAIr.Channel;
 using TvAIr.Core;
 using TvAIr.Tuner;
@@ -43,9 +43,7 @@ public sealed class EpgCapture
     private readonly ReservationStore reservationStore;
     private readonly IniSettingsService ini;
     private readonly Database database;
-    private readonly TvTestActivityKeeper tvTestActivity;
-    private readonly ServiceLogoStore serviceLogoStore;
-    private readonly EpgLogoExtractor logoExtractor;
+    private readonly WorkerTitleTracker workerTitleTracker;
     private readonly ReservationProjectionPromotionService projectionPromotion;
     private readonly KeywordMatcher keywordMatcher;
 #if TVAIR_DEVELOPER_DIAGNOSTICS
@@ -99,9 +97,7 @@ public sealed class EpgCapture
         ReservationStore reservationStore,
         IniSettingsService ini,
         Database database,
-        TvTestActivityKeeper tvTestActivity,
-        ServiceLogoStore serviceLogoStore,
-        EpgLogoExtractor logoExtractor,
+        WorkerTitleTracker workerTitleTracker,
         ReservationProjectionPromotionService projectionPromotion,
         KeywordMatcher keywordMatcher,
 #if TVAIR_DEVELOPER_DIAGNOSTICS
@@ -120,9 +116,7 @@ public sealed class EpgCapture
         this.reservationStore = reservationStore;
         this.ini           = ini;
         this.database      = database;
-        this.tvTestActivity = tvTestActivity;
-        this.serviceLogoStore = serviceLogoStore;
-        this.logoExtractor = logoExtractor;
+        this.workerTitleTracker = workerTitleTracker;
         this.projectionPromotion = projectionPromotion;
         this.keywordMatcher = keywordMatcher;
 #if TVAIR_DEVELOPER_DIAGNOSTICS
@@ -1828,19 +1822,7 @@ public sealed class EpgCapture
         var runtimeStatsPath = tsFile + ".runtime.jsonl";
         var target = group.Targets.FirstOrDefault();
         var bonDriverPath = ResolveBonDriverPathForEpg(bonDriverFileName);
-        var displayLogoPaths = target is null
-            ? ServiceLogoDisplayPaths.Empty
-            : serviceLogoStore.ResolveDisplayLogoPaths(target.OriginalNetworkId, target.TransportStreamId, target.ServiceId, displayServiceName ?? target.Name);
-        var displayLogoPath = displayLogoPaths.TitleBarLogoPath;
-        var centerLogoPath = displayLogoPaths.CenterLogoPath;
-
-        var isTerrestrialLogoScope = IsEpgGroupWave(group, "GR");
-        var getStreamVariant = isTerrestrialLogoScope
-            ? "pointer-vtable6-epg-normalize-gr-logo-opportunistic"
-            : "pointer-vtable6-epg-normalize";
-        var logoPolicy = isTerrestrialLogoScope
-            ? "gr_opportunistic_accept_cdt_like_sections"
-            : "bscs_opportunistic_no_dedicated_logo_deep_scan";
+        const string getStreamVariant = "pointer-vtable6-epg-normalize";
 
         var job = new Dictionary<string, object?>
         {
@@ -1888,19 +1870,12 @@ public sealed class EpgCapture
                 ["worker"] = workerName,
                 ["displayServiceName"] = displayServiceName ?? target?.Name ?? $"TS{group.TsId}",
                 ["displayTitle"] = displayServiceName ?? target?.Name ?? $"TS{group.TsId}",
-                ["displayLogoPath"] = displayLogoPath ?? string.Empty,
-                ["titleBarLogoPath"] = displayLogoPath ?? string.Empty,
-                ["centerLogoPath"] = centerLogoPath ?? string.Empty,
-                ["displayLogoTitleBarType"] = displayLogoPaths.TitleBarLogoType?.ToString() ?? string.Empty,
-                ["displayLogoCenterType"] = displayLogoPaths.CenterLogoType?.ToString() ?? string.Empty,
-                ["displayLogoTarget"] = "worker_titlebar_center_only",
                 ["channelArgument"] = channelArgument,
                 // TvAIrEpgRec EPG modeでは短い ready-only/continuous デフォルト秒数を使わない。
                 // The default capped the read to 15s/200 chunks, which produced 51,200-packet TS files and
                 // low EPG imports.  Use the EPG-normalize route so the worker honors the requested EPG seconds
                 // and keeps the TS reader open long enough for schedule EIT to arrive.
                 ["getStreamVariant"] = getStreamVariant,
-                ["logoAcquisitionPolicy"] = logoPolicy,
                 ["targetEventsMin"] = "1",
                 ["readyThreshold"] = "50",
                 ["modeScope"] = isPreRecordCheck ? "target_event_pre_record_check" : "transport_stream_schedule_epg",
@@ -1952,7 +1927,7 @@ public sealed class EpgCapture
             var routeNid = isPreRecordCheck ? preRecordExecutionContract?.NetworkId : target?.OriginalNetworkId;
             var routeSid = isPreRecordCheck ? preRecordExecutionContract?.ServiceId : target?.ServiceId;
             Log("TVAIREPGREC_EPG_ROUTE", $"TS{group.TsId}",
-                $"result=SELECTED pid={process.Id} exe={SafeLogValue(exe)} job={SafeLogValue(jobPath)} result={SafeLogValue(resultPath)} progress={SafeLogValue(progressPath)} stopSignal={SafeLogValue(stopSignalPath)} service={SafeLogValue(displayServiceName ?? target?.Name)} nid={(routeNid?.ToString() ?? "-")} tsid={group.TsId} sid={(routeSid?.ToString() ?? "-")} targetSidCount={group.Targets.Count} targetSids=[{string.Join(",", group.Targets.Select(t => t.ServiceId).OrderBy(x => x))}] targetIdentitySource={(isPreRecordCheck ? "pre_record_execution_contract" : "ts_group_first_target")} expectedEventId={(preRecordExecutionContract?.EventId?.ToString() ?? "-")} scope={(isPreRecordCheck ? "target_event_pre_record_check" : "transport_stream_schedule_epg")} recordServiceScopeShared=false channelArgument={SafeLogValue(channelArgument)} bonDriverSetChannelSpace={(target?.ResolvedSpace.ToString() ?? "-")} bonDriverSetChannelIndex={(target?.ResolvedChannelIndex.ToString() ?? "-")} did={did} seconds={effectiveWait} hardDeadline={(preRecordExecutionContract?.HardDeadline.ToString("O") ?? "-")} getStreamVariant={SafeLogValue(getStreamVariant)} logoPolicy={SafeLogValue(logoPolicy)} output={SafeLogValue(tsFile)} route=TvAIrEpgRec mode={(isPreRecordCheck ? "epg-check" : "epg")} launchKind={launchKind} taskbarIconVisible={showWorkerTaskbarIcon} windowPolicy={windowPolicy} preTuneChainPosition={SafeLogValue(preTuneChainPosition)} preTuneAction={SafeLogValue(preTuneAction)} keepWorkerUntilSafetyCeiling={preTuneKeepWorkerUntilSafetyCeiling} titleBarLogoPath={SafeLogValue(displayLogoPath)} centerLogoPath={SafeLogValue(centerLogoPath)} logoTarget=worker_titlebar_center_only rule=epg_worker_display_contract");
+                $"result=SELECTED pid={process.Id} exe={SafeLogValue(exe)} job={SafeLogValue(jobPath)} result={SafeLogValue(resultPath)} progress={SafeLogValue(progressPath)} stopSignal={SafeLogValue(stopSignalPath)} service={SafeLogValue(displayServiceName ?? target?.Name)} nid={(routeNid?.ToString() ?? "-")} tsid={group.TsId} sid={(routeSid?.ToString() ?? "-")} targetSidCount={group.Targets.Count} targetSids=[{string.Join(",", group.Targets.Select(t => t.ServiceId).OrderBy(x => x))}] targetIdentitySource={(isPreRecordCheck ? "pre_record_execution_contract" : "ts_group_first_target")} expectedEventId={(preRecordExecutionContract?.EventId?.ToString() ?? "-")} scope={(isPreRecordCheck ? "target_event_pre_record_check" : "transport_stream_schedule_epg")} recordServiceScopeShared=false channelArgument={SafeLogValue(channelArgument)} bonDriverSetChannelSpace={(target?.ResolvedSpace.ToString() ?? "-")} bonDriverSetChannelIndex={(target?.ResolvedChannelIndex.ToString() ?? "-")} did={did} seconds={effectiveWait} hardDeadline={(preRecordExecutionContract?.HardDeadline.ToString("O") ?? "-")} getStreamVariant={SafeLogValue(getStreamVariant)} output={SafeLogValue(tsFile)} route=TvAIrEpgRec mode={(isPreRecordCheck ? "epg-check" : "epg")} launchKind={launchKind} taskbarIconVisible={showWorkerTaskbarIcon} windowPolicy={windowPolicy} preTuneChainPosition={SafeLogValue(preTuneChainPosition)} preTuneAction={SafeLogValue(preTuneAction)} keepWorkerUntilSafetyCeiling={preTuneKeepWorkerUntilSafetyCeiling} rule=epg_worker_display_contract");
 
             return new EpgWorkerLaunchResult(true, process.Id,
                 $"Started PID={process.Id}: {exe} --job \"{jobPath}\" --mode {(isPreRecordCheck ? "epg-check" : "epg")} output={tsFile}",
@@ -2291,7 +2266,7 @@ public sealed class EpgCapture
                 // EPG/EPG確認の実TS取得は TvAIrEpgRec 経由で実行する。
                 // 取得開始はグローバルゲートでシリアル化する。
                 // 録画前EPG確認は同一TS代表サービスで起動する場合があるため、
-                // ActivityKeeper/タスクバー識別は目的番組の expectedService を優先する。
+                // ワーカーのタスクバー識別は目的番組の expectedService を優先する。
                 var displayServiceName = ResolveActivityDisplayServiceName(group, isPreRecordCheck, preRecordExecutionContract?.ServiceId);
                 bool BindStartedProcessOwnership(EpgWorkerLaunchResult startedLaunch)
                 {
@@ -2395,7 +2370,7 @@ public sealed class EpgCapture
                 }
 
                 var primaryServiceName = displayServiceName;
-                using var activityHandle = tvTestActivity.AttachExisting(isPreRecordCheck ? "EPG確認中" : "EPG取得中", launch.ProcessId, primaryServiceName, workerName);
+                using var titleHandle = workerTitleTracker.AttachExisting(isPreRecordCheck ? "EPG確認中" : "EPG取得中", launch.ProcessId, primaryServiceName, workerName);
                 if (isPreRecordCheck)
                     Log("PRE_REC_EPG_PROBE_TVAIREPGREC_START", $"TS{group.TsId}", launch.Message);
                 else
@@ -6073,7 +6048,7 @@ public sealed class EpgCapture
         bool emitDiagnostics = true)
     {
         // release_contract: 通常EPGは「局単位」ではなく .ch2 由来の同一TS束で回す。
-        // 物理選局はTVTestでactiveかつChSet解決済みのChannelTargetを正本とする一方、
+        // この旧経路の物理選局はTVTestでactiveかつChSet解決済みのChannelTargetを使う。直接経路の計画は別に生成する。
         // 通常EPGのサービス収集範囲は同一NID/TSIDの.ch2記載サービス全体とする。
         // これにより、TVTestでOFFのサブサービスもEPGへ蓄積するが、検索・予約・録画の
         // active判定には一切昇格させない。PreRecはepgServiceStatesを渡さず従来どおりactive対象のみ。

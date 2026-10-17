@@ -1,7 +1,6 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Management;
 using System.Text.RegularExpressions;
-using System.Collections.Concurrent;
 
 namespace TvAIr.Core;
 
@@ -14,13 +13,6 @@ namespace TvAIr.Core;
 /// </summary>
 public static class TvTestProcessAuditor
 {
-    // release_contract: ActivityKeeper用TVTestはRecordingWorker録画のSleepGuard向け目印であり、
-    // 録画本体ではない。同一スキャン内でプロセスごとにNOTICEを出すとログ量が増えるため、
-    // スキャン単位で1行に集約し、同一内容は短時間抑止する。
-    private static readonly ConcurrentDictionary<string, DateTime> ActivityKeeperSummaryLastUtc = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly TimeSpan ActivityKeeperSummaryWindow = TimeSpan.FromSeconds(120);
-    private static readonly TimeSpan ActivityKeeperSummaryRetention = TimeSpan.FromMinutes(10);
-
     private static readonly Regex DidRegex = new(@"/DID\s+(\S+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex BonDriverRegex = new(@"/d\s+""?([^""\s]+\.dll)""?", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
@@ -81,7 +73,6 @@ public static class TvTestProcessAuditor
     private static ProcessSnapshot CaptureSnapshot(LogRepository log, string phase)
     {
         var processes = new List<TvTestProcessInfo>();
-        var activityKeepers = new List<ActivityKeeperNoticeItem>();
         try
         {
             var managedEntries = TvAirManagedProcessRegistry.GetAll();
@@ -100,23 +91,18 @@ public static class TvTestProcessAuditor
                     var cmd = TryGetCommandLine(managed.ProcessId) ?? string.Empty;
                     var did = string.IsNullOrWhiteSpace(managed.Did) ? ExtractDid(cmd) : managed.Did;
                     var bon = string.IsNullOrWhiteSpace(managed.BonDriverFileName) ? ExtractBonDriverFileName(cmd) : managed.BonDriverFileName;
-                    var managedActivityOnly = managed.IsActivityOnly;
                     var managedViewer = managed.IsViewer;
-                    var isEpg = managedActivityOnly && ContainsToken(managed.ActivityReason ?? string.Empty, "EPG");
-                    var isRecording = !managedActivityOnly && !managedViewer;
+                    var isEpg = false;
+                    var isRecording = !managedViewer;
                     var info = new TvTestProcessInfo(managed.ProcessId, proc.ProcessName, cmd, false, isRecording, isEpg, true, did, bon);
                     processes.Add(info);
 
                     log.Add("TVAIR_MANAGED_TVTEST_PROCESS", phase,
                         $"pid={managed.ProcessId} name={proc.ProcessName} purpose={managed.Purpose} " +
                         $"reservation={(managed.ReservationId.HasValue ? "R" + managed.ReservationId.Value : "-")} " +
-                        $"reason={SafeValue(managed.ActivityReason)} service={SafeValue(managed.ActivityServiceName)} " +
                         $"did={SafeValue(did)} bonDriver={SafeValue(bon)} ownershipSource=managed_registry rule=release_contract");
 
-                    if (managedActivityOnly)
-                    {
-                        activityKeepers.Add(new ActivityKeeperNoticeItem(managed.ProcessId, managed.ActivityServiceName, managed.ActivityReason));
-                    }
+
                 }
                 catch (ArgumentException)
                 {
@@ -139,46 +125,8 @@ public static class TvTestProcessAuditor
         {
             log.Add("TVAIR_MANAGED_PROCESS_SCAN", "ERROR", $"phase={phase} error={ex.Message}");
         }
-        EmitActivityKeeperSummary(log, phase, activityKeepers);
         return new ProcessSnapshot(processes);
     }
-
-    private static void EmitActivityKeeperSummary(LogRepository log, string phase, IReadOnlyList<ActivityKeeperNoticeItem> items)
-    {
-        if (items.Count == 0)
-        {
-            return;
-        }
-
-        var ordered = items
-            .OrderBy(i => SafeValue(i.ServiceName), StringComparer.OrdinalIgnoreCase)
-            .ThenBy(i => i.ProcessId)
-            .ToList();
-        var summary = string.Join(";", ordered.Select(i => $"pid={i.ProcessId}/service={SafeValue(i.ServiceName)}/reason={SafeValue(i.ActivityReason)}"));
-        var key = $"{phase}|{summary}";
-        var now = DateTime.UtcNow;
-        if (ActivityKeeperSummaryLastUtc.TryGetValue(key, out var last) && now - last < ActivityKeeperSummaryWindow)
-        {
-            return;
-        }
-
-        ActivityKeeperSummaryLastUtc[key] = now;
-        // 長期連続稼働保護: phase/PIDを含むログ抑制キーは実行ごとに変化するため、
-        // 抑制窓を十分に過ぎた項目をここで破棄し、録画・EPG回数に比例して増やさない。
-        foreach (var pair in ActivityKeeperSummaryLastUtc)
-        {
-            if (now - pair.Value > ActivityKeeperSummaryRetention)
-                ActivityKeeperSummaryLastUtc.TryRemove(pair.Key, out _);
-        }
-        log.Add("RECORDER_ACTIVITY_NOTICE", phase,
-            $"result=INFO count={ordered.Count} role=ActivityKeeper " +
-            "note=activity_keeper_tvtest_not_recording_route recordingWorkerFailure=False " +
-            $"action=sleepguard_marker_only summary={summary} " +
-            "rule=release_contract");
-    }
-
-    private static bool ContainsToken(string text, string token)
-        => text.Contains(token, StringComparison.OrdinalIgnoreCase);
 
     private static string? ExtractDid(string commandLine)
     {
@@ -236,7 +184,6 @@ public sealed record TvTestProcessInfo(
     string? Did,
     string? BonDriverFileName);
 
-internal sealed record ActivityKeeperNoticeItem(int ProcessId, string? ServiceName, string? ActivityReason);
 
 public sealed record ProcessSnapshot(IReadOnlyList<TvTestProcessInfo> Processes);
 

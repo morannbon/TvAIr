@@ -1787,12 +1787,7 @@ internal sealed record ViewerRestartSourceIdentity(
     }
 
     private static string NormalizeGroup(string? value)
-    {
-        var group = (value ?? string.Empty).Trim().ToUpperInvariant();
-        return group is "BS" or "CS" or "BS/CS" or "BSCS" ? "BSCS"
-            : group is "地上波" or "GR" or "GROUND" ? "GR"
-            : group;
-    }
+        => TunerDisplayName.NormalizeViewerLeaseGroup(value);
 
     private static string NormalizeBonDriver(string? value)
         => string.IsNullOrWhiteSpace(value) ? string.Empty : Path.GetFileName(value.Trim());

@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 
 <html lang="ja">
 <head>
@@ -6,22 +6,22 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.12"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.12"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.13"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.13"/>
 
-<link href="/tvair-ui-foundation.css?v=1.2.12" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.12" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.12" rel="stylesheet"/>
-<link href="/tvair-epg-panel.css?v=1.2.12" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.12" rel="stylesheet"/>
-<link href="/tvair-settings-host.css?v=1.2.12" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.2.13" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.13" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.13" rel="stylesheet"/>
+<link href="/tvair-epg-panel.css?v=1.2.13" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.13" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.13" rel="stylesheet"/>
 
-<script src="/tvair-theme.js?v=1.2.12"></script>
-<script src="/tvair-page-view-state.js?v=1.2.12"></script>
-<script src="/tvair-action-button-state.js?v=1.2.12"></script>
-<script src="/tvair-reservation-action-state.js?v=1.2.12"></script>
-<script>var TVA_IR_UI_VERSION="1.2.12";</script>
-<script src="/genre-shared.js?v=1.2.12"></script>
+<script src="/tvair-theme.js?v=1.2.13"></script>
+<script src="/tvair-page-view-state.js?v=1.2.13"></script>
+<script src="/tvair-action-button-state.js?v=1.2.13"></script>
+<script src="/tvair-reservation-action-state.js?v=1.2.13"></script>
+<script>var TVA_IR_UI_VERSION="1.2.13";</script>
+<script src="/genre-shared.js?v=1.2.13"></script>
 
 
 
@@ -142,10 +142,10 @@
 <button class="cfg-browse" onclick="browseFile('folder','cfg-data-dir',this)">参照...</button>
 </div>
 <div class="cfg-note" id="cfg-data-dir-currentview"></div>
-<div class="cfg-note">番組情報や予約など、TvAIrのデータ保存場所を変更する場合に指定します。通常は変更する必要はありません。</div>
+<div class="cfg-note">番組情報や予約などの保存場所です。通常は変更不要です。変更はTvAIrの再起動後に反映されます。</div>
 </div>
 <div class="cfg-row">
-<label class="ui-checkbox-inline"><input class="ui-check-inline" id="cfg-startup-enabled" type="checkbox"/> Windows起動時にTvAIrを自動起動する</label>
+<label class="ui-checkbox-inline"><input class="ui-check-inline" id="cfg-startup-enabled" type="checkbox"/> Windowsへのログイン時にTvAIrを自動起動する</label>
 </div>
 <div class="cfg-row">
 <label>WindowsログインID</label>
@@ -199,7 +199,7 @@
 <div class="cfg-panel" id="cfg-panel-tvtest">
 <div class="cfg-section">
 <div class="cfg-section-title">TVTest</div>
-<div class="cfg-note">TVTestで使用しているチャンネル設定ファイルを指定します。</div>
+<div class="cfg-note">使用するTVTestとBonDriverの場所、チャンネル設定ファイルを指定します。</div>
 <div class="cfg-row">
 <label>TVTest.exe のフルパス</label>
 <div class="cfg-input-wrap">
@@ -251,7 +251,7 @@
 <button class="cfg-browse" onclick="browseFile('chset','cfg-bscs-chset',this)">参照...</button>
 <button class="cfg-browse" type="button" onclick="document.getElementById('cfg-bscs-chset').value=''">ChSetを使わない</button>
 </div>
-<div class="cfg-note">ISDB-CではChSet.txtは不要です。空欄にすると、選択したBonDriver名に対応するch2をBonDriverフォルダ、次にTVTestフォルダから自動で読み込みます。DLL名の拡張子をch2に置き換えたファイルを使用します。ChSetの使用有無を切り替えたら保存後に再起動してください。PT3の既存設定はそのまま使えます。</div>
+<div class="cfg-note">ChSet.txtがない環境では空欄にします。選択したBonDriverのDLL名と同名のch2をBonDriverフォルダ、次にTVTestフォルダから探します。ChSet.txtの使用有無を切り替えたら保存後にTvAIrを再起動してください。</div>
 
 </div>
 </div>
@@ -265,7 +265,7 @@
 <input class="ui-input-w90" id="cfg-tuner-count" min="0" step="1" type="number"/>
 <button class="cfg-browse" id="cfg-tuner-apply-count" onclick="applyTunerCount()" type="button">設定欄を作成</button>
 </div>
-<div class="cfg-note">地デジ/BS/CSは3波を1つのBonDriverで扱える特定のチューナー向けです。</div>
+<div class="cfg-note">録画用と視聴用を合わせたチューナー枠の数を入力し「設定欄を作成」を押してください。</div>
 </div>
 <div class="cfg-tuner-table-scroll" tabindex="0" aria-label="チューナー設定一覧。幅が足りない場合は横にスクロールできます。">
 <table id="cfg-tuner-table">
@@ -288,10 +288,10 @@
 <tbody id="cfg-tuner-tbody"></tbody>
 </table>
 </div>
-<div class="cfg-note">ISDB-Cでは「TVTest」設定でChSet.txtを空欄にしてください。選択したBonDriverと同じ名前のch2を、指定済みのBonDriverフォルダ、次にTVTestフォルダから読み込みます。チューナーごとのファイル入力は不要です。</div>
-<div class="cfg-note">ChSetを使う／使わないの切替は保存後に再起動してください。同じパスのch2更新は次のチャンネル読込で反映します。</div>
-<div class="cfg-note">局名・選局番号の変更は更新したch2から読み込みます。局の識別番号（ONID／TSID／SID）が変わる移動ではEPGの再取得と予約の確認が必要です。旧番号の予約は自動移行しません。</div>
-<div class="cfg-note">録画用は予約録画、定時EPG取得、録画前EPG確認に使用します。視聴用は視聴専用です。</div>
+<div class="cfg-note">各枠で使用するBonDriverと放送波、用途を選択してください。ケーブルテレビ用のBonDriverは「CATV」を選択します。「地デジ/BS/CS」は1つのBonDriverで複数の放送波を扱う構成で使用します。</div>
+
+
+<div class="cfg-note">録画用は予約録画・EPG取得・録画前EPG確認に使用します。視聴用は対応プラグインからの視聴に使用します。</div>
 <div class="cfg-note">BonDriverが未設定のチューナーは使用されません。</div>
 
 </div>
@@ -340,7 +340,7 @@
 <div class="cfg-row" id="cfg-chain-row">
 <label>チェーン予約</label>
 <label class="ui-checkbox-inline"><input class="ui-check-inline" id="cfg-chain-recording" type="checkbox"/> チェーン予約を実行する</label>
-<div class="cfg-note">「後番組を優先する」を選ぶと設定できます。同じ放送局で連続する番組を前後とも欠損なく録画し各番組をマージンを確保した別のTSファイルとして保存します。番組表のチェーンボタンから追加でき予約リストでは「(C)」を表示します。無効にしても未開始の予約は削除せず通常予約として残します。</div>
+<div class="cfg-note">「後番組を優先する」を選ぶと設定できます。同じ局の連続番組を番組境界で受信を止めずに録画し、重なる録画マージンも各番組の別TSファイルへ保存します。番組表のチェーンボタンで追加した予約は「(C)」と表示します。無効にしても未開始の予約は通常予約として残ります。</div>
 </div>
 
 </div>
@@ -458,9 +458,9 @@
 </div>
 </div>
 </div>
-<script src="/tvair-notification.js?v=1.2.12"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.12"></script>
-<script src="/tvair-epg-widget.js?v=1.2.12"></script>
+<script src="/tvair-notification.js?v=1.2.13"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.13"></script>
+<script src="/tvair-epg-widget.js?v=1.2.13"></script>
 <script>
 const PROGRAM_GUIDE_GEOMETRY=Object.freeze({
   dayStartHour:4,
@@ -4774,7 +4774,7 @@ function completeCfgSave(){
   hideCfgModal();
 }
 window.TvAIrSettingsModule = window.TvAIrSettingsModule || {
-  version:'1.2.12',
+  version:'1.2.13',
   open:()=>showCfgModal(),
   close:()=>hideCfgModal(),
   contract:'single-settings-module-web-modal-basis'
@@ -4862,6 +4862,7 @@ function normalizeTunerGroup(group){
   const g=(group||'').toString().trim().toUpperCase();
   if(g==='BSCS' || g==='BS/CS') return 'BSCS';
   if(g==='GR' || g==='地上波') return 'GR';
+  if(g==='CATV') return 'CATV';
   if(g==='HYBRID' || g==='GRBSCS' || g==='GR/BSCS' || g==='GR/BS/CS' || g==='地/BS/CS' || g==='地デジ/BS/CS' || g==='地上波/BS/CS') return 'HYBRID';
   return '';
 }
@@ -4869,6 +4870,7 @@ function virtualTunerPrefix(group){
   const g=normalizeTunerGroup(group);
   if(g==='BSCS') return 'S';
   if(g==='HYBRID') return 'M';
+  if(g==='CATV') return 'C';
   if(g==='GR') return 'T';
   return 'U';
 }
@@ -4878,7 +4880,7 @@ function virtualTunerName(group, ordinal){
 function buildTunerGroupSelect(selectedValue){
   const sel=document.createElement('select');
   const selected=normalizeTunerGroup(selectedValue);
-  [['','未選択'],['GR','地上波'],['BSCS','BS/CS'],['HYBRID','地デジ/BS/CS']].forEach(([value,label])=>{
+  [['','未選択'],['GR','地上波'],['BSCS','BS/CS'],['HYBRID','地デジ/BS/CS'],['CATV','CATV']].forEach(([value,label])=>{
     const o=document.createElement('option'); o.value=value; o.textContent=label;
     if(value===selected) o.selected=true;
     sel.appendChild(o);
@@ -4923,7 +4925,7 @@ function defaultTunerData(index, total){
   };
 }
 function refreshTunerVirtualNames(){
-  const counters={GR:0,BSCS:0,HYBRID:0};
+  const counters={GR:0,BSCS:0,HYBRID:0,CATV:0};
   [...document.querySelectorAll('#cfg-tuner-tbody tr')].forEach((tr, idx)=>{
     const group=normalizeTunerGroup(tr.querySelector('.cfg-tuner-group-select')?.value || '');
     counters[group]=(counters[group]||0)+1;
@@ -4941,6 +4943,9 @@ function makeTunerRow(t, idx){
   const initialGroup=normalizeTunerGroup(t.group || '');
   const initialDid=(t.did||nextDid(idx)).toString().trim().toUpperCase();
   tr.dataset.did=initialDid;
+  tr.dataset.logicalViewerSlotId=t.logicalViewerSlotId || '';
+  tr.dataset.channelCh2Path=t.channelCh2Path || '';
+  tr.dataset.channelSourceBonDriver=t.bonDriverFileName || '';
 
   const tdName=document.createElement('td');
   tdName.className='cfg-tuner-virtual-cell cfg-tuner-name-cell';
@@ -5036,6 +5041,11 @@ function collectTuners(){
       group,
       did,
       role: normalizeTunerRole(roleValue),
+      logicalViewerSlotId: tr.dataset.logicalViewerSlotId || '',
+      // A saved explicit table belongs to its original driver. A changed driver
+      // uses automatic lookup; restoring the original selection restores its table.
+      channelCh2Path: bon.trim().toUpperCase()===(tr.dataset.channelSourceBonDriver || '').trim().toUpperCase()
+        ? (tr.dataset.channelCh2Path || '') : '',
       deviceNumber: Math.max(1, parseInt(tr.dataset.deviceNumber || '1', 10) || 1),
     };
   });
@@ -5792,8 +5802,8 @@ if(!tvairSettingsFrameMode){
   bindGuideTopOperationUi();
 }
 </script>
-<script src="/tvair-settings-host.js?v=1.2.12"></script>
-<script src="/tvair-menu-spine.js?v=1.2.12"></script>
+<script src="/tvair-settings-host.js?v=1.2.13"></script>
+<script src="/tvair-menu-spine.js?v=1.2.13"></script>
 <script>
 (function(){
   try{
@@ -5807,4 +5817,5 @@ if(!tvairSettingsFrameMode){
 </script>
 </body>
 </html>
+
 

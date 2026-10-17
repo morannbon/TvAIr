@@ -206,7 +206,7 @@ internal static class Program
         if (name is "window" or "fallback-selection")
         {
             var snapshotType = presentation.GetNestedType("PresentationSnapshot", BindingFlags.NonPublic)!;
-            var snapshot = Activator.CreateInstance(snapshotType, "EPG取得 テスト", null, null)!;
+            var snapshot = Activator.CreateInstance(snapshotType, "EPG取得 テスト")!;
             var windowType = presentation.GetNestedType("WorkerWindow", BindingFlags.NonPublic)!;
             using var window = (Form)Activator.CreateInstance(windowType, PrivateInstance, null, new[] { snapshot }, null)!;
             var activations = 0;
@@ -228,23 +228,16 @@ internal static class Program
             Native.ShowWindow(hwnd, 9); // A deliberate user restore, on the isolated desktop only.
             Application.DoEvents();
             Check(!Native.IsIconic(hwnd) && Native.GetActiveWindow() == hwnd, "user restore remains possible");
-            Check(window.Controls[0].IsHandleCreated, "restored logo control has a handle");
+            Check(window.Controls.Count == 0, "worker must not create a channel-logo control");
             Native.SetActiveWindow(anchorHandle);
             activations = 0;
-            using var logo = new Bitmap(24, 24);
-            var logoPath = Path.Combine(Path.GetDirectoryName(workerDll)!, "focus-test-logo.png");
-            logo.Save(logoPath);
-            try
-            {
-                var updated = Activator.CreateInstance(snapshotType, "EPG取得 次の局", logoPath, logoPath)!;
-                windowType.GetMethod("Apply", PrivateInstance)!.Invoke(window, new[] { updated });
-                Application.DoEvents();
-                Check(window.Handle == hwnd && window.Text == "EPG取得 次の局", "content update preserves handle");
-                Check(!Native.IsIconic(hwnd), "updates must not minimize a user-restored window");
-                Check(activations == 0 && Native.GetActiveWindow() == anchorHandle, "title/logo update must not activate");
-                Check(((PictureBox)window.Controls[0]).Image is not null && window.Icon is not null, "logo/icon preserved");
-            }
-            finally { File.Delete(logoPath); }
+            var updated = Activator.CreateInstance(snapshotType, "EPG取得 次の局")!;
+            windowType.GetMethod("Apply", PrivateInstance)!.Invoke(window, new[] { updated });
+            Application.DoEvents();
+            Check(window.Handle == hwnd && window.Text == "EPG取得 次の局", "content update preserves handle");
+            Check(!Native.IsIconic(hwnd), "updates must not minimize a user-restored window");
+            Check(activations == 0 && Native.GetActiveWindow() == anchorHandle, "title update must not activate");
+            Check(window.Controls.Count == 0, "title update must not add channel-logo controls");
             return;
         }
 

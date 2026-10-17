@@ -1,4 +1,4 @@
-namespace TvAIr.Core;
+﻿namespace TvAIr.Core;
 
 /// <summary>
 /// アプリ全体の設定。appsettings.json の各セクションにバインドされる。
@@ -49,6 +49,19 @@ public sealed class TvTestSettings
 /// </summary>
 public static class TunerDisplayName
 {
+    // Preserve the narrower legacy viewer/lease alias contract independently
+    // of persisted tuner names and broadcast-wave display classification.
+    internal static string NormalizeViewerLeaseGroup(string? value)
+    {
+        var group = (value ?? string.Empty).Trim().ToUpperInvariant();
+        return group switch
+        {
+            "BS" or "CS" or "BS/CS" or "BSCS" => "BSCS",
+            "地上波" or "GR" or "GROUND" => "GR",
+            _ => group
+        };
+    }
+
     public static string NormalizeGroup(string? group)
     {
         var raw = (group ?? string.Empty).Trim();
@@ -57,6 +70,7 @@ public static class TunerDisplayName
         {
             "GR" or "地上波" or "地デジ" or "GROUND" => "GR",
             "BS" or "CS" or "BSCS" or "BS/CS" => "BSCS",
+            "CATV" => "CATV",
             "HYBRID" or "GRBSCS" or "GR/BSCS" or "GR/BS/CS" or "地/BS/CS" or "地デジ/BS/CS" or "地上波/BS/CS" => "HYBRID",
             _ => raw
         };
@@ -141,7 +155,7 @@ public sealed class TunerProfile
     /// <summary>Optional .ch2 produced for this BonDriver. Empty means legacy channel resolution.</summary>
     public string ChannelCh2Path { get; set; } = "";
 
-    /// <summary>グループ (GR / BSCS / HYBRID)</summary>
+    /// <summary>グループ (GR / BSCS / HYBRID / CATV)</summary>
     public string Group { get; set; } = "";
 
     /// <summary>

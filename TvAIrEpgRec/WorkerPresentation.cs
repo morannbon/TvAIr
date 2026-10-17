@@ -1,6 +1,4 @@
 using System.Drawing;
-using System.Drawing.Drawing2D;
-using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using TvAIr.Workers;
 
@@ -14,7 +12,7 @@ internal static class WorkerPresentation
     private static readonly object Gate = new();
     private static readonly Dictionary<int, RecordingDisplay> ActiveRecordings = new();
 
-    private static PresentationBase _base = new("TvAIrEpgRec", null, null, false);
+    private static PresentationBase _base = new("TvAIrEpgRec", false);
     private static RecordingDisplay? _lastRecording;
     private static long _sequence;
     private static Thread? _uiThread;
@@ -152,8 +150,7 @@ internal static class WorkerPresentation
 
         var shortSubject = TrimForTitle(subject, 44);
         var caption = string.IsNullOrWhiteSpace(shortSubject) ? modeLabel : $"{modeLabel} {shortSubject}";
-        var logos = GetLogoPaths(job);
-        return new PresentationBase(caption, logos.TitleBarLogoPath, logos.CenterLogoPath,
+        return new PresentationBase(caption,
             normalizedMode.Equals("record", StringComparison.OrdinalIgnoreCase));
     }
 
@@ -173,7 +170,7 @@ internal static class WorkerPresentation
             // Do not regress to the process-launch title while the worker is completing the final segment.
             current ??= _lastRecording;
         }
-        return new PresentationSnapshot(current?.Title ?? _base.Title, _base.TitleBarLogoPath, _base.CenterLogoPath);
+        return new PresentationSnapshot(current?.Title ?? _base.Title);
     }
 
     private static void Project(PresentationSnapshot snapshot)
@@ -231,20 +228,6 @@ internal static class WorkerPresentation
         }
     }
 
-    private static LogoPaths GetLogoPaths(TvAIrEpgRecJob? job)
-    {
-        if (job?.Metadata == null) return new LogoPaths(null, null);
-        var titleBar = FirstNonEmpty(
-            job.Metadata.TryGetValue("titleBarLogoPath", out var titleBarLogoPath) ? titleBarLogoPath : null,
-            job.Metadata.TryGetValue("displayLogoPath", out var displayLogoPath) ? displayLogoPath : null,
-            job.Metadata.TryGetValue("serviceLogoPath", out var serviceLogoPath) ? serviceLogoPath : null,
-            job.Metadata.TryGetValue("logoPath", out var logoPath) ? logoPath : null);
-        var center = FirstNonEmpty(
-            job.Metadata.TryGetValue("centerLogoPath", out var centerLogoPath) ? centerLogoPath : null,
-            job.Metadata.TryGetValue("displayLogoPath", out var displayLogoPath2) ? displayLogoPath2 : null);
-        return new LogoPaths(titleBar, center);
-    }
-
     private static string FirstNonEmpty(params string?[] values)
         => values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim() ?? string.Empty;
 
@@ -256,10 +239,9 @@ internal static class WorkerPresentation
         return normalized.Length <= max ? normalized : normalized[..Math.Max(0, max - 1)] + "…";
     }
 
-    private sealed record PresentationBase(string Title, string? TitleBarLogoPath, string? CenterLogoPath, bool IsRecordingMode);
+    private sealed record PresentationBase(string Title, bool IsRecordingMode);
     private sealed record RecordingDisplay(int ReservationId, string Title, long Sequence);
-    private sealed record PresentationSnapshot(string Title, string? TitleBarLogoPath, string? CenterLogoPath);
-    private sealed record LogoPaths(string? TitleBarLogoPath, string? CenterLogoPath);
+    private sealed record PresentationSnapshot(string Title);
 
     // One and only one top-level user-visible worker window.
     // Presentation is a background worker surface: visible on the taskbar when configured,
@@ -268,12 +250,7 @@ internal static class WorkerPresentation
     {
         private const int WsExNoActivate = 0x08000000;
         private const int WsExAppWindow = 0x00040000;
-        private readonly System.Windows.Forms.PictureBox _pictureBox = new();
-        private Image? _currentImage;
-        private Icon? _currentIcon;
-        private string? _titleBarLogoPath;
-        private string? _centerLogoPath;
-        private bool _visualInitialized;
+        private Icon? _applicationIcon;
 
         internal WorkerWindow(PresentationSnapshot initial)
         {
@@ -286,11 +263,13 @@ internal static class WorkerPresentation
             MaximizeBox = false;
             BackColor = Color.FromArgb(238, 238, 238);
 
-            _pictureBox.Dock = System.Windows.Forms.DockStyle.Fill;
-            _pictureBox.BackColor = Color.FromArgb(238, 238, 238);
-            _pictureBox.SizeMode = System.Windows.Forms.PictureBoxSizeMode.CenterImage;
-            _pictureBox.Padding = new System.Windows.Forms.Padding(12);
-            Controls.Add(_pictureBox);
+            // Standard application icon only; no channel-logo files or projection.
+            try
+            {
+                _applicationIcon = Icon.ExtractAssociatedIcon(Environment.ProcessPath ?? string.Empty);
+                if (_applicationIcon is not null) Icon = _applicationIcon;
+            }
+            catch { }
 
             Apply(initial);
         }
@@ -385,131 +364,14 @@ internal static class WorkerPresentation
 #endif
             }
 
-            var visualChanged = !_visualInitialized
-                || !string.Equals(_titleBarLogoPath, snapshot.TitleBarLogoPath, StringComparison.OrdinalIgnoreCase)
-                || !string.Equals(_centerLogoPath, snapshot.CenterLogoPath, StringComparison.OrdinalIgnoreCase);
-
-            if (visualChanged)
-            {
-                _titleBarLogoPath = snapshot.TitleBarLogoPath;
-                _centerLogoPath = snapshot.CenterLogoPath;
-                using var iconSource = LoadLogoOrFallback(snapshot.TitleBarLogoPath);
-                using var centerSource = LoadLogoOrFallback(snapshot.CenterLogoPath ?? snapshot.TitleBarLogoPath);
-                SetWindowIcon(iconSource);
-                SetCenterImage(centerSource);
-                _visualInitialized = true;
-            }
-
         }
-
-        private void SetWindowIcon(Bitmap source)
-        {
-            try
-            {
-                var icon = CreateIconFromBitmap(source, 64);
-                if (icon is null) return;
-                var previous = _currentIcon;
-                _currentIcon = icon;
-                Icon = icon;
-                previous?.Dispose();
-            }
-            catch { }
-        }
-
-        private void SetCenterImage(Bitmap source)
-        {
-            var size = Math.Max(48, Math.Min(96, Math.Min(ClientSize.Width, ClientSize.Height) - 24));
-            var canvas = new Bitmap(size, size, PixelFormat.Format32bppArgb);
-            using (var g = Graphics.FromImage(canvas))
-            {
-                g.Clear(Color.Transparent);
-                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                g.SmoothingMode = SmoothingMode.HighQuality;
-                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                var maxW = size - 8f;
-                var maxH = size - 8f;
-                var scale = Math.Min(maxW / Math.Max(1, source.Width), maxH / Math.Max(1, source.Height));
-                var w = Math.Max(1, (int)Math.Round(source.Width * scale));
-                var h = Math.Max(1, (int)Math.Round(source.Height * scale));
-                g.DrawImage(source, new Rectangle((size - w) / 2, (size - h) / 2, w, h));
-            }
-
-            var previous = _currentImage;
-            _currentImage = canvas;
-            _pictureBox.Image = canvas;
-            previous?.Dispose();
-        }
-
-        private static Bitmap LoadLogoOrFallback(string? logoPath)
-        {
-            try
-            {
-                if (!string.IsNullOrWhiteSpace(logoPath) && File.Exists(logoPath)) return new Bitmap(logoPath);
-            }
-            catch { }
-
-            try
-            {
-                using var appIcon = Icon.ExtractAssociatedIcon(Environment.ProcessPath ?? string.Empty);
-                if (appIcon is not null) return appIcon.ToBitmap();
-            }
-            catch { }
-
-            var fallback = new Bitmap(64, 64, PixelFormat.Format32bppArgb);
-            using var g = Graphics.FromImage(fallback);
-            g.Clear(Color.Transparent);
-            using var brush = new SolidBrush(Color.FromArgb(34, 34, 34));
-            using var pen = new Pen(Color.FromArgb(210, 24, 24), 5);
-            g.FillRectangle(brush, new Rectangle(8, 8, 48, 48));
-            g.DrawLine(pen, 25, 20, 25, 44);
-            g.DrawLine(pen, 25, 20, 44, 32);
-            g.DrawLine(pen, 44, 32, 25, 44);
-            return fallback;
-        }
-
-        private static Icon? CreateIconFromBitmap(Bitmap source, int size)
-        {
-            IntPtr handle = IntPtr.Zero;
-            try
-            {
-                using var canvas = new Bitmap(size, size, PixelFormat.Format32bppArgb);
-                using (var g = Graphics.FromImage(canvas))
-                {
-                    g.Clear(Color.Transparent);
-                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                    g.SmoothingMode = SmoothingMode.HighQuality;
-                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                    var maxW = size - 6f;
-                    var maxH = size - 6f;
-                    var scale = Math.Min(maxW / Math.Max(1, source.Width), maxH / Math.Max(1, source.Height));
-                    var w = Math.Max(1, (int)Math.Round(source.Width * scale));
-                    var h = Math.Max(1, (int)Math.Round(source.Height * scale));
-                    g.DrawImage(source, new Rectangle((size - w) / 2, (size - h) / 2, w, h));
-                }
-
-                handle = canvas.GetHicon();
-                using var temp = Icon.FromHandle(handle);
-                return (Icon)temp.Clone();
-            }
-            catch { return null; }
-            finally
-            {
-                if (handle != IntPtr.Zero) DestroyIcon(handle);
-            }
-        }
-
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern bool DestroyIcon(IntPtr hIcon);
 
         protected override void Dispose(bool disposing)
         {
             if (disposing)
             {
-                _pictureBox.Image = null;
-                _currentImage?.Dispose();
                 Icon = null;
-                _currentIcon?.Dispose();
-                _pictureBox.Dispose();
+                _applicationIcon?.Dispose();
             }
             base.Dispose(disposing);
         }

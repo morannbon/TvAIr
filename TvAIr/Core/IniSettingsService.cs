@@ -1,4 +1,4 @@
-namespace TvAIr.Core;
+﻿namespace TvAIr.Core;
 
 /// <summary>
 /// TvAIr.ini を読み書きするサービス。
@@ -361,7 +361,7 @@ public sealed class IniSettingsService
         TaskPasswordEncrypted = GetStr(dict, "TaskPasswordEncrypted", TaskPasswordEncrypted);
 
         // チューナー個別設定
-        // 形式: Tuner1 = 名前, BonDriverファイル名, GR/BSCS/HYBRID, DID, Role, LogicalViewerSlotId, DeviceNumber
+        // 形式: Tuner1 = 名前, BonDriverファイル名, GR/BSCS/HYBRID/CATV, DID, Role, LogicalViewerSlotId, DeviceNumber
         Tuners = new List<TunerProfileDto>();
         var count = GetInt(dict, "TunerCount", 0);
 
@@ -1260,7 +1260,7 @@ public sealed class IniSettingsService
             // Keep compatibility with previously delivered developer configurations.
             if (!string.IsNullOrWhiteSpace(tuner.ChannelCh2Path)) continue;
             var group = TunerDisplayName.NormalizeGroup(tuner.Group);
-            var automatic = group == "HYBRID"
+            var automatic = group is "HYBRID" or "CATV"
                 || (group == "GR" && string.IsNullOrWhiteSpace(GrChSetFilePath))
                 || (group == "BSCS" && string.IsNullOrWhiteSpace(BscsChSetFilePath));
             if (!automatic || string.IsNullOrWhiteSpace(tuner.BonDriverFileName)) continue;

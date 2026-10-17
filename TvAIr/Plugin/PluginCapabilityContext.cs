@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text.Json;
 using TvAIr.Channel;
 using TvAIr.Core;
@@ -1969,7 +1969,8 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
                 ChannelIndex = result.ChannelIndex,
                 ViewerState = result.ViewerState,
                 Diagnostics = result.Diagnostics,
-                // SDK 1.1.2 compatibility only. Foreground restore is intentionally not performed by Host.
+                // SDK 1.1.2 compatibility only. Host neither measures nor restores foreground here.
+                // False plus not_measured means unknown, not an observed focus loss.
                 FocusPolicyRequested = "not_requested",
                 FocusPolicyApplied = "not_requested",
                 ForegroundBeforeHwnd = null,
@@ -1982,8 +1983,8 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
                 ChangedToTargetViewer = false,
                 RestorationAttempted = false,
                 RestorationSucceeded = false,
-                FocusPreserved = true,
-                FocusPreserveFailureReason = string.Empty,
+                FocusPreserved = false,
+                FocusPreserveFailureReason = "not_measured",
                 OperationCompleted = result.OperationCompleted,
                 HasWarning = result.HasWarning,
                 ContinuationRecommended = result.ContinuationRecommended

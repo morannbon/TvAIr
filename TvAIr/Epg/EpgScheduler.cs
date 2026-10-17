@@ -1,4 +1,4 @@
-using TvAIr.Epg.Projection;
+﻿using TvAIr.Epg.Projection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Win32;
 using TvAIr.Channel;
@@ -1431,7 +1431,7 @@ public sealed class EpgScheduler : BackgroundService
                 EpgRecordingHandoffPolicy.LatestNormalEpgEndBeforeRecording(r.StartTime, ini.PreStartMarginSeconds),
                 r.EndTime + post,
                 r.Id))
-            .Where(x => x.Group is "GR" or "BSCS")
+            .Where(x => x.Group is "GR" or "BSCS" or "CATV")
             .ToArray();
 
         var required = TimeSpan.FromSeconds(requiredSeconds);
@@ -1537,7 +1537,7 @@ public sealed class EpgScheduler : BackgroundService
     private int EnsureDailyProjection(DailyEpgRunState state, bool refreshAllocationRoute)
     {
         var changed = 0;
-        var recordingTunersByGroup = new[] { "GR", "BSCS", "HYBRID" }
+        var recordingTunersByGroup = new[] { "GR", "BSCS", "HYBRID", "CATV" }
             .ToDictionary(
                 group => group,
                 group => GetScheduledRecordingTuners(group).Where(t => NormalizeEpgScheduleGroup(t.Group) == group).ToArray(),
@@ -1979,7 +1979,22 @@ public sealed class EpgScheduler : BackgroundService
     }
 
     private string ResolveReservationGroup(Reservation r)
-        => serviceAccess.Capture().ResolveSchedulingGroup(r, tunerProfiles);
+    {
+        var access = serviceAccess.Capture();
+        var recording = tunerProfiles.Where(t => string.Equals(t.Role, "Recording", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var assignedName = r.Status is ReservationStatus.Starting or ReservationStatus.Recording or ReservationStatus.Stopping
+            && !string.IsNullOrWhiteSpace(r.ActualTunerName) ? r.ActualTunerName : r.TunerName;
+        // Occupancy follows the assigned physical cable route, not the NID of
+        // a retransmitted service. Viewing-only slots do not define recording capacity.
+        if (recording.Any(t => TunerDisplayName.NormalizeGroup(t.Group) == "CATV"
+            && !string.IsNullOrWhiteSpace(assignedName)
+            && string.Equals(t.Name, assignedName, StringComparison.OrdinalIgnoreCase)
+            && access.CanTune(t, r)))
+            return "CATV";
+        if (recording.Length > 0 && recording.All(t => TunerDisplayName.NormalizeGroup(t.Group) == "CATV"))
+            return access.ResolveSchedulingGroup(r, recording);
+        return access.ResolveSchedulingGroup(r, tunerProfiles);
+    }
 
     private int EstimateEpgRequiredSeconds(string targetScope, string? depth = null)
         => EstimateEpgDuration(targetScope, SettingsDefaults.NormalizeEpgDepth(depth ?? _currentDepth)).RequiredSeconds;
@@ -2044,13 +2059,21 @@ public sealed class EpgScheduler : BackgroundService
         }
     }
 
-    private static IEnumerable<string> GroupsForScope(string normalizedScope)
+    private IEnumerable<string> GroupsForScope(string normalizedScope)
     {
         var scope = string.IsNullOrWhiteSpace(normalizedScope) ? "ALL" : normalizedScope.Trim().ToUpperInvariant();
-        if (scope is "GR") return new[] { "GR" };
-        if (scope is "BS" or "CS" or "BSCS") return new[] { "BSCS" };
-        if (scope is "HYBRID" or "CATV" or "ISDB-C") return new[] { "HYBRID" };
-        return new[] { "GR", "BSCS", "HYBRID" };
+        var groups = scope switch
+        {
+            "GR" => new[] { "GR" },
+            "BS" or "CS" or "BSCS" => new[] { "BSCS" },
+            "HYBRID" or "CATV" or "ISDB-C" => new[] { "HYBRID" },
+            _ => new[] { "GR", "BSCS", "HYBRID" }
+        };
+        // Normal EPG reserves recording capacity by wave/physical group. Cable
+        // capacity can carry any displayed wave; keep its occupation distinct.
+        return tunerProfiles.Any(t => string.Equals(t.Role, "Recording", StringComparison.OrdinalIgnoreCase)
+            && TunerDisplayName.NormalizeGroup(t.Group) == "CATV")
+            ? groups.Append("CATV") : groups;
     }
 
     private static string NormalizeBlockedReason(string? reason)
@@ -2245,7 +2268,7 @@ public sealed class EpgScheduler : BackgroundService
             }
 
             log.Add("EPG_PIPELINE_AUDIT", "RunWithGuard",
-                $"source={requestedBy} silent={silent} uiMode={(silent ? "Silent" : "Visible")} targetScope={targetScope} depth={runDepth} sameCapturePipeline=True commonRouteAction={routeAction} runScopedActivityKeeper=False activityKeeperTvTest=False rule=release_contract");
+                $"source={requestedBy} silent={silent} uiMode={(silent ? "Silent" : "Visible")} targetScope={targetScope} depth={runDepth} sameCapturePipeline=True commonRouteAction={routeAction} rule=release_contract");
             var captureResult = await capture.RunAsync(
                 ct,
                 targetScope,

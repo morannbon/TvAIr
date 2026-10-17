@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Collections.Concurrent;
 using System.Management;
 using System.Text.Json;
@@ -46,9 +46,7 @@ private readonly ReservationStore _store;
     private readonly IProgramEventSource _programEvents;
     private readonly EpgCapture _epgCapture;
     private readonly EpgStore _epgStore;
-    private readonly TvTestActivityKeeper _tvTestActivity;
     private readonly ChainRuntimeSnapshotRegistry _chainSessionRegistry;
-    private readonly ServiceLogoStore _serviceLogoStore;
     private readonly UserEventLogService _userEvents;
     private readonly PluginTypedEventHub _typedEvents;
     private readonly RecordingResultStore _recordingResults;
@@ -137,10 +135,9 @@ private readonly ReservationStore _store;
 
     internal sealed record RecordingAbortCleanupResult(
         bool WorkerIdentityGone,
-        bool ActivityHandleReleased,
         bool LeaseReleaseCompleted)
     {
-        public bool Complete => WorkerIdentityGone && ActivityHandleReleased && LeaseReleaseCompleted;
+        public bool Complete => WorkerIdentityGone && LeaseReleaseCompleted;
     }
 
     private sealed record ResidualRecordingWorkerQuarantine(
@@ -261,9 +258,7 @@ private readonly ReservationStore _store;
         IProgramEventSource programEvents,
         EpgCapture epgCapture,
         EpgStore epgStore,
-        TvTestActivityKeeper tvTestActivity,
         ChainRuntimeSnapshotRegistry chainSessionRegistry,
-        ServiceLogoStore serviceLogoStore,
         UserEventLogService userEvents,
         PluginTypedEventHub typedEvents,
         RecordingResultStore recordingResults,
@@ -283,9 +278,7 @@ private readonly ReservationStore _store;
         _programEvents = programEvents;
         _epgCapture = epgCapture;
         _epgStore = epgStore;
-        _tvTestActivity = tvTestActivity;
         _chainSessionRegistry = chainSessionRegistry;
-        _serviceLogoStore = serviceLogoStore;
         _userEvents = userEvents;
         _typedEvents = typedEvents;
         _recordingResults = recordingResults;
@@ -1047,7 +1040,6 @@ private readonly ReservationStore _store;
                 runtimeStatsPath,
                 worker.JobPath,
                 postEndMarginSeconds,
-                activityHandle: null,
                 chainControlPath: isSharedReattach ? chainControlPath : string.Empty,
                 sharedCaptureRootReservationId: isSharedReattach ? (sharedCaptureRootReservationId ?? metadataReservationId) : null);
             // RECORDING_REATTACH_COMMIT_INVARIANT:
@@ -1669,7 +1661,6 @@ private readonly ReservationStore _store;
 
         foreach (var candidate in removed.Distinct())
         {
-            try { candidate.ActivityHandle?.Dispose(); } catch { }
             try { candidate.Lease.Dispose(); } catch { }
             try { TvAirManagedProcessRegistry.Unregister(candidate.ProcessId); } catch { }
             RemoveChainRuntimeSnapshot(candidate.ReservationId, reason, "dead_runtime_owner_cleanup");
@@ -3780,9 +3771,6 @@ private readonly ReservationStore _store;
         _log.Add("REC_OPERATIONAL_MODE", $"R{r.Id}",
             $"mode=TvAIrEpgRecProduction legacyTvTestRecording=False nativeRecProbe=False legacyRecorderExecutableDependency=false service={SafeValue(r.ServiceName)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} channelArg={SafeValue(channelArg)} rule=release_contract");
 
-        TvTestActivityHandle? activityHandle = null;
-        _log.Add("RECORDER_ACTIVITY", "RECORD_KEEPER_DISABLED",
-            $"reservation=R{r.Id} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title, 80)} reason=recording_process_monitor_migrated_to_tvairepgrec action=no_activitykeeper_tvtest_started rule=release_contract");
         // TUNER_DEVICE_GATE_SCOPE_INVARIANT:
         // 放送波GateはBonDriver Openの同時衝突だけを防ぐ。TvAIrEpgRecがOpenTunerOkを報告した時点で
         // 対象workerは自身のDID/物理デバイス所有を確立済みなので、TS開始・ファイル生成・完全Ready待ちまで
@@ -3814,7 +3802,6 @@ private readonly ReservationStore _store;
         }
         if (!directStart.Success)
         {
-            activityHandle?.Dispose();
             lease.Dispose();
             // RECORDING_START_TRANSIENT_FAILURE_INVARIANT:
             // OpenTuner失敗やOpen前worker終了は、通常due／チェーン境界の入口差に関係なく一時失敗として扱う。
@@ -3844,7 +3831,7 @@ private readonly ReservationStore _store;
             ? directStart.ChainSegmentRuntimeStatsPath
             : directStart.RuntimeStatsPath;
         var session = new RecordingSession(
-            r.Id, directStart.ProcessId, plannedEnd, lease, directStart.OutputPath, effectiveResponsePath, directStart.StopSignalPath, directStart.ProgressPath, effectiveRuntimeStatsPath, directStart.JobPath, postEndMarginSeconds, activityHandle,
+            r.Id, directStart.ProcessId, plannedEnd, lease, directStart.OutputPath, effectiveResponsePath, directStart.StopSignalPath, directStart.ProgressPath, effectiveRuntimeStatsPath, directStart.JobPath, postEndMarginSeconds,
             chainControlPath: directStart.ChainControlPath,
             sharedCaptureRootReservationId: directStart.ContinuousChainCapture ? (r.UserChainRootId ?? r.Id) : null,
             physicalCapturePlannedEndTime: physicalCaptureEnd);
@@ -4185,13 +4172,6 @@ private readonly ReservationStore _store;
         var recordingWorkerChannelIndex = ResolveRecordingWorkerChannelIndex(resolvedChannel);
         var recordingWorkerChannelReason = ResolveRecordingWorkerChannelReason(resolvedChannel, recordingWorkerChannelIndex);
         var channelArgument = $"/chspace {resolvedChannel.ResolvedSpace} /chi {recordingWorkerChannelIndex} /nid {resolvedChannel.OriginalNetworkId} /tsid {resolvedChannel.TransportStreamId} /sid {resolvedChannel.ServiceId}";
-        var displayLogoPaths = _serviceLogoStore.ResolveDisplayLogoPaths(
-            resolvedChannel.OriginalNetworkId,
-            resolvedChannel.TransportStreamId,
-            resolvedChannel.ServiceId,
-            r.ServiceName);
-        var displayLogoPath = displayLogoPaths.TitleBarLogoPath;
-        var centerLogoPath = displayLogoPaths.CenterLogoPath;
         var tvairEpgRecJob = new
         {
             jobId = $"tvairepgrec_production_record_R{r.Id}_{stamp}_{Guid.NewGuid():N}",
@@ -4252,12 +4232,6 @@ private readonly ReservationStore _store;
                 ["title"] = r.Title ?? string.Empty,
                 ["displayServiceName"] = r.ServiceName ?? string.Empty,
                 ["displayTitle"] = ReservationTitleDisplayContract.ForUser(r.Title),
-                ["displayLogoPath"] = displayLogoPath ?? string.Empty,
-                ["titleBarLogoPath"] = displayLogoPath ?? string.Empty,
-                ["centerLogoPath"] = centerLogoPath ?? string.Empty,
-                ["displayLogoTitleBarType"] = displayLogoPaths.TitleBarLogoType?.ToString() ?? string.Empty,
-                ["displayLogoCenterType"] = displayLogoPaths.CenterLogoType?.ToString() ?? string.Empty,
-                ["displayLogoTarget"] = "worker_titlebar_center_only",
                 ["group"] = group,
                 ["tuner"] = lease.Name,
                 ["did"] = lease.Did,
@@ -4331,7 +4305,7 @@ private readonly ReservationStore _store;
             $"pid={process.Id} exe={SafeValue(epgRecExe)} job={SafeValue(requestPath)} result={SafeValue(responsePath)} progress={SafeValue(progressPath)} stopSignal={SafeValue(stopSignalPath)} " +
             $"service={SafeValue(r.ServiceName)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} " +
             $"space={resolvedChannel.ResolvedSpace} ch={recordingWorkerChannelIndex} tvtestArgCh={resolvedChannel.ResolvedChannelIndex} bonCh={resolvedChannel.BonDriverChannel} channelReason={SafeValue(recordingWorkerChannelReason)} tuner={lease.Name} did={lease.Did} " +
-            $"seconds={seconds} path={SafeValue(outputPath)} recordingReservation=R{r.Id} contract=one_worker_one_reservation_one_ts_one_quality_result launchKind={launchKind} taskbarIconVisible={showWorkerTaskbarIcon} windowPolicy={windowPolicy} titleBarLogoPath={SafeValue(displayLogoPath)} centerLogoPath={SafeValue(centerLogoPath)} logoTarget=worker_titlebar_center_only productionRoute=TvAIrEpgRec state=Starting rule=release_contract");
+            $"seconds={seconds} path={SafeValue(outputPath)} recordingReservation=R{r.Id} contract=one_worker_one_reservation_one_ts_one_quality_result launchKind={launchKind} taskbarIconVisible={showWorkerTaskbarIcon} windowPolicy={windowPolicy} productionRoute=TvAIrEpgRec state=Starting rule=release_contract");
 
         var startup = await WaitForRecordingWorkerStartupAsync(
             process, progressPath, stopSignalPath, r.Id, ct, onTunerOpened).ConfigureAwait(false);
@@ -4817,8 +4791,8 @@ private readonly ReservationStore _store;
 
     private static int ResolveRecordingWorkerChannelIndex(ChannelTarget target)
     {
-        // ChannelTarget.ResolvedChannelIndex is built from the explicit ch2 + ChSet contract.
-        // Do not fall back to .ch2-only BonDriverChannel values here.
+        // ChannelTarget.ResolvedChannelIndex comes from the validated legacy or leased BonDriver route.
+        // Do not substitute unvalidated wave-global or raw channel coordinates here.
         return target.ResolvedChannelIndex;
     }
 
@@ -6014,7 +5988,6 @@ private readonly ReservationStore _store;
             ResultFileState = outcome.ResponseExists ? "present" : "missing",
             LeaseReleaseResult = "retained_for_chain_successor",
             RegistryReleaseResult = "retained_for_chain_successor",
-            ActivityReleaseResult = "retained_for_chain_successor",
             TunerStateAfterRelease = _tunerPool.GetStatusSummary()
         };
         try { _userEvents.EnrichRecordingResult(result, termination.ToDetails()); } catch { }
@@ -6795,7 +6768,6 @@ private readonly ReservationStore _store;
         // 先にTunerPoolへ解放時刻を確定し、再起動時の同一スロット再利用保護は
         // worker終了・lease解放・generation更新を再利用可能証拠の単一正本とする。
         try { session.Lease.Dispose(); } catch { }
-        try { session.ActivityHandle?.Dispose(); } catch { }
         _log.Add("REC_STARTUP_ZERO_BYTE_RECOVERY", $"R{session.ReservationId}",
             $"result=RELEASED stage=after_old_worker_stop attempt={attempt} tuner={SafeValue(session.Lease.Name)} did={SafeValue(session.Lease.Did)} " +
             $"nextGate=worker_exit_lease_release_generation rule=release_contract");
@@ -8155,24 +8127,6 @@ private readonly ReservationStore _store;
                 _log.Add("REC_RELEASE_EVIDENCE", $"R{rid}",
                     $"result=FAILED target=managed_process_registry pid={pid} reason={SafeValue(ex.Message)} rule=recording_termination_evidence");
             }
-            if (session.ActivityHandle is null)
-            {
-                terminationEvidence.ActivityReleaseResult = "not_registered";
-            }
-            else
-            {
-                try
-                {
-                    session.ActivityHandle.Dispose();
-                    terminationEvidence.ActivityReleaseResult = "released";
-                }
-                catch (Exception ex)
-                {
-                    terminationEvidence.ActivityReleaseResult = $"failed:{SafeValue(ex.GetType().Name)}";
-                    _log.Add("REC_RELEASE_EVIDENCE", $"R{rid}",
-                        $"result=FAILED target=activity_handle pid={pid} reason={SafeValue(ex.Message)} rule=recording_termination_evidence");
-                }
-            }
             _log.Add("PROCESS_OWNERSHIP", $"R{rid}",
                 $"unregisterManagedPid=True pid={pid} reason=recording_session_finished rule=release_contract");
 
@@ -9516,7 +9470,7 @@ private readonly ReservationStore _store;
         {
             // 正式録画昇格が先行した場合は、そのworkerをabortしてはならない。
             if (session.IsRecordingCommitted || session.IsRecordingCommitInProgress)
-                return new RecordingAbortCleanupResult(false, false, false);
+                return new RecordingAbortCleanupResult(false, false);
 
             return await session.AbortCleanupCompletion.ConfigureAwait(false);
         }
@@ -9530,7 +9484,7 @@ private readonly ReservationStore _store;
             }
         }
 
-        var result = new RecordingAbortCleanupResult(false, false, false);
+        var result = new RecordingAbortCleanupResult(false, false);
         try
         {
             var stopped = false;
@@ -9541,14 +9495,7 @@ private readonly ReservationStore _store;
             }
 
             var workerGone = !IsOwnedRecordingWorkerAlive(session);
-            var activityReleased = false;
             var leaseReleased = false;
-            try
-            {
-                session.ActivityHandle?.Dispose();
-                activityReleased = true;
-            }
-            catch { }
             try
             {
                 session.Lease.Dispose();
@@ -9566,7 +9513,7 @@ private readonly ReservationStore _store;
                 leaseReleased = false;
             }
 
-            result = new RecordingAbortCleanupResult(workerGone, activityReleased, leaseReleased);
+            result = new RecordingAbortCleanupResult(workerGone, leaseReleased);
             if (!workerGone)
                 RegisterResidualRecordingWorkerQuarantine(session);
             if (!leaseReleased)
@@ -9574,14 +9521,14 @@ private readonly ReservationStore _store;
 
             _log.Add("REC_START_ABORT_CLEANUP", $"R{session.ReservationId}",
                 $"result={(result.Complete ? "COMPLETE" : "PARTIAL_FAILURE")} pid={session.ProcessId} gracefulStop={stopped} " +
-                $"workerGone={result.WorkerIdentityGone} activityHandleReleased={result.ActivityHandleReleased} leaseReleaseCompleted={result.LeaseReleaseCompleted} " +
+                $"workerGone={result.WorkerIdentityGone} leaseReleaseCompleted={result.LeaseReleaseCompleted} " +
                 $"tuner={SafeValue(session.Lease.Name)} did={session.Lease.Did} poolLeaseId={session.Lease.PoolLeaseId} generation={session.Lease.OccupancyGeneration} " +
                 "rule=recording_lifecycle_cas_contract");
             return result;
         }
         catch (Exception ex)
         {
-            result = new RecordingAbortCleanupResult(false, false, false);
+            result = new RecordingAbortCleanupResult(false, false);
             RegisterResidualRecordingWorkerQuarantine(session);
             RegisterRecordingResourceReleaseQuarantine(session);
             _log.Add("REC_START_ABORT_CLEANUP", $"R{session.ReservationId}",
@@ -11187,13 +11134,12 @@ internal sealed class RecordingSession
             RuntimeStatsPath = primaryRuntimeStatsPath;
     }
 
-    public TvTestActivityHandle? ActivityHandle { get; }
     public DateTime RecordingFileGrowthWatchStartedAt { get; private set; }
     public DateTime LastRecordingFileGrowthAt { get; private set; }
     public long LastObservedRecordingFileBytes { get; private set; } = -1;
     public bool RecordingFileEverGrew { get; private set; }
     public bool RecordingFileStallStopRequested { get; private set; }
-    public RecordingSession(int reservationId, int processId, DateTime plannedEndTime, TunerLease lease, string recordingFilePath, string responsePath = "", string stopSignalPath = "", string progressPath = "", string runtimeStatsPath = "", string jobPath = "", int postEndMarginSeconds = SettingsDefaults.PostEndMarginSeconds, TvTestActivityHandle? activityHandle = null, string chainControlPath = "", int? sharedCaptureRootReservationId = null, DateTime? physicalCapturePlannedEndTime = null)
+    public RecordingSession(int reservationId, int processId, DateTime plannedEndTime, TunerLease lease, string recordingFilePath, string responsePath = "", string stopSignalPath = "", string progressPath = "", string runtimeStatsPath = "", string jobPath = "", int postEndMarginSeconds = SettingsDefaults.PostEndMarginSeconds, string chainControlPath = "", int? sharedCaptureRootReservationId = null, DateTime? physicalCapturePlannedEndTime = null)
     {
         ReservationId  = reservationId;
         ProcessId      = processId;
@@ -11213,7 +11159,6 @@ internal sealed class RecordingSession
         ChainControlPath = chainControlPath ?? string.Empty;
         ChainControl = ChainControlState.TryOpen(ChainControlPath, out var openedControl) ? openedControl : null;
         SharedCaptureRootReservationId = sharedCaptureRootReservationId;
-        ActivityHandle = activityHandle;
         RecordingFileGrowthWatchStartedAt = DateTime.Now;
         LastRecordingFileGrowthAt = RecordingFileGrowthWatchStartedAt;
     }

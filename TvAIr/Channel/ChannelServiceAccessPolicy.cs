@@ -1,4 +1,4 @@
-using TvAIr.Core;
+﻿using TvAIr.Core;
 
 namespace TvAIr.Channel;
 
@@ -314,18 +314,10 @@ public sealed class ChannelServiceAccessSnapshot
             return false;
         foreach (var tuner in configuredTuners)
         {
-            if (!string.Equals(tuner.Role, "Recording", StringComparison.OrdinalIgnoreCase)
-                || string.IsNullOrWhiteSpace(tuner.ChannelCh2Path)
-                || (BroadcastNetworkIdentity.TryResolveWave(networkId, out var wave)
-                    && !SupportsGroup(tuner.Group, wave))
-                || !catalog.TryResolveTransportForSource(tuner.BonDriverFileName,
-                    tuner.ChannelCh2Path, new[] { service }, out _))
+            if (!TryResolveConfiguredRecordingRoute(tuner, catalog, service, out var route))
                 continue;
             // Do not persist driver-specific Space/Channel prior to physical allocation.
-            serviceName = _channels.DirectSourceServices.FirstOrDefault(r =>
-                r.Service == service &&
-                string.Equals(r.BonDriverIdentity, tuner.BonDriverFileName,
-                    StringComparison.OrdinalIgnoreCase))?.ServiceName ?? string.Empty;
+            serviceName = route.ServiceName;
             return true;
         }
         return false;
@@ -405,11 +397,29 @@ public sealed class ChannelServiceAccessSnapshot
         BonDriverChannelRouteCatalog catalog,
         BroadcastServiceKey service)
         => configuredTuners.Any(t =>
-            string.Equals(t.Role, "Recording", StringComparison.OrdinalIgnoreCase)
-            && !string.IsNullOrWhiteSpace(t.ChannelCh2Path)
-            && (!BroadcastNetworkIdentity.TryResolveWave(service.NetworkId, out var wave) || SupportsGroup(t.Group, wave))
-            && catalog.TryResolveTransportForSource(t.BonDriverFileName,
-                t.ChannelCh2Path, new[] { service }, out _));
+            TryResolveConfiguredRecordingRoute(t, catalog, service, out _));
+
+    private static bool TryResolveConfiguredRecordingRoute(
+        TunerProfileDto tuner,
+        BonDriverChannelRouteCatalog catalog,
+        BroadcastServiceKey service,
+        out BonDriverChannelRoute route)
+    {
+        route = null!;
+        if (!string.Equals(tuner.Role, "Recording", StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(tuner.ChannelCh2Path))
+            return false;
+        // A CATV transport can carry a terrestrial/satellite service identity.
+        // Accept it only through this tuner's exact, enabled BonDriver/.ch2 route;
+        // the carried NID does not change the physical tuner capability.
+        if (TunerDisplayName.NormalizeGroup(tuner.Group) != "CATV"
+            && BroadcastNetworkIdentity.TryResolveWave(service.NetworkId, out var wave)
+            && !SupportsGroup(tuner.Group, wave))
+            return false;
+        return catalog.TryResolveTransportForSource(tuner.BonDriverFileName,
+            tuner.ChannelCh2Path, new[] { service }, out route);
+    }
+
 
     public bool IsOperational(Reservation reservation)
         => reservation.Source == ReservationSource.Epg

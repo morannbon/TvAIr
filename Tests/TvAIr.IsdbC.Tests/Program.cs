@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -734,6 +734,249 @@ Case("CATV EPG worker participates in native transition boundary",()=>{
         Check(denied && observed.Any(s=>s.Contains("group=CATV")),"CATV native transition did not own exclusive boundary");
     }
 });
+Case("retired logo modules and schema removed without deleting legacy data",()=>{
+    var host=typeof(EpgCapture).Assembly;
+    Check(host.GetType("TvAIr.Epg.EpgLogoExtractor")==null && host.GetType("TvAIr.Epg.ServiceLogoStore")==null,"logo modules remain");
+    var dir=Path.Combine(root,"logo-retirement");var db=new Database(dir);
+    using(var con=db.Open())using(var cmd=con.CreateCommand()){
+        cmd.CommandText="SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('service_logos','service_logo_inventory')";
+        Check(Convert.ToInt32(cmd.ExecuteScalar())==0,"new database still creates logo tables");
+        cmd.CommandText="CREATE TABLE service_logos(marker TEXT); INSERT INTO service_logos VALUES ('legacy'); CREATE TABLE service_logo_inventory(marker TEXT); INSERT INTO service_logo_inventory VALUES ('legacy');";cmd.ExecuteNonQuery();
+    }
+    var reopened=new Database(dir);
+    using(var con=reopened.Open())using(var cmd=con.CreateCommand()){
+        cmd.CommandText="SELECT COUNT(*) FROM service_logos WHERE marker='legacy'";Check(Convert.ToInt32(cmd.ExecuteScalar())==1,"legacy logo row removed");
+        cmd.CommandText="SELECT COUNT(*) FROM service_logo_inventory WHERE marker='legacy'";Check(Convert.ToInt32(cmd.ExecuteScalar())==1,"legacy inventory row removed");
+    }
+});
+Case("retired logo variants use normal EPG and PID exception is removed",()=>{
+    var a=Assembly.LoadFrom(Path.Combine(AppContext.BaseDirectory,"TvAIrEpgRec.dll"));
+    var program=a.GetTypes().Single(t=>t.Name=="Program");var cli=a.GetTypes().Single(t=>t.Name=="CliOptions");
+    foreach(var variant in new[]{"pointer-vtable6-epg-normalize-gr-logo-opportunistic","epg-normalize-gr-logo","pointer-vtable6-epg-normalize-logo-pid29","epg-normalize-logo-pid29","logo-pid29-pointer"}){
+        var parsed=cli.GetMethod("Parse")!.Invoke(null,new object[]{new[]{"--variant",variant}})!;
+        var resolved=(string)program.GetMethod("ResolveTsGetStreamVariant",BindingFlags.Static|BindingFlags.NonPublic)!.Invoke(null,new object?[]{null,parsed})!;
+        Check(resolved=="pointer-vtable6-epg-normalize","legacy variant revived logo mode");
+    }
+    var probe=a.GetTypes().Single(t=>t.Name=="BonDriverNativeProbe");var st=a.GetTypes().Single(t=>t.Name=="TsReadProbeSummary");var summary=Activator.CreateInstance(st)!;
+    st.GetProperty("RecordServiceScopeReady")!.SetValue(summary,true);
+    var method=probe.GetMethod("ShouldWriteRecordServiceScopedPacket",BindingFlags.Static|BindingFlags.NonPublic)!;
+    foreach(var mode in new[]{"record","epg","epg-check"}){
+        st.GetProperty("Mode")!.SetValue(summary,mode);
+        bool Allowed(int pid)=>(bool)method.Invoke(null,new object[]{pid,summary,true})!;
+        foreach(var pid in new[]{0,0x10,0x11,0x12,0x14})Check(Allowed(pid),"required PSI/SI PID lost: "+pid);
+        Check(!Allowed(0x29),"logo-only CDT exception remains");
+    }
+});
+
+Case("viewer lease group normalization preserves both legacy call contracts",()=>{
+    var host=typeof(TunerDisplayName).Assembly;
+    var common=typeof(TunerDisplayName).GetMethod("NormalizeViewerLeaseGroup",BindingFlags.Static|BindingFlags.NonPublic)!;
+    var external=typeof(ExternalTunerLeaseService).GetMethod("NormalizeGroup",BindingFlags.Static|BindingFlags.NonPublic)!;
+    var identity=host.GetType("TvAIr.Tuner.ViewerRestartSourceIdentity",true)!.GetMethod("NormalizeGroup",BindingFlags.Static|BindingFlags.NonPublic)!;
+    foreach(var value in new string?[]{null,""," ","GR","gr"," 地上波 ","地デジ","GROUND","ground","BS","bs","CS","cs","BS/CS","bscs","HYBRID","hybrid","GR/BS/CS","CATV","catv","ISDB-C","UnknownMixed"," 未定義 ","\tBS\r\n"}){
+        var normalized=(value??string.Empty).Trim().ToUpperInvariant();
+        var expected=normalized switch {"BS" or "CS" or "BS/CS" or "BSCS"=>"BSCS","地上波" or "GR" or "GROUND"=>"GR",_=>normalized};
+        foreach(var method in new[]{common,external,identity})
+            Check((string)method.Invoke(null,new object?[]{value})! == expected,"alias behavior changed: "+value+" at "+method.DeclaringType!.Name);
+    }
+});
+
+Case("worker title tracking cannot launch or terminate a process",()=>{
+    var host=typeof(TunerDisplayName).Assembly;
+    Check(host.GetType("TvAIr.Core.TvTestActivityKeeper")==null,"retired launcher type remains");
+    var tracker=host.GetType("TvAIr.Core.WorkerTitleTracker",true)!;
+    var constructors=tracker.GetConstructors();
+    Check(constructors.Length==1 && constructors[0].GetParameters().Select(p=>p.ParameterType).SequenceEqual(new[]{typeof(LogRepository)}),"title tracker retains executable configuration");
+    Check(tracker.GetMethod("AttachExisting")!=null,"existing worker tracking lost");
+    foreach(var method in tracker.GetMethods(BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance|BindingFlags.Static))
+        Check(!new[]{"AcquireOwned","StartOwnedProcess","StopOwnedProcess","ResolveTvTestExecutable","TryFindPassiveBonDriver","StartOwnedDialogSuppression"}.Contains(method.Name),"retired lifecycle method remains");
+    Check(typeof(TvAirManagedProcessRegistry).GetMethod("RegisterActivity")==null,"retired registration remains");
+    Check(!Enum.GetNames(typeof(ManagedTvTestProcessPurpose)).Contains("ActivityKeeper"),"retired purpose remains");
+    Check((int)ManagedTvTestProcessPurpose.RecordingWorker==0 && (int)ManagedTvTestProcessPurpose.Viewer==2,"remaining purpose values changed");
+    var instance=Activator.CreateInstance(tracker,new LogRepository())!;
+    var handle=(IDisposable)tracker.GetMethod("AttachExisting")!.Invoke(instance,new object[]{"EPG取得中",int.MaxValue,"Fixture","Fixture"})!;
+    handle.Dispose(); handle.Dispose();
+});
+
+foreach(var nid in new ushort[]{0x7880,4,7,0xfffe})
+Case("CATV recording entry points agree for network "+nid,()=>{
+    var path=Ch2("catv-admission-"+nid,Row("Cable "+nid,3,17,nid,210,211));
+    var p=Profile("Cable","BonDriver_Cable.dll",path,"CATV");var ctx=Context("catv-admission-"+nid,p);var access=ctx.Policy.Capture();
+    var reservation=new Reservation{NetworkId=nid,TransportStreamId=210,ServiceId=211};
+    Check(access.CanTune(p,reservation),"physical CATV route unavailable");
+    Check(access.IsOperationalForRecording(reservation,new[]{p}),"runtime recording rejected");
+    Check(access.TryResolveRecordingAdmission(nid,210,211,ctx.Ini.Tuners,out var name,out var argument),"reservation entry rejected carried network");
+    Check(name=="Cable "+nid && argument=="","admission persisted driver coordinates or wrong name");
+    Check(access.IsOperationalForConfiguredRecordingTuners(nid,210,211,ctx.Ini.Tuners),"configured recording rejected carried network");
+    Check(access.IsEnabledForConfiguredRecordingTuners(nid,210,211,ctx.Ini.Tuners),"automatic reservation retention rejected carried network");
+    foreach(var source in new[]{ReservationSource.Manual,ReservationSource.Keyword,ReservationSource.Program})
+        Reserve(ctx.Store,nid,210,211,source,start:(int)source*60);
+    Evaluate(ctx.Store,ctx.Pool,new[]{p});
+    Check(ctx.Store.GetAll().All(r=>!r.IsConflicted && r.TunerName==p.Name),"accepted reservation cannot be assigned");
+    var rule=Invoke(ctx.Store,"ResolveProgramRuleChannel",new ProgramRule{NetworkId=nid,TransportStreamId=210,ServiceId=211});
+    Check(Get<bool>(rule,"IsResolved"),"program rule entry rejected");
+    using var lease=ctx.Pool.AcquireForRecordingByName(p.Name,123,at);
+    Check(lease!=null && access.TryResolveDirectTargetForLease(lease,nid,210,211,"CATV",out var target) && target.ResolvedSpace==3 && target.ResolvedChannelIndex==17,"assigned CATV lease lost its own coordinates");
+    Check(!ChannelServiceAccessSnapshot.SupportsGroup("CATV","GR") && !ChannelServiceAccessSnapshot.SupportsGroup("CATV","BSCS"),"global physical compatibility was broadened");
+});
+Case("CATV recording admission rejects unproven or viewing sources",()=>{
+    var valid=Ch2("catv-negative-valid",Row("Cable",3,17,4,210,211));
+    var other=Ch2("catv-negative-other",Row("Other",8,91,4,999,901));
+    var disabled=Ch2("catv-negative-disabled",Row("Off",3,17,4,210,211,false));
+    var ambiguous=Ch2("catv-negative-ambiguous",Row("One",3,17,4,210,211)+Row("Two",3,18,4,210,211));
+    foreach(var item in new[]{(name:"viewing",p:Profile("View","BonDriver_Cable.dll",valid,"CATV","Viewing")),(name:"disabled",p:Profile("Off","BonDriver_Cable.dll",disabled,"CATV")),(name:"ambiguous",p:Profile("Amb","BonDriver_Cable.dll",ambiguous,"CATV")),(name:"missing",p:Profile("Missing","BonDriver_Cable.dll",Path.Combine(root,"not-found.ch2"),"CATV")),(name:"unlisted",p:Profile("Other","BonDriver_Cable.dll",other,"CATV"))}){
+        var ctx=Context("catv-negative-"+item.name,item.p);var access=ctx.Policy.Capture();
+        Check(!access.TryResolveRecordingAdmission(4,210,211,ctx.Ini.Tuners,out _,out _),"admitted "+item.name);
+        Check(!access.IsOperationalForConfiguredRecordingTuners(4,210,211,ctx.Ini.Tuners),"configured admitted "+item.name);
+    }
+    var cable=Profile("Cable","BonDriver_Cable.dll",other,"CATV");
+    var viewer=Profile("ForeignView","BonDriver_Other.dll",valid,"CATV","Viewing");
+    var mixed=Context("catv-negative-foreign",cable,viewer);var snapshot=mixed.Policy.Capture();
+    Check(!snapshot.TryResolveRecordingAdmission(4,210,211,mixed.Ini.Tuners,out _,out _),"borrowed foreign viewing source");
+    var mismatched=Dto(cable);mismatched.ChannelCh2Path=valid;
+    Check(!snapshot.TryResolveRecordingAdmission(4,210,211,new[]{mismatched},out _,out _),"borrowed foreign driver coordinates");
+});
+Case("mixed satellite and CATV recording routes retain independent coordinates",()=>{
+    var sat=Ch2("admission-mixed-sat",Row("Satellite",7,41,4,210,211));
+    var cat=Ch2("admission-mixed-cat",Row("Cable",3,17,4,210,211));
+    var p=Profile("Cable","BonDriver_Cable.dll",cat,"CATV");var s=Profile("Sat","BonDriver_Sat.dll",sat,"BSCS");var ctx=Context("admission-mixed",p,s);var access=ctx.Policy.Capture();
+    Check(access.TryResolveRecordingAdmission(4,210,211,new[]{Dto(p)},out var name,out var arg) && name=="Cable" && arg=="","cable entry chose satellite source");
+    Check(access.TryResolveRecordingAdmission(4,210,211,new[]{Dto(s)},out name,out arg) && name=="Satellite" && arg=="","satellite entry regressed");
+    foreach(var profile in new[]{p,s}){
+        using var lease=ctx.Pool.AcquireForRecordingByName(profile.Name,123,at);
+        Check(lease!=null && access.TryResolveDirectTargetForLease(lease,4,210,211,profile.Group,out var target) && target.ResolvedChannelIndex==(profile==p?17:41),"mixed physical coordinates crossed");
+    }
+});
+
+Case("CATV configured group uses selected driver automatic ch2 for recording",()=>{
+    var path=Ch2("settings-catv-auto",Row("Cable BS",3,17,4,210,211)+Row("Cable only",3,18,0xfffe,310,311));
+    var ctx=Context("settings-catv-auto",Profile("C1","BonDriver_Cable.dll",path,"CATV"));
+    EnableAutomaticChannels(ctx.Ini);ctx.Ini.Tuners[0].DeviceNumber=1;
+    var profile=TunerRuntimeProfileSource.Build(ctx.Ini,null).Single();var access=ctx.Policy.Capture();
+    Check(profile.Group=="CATV" && profile.ChannelCh2Path.EndsWith("BonDriver_Cable.ch2"),"CATV setting did not bind automatic source");
+    Check(ctx.Ini.ToDto().Tuners.Single().ChannelCh2Path=="","inferred path leaked into persisted configuration");
+    Check(access.TryResolveRecordingAdmission(4,210,211,ctx.Ini.GetEffectiveTuners(),out _,out _) && access.IsAvailableForRecording(0xfffe,310,311),"automatic CATV recording unavailable");
+    var runtimePool=new TunerPool(new[]{profile},ctx.Ini,new LogRepository());
+    using var lease=runtimePool.AcquireForRecordingByName(profile.Name,1,at);
+    Check(lease!=null && access.TryResolveDirectTargetForLease(lease,4,210,211,"CATV",out var target) && target.ResolvedChannelIndex==17,"automatic CATV cannot materialize recording route");
+});
+Case("CATV viewing setting resolves its own automatic table",()=>{
+    var path=Ch2("settings-catv-view",Row("Cable BS",8,37,4,210,211)+Row("Cable only",8,38,0xfffe,310,311));
+    var ctx=Context("settings-catv-view",Profile("C1","BonDriver_ViewCable.dll",path,"CATV","Viewing"));
+    EnableAutomaticChannels(ctx.Ini);ctx.Ini.Tuners[0].DeviceNumber=1;
+    var profiles=TunerRuntimeProfileSource.Build(ctx.Ini,null).ToArray();
+    Check(ViewerGroups(ctx.Ini,profiles).SequenceEqual(new[]{"BS","CATV"}),"automatic CATV viewer groups unavailable");
+    var access=ctx.Policy.Capture();
+    Check(access.TryResolveTargetForProfile(profiles[0],new BroadcastServiceKey(4,210,211),out var target) && target.ResolvedSpace==8 && target.ResolvedChannelIndex==37,"automatic viewer used another source");
+    Check(!access.TryResolveRecordingAdmission(4,210,211,ctx.Ini.GetEffectiveTuners(),out _,out _),"viewing setting became a recording route");
+});
+Case("unchanged CATV settings persist source DID device and logical slot identity",()=>{
+    var profiles=new[]{Profile("C1","BonDriver_Cable.dll",a,"CATV"),Profile("C2","BonDriver_ViewCable.dll",b,"CATV","Viewing")};
+    var ctx=Context("settings-catv-roundtrip",profiles);
+    for(var i=0;i<2;i++){ctx.Ini.Tuners[i].Did=((char)('D'+i)).ToString();ctx.Ini.Tuners[i].DeviceNumber=i+1;ctx.Ini.Tuners[i].LogicalViewerSlotId="saved-catv-"+i;}
+    Invoke(ctx.Ini,"CapturePersistedTunerTopologyFromRuntime");
+    var dto=System.Text.Json.JsonSerializer.Deserialize<IniSettingsUpdateDto>(System.Text.Json.JsonSerializer.Serialize(ctx.Ini.ToDto()))!;
+    Check(ctx.Ini.MatchesRuntimeTunerTopology(dto),"unchanged tuner topology considered changed");
+    Invoke(ctx.Ini,"SaveFromApplicationService",dto,false,false);
+    Check(!ctx.Ini.IsTunerTopologyRestartPending(),"unrelated save introduced tuner restart");
+    var loaded=new IniSettingsService(Path.Combine(root,"settings-catv-roundtrip"),Path.Combine(root,"settings-catv-roundtrip","data"),18787);
+    for(var i=0;i<2;i++){
+        var t=loaded.Tuners[i];Check(t.Group=="CATV" && t.Did==((char)('D'+i)).ToString() && t.DeviceNumber==i+1 && t.LogicalViewerSlotId=="saved-catv-"+i && t.ChannelCh2Path==profiles[i].ChannelCh2Path && t.BonDriverFileName==profiles[i].BonDriverFileName && t.Role==profiles[i].Role,"roundtrip lost stable tuner data");
+    }
+});
+Case("changing tuner to CATV waits for restart then binds new driver automatic source",()=>{
+    var ctx=Context("settings-catv-change",Profile("T1","BonDriver_Old.dll",a,"GR"));EnableAutomaticChannels(ctx.Ini);
+    ctx.Ini.Tuners[0].DeviceNumber=1;ctx.Ini.Tuners[0].Did="A";ctx.Ini.Tuners[0].LogicalViewerSlotId="persistent-view-slot";Invoke(ctx.Ini,"CapturePersistedTunerTopologyFromRuntime");
+    var newPath=Path.Combine(ctx.Ini.BonDriverDirectory,"BonDriver_Cable.ch2");File.WriteAllText(newPath,Row("Cable",6,42,4,210,211),Encoding.GetEncoding(932));
+    var oldEffective=ctx.Ini.GetEffectiveTuners().Single().ChannelCh2Path;
+    var dto=System.Text.Json.JsonSerializer.Deserialize<IniSettingsUpdateDto>(System.Text.Json.JsonSerializer.Serialize(ctx.Ini.ToDto()))!;
+    dto.Tuners[0].Group="CATV";dto.Tuners[0].Name="C1";dto.Tuners[0].BonDriverFileName="BonDriver_Cable.dll";dto.Tuners[0].ChannelCh2Path="";
+    Check(!ctx.Ini.MatchesRuntimeTunerTopology(dto),"CATV edit missed restart classification");Invoke(ctx.Ini,"SaveFromApplicationService",dto,false,false);
+    Check(ctx.Ini.IsTunerTopologyRestartPending() && ctx.Ini.Tuners.Single().Group=="GR" && ctx.Ini.GetEffectiveTuners().Single().ChannelCh2Path==oldEffective,"saved change modified live reception route");
+    var loaded=new IniSettingsService(Path.Combine(root,"settings-catv-change"),Path.Combine(root,"settings-catv-change","data"),18787);
+    var t=loaded.GetEffectiveTuners().Single();Check(t.Group=="CATV" && t.ChannelCh2Path==newPath && t.LogicalViewerSlotId=="persistent-view-slot" && t.Did=="A","restart lost new CATV binding or identity");
+    Check(loaded.Tuners.Single().ChannelCh2Path=="","automatic source was persisted as an explicit path");
+});
+Case("CATV settings normalize case and never borrow a missing driver source",()=>{
+    Check(TunerDisplayName.NormalizeGroup(" catv ")=="CATV" && TunerDisplayName.IsKnownGroup("CatV"),"CATV case not canonical");
+    var cable=Profile("C1","BonDriver_Missing.dll","","CATV");var foreign=Profile("C2","BonDriver_Other.dll",a,"CATV","Viewing");var ctx=Context("settings-catv-missing",cable,foreign);EnableAutomaticChannels(ctx.Ini);
+    var profiles=TunerRuntimeProfileSource.Build(ctx.Ini,null).ToArray();var access=ctx.Policy.Capture();
+    Check(profiles[0].ChannelCh2Path.EndsWith("BonDriver_Missing.ch2") && !File.Exists(profiles[0].ChannelCh2Path),"missing driver used another table");
+    Check(!access.CanTune(profiles[0],new Reservation{NetworkId=4,TransportStreamId=200,ServiceId=201}) && !access.TryResolveRecordingAdmission(4,200,201,ctx.Ini.GetEffectiveTuners(),out _,out _),"CATV setting borrowed viewing source");
+});
+
+EpgScheduler SettingsScheduler(IniSettingsService ini,ChannelFileLoader loader,ChannelServiceAccessPolicy policy,ReservationStore store,NormalEpgWaveOccupation occupation,TunerProfile[] profiles)
+{
+    var scheduler=(EpgScheduler)RuntimeHelpers.GetUninitializedObject(typeof(EpgScheduler));
+    foreach(var pair in new Dictionary<string,object>{{"ini",ini},{"channelLoader",loader},{"serviceAccess",policy},{"reservationStore",store},{"normalEpgWaveOccupation",occupation},{"tunerProfiles",profiles},{"capture",CaptureForPlan(profiles)},{"log",new LogRepository()}})
+        typeof(EpgScheduler).GetField(pair.Key,BindingFlags.Instance|BindingFlags.NonPublic)!.SetValue(scheduler,pair.Value);
+    return scheduler;
+}
+object DailyConfig() => Activator.CreateInstance(typeof(EpgScheduler).Assembly.GetType("TvAIr.Epg.DailyEpgConfigSnapshot",true)!,new object[]{true,12,0,SettingsDefaults.NormalizeEpgDepth(null)})!;
+object DailyState(string phase)
+{
+    var a=typeof(EpgScheduler).Assembly;
+    return Activator.CreateInstance(a.GetType("TvAIr.Epg.DailyEpgRunState",true)!,new object?[]{at.Date,Enum.Parse(a.GetType("TvAIr.Epg.DailyEpgRunPhase",true)!,phase),DailyConfig(),at,at,at.AddMinutes(10),at.AddHours(3),600,Enum.Parse(a.GetType("TvAIr.Epg.DailyEpgPlacementState",true)!,"Placed"),at})!;
+}
+Case("CATV normal EPG occupation blocks and releases cable recording",()=>{
+    var p=Profile("C1","BonDriver_Cable.dll",a,"CATV");var ctx=Context("catv-occupation",p);var r=Reserve(ctx.Store,4,200,201);
+    ctx.Occupation.Set("CATV",at,at.AddMinutes(40),"test",false,70);Evaluate(ctx.Store,ctx.Pool,new[]{p});
+    Check(ctx.Store.GetById(r.Id)!.IsConflicted,"CATV EPG occupation was ignored");
+    Check(ctx.Occupation.Clear("CATV",70),"CATV occupation not released");Evaluate(ctx.Store,ctx.Pool,new[]{p});
+    Check(!ctx.Store.GetById(r.Id)!.IsConflicted && ctx.Store.GetById(r.Id)!.TunerName=="C1","CATV reservation not restored");
+});
+Case("CATV EPG occupation does not consume satellite capacity",()=>{
+    var profiles=new[]{Profile("C1","BonDriver_Cable.dll",a,"CATV"),Profile("S1","BonDriver_Sat.dll",b,"BSCS")};var ctx=Context("catv-occupation-mixed",profiles);
+    ctx.Occupation.Set("CATV",at,at.AddMinutes(40),"test",false,71);var r=Reserve(ctx.Store,4,200,201);Evaluate(ctx.Store,ctx.Pool,profiles);
+    Check(!ctx.Store.GetById(r.Id)!.IsConflicted && ctx.Store.GetById(r.Id)!.TunerName=="S1","CATV occupation leaked to satellite tuner");
+});
+Case("EPG scope occupations include recording CATV without changing legacy groups",()=>{
+    var p=Profile("C1","BonDriver_Cable.dll",a,"CATV");var ctx=Context("catv-scope-occupancy",p);var scheduler=SettingsScheduler(ctx.Ini,ctx.Loader,ctx.Policy,ctx.Store,ctx.Occupation,new[]{p});
+    foreach(var scope in new[]{"All","GR","BSCS","HYBRID"})
+        Check(Items(Invoke(scheduler,"GroupsForScope",scope)).Cast<string>().Contains("CATV"),"CATV omitted from scope "+scope);
+    var legacy=new[]{Profile("T1","BonDriver_A.dll",a,"GR"),Profile("S1","BonDriver_B.dll",b,"BSCS")};
+    var old=SettingsScheduler(ctx.Ini,ctx.Loader,ctx.Policy,ctx.Store,ctx.Occupation,legacy);
+    Check(Items(Invoke(old,"GroupsForScope","All")).Cast<string>().SequenceEqual(new[]{"GR","BSCS","HYBRID"}),"legacy All groups changed");
+    Check(Items(Invoke(old,"GroupsForScope","GR")).Cast<string>().SequenceEqual(new[]{"GR"}),"legacy GR group changed");
+});
+Case("daily EPG projection includes CATV recording slots and cleans terminal rows",()=>{
+    var profiles=new[]{Profile("C1","BonDriver_Cable.dll",a,"CATV"),Profile("C2","BonDriver_Cable.dll",a,"CATV"),Profile("T1","BonDriver_T.dll",a,"GR"),Profile("S1","BonDriver_S.dll",b,"BSCS"),Profile("H1","BonDriver_H.dll",a,"HYBRID"),Profile("Cview","BonDriver_V.dll",a,"CATV","Viewing")};
+    var ctx=Context("catv-daily-projection",profiles);var scheduler=SettingsScheduler(ctx.Ini,ctx.Loader,ctx.Policy,ctx.Store,ctx.Occupation,profiles);
+    Invoke(scheduler,"EnsureDailyProjection",DailyState("Planned"),false);var rows=ctx.Store.GetAll().Where(r=>r.Source==ReservationSource.Epg).ToArray();
+    Check(rows.Length==5 && rows.Select(r=>r.TunerName).Order().SequenceEqual(new[]{"C1","C2","H1","S1","T1"}),"daily projection omitted CATV or included viewing slot");
+    Check(rows.All(r=>r.StartTime==at && r.EndTime==at.AddMinutes(10)),"daily All plan split across groups");
+    Invoke(scheduler,"EnsureDailyProjection",DailyState("Succeeded"),false);
+    Check(!ctx.Store.GetAll().Any(r=>r.Source==ReservationSource.Epg && r.Status==ReservationStatus.Scheduled),"terminal CATV daily rows remained");
+});
+Case("daily EPG plan moves beyond a cable recording block",()=>{
+    var p=Profile("C1","BonDriver_Cable.dll",a,"CATV");var ctx=Context("catv-daily-block",p);var r=Reserve(ctx.Store,4,200,201);Evaluate(ctx.Store,ctx.Pool,new[]{p});
+    var scheduler=SettingsScheduler(ctx.Ini,ctx.Loader,ctx.Policy,ctx.Store,ctx.Occupation,new[]{p});
+    var plan=Invoke(scheduler,"BuildDailyEpgPlanResult",at.Date,DailyConfig(),at);
+    Check(Get<DateTime?>(plan,"PlannedStart")>r.EndTime && Get<string>(plan,"Reason").StartsWith("moved_after_recording_R"),"daily plan overlapped CATV recording");
+});
+Case("interactive EPG recognizes assigned CATV retransmission in mixed hardware",()=>{
+    var profiles=new[]{Profile("C1","BonDriver_Cable.dll",a,"CATV"),Profile("T1","BonDriver_T.dll",a,"GR")};var ctx=Context("catv-interactive-block",profiles);var r=Reserve(ctx.Store,4,200,201);Evaluate(ctx.Store,ctx.Pool,profiles);
+    Check(ctx.Store.GetById(r.Id)!.TunerName=="C1","fixture not assigned to CATV");
+    var scheduler=SettingsScheduler(ctx.Ini,ctx.Loader,ctx.Policy,ctx.Store,ctx.Occupation,profiles);
+    var historical=new Reservation{NetworkId=4,TransportStreamId=200,ServiceId=201,TunerName="T1",ActualTunerName="C1",Status=ReservationStatus.Scheduled};
+    Check((string)Invoke(scheduler,"ResolveReservationGroup",historical)! !="CATV","stale actual tuner overrode current scheduled assignment");
+    historical.Status=ReservationStatus.Recording;
+    Check((string)Invoke(scheduler,"ResolveReservationGroup",historical)! =="CATV","active physical recording identity ignored");
+    var invokeArgs=new object?[]{"HYBRID",at,"",null,"",""};
+    var blocked=(bool)typeof(EpgScheduler).GetMethod("TryGetInteractiveEpgOccupancyBlock",BindingFlags.Instance|BindingFlags.NonPublic)!.Invoke(scheduler,invokeArgs)!;
+    Check(blocked && (string)invokeArgs[2]! =="recording_occupancy_overlap" && (string)invokeArgs[4]! =="CATV","manual EPG missed physical CATV recording");
+});
+
+Case("manual CATV chain keeps one physical route with a terrestrial tuner present",()=>{
+    var profiles=new[]{Profile("C1","BonDriver_Cable.dll",a,"CATV"),Profile("T1","BonDriver_T.dll",a,"GR")};profiles[0].Did="A";profiles[1].Did="B";
+    var ctx=Context("catv-mixed-chain",profiles);var parent=Reserve(ctx.Store,4,200,201,duration:30);
+    var child=new Reservation{NetworkId=4,TransportStreamId=200,ServiceId=201,EventId=101,Source=ReservationSource.Manual,StartTime=at.AddMinutes(30),EndTime=at.AddMinutes(60),Title="Child",ServiceName="Fixture"};
+    var mutation=ctx.Store.AddOrPromoteUserChain(child,parent.Id,parent.Id,true);Check(mutation.Applied,"chain create rejected");
+    Evaluate(ctx.Store,ctx.Pool,profiles,chain:true,margin:10);
+    var first=ctx.Store.GetById(parent.Id)!;var second=ctx.Store.GetById(mutation.ReservationId)!;
+    Check(!first.IsConflicted && !second.IsConflicted && first.TunerName=="C1" && second.TunerName=="C1","mixed CATV chain lost its physical root route");
+});
+
 File.WriteAllText(Path.Combine(root,"results.json"),System.Text.Json.JsonSerializer.Serialize(new{total=results.Count,failed,cases=results},new System.Text.Json.JsonSerializerOptions{WriteIndented=true}));
 Console.WriteLine($"{results.Count-failed}/{results.Count} passed; synthetic inputs only; no RF verification. Results: {root}");
 return failed==0 ? 0 : 1;

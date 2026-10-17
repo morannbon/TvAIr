@@ -487,15 +487,7 @@ public sealed class ExternalTunerLeaseService
     private static string Safe(string? value) => string.IsNullOrWhiteSpace(value) ? "-" : value.Trim();
 
     private static string NormalizeGroup(string? group)
-    {
-        var g = (group ?? string.Empty).Trim().ToUpperInvariant();
-        return g switch
-        {
-            "BS" or "CS" or "BS/CS" or "BSCS" => "BSCS",
-            "地上波" or "GR" or "GROUND" => "GR",
-            _ => g
-        };
-    }
+        => TunerDisplayName.NormalizeViewerLeaseGroup(group);
 }
 
 public sealed record ViewerActionResultSnapshot(

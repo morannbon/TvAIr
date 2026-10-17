@@ -22,7 +22,7 @@ Coverage:
 - WinForms' minimized ShowParams chooses SW_SHOWMINIMIZED before ShowWithoutActivation.
 - All launch kinds and both visibility settings produce one explicit policy argument.
 - Initial native display remains minimized and preserves the active input window.
-- Managed visibility, child controls, logo and icon remain functional.
+- Managed visibility and the standard application icon remain functional; no channel-logo controls are created.
 - Deliberate user restoration works; later content updates do not minimize or activate it.
 - Hidden workers remain without a UI thread/window after progress and recording updates.
 - EPG and recording use the same presentation owner and create one taskbar window.
@@ -33,7 +33,7 @@ desktop, separately from verifying the activating show-command selection.
 Passing this suite does not establish that the reported real CATV/game environment
 has been reproduced or that a third-party BonDriver never creates its own UI.
 
-The worker presentation tests include background-window style and OS fallback checks, 16 segment
+Additional regression coverage includes background-window style and OS fallback checks, 16 segment
 presentation updates, serial hidden/taskbar transitions, parallel worker processes,
 and developer focus telemetry checks. Process-transition fixtures run mode=runtime
 without a tuner. The epg/record/chain cases exercise real presentation callbacks,

@@ -5,7 +5,7 @@ using TvAIr.Core;
 namespace TvAIr.Channel;
 
 /// <summary>
-/// ch2 + ChSet.txt を読み込みChannelTargetを構築する。
+/// ch2の局情報と任意のChSet選局情報を読み込み、旧経路のChannelTargetとBonDriver固有の経路カタログを構築する。
 /// GR  : ChSet.txt BonDriverCh → 物理CH番号 → /ch {physCh}
 /// BS/CS: ChSet.txt TsId → (Space, BonCh) → /chspace {Space} /chi {BonCh}
 ///        同一TS内に複数サービスがある場合のみ /sid を追加してONE/TWO/NEXT等を分離する。
@@ -45,7 +45,7 @@ public sealed class ChannelFileLoader
         }).ToArray();
 
     /// <summary>
-    /// ch2 + ChSet.txt を読み込む。
+    /// ch2・任意のChSet.txt・設定BonDriverに結び付いたch2経路を読み込む。
     /// release_contract: 起動時IOptions固定ではなく、TvAIr.iniの現在値を正とする。
     /// ch2/ChSet 4パスと各ファイルの更新時刻をcache keyに含め、設定変更・ファイル差し替え時は再読込する。
     /// </summary>
@@ -604,7 +604,7 @@ public sealed class ChannelLoadResult
     public string Message        { get; set; } = "";
 
     /// <summary>
-    /// ChannelServiceAccessPolicy 内部用。TVTest .ch2 state と現在のChSet routeを分類する。
+    /// ChannelServiceAccessPolicy 内部用。TVTest .ch2 state と旧ChSet経路の状態を分類する。直接経路の可否は上位ポリシーが別に確認する。
     /// EPGに存在するだけのサービスは Unknown。操作側から直接呼ばない。
     /// </summary>
     internal ChannelServiceEligibility GetServiceEligibility(ushort networkId, ushort transportStreamId, ushort serviceId)

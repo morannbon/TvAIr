@@ -673,98 +673,6 @@ public sealed class EpgStore
         return result;
     }
 
-    /// <summary>キーワード・チャンネル・曜日・時間帯で番組を検索する。</summary>
-    public IReadOnlyList<EpgEvent> Search(
-        string? keyword,
-        bool searchDescription,
-        IEnumerable<ushort>? serviceIds,
-        IEnumerable<int>? daysOfWeek,   // 0=日 〜 6=土
-        int? timeFromHour,
-        int? timeToHour,
-        DateTime? dateFrom,
-        DateTime? dateTo,
-        int limit = 300)
-    {
-        using var con = db.Open();
-        using var cmd = con.CreateCommand();
-
-        var where = new List<string>();
-        var now = DateTime.Now.ToString("O");
-
-        // 過去分を除外（終了時刻が現在以降）
-        where.Add("end_time >= $now");
-        cmd.Parameters.AddWithValue("$now", now);
-
-        // 期間
-        if (dateFrom.HasValue)
-        {
-            where.Add("start_time >= $dateFrom");
-            cmd.Parameters.AddWithValue("$dateFrom", dateFrom.Value.ToString("O"));
-        }
-        if (dateTo.HasValue)
-        {
-            where.Add("start_time < $dateTo");
-            cmd.Parameters.AddWithValue("$dateTo", dateTo.Value.ToString("O"));
-        }
-
-        // キーワードはraw descriptor投影で評価する。
-        // raw descriptorから作る共通投影(EpgProjection)でReadEvents後に判定する。
-
-        // サービスID
-        var svcList = serviceIds?.ToList();
-        if (svcList is { Count: > 0 })
-        {
-            var sidParamNames = svcList.Select((_, i) => $"$sid{i}").ToList();
-            where.Add($"service_id IN ({string.Join(",", sidParamNames)})");
-            for (var i = 0; i < svcList.Count; i++)
-                cmd.Parameters.AddWithValue($"$sid{i}", (int)svcList[i]);
-        }
-
-        // タイトル検索はraw descriptor投影で評価する。
-        // キーワード指定時は先に十分な件数を読み、投影後に最終limitを掛ける。
-        var prefilterLimit = string.IsNullOrWhiteSpace(keyword) ? Math.Max(1, limit) : Math.Max(limit, 10000);
-
-        cmd.CommandText = $"""
-            SELECT network_id, transport_stream_id, service_id, event_id,
-                   service_name, title, description,
-                   genre, genre_codes, table_id, section_number, version_number,
-                   raw_descriptor_loop, raw_short_event_descriptor, raw_extended_event_descriptor, raw_content_descriptor,
-                   duration_seconds, start_time, end_time, updated_at
-            FROM epg_events
-            WHERE {string.Join(" AND ", where)}
-            ORDER BY start_time
-            LIMIT $limit;
-            """;
-        cmd.Parameters.AddWithValue("$limit", prefilterLimit);
-
-        var events = ReadEvents(cmd);
-
-        // 曜日・時間帯・キーワードフィルターはメモリ上で適用（SQLiteに曜日関数がないため）。
-        // キーワード本文はraw descriptor共通デコード投影を見る。
-        var dowSet = daysOfWeek?.ToHashSet();
-        IEnumerable<EpgEvent> result = events;
-
-        if (!string.IsNullOrWhiteSpace(keyword))
-        {
-            var kw = keyword.Trim();
-            result = searchDescription
-                ? result.Where(e => ContainsProjectionText(EpgProjection.Title(e), kw)
-                    || ContainsProjectionText(EpgProjection.ShortText(e), kw)
-                    || ContainsProjectionText(EpgProjection.ExtendedText(e), kw))
-                : result.Where(e => ContainsProjectionText(EpgProjection.Title(e), kw));
-        }
-
-        if (dowSet is { Count: > 0 })
-            result = result.Where(e => dowSet.Contains((int)e.Start.DayOfWeek));
-
-        if (timeFromHour.HasValue)
-            result = result.Where(e => e.Start.Hour >= timeFromHour.Value);
-
-        if (timeToHour.HasValue && timeToHour.Value < 24)
-            result = result.Where(e => e.Start.Hour < timeToHour.Value);
-
-        return result.Take(Math.Max(1, limit)).ToList();
-    }
     public int DeleteExpired(DateTime before)
     {
         using var con = db.Open();
@@ -779,26 +687,6 @@ public sealed class EpgStore
 
 
     // ─── 内部ヘルパー ────────────────────────────────────────────
-
-    private static bool ContainsProjectionText(string? source, string keyword)
-    {
-        if (string.IsNullOrWhiteSpace(source) || string.IsNullOrWhiteSpace(keyword)) return false;
-        if (source.Contains(keyword, StringComparison.OrdinalIgnoreCase)) return true;
-        var normalizedSource = NormalizeSearchText(source);
-        var normalizedKeyword = NormalizeSearchText(keyword);
-        if (normalizedSource.Contains(normalizedKeyword, StringComparison.OrdinalIgnoreCase)) return true;
-        return CompactSearchText(normalizedSource).Contains(CompactSearchText(normalizedKeyword), StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string NormalizeSearchText(string text)
-        => (text ?? string.Empty).Normalize(System.Text.NormalizationForm.FormKC);
-
-    private static string CompactSearchText(string text)
-    {
-        if (string.IsNullOrEmpty(text)) return string.Empty;
-        var chars = text.Where(c => !char.IsWhiteSpace(c)).ToArray();
-        return new string(chars);
-    }
 
     private static IReadOnlyList<EpgEvent> ReadEvents(SqliteCommand cmd)
     {

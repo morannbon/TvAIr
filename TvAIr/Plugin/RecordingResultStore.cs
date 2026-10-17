@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using TvAIrPlugin;
 using TvAIr.Core;
 
@@ -249,7 +249,6 @@ public sealed class RecordingTerminationEvidence
     public string ResultFileState { get; set; } = string.Empty;
     public string TransportStreamValidation { get; set; } = string.Empty;
     public string LeaseReleaseResult { get; set; } = string.Empty;
-    public string ActivityReleaseResult { get; set; } = string.Empty;
     public string RegistryReleaseResult { get; set; } = string.Empty;
     public string TunerStateAfterRelease { get; set; } = string.Empty;
     public string RecoveryReservationResult { get; set; } = string.Empty;
@@ -273,7 +272,6 @@ public sealed class RecordingTerminationEvidence
             ["resultFileState"] = ResultFileState,
             ["transportStreamValidation"] = TransportStreamValidation,
             ["leaseReleaseResult"] = LeaseReleaseResult,
-            ["activityReleaseResult"] = ActivityReleaseResult,
             ["registryReleaseResult"] = RegistryReleaseResult,
             ["tunerStateAfterRelease"] = TunerStateAfterRelease,
             ["recoveryReservationResult"] = RecoveryReservationResult
