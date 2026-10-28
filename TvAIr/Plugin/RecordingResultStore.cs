@@ -14,14 +14,17 @@ public enum RecordingResultUpsertOutcome
 
 public sealed class RecordingResultStore
 {
+    public RecordingFileCatalog Files { get; }
     private readonly object gate = new();
     private readonly string filePath;
     private readonly LogRepository log;
     private Dictionary<string, StoredRecordingResult> rows;
+    private bool loadFailed;
 
     public RecordingResultStore(Database database, LogRepository log)
     {
         this.log = log;
+        Files = new RecordingFileCatalog(database, log, Get);
         Directory.CreateDirectory(database.DataDirectory);
         filePath = Path.Combine(database.DataDirectory, "recording-results.json");
         rows = Load();
@@ -31,6 +34,13 @@ public sealed class RecordingResultStore
     {
         lock (gate)
         {
+            // An unreadable existing ledger is not an empty one. Retry its load before
+            // accepting another projection, preserving both disk evidence and finalize-once.
+            if (loadFailed)
+            {
+                rows = Load(allowMissing: false);
+                if (loadFailed) throw new IOException("Recording result history is unreadable; projection was not saved.");
+            }
             rows.TryGetValue(result.ReservationId, out var existing);
 
             // RECORDING_RESULT_FINALIZE_ONCE_INVARIANT:
@@ -51,12 +61,11 @@ public sealed class RecordingResultStore
                 if (!IsSameRecordingOccurrence(existing.PublicResult, result))
                 {
                     var previous = existing.PublicResult;
-                    rows[result.ReservationId] = new StoredRecordingResult
+                    SaveUnsafe(result.ReservationId, new StoredRecordingResult
                     {
                         PublicResult = result,
                         TerminationEvidence = terminationEvidence
-                    };
-                    SaveUnsafe();
+                    });
                     log.Add("RECORDING_RESULT_STORE_FINALIZE_ONCE", "RecordingResultStore",
                         $"result=APPLIED_NEW_OCCURRENCE reservation={result.ReservationId} " +
                         $"previousScheduled={previous.ScheduledStartTime:O} currentScheduled={result.ScheduledStartTime:O} " +
@@ -69,8 +78,11 @@ public sealed class RecordingResultStore
 
                 if (existing.TerminationEvidence is null && terminationEvidence is not null)
                 {
-                    existing.TerminationEvidence = terminationEvidence;
-                    SaveUnsafe();
+                    SaveUnsafe(result.ReservationId, new StoredRecordingResult
+                    {
+                        PublicResult = existing.PublicResult,
+                        TerminationEvidence = terminationEvidence
+                    });
                     log.Add("RECORDING_RESULT_STORE_FINALIZE_ONCE", "RecordingResultStore",
                         $"result=EVIDENCE_COMPLETED reservation={result.ReservationId} publicResult=preserved rule=recording_result_finalize_once_contract");
                     return RecordingResultUpsertOutcome.AppliedEvidenceOnly;
@@ -81,14 +93,19 @@ public sealed class RecordingResultStore
                 return RecordingResultUpsertOutcome.SkippedAlreadyFinalized;
             }
 
-            rows[result.ReservationId] = new StoredRecordingResult
+            SaveUnsafe(result.ReservationId, new StoredRecordingResult
             {
                 PublicResult = result,
                 TerminationEvidence = terminationEvidence ?? existing?.TerminationEvidence
-            };
-            SaveUnsafe();
+            });
             return RecordingResultUpsertOutcome.AppliedNewFinalized;
         }
+    }
+
+    internal bool HasFinalizedOccurrence(TvAirRecordingResultDto identity)
+    {
+        lock (gate) return rows.TryGetValue(identity.ReservationId, out var existing)
+            && existing.PublicResult.ResultFinalized && IsSameRecordingOccurrence(existing.PublicResult, identity);
     }
 
     public TvAirRecordingResultDto? Get(string reservationId)
@@ -110,20 +127,26 @@ public sealed class RecordingResultStore
         lock (gate) return rows.Values.Select(x => x.PublicResult).ToList();
     }
 
-    private void SaveUnsafe()
+    private void SaveUnsafe(string reservationId, StoredRecordingResult incoming)
     {
+        // Publish only after the file replacement succeeds. An IO failure must leave
+        // both the previous public result and the finalize-once retry decision intact.
+        var candidate = new Dictionary<string, StoredRecordingResult>(rows, rows.Comparer)
+        {
+            [reservationId] = incoming
+        };
         var temp = filePath + ".tmp";
-        var payload = rows.Values
+        var payload = candidate.Values
             .OrderBy(x => x.PublicResult.ScheduledStartTime)
             .ToList();
         File.WriteAllText(temp, JsonSerializer.Serialize(payload, JsonOptions));
         File.Move(temp, filePath, true);
+        rows = candidate;
     }
 
-    private Dictionary<string, StoredRecordingResult> Load()
+    private Dictionary<string, StoredRecordingResult> Load(bool allowMissing = true)
     {
-        if (!File.Exists(filePath)) return new(StringComparer.OrdinalIgnoreCase);
-
+        loadFailed = false;
         try
         {
             var json = File.ReadAllText(filePath);
@@ -155,8 +178,17 @@ public sealed class RecordingResultStore
                 $"result=OK format={(isNewFormat ? "stored_result" : "legacy_public_result")} count={loaded.Count} migration=typed_succeeded_projection rule=recording_result_store_contract");
             return loaded;
         }
+        catch (FileNotFoundException) when (allowMissing)
+        {
+            return new(StringComparer.OrdinalIgnoreCase);
+        }
+        catch (DirectoryNotFoundException) when (allowMissing)
+        {
+            return new(StringComparer.OrdinalIgnoreCase);
+        }
         catch (Exception ex)
         {
+            loadFailed = true;
             log.Add("RECORDING_RESULT_STORE_LOAD", "RecordingResultStore",
                 $"result=FAILED filePreserved=True action=do_not_overwrite reason={Sanitize(ex.Message)} rule=recording_result_store_contract");
             return new(StringComparer.OrdinalIgnoreCase);

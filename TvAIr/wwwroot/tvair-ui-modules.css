@@ -69,7 +69,10 @@ tr:nth-child(even),.row-alt{background:color-mix(in srgb,var(--tvair-module-pane
   --prog-btn-h:20px;
   --prog-btn-min-w:42px;
   --prog-cell-btn-pad-x:6px;
-  --tvair-program-action-guide-width:calc((var(--tvair-guide-col-w) - (2 * var(--prog-padding-h)) - var(--prog-btn-gap)) / 2);
+  /* ProgramActionControlSingleSourceContract: a button must fit twice inside
+     the 120px guide cell, including horizontal padding and the 3px gap.
+     Integer-pixel rounding is owned here, never by a specific action/page. */
+  --tvair-program-action-width:round(down, calc((var(--tvair-guide-col-w) - 2 * var(--prog-padding-h) - var(--prog-btn-gap)) / 2), 1px);
   --tvair-nav-bg:var(--tvair-bg-c);
   --tvair-nav-border:var(--tvair-border-a);
   --tvair-nav-item-bg:var(--tvair-bg-b);
@@ -1345,17 +1348,6 @@ body.tvair-guide-page .prog.epg-gap .prog-desc{
   color:var(--tvair-event-unknown-fg);
 }
 
-.tvair-action-button.program-cell-action-btn--list-context,
-body.tvair-keyword-page .tvair-action-button.program-cell-action-btn--list-context{
-  min-width:var(--tvair-button-list-action-min-width);
-  max-width:100%;
-  height:var(--tvair-button-h-row-action);
-  padding:0 var(--tvair-button-pad-x-row-action);
-  border-radius:var(--tvair-button-radius);
-  font-size:var(--tvair-button-font-compact);
-  line-height:1;
-}
-
 /* release_contract ProgramGuideTimeAxisHeaderOwnerContract audit
    Time-axis header spacers are structural cells. Geometry and paint are owned here once;
    body time-axis rows remain owned by the ProgramGuide time-axis body contract below. */
@@ -2249,9 +2241,9 @@ body.tvair-guide-page .cfg-genre-palette-close{font-size:12px;border:0;backgroun
   justify-content:center;
   flex:0 0 auto;
   align-self:stretch;
-  width:auto;
-  min-width:0;
-  max-width:100%;
+  width:var(--tvair-program-action-width);
+  min-width:var(--tvair-program-action-width);
+  max-width:var(--tvair-program-action-width);
   height:var(--prog-btn-h);
   min-height:var(--prog-btn-h);
   margin:0;
@@ -2264,14 +2256,8 @@ body.tvair-guide-page .cfg-genre-palette-close{font-size:12px;border:0;backgroun
   appearance:none;
   -webkit-appearance:none;
   font-family:"Meiryo","メイリオ",sans-serif;
-  /* ProgramActionTextVerticalCenterContract:
-     Keep the shared action-control typography on whole CSS pixels.  The former
-     9.5px font size introduced a half-pixel glyph metric, so identical 20px
-     controls could rasterize the Meiryo label one pixel apart depending on the
-     surrounding table/grid layout.  The control owns both font-size and
-     line-height as a 10px integer pair; with an 18px inner box this leaves an
-     exact 4px line-box offset on both sides.  No surface-specific vertical
-     offset/padding correction is permitted. */
+  /* All labels share this single font and line box. Flex centers the line box
+     on both axes; no cell-specific line-height or padding corrections. */
   font-size:10px;
   font-weight:700;
   line-height:10px;
@@ -2282,22 +2268,6 @@ body.tvair-guide-page .cfg-genre-palette-close{font-size:12px;border:0;backgroun
   z-index:2;
   opacity:1;
   filter:none;
-}
-body.tvair-guide-page .prog .tvair-program-action-control.prog-btn-slot-primary,
-body.tvair-guide-page .prog .tvair-program-action-control.prog-btn-slot-state,
-body.tvair-guide-page .prog .tvair-program-action-control.prog-btn-slot-chain{
-  flex:0 0 auto;
-  align-self:flex-start;
-  width:auto;
-  min-width:var(--prog-btn-min-w);
-  max-width:100%;
-  padding-left:var(--prog-cell-btn-pad-x);
-  padding-right:var(--prog-cell-btn-pad-x);
-}
-body.tvair-reservation-page .reservation-action-slot .tvair-program-action-control{
-  width:var(--tvair-program-action-guide-width);
-  min-width:var(--tvair-program-action-guide-width);
-  max-width:var(--tvair-program-action-guide-width);
 }
 .tvair-program-action-control[data-program-action="record-now"],
 .tvair-program-action-control[data-program-guide-action-pending-action="record-now"]{
@@ -2351,65 +2321,6 @@ body.tvair-reservation-page .reservation-action-slot .tvair-program-action-contr
 body.tvair-guide-page .prog .tvair-program-action-control[data-program-guide-action-busy="1"]:not([data-program-guide-action-pending-visual="1"]){cursor:not-allowed;}
 .tvair-program-action-control.tvair-action-label{pointer-events:none;}
 
-/* release_contract ProgramGuideNextDayBottomCenter
-   Owner: ProgramGuide next-day auxiliary action only.
-   Purpose: keep the next-day action outside normal flow and anchor it at the
-   bottom center of the guide viewport, controlled only by hidden/aria-hidden/is-visible. */
-body.tvair-guide-page #next-day-btn.tvair-guide-floating-next-day,
-body.tvair-guide-page button#next-day-btn[data-floating-action="next-day"]{
-  position:fixed;
-  left:50%;
-  right:auto;
-  bottom:18px;
-  z-index:1850;
-  display:none;
-  align-items:center;
-  justify-content:center;
-  min-width:112px;
-  min-height:28px;
-  padding:6px 14px;
-  margin:0;
-  border:1px solid var(--tvair-guide-next-day-floating-border,var(--tvair-role-control-border));
-  border-radius:999px;
-  background:var(--tvair-guide-next-day-floating-bg,var(--tvair-role-control-active-bg));
-  color:var(--tvair-guide-next-day-floating-fg,var(--tvair-role-control-active-fg));
-  box-shadow:var(--tvair-guide-next-day-floating-shadow,var(--tvair-shadow-a));
-  font:700 12px/1 "Meiryo","メイリオ",sans-serif;
-  text-decoration:none;
-  white-space:nowrap;
-  cursor:pointer;
-  user-select:none;
-  pointer-events:auto;
-  opacity:0;
-  transform:translate(-50%,8px);
-  transition:opacity .12s ease, transform .12s ease, background-color .12s ease, border-color .12s ease;
-}
-body.tvair-guide-page #next-day-btn.tvair-guide-floating-next-day[hidden],
-body.tvair-guide-page button#next-day-btn[data-floating-action="next-day"][hidden],
-body.tvair-guide-page #next-day-btn.tvair-guide-floating-next-day[aria-hidden="true"],
-body.tvair-guide-page button#next-day-btn[data-floating-action="next-day"][aria-hidden="true"]{
-  display:none;
-  opacity:0;
-  pointer-events:none;
-}
-body.tvair-guide-page #next-day-btn.tvair-guide-floating-next-day.is-visible:not([hidden]),
-body.tvair-guide-page button#next-day-btn[data-floating-action="next-day"].is-visible:not([hidden]){
-  display:inline-flex;
-  opacity:1;
-  transform:translate(-50%,0);
-}
-body.tvair-guide-page #next-day-btn.tvair-guide-floating-next-day:hover,
-body.tvair-guide-page button#next-day-btn[data-floating-action="next-day"]:hover{
-  background:var(--tvair-guide-next-day-floating-hover-bg,var(--tvair-role-control-hover-bg));
-  color:var(--tvair-guide-next-day-floating-hover-fg,var(--tvair-guide-next-day-floating-fg));
-  border-color:var(--tvair-guide-next-day-floating-hover-border,var(--tvair-guide-next-day-floating-border));
-}
-body.tvair-guide-page #next-day-btn.tvair-guide-floating-next-day:focus-visible,
-body.tvair-guide-page button#next-day-btn[data-floating-action="next-day"]:focus-visible{
-  outline:2px solid var(--tvair-role-focus);
-  outline-offset:2px;
-}
-
 /* release_contract ProgramCellActionIdentityOverlapGuard
    Owner: ProgramGuide cell action geometry and identity-safety only.
    Purpose: short cells must not visually stack action buttons, and unsafe long
@@ -2431,16 +2342,6 @@ body.tvair-guide-page .prog .prog-btns{
 body.tvair-guide-page .prog.prog-short .prog-btns,
 body.tvair-guide-page .prog[data-desc-lines="0"] .prog-btns{
   gap:var(--prog-btn-gap);
-}
-body.tvair-guide-page .prog.prog-short .program-cell-action-btn,
-body.tvair-guide-page .prog[data-desc-lines="0"] .program-cell-action-btn{
-  max-width:100%;
-  white-space:nowrap;
-  overflow:hidden;
-  text-overflow:clip;
-  line-height:1;
-  padding-top:0;
-  padding-bottom:0;
 }
 body.tvair-guide-page .prog.prog-action-unsafe{
   pointer-events:none;
@@ -2531,3 +2432,11 @@ body.tvair-guide-page .prog:hover:not(.reserved-now):not(.recording-now):not(.re
 }
 
 /* Reservation subtabs are owned by tvair-list-module.css; no late page repaint here. */
+
+
+.tvair-program-action-control[data-program-action="live-view"],
+.tvair-program-action-control[data-program-guide-action-pending-action="live-view"]{
+  --tvair-programcell-action-bg:var(--tvair-programcell-button-live-view-bg);
+  --tvair-programcell-action-fg:var(--tvair-programcell-button-live-view-fg);
+  --tvair-programcell-action-border:var(--tvair-programcell-button-live-view-border);
+}

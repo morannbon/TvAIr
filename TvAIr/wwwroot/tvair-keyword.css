@@ -83,7 +83,7 @@ body.tvair-keyword-page{
 .td-dur{color:var(--tvair-content-muted)}
 
 /* release_contract: .rsv-btn and keyword form utility button geometry are owned by tvair-list-module.css. */
-.rsv-btn{border:none}
+.rsv-btn:not(.tvair-program-action-control){border:none}
 .rsv-btn-new{background:var(--tvair-role-control-active-bg);color:var(--tvair-content-inverse)}
 .rsv-btn-new:hover{background:var(--tvair-role-action-primary-hover-bg)}
 .rsv-btn-done{background:var(--tvair-role-action-danger-soft-bg);color:var(--rsv-done-text);border:1px solid var(--tvair-role-border);cursor:default}

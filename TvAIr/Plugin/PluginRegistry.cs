@@ -1,4 +1,4 @@
-using TvAIrPlugin;
+﻿using TvAIrPlugin;
 using TvAIrPlugin.Runtime;
 
 
@@ -12,6 +12,35 @@ public sealed class PluginRegistry
 {
     private readonly object _sync = new();
     private readonly List<ITvAirRuntimeCapabilityPlugin> _runtimePlugins = new();
+    private readonly Dictionary<string, TvAirPluginSelectionFeatureDto> _selectionFeatures = new(StringComparer.OrdinalIgnoreCase);
+
+    public IReadOnlyList<TvAirPluginSelectionFeatureDto> ListSelectionFeatures()
+    {
+        lock (_sync) return _selectionFeatures.Values.OrderBy(x => x.PluginId).ThenBy(x => x.FeatureId).ToArray();
+    }
+
+    internal void PublishSelectionFeature(string ownerId, string featureId, string label, bool enabled,
+        IReadOnlyList<TvAirPluginSelectionOptionDto> options)
+    {
+        if (string.IsNullOrWhiteSpace(ownerId) || string.IsNullOrWhiteSpace(featureId) || featureId.Length > 128)
+            throw new ArgumentException("Plugin selection owner/feature is invalid.");
+        if (options is null || options.Count > 256 || options.Any(o => o is null || string.IsNullOrWhiteSpace(o.SelectionId)
+            || o.SelectionId.Length > 256 || string.IsNullOrWhiteSpace(o.DisplayName)))
+            throw new ArgumentException("Plugin selection options are invalid.");
+        var list = options.Select(o => new TvAirPluginSelectionOptionDto { SelectionId = o.SelectionId, DisplayName = o.DisplayName }).ToArray();
+        if (list.Select(o => o.SelectionId).Distinct(StringComparer.Ordinal).Count() != list.Length)
+            throw new ArgumentException("Duplicate selection identifiers.");
+        lock (_sync) _selectionFeatures[ownerId + ":" + featureId] = new TvAirPluginSelectionFeatureDto
+        {
+            PluginId = ownerId, FeatureId = featureId, DisplayName = label ?? "", Enabled = enabled, Options = list
+        };
+    }
+
+    internal void RemoveSelectionFeature(string ownerId, string featureId)
+    {
+        lock (_sync) _selectionFeatures.Remove(ownerId + ":" + featureId);
+    }
+
     internal void RegisterRuntime(ITvAirRuntimeCapabilityPlugin plugin)
     {
         lock (_sync)

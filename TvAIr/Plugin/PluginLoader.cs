@@ -1,4 +1,4 @@
-using System.Reflection;
+﻿using System.Reflection;
 using System.Runtime.Loader;
 using Microsoft.Extensions.Options;
 using TvAIr.Channel;
@@ -62,6 +62,7 @@ internal sealed class PluginLoader : IHostedService
     private readonly PluginManagedExternalLookupHost _externalLookupHost;
     private readonly PluginInternetAccessGate _internetAccessGate;
     private readonly PluginExternalJobHost _externalJobHost;
+    private readonly PluginPowerInhibitionHost _powerInhibitionHost;
     private readonly List<(ITvAirRuntimeCapabilityPlugin Plugin, string PluginId)> _loadedRuntimeCapabilities = new();
     private readonly List<PluginRuntimeContext> _runtimeContexts = new();
 
@@ -146,6 +147,7 @@ internal sealed class PluginLoader : IHostedService
         _externalLookupHost = externalLookupHost;
         _internetAccessGate = internetAccessGate;
         _externalJobHost = externalJobHost;
+        _powerInhibitionHost = new PluginPowerInhibitionHost(log);
     }
 
     /// <summary>
@@ -190,6 +192,8 @@ internal sealed class PluginLoader : IHostedService
 
     public Task StopAsync(CancellationToken cancellationToken)
     {
+        // Close admission and finish Host-owned processes before Plugin OnStop/context disposal.
+        _externalJobHost.Dispose();
         StopAll();
         return Task.CompletedTask;
     }
@@ -314,6 +318,7 @@ internal sealed class PluginLoader : IHostedService
                 _externalLookupHost,
                 _internetAccessGate,
                 _externalJobHost,
+                _powerInhibitionHost,
                 pluginId,
                 descriptor.DisplayName,
                 PluginsDirectory,
@@ -329,7 +334,13 @@ internal sealed class PluginLoader : IHostedService
                         ? new VideoOverlayViewerTarget(session.ViewerSessionId, session.Generation, session.ProcessId.Value)
                         : null;
                 });
-            plugin.Initialize(context);
+            try { plugin.Initialize(context); }
+            catch
+            {
+                try { ReleasePluginResources(pluginId); }
+                finally { context.Dispose(); }
+                throw;
+            }
             _runtimeContexts.Add(context);
             _loadedRuntimeCapabilities.Add((plugin, pluginId));
             _registry.RegisterRuntime(plugin);
@@ -479,6 +490,16 @@ internal sealed class PluginLoader : IHostedService
         }
     }
 
+    private void ReleasePluginResources(string pluginId)
+    {
+        try { _externalLookupHost.CancelPlugin(pluginId); }
+        finally
+        {
+            try { _externalJobHost.CancelPlugin(pluginId); }
+            finally { _powerInhibitionHost.CancelPlugin(pluginId); }
+        }
+    }
+
     /// <summary>ロード済み全プラグインの OnStop を呼び出す。</summary>
     private void StopAll()
     {
@@ -501,8 +522,7 @@ internal sealed class PluginLoader : IHostedService
         }
         foreach (var entry in _loadedRuntimeCapabilities)
         {
-            _externalLookupHost.CancelPlugin(entry.PluginId);
-            _externalJobHost.CancelPlugin(entry.PluginId);
+            ReleasePluginResources(entry.PluginId);
         }
 
         for (var i = _runtimeContexts.Count - 1; i >= 0; i--)

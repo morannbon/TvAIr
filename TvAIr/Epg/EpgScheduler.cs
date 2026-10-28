@@ -1600,36 +1600,22 @@ public sealed class EpgScheduler : BackgroundService
     {
         log.Add("EPG_SCHEDULER_START", "EPG", "EPGスケジューラーを開始しました。");
 
-        // 起動時に自動検索予約の整合性をとる。
-        // 前回終了後にDBだけ残っているルール・予約の状態が最新のEPGと一致していない
-        // 可能性があるため、起動直後に一度 Purge → RunMatching を走らせて予約リストを
-        // 最新状態に揃える。これで「ルール作成後に再起動 → 朝まで何も反映されない」
-        // という問題を解消する(TvAIr は毎朝6:54に自動再起動される前提のため影響大)。
-        try
-        {
-            var purged = reservationStore.PurgeExpiredKeywordRules();
-            if (purged > 0)
-                log.Add("KEYWORD_RULE_PURGE", "StartupPurge",
-                    $"起動時 期限切れルール掃除: {purged}件 (関連予約も物理削除)");
-        }
-        catch (Exception ex)
-        {
-            log.Add("KEYWORD_RULE_PURGE", "StartupPurge", $"起動時ルール掃除エラー: {ex.Message}");
-        }
-
+        // Expiry and the following match are one existing allocation-route request.
+        // Runtime admission may retain this automatic intent until initialization is ready.
         try
         {
             allocationRoute.Run(new ReservationAllocationRouteRequest(
                 Source: "EpgScheduler",
                 Action: "StartupSync",
-                RunKeywordMatcher: true,
-                SyncProgramRuleReservations: true,
+                RunKeywordMatcher: false,
+                SyncProgramRuleReservations: false,
                 ReevaluateAllocations: true,
                 RefreshPreRecordEpgEntries: true,
                 RefreshWakeTask: false,
                 EmitConflictLogs: true,
                 ConflictLogCategory: "EPG_SCHEDULER",
-                ConflictLogTitle: "Conflict(StartupSync)"));
+                ConflictLogTitle: "Conflict(StartupSync)",
+                TopologyCommands: new[] { new ExpiredKeywordRuleDeletionCommand(DateOnly.FromDateTime(DateTime.Now)) }));
         }
         catch (Exception ex)
         {
@@ -2395,20 +2381,6 @@ public sealed class EpgScheduler : BackgroundService
             // Scheduler.Daily はDaily All成功時だけ、手動/プラグイン取得は今回ランに有効取込がある場合だけ通す。
             if (!ct.IsCancellationRequested && postImportRequired)
             {
-                // マッチング前に期限切れルールと、そのルール由来のScheduled予約を
-                // 同一Transactionで物理削除し、EPG取込後の整合処理へ渡す。
-                try
-                {
-                    var purged = reservationStore.PurgeExpiredKeywordRules();
-                    if (purged > 0)
-                        log.Add("KEYWORD_RULE_PURGE", "ExpiredRules",
-                            $"期限切れルールを掃除: {purged}件 (関連予約も物理削除)");
-                }
-                catch (Exception ex)
-                {
-                    log.Add("KEYWORD_RULE_PURGE", "ExpiredRules", $"期限切れルール掃除エラー: {ex.Message}");
-                }
-
                 // release_contract: EPG取り込み後の縦串順序を固定する。
                 // 先に既存EventIdentity予約を最新EITへ追従させ、その後に自動検索/ProgramRule/割当/PreRecEpg/Wakeを
                 // 1本の共通割当ルートで通す。古い時刻のまま一度割当評価してから追従する二段評価を避ける。
@@ -2424,18 +2396,20 @@ public sealed class EpgScheduler : BackgroundService
 
                 try
                 {
-                    allocationRoute.Run(new ReservationAllocationRouteRequest(
+                    var expiry = new ExpiredKeywordRuleDeletionCommand(DateOnly.FromDateTime(DateTime.Now));
+                    var allocation = allocationRoute.Run(new ReservationAllocationRouteRequest(
                         Source: "EpgScheduler",
                         Action: "EpgCompletePostImport",
-                        RunKeywordMatcher: true,
-                        SyncProgramRuleReservations: true,
+                        RunKeywordMatcher: false,
+                        SyncProgramRuleReservations: false,
                         ReevaluateAllocations: true,
                         RefreshPreRecordEpgEntries: true,
                         RefreshWakeTask: true,
                         EmitConflictLogs: true,
                         ConflictLogCategory: "EPG_SCHEDULER",
-                        ConflictLogTitle: "Conflict(EpgCompletePostImport)"));
-                    log.Add("EPG_SCHEDULER", "PostImportRoute", $"result=OK timeFollowUpdated={timeFollowUpdated} route=ALLOC_ROUTE matcher=True syncProgram=True reevaluate=True preRec=True wake=True rule=release_contract");
+                        ConflictLogTitle: "Conflict(EpgCompletePostImport)",
+                        TopologyCommands: new[] { expiry }));
+                    log.Add("EPG_SCHEDULER", "PostImportRoute", $"result={(allocation.Deferred ? "DEFERRED" : allocation.RetryRequired ? "RETRY_REQUIRED" : "OK")} timeFollowUpdated={timeFollowUpdated} expiryCommitted={expiry.Result is { Applied: true }} route=ALLOC_ROUTE matcher=True syncProgram=True reevaluate=True preRec=True wake=True rule=release_contract");
                 }
                 catch (Exception ex)
                 {

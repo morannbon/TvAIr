@@ -1,4 +1,4 @@
-/*
+﻿/*
  * 共通割り当てルートの不変条件:
  * - 割り当て順序、single-flight、authoritative commit、Mutation/Wake投影はこの経路へ集約する。
  * - 録画実行はTvAIrEpgRec共通TS runtimeへ渡し、別の録画起動・待機・補正経路を作らない。
@@ -32,7 +32,19 @@ public sealed record ReservationAllocationRouteRequest(
     string ConflictLogCategory = "ReservationRoute",
     string ConflictLogTitle = "Conflict",
     string ExecutionMode = "Normal",
-    ReservationAllocationWakeRefreshMode WakeRefreshMode = ReservationAllocationWakeRefreshMode.Immediate);
+    ReservationAllocationWakeRefreshMode WakeRefreshMode = ReservationAllocationWakeRefreshMode.Immediate,
+    IReadOnlyList<ReservationTopologyCommand>? TopologyCommands = null,
+    bool RejectDeferredTopologyCommands = false)
+{
+    internal bool IncludesOrdinaryWork { get; init; }
+    internal bool DeferRuleRefresh { get; init; }
+    internal bool RetainRuleRefresh { get; init; }
+    internal bool RetainChainConvergence { get; init; }
+    internal ReservationProjectionPromotionService? RetainedProjectionPromotion { get; init; }
+    internal bool DeferProjectionPromotion { get; init; }
+    internal ReservationAllocationRouteRequest? StopResumeRetry { get; init; }
+    internal StopPhaseGate.PhysicalReleaseBarrier? StopPreparationBarrier { get; init; }
+}
 
 public sealed record ReservationAllocationRouteResult(
     int ChangedCount,
@@ -56,7 +68,10 @@ public sealed class ReservationAllocationRouteService
         ReservationAllocationRouteResult Result,
         IReadOnlyList<(int Id, string ServiceName, string Title, bool Conflicted)> Changes,
         IReadOnlyList<AllocationCommittedRowChange> RowChanges,
-        bool AllocationAttempted);
+        bool AllocationAttempted,
+        bool DeferredKeywordRefresh = false,
+        bool DeferredProgramSync = false, bool DeferredChainConvergence = false,
+        ReservationProjectionPromotionService? DeferredProjectionPromotion = null, bool ProjectionPromotionAttempted = false);
 
     private sealed record AggregateConflictChange(
         int Id,
@@ -83,6 +98,13 @@ public sealed class ReservationAllocationRouteService
     private readonly LogRepository _log;
     private readonly IServiceProvider _serviceProvider;
 
+    // Pending work only; INI and ReservationStore remain the authoritative state.
+    private int _disabledChainConvergenceRequested;
+    public void RequestDisabledChainConvergence()
+        => Interlocked.Exchange(ref _disabledChainConvergenceRequested, 1);
+    internal bool HasPendingDisabledChainConvergence
+        => Volatile.Read(ref _disabledChainConvergenceRequested) != 0;
+
     private readonly object _singleFlightGate = new();
     private bool _singleFlightRunning;
     private int _singleFlightOwnerThreadId;
@@ -101,6 +123,46 @@ public sealed class ReservationAllocationRouteService
     private readonly object _derivedProjectionQueueGate = new();
     private Task _derivedProjectionTail = Task.CompletedTask;
 
+    // Transient index into canonical queued/running commands, never reservation state or a second queue.
+    private sealed class LabWithdrawalSlot(int selected)
+    {
+        public int Selected{get;}=selected;
+        public TaskCompletionSource<LabWithdrawalOperationCommand?> Ready{get;}=new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+    private readonly Dictionary<string,LabWithdrawalSlot> _labWithdrawalOwners=new(StringComparer.Ordinal);
+    public async Task<LabWithdrawalAdmission> AdmitLabWithdrawalAsync(Guid operation,int selected,Func<LabWithdrawalOperationCommand?> create)
+    {
+        var key=operation.ToString("N");LabWithdrawalSlot slot;bool creator;
+        lock(_singleFlightGate){
+            foreach(var old in _labWithdrawalOwners.Where(pair=>pair.Value.Ready.Task.IsCompleted
+                &&(!pair.Value.Ready.Task.IsCompletedSuccessfully||pair.Value.Ready.Task.Result is null||pair.Value.Ready.Task.Result.Completion.IsCompleted)).Select(pair=>pair.Key).ToArray())_labWithdrawalOwners.Remove(old);
+            if(_labWithdrawalOwners.TryGetValue(key,out var existing)){
+                if(existing.Selected!=selected)return new(null,"operation_target_mismatch",true);
+                slot=existing;creator=false;
+            }else{slot=new(selected);_labWithdrawalOwners.Add(key,slot);creator=true;}
+        }
+        if(creator){
+            try{
+                var candidate=create();
+                if(candidate is not null&&(candidate.RequestedId!=selected||candidate.OperationId!=key))throw new InvalidOperationException("Withdrawal command identity mismatch.");
+                slot.Ready.TrySetResult(candidate);
+            }catch(Exception ex){slot.Ready.TrySetException(ex);lock(_singleFlightGate)if(_labWithdrawalOwners.TryGetValue(key,out var current)&&ReferenceEquals(current,slot))_labWithdrawalOwners.Remove(key);}
+        }
+        // Factory/SQLite work and waits never hold the canonical queue gate.
+        var command=await slot.Ready.Task;
+        if(command is null)return new(null,"not_applicable",!creator);
+        Run(new("ReservationMutation","WithdrawRegisteredFuture",SyncProgramRuleReservations:false,ReevaluateAllocations:false,
+            RefreshPreRecordEpgEntries:false,RefreshWakeTask:false,TopologyCommands:new[]{command}),waitForActiveSingleFlight:false);
+        return new(command,"accepted",!creator);
+    }
+
+    private string _appliedChainMode;
+    // Preview only. The command rechecks policy and SQLite scope inside this route.
+    public IReadOnlyList<Reservation> GetReservationCancellationTargets(int id)
+        => _store.GetReservationCancellationTargets(id, _ini.AutomaticChainRecordingEnabled);
+
+    private string EffectiveChainMode => _ini.LaterProgramPriority ? _ini.ChainReservationMode : ChainModeContract.Disabled;
+
     public ReservationAllocationRouteService(
         ReservationStore store,
         IniSettingsService ini,
@@ -111,18 +173,98 @@ public sealed class ReservationAllocationRouteService
     {
         _store = store;
         _ini = ini;
+        // Startup adopts the configured policy without resetting stored connections.
+        // Automatic convergence still runs through the ordinary common allocation cycle.
+        _appliedChainMode=EffectiveChainMode;
         _tunerProfiles = tunerProfiles;
         _tunerPool = tunerPool;
         _log = log;
         _serviceProvider = serviceProvider;
     }
 
+    internal void RetainStopResumeRequest(ReservationAllocationRouteRequest request)
+    {
+        if (request.StopPreparationBarrier is not null)
+            throw new InvalidOperationException("A live stop-preparation scope cannot be retained.");
+        if (request.TopologyCommands is { } commands)
+            request = request with { TopologyCommands = Array.AsReadOnly(commands.ToArray()) };
+        request = request with { StopResumeRetry = (request.StopResumeRetry ?? request) with { StopResumeRetry = null } };
+        lock (_singleFlightGate)
+            _pendingRequest = _pendingRequest is null ? request : MergeRequests(request, _pendingRequest);
+    }
+
+    // Only explicitly retryable automatic intents survive failures; strict UI commands are not replayed.
+    private static ReservationAllocationRouteRequest? RetainedTopologyRetryRequest(
+        ReservationAllocationRouteRequest request, ReservationAllocationRouteRequest? pending)
+    {
+        var commands = (request.TopologyCommands ?? Array.Empty<ReservationTopologyCommand>())
+            .Concat(pending?.TopologyCommands ?? Array.Empty<ReservationTopologyCommand>())
+            .Where(c => c.RetainIfUnexecuted).Distinct().ToArray();
+        var retainRefresh = request.RetainRuleRefresh || pending?.RetainRuleRefresh == true;
+        var retainChain=request.RetainChainConvergence || pending?.RetainChainConvergence == true;
+        var promotion = PendingProjectionPromotion(request) ?? PendingProjectionPromotion(pending);
+        return commands.Length == 0 && !retainRefresh && !retainChain && promotion is null ? null : new("AutomaticTopology", "RetryUnfinished",
+            RunKeywordMatcher: retainRefresh && (request.RunKeywordMatcher || pending?.RunKeywordMatcher == true),
+            SyncProgramRuleReservations: retainRefresh && (request.SyncProgramRuleReservations || pending?.SyncProgramRuleReservations == true),
+            ReevaluateAllocations:request.ReevaluateAllocations || pending?.ReevaluateAllocations==true,
+            RefreshPreRecordEpgEntries:request.RefreshPreRecordEpgEntries || pending?.RefreshPreRecordEpgEntries==true,
+            RefreshWakeTask:request.RefreshWakeTask || pending?.RefreshWakeTask==true,
+            TopologyCommands: commands) { RetainRuleRefresh = retainRefresh, RetainChainConvergence=retainChain, RetainedProjectionPromotion=promotion };
+    }
+
+    // Carry only the service that re-reads current DB/metadata, never captured EPG payloads.
+    private static ReservationProjectionPromotionService? PendingProjectionPromotion(ReservationAllocationRouteRequest? request)
+        => request?.TopologyCommands?.OfType<EpgCaptureCommitCommand>()
+            .Select(c => c.PendingPromotionRetry).FirstOrDefault(p => p is not null)
+            ?? request?.RetainedProjectionPromotion;
+
+    internal ReservationAllocationRouteResult RunManualStopPreparation(
+        ManualStopPreparationCommand command, StopPhaseGate.PhysicalReleaseBarrier barrier)
+        => Run(new("RecordingStop", "PrepareTopology", SyncProgramRuleReservations: false,
+            ReevaluateAllocations: false, TopologyCommands: new[] { command },
+            RejectDeferredTopologyCommands: true) { StopPreparationBarrier = barrier });
+
+    // Isolated withdrawal integration; accepted intents remain in the one existing queue.
+    internal bool HasPendingLabWithdrawalWork
+    {
+        get
+        {
+            lock (_singleFlightGate)
+                return _pendingRequest?.TopologyCommands?.Any(command =>
+                    command is LabWithdrawalOperationCommand || command is LabWithdrawalSettlementCommand
+                    || command is ReservationCancellationCommand { LabPreparationReady: not null }) == true;
+        }
+    }
+
     public ReservationAllocationRouteResult Run(ReservationAllocationRouteRequest request, bool waitForActiveSingleFlight = true)
     {
+        var stopPreparation = request.StopPreparationBarrier is not null;
+        if (stopPreparation && (request.StopPreparationBarrier is not { IsActive: true }
+            || request.TopologyCommands is not { Count: 1 }
+            || request.TopologyCommands[0] is not ManualStopPreparationCommand stopCommand
+            || request.StopPreparationBarrier.ReservationId != stopCommand.ReservationId
+            || request.RunKeywordMatcher || request.SyncProgramRuleReservations
+            || request.ReevaluateAllocations || request.RefreshPreRecordEpgEntries || request.RefreshWakeTask))
+            throw new InvalidOperationException("Invalid manual-stop preparation request.");
+        if (!stopPreparation && request.TopologyCommands?.Any(c => c is ManualStopPreparationCommand) == true)
+            throw new InvalidOperationException("Manual-stop preparation requires its physical-release scope.");
+
+        // Freeze the caller's collection before StopPhase/single-flight can retain it.
+        if (request.TopologyCommands is { } commands)
+            request = request with
+            {
+                TopologyCommands = Array.AsReadOnly(commands.ToArray()),
+                ReevaluateAllocations = request.ReevaluateAllocations || (!stopPreparation && commands.Any(c=>c.RequiresAllocationAfterCommit)),
+                RefreshPreRecordEpgEntries = request.RefreshPreRecordEpgEntries || (!stopPreparation && commands.Any(c=>c.RequiresAllocationAfterCommit)),
+                RefreshWakeTask = request.RefreshWakeTask || (!stopPreparation && commands.Any(c=>c.RequiresAllocationAfterCommit))
+            };
+
+        if (request.TopologyCommands is not { Count: > 0 })
+            request = request with { IncludesOrdinaryWork = true };
+
         var requestedAt = DateTime.Now;
 
-        if (!request.BypassStopPhaseGate
-            && StopPhaseGate.TryDeferAllocRoute(request,
+        if (StopPhaseGate.TryDeferAllocRoute(request,
                 msg => _log.Add("ALLOC_ROUTE", "StopPhase", msg)))
         {
             _log.Add("ALLOC_ROUTE", "Deferred",
@@ -139,6 +281,24 @@ public sealed class ReservationAllocationRouteService
         {
             if (!_singleFlightRunning)
             {
+                if (_pendingRequest is not null)
+                {
+                    if (stopPreparation)
+                    {
+                        var maintenanceOnly = _pendingRequest.TopologyCommands is { Count: > 0 } pendingCommands
+                            ? pendingCommands.All(c => c.NonBlockingDeferralKey is not null)
+                            : _pendingRequest.RetainRuleRefresh || _pendingRequest.RetainChainConvergence || _pendingRequest.RetainedProjectionPromotion is not null;
+                        if (_pendingRequest.IncludesOrdinaryWork || _pendingRequest.StopResumeRetry is not null || !maintenanceOnly)
+                            return new(0, 0, 0, Deferred: true, Reason: "stop_preparation_resume_pending");
+                        // Stop preparation may pass parked maintenance, but never executes it
+                        // within the caller-owned physical-release barrier.
+                    }
+                    else
+                    {
+                        request = MergeRequests(_pendingRequest, request);
+                        _pendingRequest = null;
+                    }
+                }
                 _singleFlightRunning = true;
                 _singleFlightOwnerThreadId = currentThreadId;
                 ownerEpoch = unchecked(++_singleFlightOwnerEpoch);
@@ -146,6 +306,16 @@ public sealed class ReservationAllocationRouteService
             }
             else
             {
+                // Stop preparation never waits inside another flight or survives its caller.
+                // Its physical-release scope must not be merged with ordinary allocation.
+                if (stopPreparation)
+                    return new(0, 0, 0, Deferred: true, Reason: "stop_preparation_not_accepted_busy");
+                // Interactive callers must never receive an unsaved response while their
+                // command remains queued to create a reservation afterwards.
+                if (request.RejectDeferredTopologyCommands && request.TopologyCommands is { Count: > 0 }
+                    && (_singleFlightOwnerThreadId == currentThreadId || !waitForActiveSingleFlight))
+                    return new(0, 0, 0, Deferred: true, Reason: "chain_command_not_accepted_busy");
+
                 _pendingRequest = _pendingRequest is null ? request : MergeRequests(_pendingRequest, request);
 
                 // Typed eventなど、先行Runと同一スレッドからの再入は待機するとデッドロックする。
@@ -193,6 +363,7 @@ public sealed class ReservationAllocationRouteService
         catch (Exception ex)
         {
             var released = false;
+            var retry = firstRequest.StopResumeRetry;
             var waiterCount = 0;
             lock (_singleFlightGate)
             {
@@ -201,10 +372,11 @@ public sealed class ReservationAllocationRouteService
                 // 世代交代している場合は絶対に触らない。
                 if (_singleFlightRunning && _singleFlightOwnerEpoch == ownerEpoch)
                 {
+                    retry = MergeStopResumeRetries(retry, _pendingRequest?.StopResumeRetry);
                     waiterCount = _pendingWaiters.Count;
                     _singleFlightRunning = false;
                     _singleFlightOwnerThreadId = 0;
-                    _pendingRequest = null;
+                    _pendingRequest = RetainedTopologyRetryRequest(firstRequest, _pendingRequest);
                     CompleteWaitersLocked(null, ex);
                     released = true;
                 }
@@ -212,6 +384,7 @@ public sealed class ReservationAllocationRouteService
 
             if (released)
             {
+                if (retry is not null) RetainStopResumeRequest(retry);
                 _log.Add("ALLOC_ROUTE", "SingleFlightOwnerTerminal",
                     $"result=RELEASED ownerEpoch={ownerEpoch} pendingWaiters={waiterCount} errorType={ex.GetType().Name} reason=leader_initialization_or_outer_scope_failure rule=single_flight_owner_terminal_contract");
             }
@@ -225,29 +398,142 @@ public sealed class ReservationAllocationRouteService
         long ownerEpoch)
     {
         using var eventScope = BeginTypedEventOutboxScope(out var commitEvents);
-        var currentRequest = firstRequest;
-        var aggregateRequest = firstRequest;
+        var currentRequest = firstRequest with { RetainChainConvergence = firstRequest.RetainChainConvergence || (firstRequest.ReevaluateAllocations && (EffectiveChainMode==ChainModeContract.Automatic || EffectiveChainMode!=_appliedChainMode)) };
+        var aggregateRequest = currentRequest;
         var mutationJournal = Resolve<ReservationMutationJournal>();
         CycleResult? finalCycle = null;
         ReservationAllocationRouteResult? latestAllocationResult = null;
         var aggregateConflictChanges = new Dictionary<int, AggregateConflictChange>();
         var aggregateAllocationRowChanges = new Dictionary<int, AggregateAllocationRowChange>();
+        // Flight-local references only; pending ownership remains in _pendingRequest.
+        var parked = new List<ReservationTopologyCommand>();
+        var deferredKeywordRefresh = false;
+        var deferredProgramSync = false;
+        var deferredChainConvergence=false;
+        ReservationProjectionPromotionService? deferredProjectionPromotion=null;
+        bool BlocksRefresh() => parked.Any(c => c.RetainIfUnexecuted && c.BlocksRuleRefreshWhenDeferred);
+        ReservationAllocationRouteRequest WithParked(ReservationAllocationRouteRequest request)
+        {
+            foreach (var settings in request.TopologyCommands?.OfType<SettingsChangeCommand>()
+                ?? Enumerable.Empty<SettingsChangeCommand>())
+                if (settings.Followup is { } followup) request = MergeRequests(request, followup);
+            // A command may commit and then throw from its observer before the core
+            // reports its refresh flags. Preserve that committed intent as well.
+            var keyword = deferredKeywordRefresh
+                || request.TopologyCommands?.Any(c => c.RequiresKeywordRefreshAfterCommit) == true;
+            var program = deferredProgramSync || request.SyncProgramRuleReservations
+                || request.TopologyCommands?.Any(c => c.RequiresProgramRuleRefreshAfterCommit) == true;
+            return request with
+            {
+                TopologyCommands = MergeTopologyCommands(parked, request.TopologyCommands),
+                RunKeywordMatcher = request.RunKeywordMatcher || keyword,
+                SyncProgramRuleReservations = request.SyncProgramRuleReservations || program,
+                RetainRuleRefresh = request.RetainRuleRefresh || keyword || program,
+                RetainChainConvergence = request.RetainChainConvergence || deferredChainConvergence || (request.ReevaluateAllocations && EffectiveChainMode==ChainModeContract.Automatic),
+                RetainedProjectionPromotion = PendingProjectionPromotion(request) ?? deferredProjectionPromotion,
+                DeferRuleRefresh = false
+            };
+        }
 
         try
         {
             while (true)
             {
-                finalCycle = ExecuteCoreCycle(currentRequest);
-                if (finalCycle.AllocationAttempted)
-                    latestAllocationResult = finalCycle.Result;
-                AccumulateConflictChanges(aggregateConflictChanges, finalCycle.Changes);
-                AccumulateAllocationRowChanges(aggregateAllocationRowChanges, finalCycle.RowChanges);
+                // Preserve sequential command semantics after request coalescing: a following
+                // command must observe allocation/conflict changes made by its predecessor.
+                var commands = currentRequest.TopologyCommands;
+                var cycleCount = Math.Max(1, commands?.Count ?? 0);
+                for (var index = 0; index < cycleCount; index++)
+                {
+                    var cycleRequest = commands is { Count: > 0 }
+                        ? currentRequest with
+                        {
+                            TopologyCommands = new[] { commands[index] },
+                            RunKeywordMatcher = index == 0 && currentRequest.RunKeywordMatcher,
+                            SyncProgramRuleReservations = index == 0 && currentRequest.SyncProgramRuleReservations,
+                            RetainedProjectionPromotion = index == 0 ? currentRequest.RetainedProjectionPromotion : null
+                        }
+                        : currentRequest;
+                    var blockRefresh = BlocksRefresh();
+                    cycleRequest = cycleRequest with
+                    {
+                        DeferRuleRefresh = blockRefresh,
+                        RetainedProjectionPromotion = cycleRequest.RetainedProjectionPromotion ?? deferredProjectionPromotion,
+                        DeferProjectionPromotion = deferredProjectionPromotion is not null,
+                        RunKeywordMatcher = cycleRequest.RunKeywordMatcher || (!blockRefresh && deferredKeywordRefresh),
+                        SyncProgramRuleReservations = cycleRequest.SyncProgramRuleReservations || (!blockRefresh && deferredProgramSync)
+                    };
+                    var command = commands is { Count: > 0 } ? commands[index] : null;
+                    var orderingKey = command?.NonBlockingDeferralKey;
+                    var behindParked = orderingKey is not null && command!.RetainIfUnexecuted
+                        && parked.Any(c => c.RetainIfUnexecuted && ReferenceEquals(c.NonBlockingDeferralKey, orderingKey));
+                    finalCycle = behindParked ? null : ExecuteCoreCycle(cycleRequest);
+                    if (command is SettingsChangeCommand settings && settings.Followup is { } followup)
+                    {
+                        cycleRequest = MergeRequests(cycleRequest, followup);
+                        aggregateRequest = MergeRequests(aggregateRequest, followup);
+                        if (finalCycle is { Result: { Deferred: false, RetryRequired: false } }) settings.CompleteFollowup();
+                        else if (settings.RetainIfUnexecuted && !parked.Contains(settings)) parked.Add(settings);
+                    }
+                    if (orderingKey is not null && (behindParked || finalCycle!.Result.Deferred && command!.DeferredReason is not null))
+                    {
+                        if (!parked.Contains(command!)) parked.Add(command!);
+                        // Do not retry this series inside the same flight. Ordinary work and
+                        // unrelated commands still use the existing allocation core.
+                        finalCycle = ExecuteCoreCycle(cycleRequest with { TopologyCommands = null, DeferRuleRefresh = BlocksRefresh() });
+                    }
+                    if (finalCycle is null) throw new InvalidOperationException("Allocation cycle did not execute.");
+                    if (finalCycle.Result.Deferred && command?.DeferredReason is not null)
+                    {
+                        // Park the current and following commands in the existing queue. Do not spin
+                        // inside this flight while a runtime publisher still owns its admission.
+                        var tail = currentRequest with
+                        {
+                            TopologyCommands = Array.AsReadOnly(commands!.Skip(index).ToArray()),
+                            RunKeywordMatcher = index == 0 && currentRequest.RunKeywordMatcher,
+                            SyncProgramRuleReservations = index == 0 && currentRequest.SyncProgramRuleReservations
+                        };
+                        var completed = BuildEffectiveFinalCycle(finalCycle, latestAllocationResult,
+                            aggregateConflictChanges, aggregateAllocationRowChanges);
+                        lock (_singleFlightGate)
+                        {
+                            tail = WithParked(tail);
+                            var queued = _pendingRequest is null ? tail : MergeRequests(tail, _pendingRequest);
+                            // A synchronous UI waiter receives Deferred below. Its unexecuted intent
+                            // must not create/cancel a reservation later after that unsaved response.
+                            _pendingRequest = queued with { TopologyCommands = Array.AsReadOnly(
+                                (queued.TopologyCommands ?? Array.Empty<ReservationTopologyCommand>())
+                                .Where(c => c.RetainIfUnexecuted).ToArray()) };
+                            commitEvents();
+                            _singleFlightRunning = false;
+                            _singleFlightOwnerThreadId = 0;
+                            CompleteWaitersLocked(finalCycle.Result, null);
+                        }
+                        if (latestAllocationResult is not null)
+                            QueueFinalDerivedEffects(aggregateRequest, completed, mutationJournal);
+                        return finalCycle.Result;
+                    }
+                    if (finalCycle.DeferredKeywordRefresh) deferredKeywordRefresh = true;
+                    else if (!finalCycle.Result.Deferred && cycleRequest.RunKeywordMatcher) deferredKeywordRefresh = false;
+                    if (finalCycle.DeferredProgramSync) deferredProgramSync = true;
+                    else if (!finalCycle.Result.Deferred && cycleRequest.SyncProgramRuleReservations) deferredProgramSync = false;
+                    if(finalCycle.DeferredProjectionPromotion is not null) deferredProjectionPromotion=finalCycle.DeferredProjectionPromotion;
+                    else if(finalCycle.ProjectionPromotionAttempted) deferredProjectionPromotion=null;
+                    if(finalCycle.DeferredChainConvergence) deferredChainConvergence=true;
+                    else if(cycleRequest.ReevaluateAllocations) deferredChainConvergence=false;
+                    if (finalCycle.AllocationAttempted)
+                        latestAllocationResult = finalCycle.Result;
+                    AccumulateConflictChanges(aggregateConflictChanges, finalCycle.Changes);
+                    AccumulateAllocationRowChanges(aggregateAllocationRowChanges, finalCycle.RowChanges);
+                }
+
+                if (finalCycle is null) throw new InvalidOperationException("Allocation cycle did not execute.");
 
                 ReservationAllocationRouteRequest? nextRequest;
                 lock (_singleFlightGate)
                 {
-                    nextRequest = _pendingRequest;
-                    _pendingRequest = null;
+                    nextRequest = firstRequest.StopPreparationBarrier is null ? _pendingRequest : null;
+                    if (nextRequest is not null) _pendingRequest = null;
                 }
 
                 if (nextRequest is not null)
@@ -263,12 +549,13 @@ public sealed class ReservationAllocationRouteService
                 // DB/Tuner正本はExecuteCoreCycle内ですでにcommit済み。外部subscriberやWake派生の
                 // 配送時間をsingle-flightの所有時間へ含めず、競合解除を次の再評価から即時参照可能にする。
                 var effectiveCycle = BuildEffectiveFinalCycle(finalCycle, latestAllocationResult, aggregateConflictChanges, aggregateAllocationRowChanges);
+                var response = effectiveCycle.Result;
 
                 lock (_singleFlightGate)
                 {
                     // 正本確定までに到着した要求だけを同じbatchへ統合する。
                     // 派生投影開始後の要求は、新しいsingle-flightとして最新DBを再評価する。
-                    if (_pendingRequest is not null)
+                    if (_pendingRequest is not null && firstRequest.StopPreparationBarrier is null)
                     {
                         currentRequest = _pendingRequest;
                         aggregateRequest = currentRequest;
@@ -281,9 +568,23 @@ public sealed class ReservationAllocationRouteService
 
                     commitEvents();
                     _log.Add("PLUGIN_TYPED_EVENT_OUTBOX", "AllocationRoute", $"result=COMMITTED operation=AllocationSingleFlight source={aggregateRequest.Source} action={aggregateRequest.Action} allocationGeneration={effectiveCycle.Result.AllocationGeneration} rule=typed_event_outbox");
+                    var unfinished = parked.Where(c => c.RetainIfUnexecuted).ToArray();
+                    if (unfinished.Length > 0 || deferredKeywordRefresh || deferredProgramSync || deferredChainConvergence || deferredProjectionPromotion is not null)
+                    {
+                        var retry = new ReservationAllocationRouteRequest("AutomaticTopology", "RetryParked",
+                            RunKeywordMatcher: deferredKeywordRefresh, SyncProgramRuleReservations: deferredProgramSync,
+                            ReevaluateAllocations:aggregateRequest.ReevaluateAllocations,
+                            RefreshPreRecordEpgEntries:aggregateRequest.RefreshPreRecordEpgEntries,
+                            RefreshWakeTask:aggregateRequest.RefreshWakeTask, TopologyCommands: unfinished)
+                            { RetainRuleRefresh = deferredKeywordRefresh || deferredProgramSync, RetainChainConvergence=deferredChainConvergence, RetainedProjectionPromotion=deferredProjectionPromotion };
+                        _pendingRequest = _pendingRequest is null ? retry : MergeRequests(retry, _pendingRequest);
+                        if (!aggregateRequest.IncludesOrdinaryWork && aggregateRequest.TopologyCommands is { Count: > 0 } all
+                            && all.All(unfinished.Contains))
+                            response = response with { Deferred = true, Reason = "automatic_maintenance_parked" };
+                    }
                     _singleFlightRunning = false;
                     _singleFlightOwnerThreadId = 0;
-                    CompleteWaitersLocked(effectiveCycle.Result, null);
+                    CompleteWaitersLocked(response, null);
                 }
 
                 QueueFinalDerivedEffects(aggregateRequest, effectiveCycle, mutationJournal);
@@ -291,23 +592,26 @@ public sealed class ReservationAllocationRouteService
                 var elapsedMs = (int)(DateTime.Now - requestedAt).TotalMilliseconds;
                 _log.Add("ALLOC_ROUTE", "SingleFlightComplete",
                     $"source={aggregateRequest.Source} action={aggregateRequest.Action} changed={effectiveCycle.Result.ChangedCount} allocationGeneration={effectiveCycle.Result.AllocationGeneration} retryRequired={effectiveCycle.Result.RetryRequired} reason={effectiveCycle.Result.Reason} elapsedMs={elapsedMs} rule=release_contract");
-                return effectiveCycle.Result;
+                return response;
             }
         }
         catch (Exception ex)
         {
+            var retry = aggregateRequest.StopResumeRetry;
             lock (_singleFlightGate)
             {
                 // 正常解放直後の派生enqueue等で例外になり、既に次ownerへ世代交代していても
                 // catchした世代が現在のownerである場合だけ終端し、後続ownerの所有権には触れない。
                 if (_singleFlightRunning && _singleFlightOwnerEpoch == ownerEpoch)
                 {
+                    retry = MergeStopResumeRetries(retry, _pendingRequest?.StopResumeRetry);
                     _singleFlightRunning = false;
                     _singleFlightOwnerThreadId = 0;
-                    _pendingRequest = null;
+                    _pendingRequest = RetainedTopologyRetryRequest(WithParked(aggregateRequest), _pendingRequest);
                     CompleteWaitersLocked(null, ex);
                 }
             }
+            if (retry is not null) RetainStopResumeRequest(retry);
             throw;
         }
     }
@@ -330,6 +634,17 @@ public sealed class ReservationAllocationRouteService
 
     private CycleResult ExecuteCoreCycle(ReservationAllocationRouteRequest request)
     {
+        if (request.StopPreparationBarrier is { } preparation)
+        {
+            if (!preparation.IsActive)
+                throw new InvalidOperationException("Manual-stop preparation scope has ended.");
+        }
+        else if (StopPhaseGate.TryDeferAllocRouteForPhysicalRelease(request,
+            msg => _log.Add("ALLOC_ROUTE", "PhysicalRelease", msg)))
+        {
+            return new CycleResult(new(0, 0, 0, Deferred: true, Reason: "physical_release_pending"),
+                Array.Empty<(int, string, string, bool)>(), Array.Empty<AllocationCommittedRowChange>(), false);
+        }
         var startedAt = DateTime.Now;
         var tunerStatusBefore = _tunerPool.GetStatusSummary();
         _log.Add("ALLOC_TRACE", "Enter",
@@ -341,21 +656,213 @@ public sealed class ReservationAllocationRouteService
         List<AllocationCommittedRowChange> rowChanges = new();
         long allocationGeneration = 0;
         bool retryRequired = false;
-        string allocationReason = "not_requested";
+        string allocationReason = request.StopPreparationBarrier is not null
+            ? "stop_preparation_applied" : "not_requested";
 
-        if (request.RunKeywordMatcher)
-            Resolve<KeywordMatcher>()?.RunMatching();
+        // Explicit topology intent is committed only while this route owns the flight.
+        // A receipt records a committed/rejected mutation separately from later allocation failure.
+        foreach (var command in request.TopologyCommands ?? Array.Empty<ReservationTopologyCommand>())
+        {
+            if (command is LabWithdrawalOperationCommand operation) operation.PrepareMode(_ini.AutomaticChainRecordingEnabled);
+            if (command is ReservationCancellationCommand cancellation)
+                cancellation.PrepareCancellationPolicy(_ini.AutomaticChainRecordingEnabled);
+            var runtime = command.RequiresSchedulerContext
+                ? Resolve<ReservationScheduler>() ?? throw new InvalidOperationException("Reservation scheduler is unavailable.")
+                : null;
+            try
+            {
+                var metadata = command.RequiresProjectionMetadata ? Resolve<ReservationProjectionMetadataStore>() : null;
+                if (request.StopPreparationBarrier is { IsActive: false })
+                    throw new InvalidOperationException("Manual-stop preparation scope has ended.");
+                if (runtime is not null) command.PrepareSchedulerContext(runtime);
+                if (command is ManualStopPreparationCommand stopPreparation)
+                    stopPreparation.PrepareOccurrencePolicy(runtime!);
+                command.Apply(_store, command is UserChainAllocationCommand ? _ini.ManualChainRecordingEnabled : _ini.UserChainRecordingEnabled, metadata);
+                if (command is SettingsChangeCommand settings && settings.Followup is { } followup)
+                    request = MergeRequests(request, followup);
+                if (command.DeferredReason is string deferredReason)
+                    return new CycleResult(new(0, 0, 0, Deferred: true, RetryRequired: true,
+                        Reason: deferredReason), changes, rowChanges, AllocationAttempted: false);
+            }
+            finally
+            {
+                // A post-commit observer error must not skip the canonical runtime seam.
+                if (runtime is not null) command.ReconcileRuntime(runtime);
+            }
+        }
 
-        if (request.SyncProgramRuleReservations)
-            _store.SyncProgramRuleReservations();
+        // A retained command may acquire a committed mutation only on a later cycle.
+        // Re-capture its allocation intent after completion in this same canonical exit.
+        if(request.StopPreparationBarrier is null && request.TopologyCommands?.Any(c=>c.RequiresAllocationAfterCommit)==true)
+            request=request with { ReevaluateAllocations=true,RefreshPreRecordEpgEntries=true,RefreshWakeTask=true };
 
+        if (request.TopologyCommands is { Count: > 0 } explicitCommands
+            && explicitCommands.All(c => c.IsRejected)
+            && !request.RunKeywordMatcher && !request.SyncProgramRuleReservations && !request.IncludesOrdinaryWork
+            && request.RetainedProjectionPromotion is null)
+            return new CycleResult(new(0, 0, 0, Deferred: false, Reason: "chain_command_rejected"),
+                changes, rowChanges, AllocationAttempted: false);
+
+        var promotionPending = request.TopologyCommands?.OfType<EpgCaptureCommitCommand>()
+            .Select(c => c.PendingPromotionRetry).FirstOrDefault(p => p is not null);
+        var completedPromotion = request.TopologyCommands?.OfType<EpgCaptureCommitCommand>()
+            .Select(c => c.CompletedPromotionService).FirstOrDefault(p => p is not null);
+        var promotionAttempted = completedPromotion is not null;
+        if (request.DeferProjectionPromotion && completedPromotion is null) promotionPending ??= request.RetainedProjectionPromotion;
+        if (!request.DeferProjectionPromotion && request.RetainedProjectionPromotion is { } retainedPromotion
+            && !ReferenceEquals(retainedPromotion, completedPromotion) && promotionPending is null)
+        {
+            // Raw capture has finished. Retry its reservation work under the existing
+            // Scheduler admission using current metadata and DB events.
+            promotionAttempted = true;
+            promotionPending = retainedPromotion;
+            var scheduler = Resolve<ReservationScheduler>()
+                ?? throw new InvalidOperationException("Projection retry scheduler is unavailable.");
+            scheduler.ExecuteProjectionPromotionCore(_store, retainedPromotion, receipt =>
+            {
+                promotionPending = receipt.RetryRequired ? retainedPromotion : null;
+            });
+        }
+
+        var committedRuleRefresh = request.TopologyCommands?.Any(c => c.RequiresRuleRefreshAfterCommit) == true;
+        var incrementalCommands = request.TopologyCommands?.Select(c => c.CommittedKeywordEvents)
+            .Where(events => events is { Count: > 0 }).ToArray();
+        var wantsKeywordRefresh = request.RunKeywordMatcher || committedRuleRefresh || incrementalCommands is { Length: > 0 };
+        var deferredKeywordRefresh = request.DeferRuleRefresh && wantsKeywordRefresh;
+        if (wantsKeywordRefresh && !deferredKeywordRefresh)
+        {
+            var matcher = Resolve<KeywordMatcher>();
+            if (request.RunKeywordMatcher || committedRuleRefresh) matcher?.RunMatching();
+            else foreach (var events in incrementalCommands!) matcher?.RunMatching(events!);
+        }
+
+        // Matcher observations are only hints. Re-capture channel settings under runtime
+        // admission, then select current rows in the allocation-owned transaction. The
+        // matcher gate has already been released before this stage begins.
+        var inactiveMatcher = request.ReevaluateAllocations ? Resolve<KeywordMatcher>() : null;
+        if (inactiveMatcher?.TakeInactiveCleanupRequest() == true)
+        {
+            KeywordRuleMutationResult? cleanup = null;
+            try
+            {
+                var runtime = Resolve<ReservationScheduler>()
+                    ?? throw new InvalidOperationException("Inactive cleanup scheduler is unavailable.");
+                runtime.ExecuteInactiveKeywordCleanupCore(_store, inactiveMatcher, committed => cleanup = committed);
+                _log.Add("KEYWORD_INACTIVE_CLEANUP", "AllocationRoute",
+                    $"source={request.Source} action={request.Action} committed={cleanup?.Applied == true} removed={cleanup?.RemovedIds.Count ?? 0} reason={cleanup?.Reason ?? "runtime_unavailable"}");
+            }
+            finally
+            {
+                // Taking the bit before execution preserves a new observation arriving during
+                // commit. Never clear that newer request when this attempt succeeds.
+                if (cleanup is not { Applied: true, Reason: "applied" }) inactiveMatcher.RestoreInactiveCleanupRequest();
+            }
+        }
+
+        var wantsProgramSync = request.SyncProgramRuleReservations
+            || request.TopologyCommands?.Any(c => c.RequiresProgramRuleRefreshAfterCommit) == true;
+        var deferredProgramSync = request.DeferRuleRefresh && wantsProgramSync;
+        if (wantsProgramSync && !deferredProgramSync)
+            deferredProgramSync=!_store.SyncProgramRuleReservations(selection=>
+            {
+                if(!_store.HasProgramCleanupWork(selection)) return new(true,"no_candidates",Array.Empty<int>(),0,Array.Empty<int>());
+                var runtime=Resolve<ReservationScheduler>();
+                return runtime is null ? new(false,"program_sync_scheduler_unavailable",Array.Empty<int>(),0,Array.Empty<int>())
+                    : runtime.ExecuteProgramReservationCleanupCore(_store,selection);
+            });
+
+        if (deferredKeywordRefresh || deferredProgramSync)
+            _log.Add("RULE_REFRESH_DEFERRED", "ProjectionPromotion",
+                $"keyword={deferredKeywordRefresh} program={deferredProgramSync} allocationContinues=True rule=common_allocation_route_contract");
+
+        var chainPending=false;
         if (request.ReevaluateAllocations)
         {
+            chainPending=!_store.CleanupResolvedProgramGuideMissingDuplicates(selection=>
+            {
+                if(!_store.HasProgramCleanupWork(selection))return new(true,"no_candidates",Array.Empty<int>(),0,Array.Empty<int>());
+                var scheduler=Resolve<ReservationScheduler>();
+                return scheduler is null ? new(false,"duplicate_cleanup_scheduler_unavailable",Array.Empty<int>(),0,Array.Empty<int>())
+                    : scheduler.ExecuteProgramReservationCleanupCore(_store,selection);
+            });
             var suppressedDuplicates = _store.SuppressDuplicateScheduledParentReservations(request.Source, request.Action);
             if (suppressedDuplicates > 0)
             {
                 _log.Add("RESERVATION_DEDUPE", "SUMMARY",
                     $"result=SUPPRESSED count={suppressedDuplicates} source={request.Source} action={request.Action} commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
+            }
+
+            var mode=EffectiveChainMode;
+            if(!chainPending && mode!=_appliedChainMode)
+            {
+                // Mode switches preserve stored edges. Feature disable retains its existing detach path.
+                var requiresRebuild=mode==ChainModeContract.Disabled && _appliedChainMode==ChainModeContract.Automatic;
+                if(requiresRebuild)
+                {
+                    var scheduler=Resolve<ReservationScheduler>();
+                    chainPending=scheduler is null || !scheduler.PrepareChainModeRebuildCore(
+                        "ChainMode:"+_appliedChainMode+"->"+mode,()=>_appliedChainMode=mode);
+                }
+                else _appliedChainMode=mode; // manual <-> automatic, including startup: keep stored edges.
+            }
+            if(mode==ChainModeContract.Automatic && !chainPending)
+            {
+                var scheduler=Resolve<ReservationScheduler>();
+                if(scheduler is null) chainPending=true;
+                else
+                {
+                    var snapshot=_store.GetAll().Where(r=>r.IsEnabled && r.Source!=ReservationSource.Epg
+                        && ChainReservationEligibilityContract.IsActivePredecessorStatus(r.Status)).ToArray();
+                    var parents=snapshot.Where(r=>r.UserChainPreviousId.HasValue).Select(r=>r.UserChainPreviousId!.Value).ToHashSet();
+                    var heads=snapshot.Where(r=>r.UserChainPreviousId is null)
+                        .GroupBy(r=>(r.NetworkId,r.TransportStreamId,r.ServiceId,r.StartTime)).ToDictionary(g=>g.Key,g=>g.ToArray());
+                    var tails=snapshot.Where(r=>!parents.Contains(r.Id))
+                        .GroupBy(r=>(r.NetworkId,r.TransportStreamId,r.ServiceId,r.EndTime)).ToDictionary(g=>g.Key,g=>g.ToArray());
+                    bool OtherComponent(Reservation a,Reservation b)=>(a.UserChainRootId??a.Id)!=(b.UserChainRootId??b.Id);
+                    foreach(var row in snapshot.Where(r=>r.Status==ReservationStatus.Scheduled
+                        && (r.UserChainPreviousId is null && tails.TryGetValue((r.NetworkId,r.TransportStreamId,r.ServiceId,r.StartTime),out var before)
+                                && before.Any(p=>OtherComponent(r,p))
+                            || !parents.Contains(r.Id) && heads.TryGetValue((r.NetworkId,r.TransportStreamId,r.ServiceId,r.EndTime),out var after)
+                                && after.Any(n=>OtherComponent(r,n))))
+                        .OrderBy(r=>r.StartTime).ThenBy(r=>r.Id))
+                {
+                    UserChainSequenceMutationResult? receipt=null;
+                    try { scheduler.ExecuteAutomaticChainCore(_store,row.Id,true,result=>receipt=result); }
+                    finally { if(receipt?.Applied==true) scheduler.ReconcileActiveContinuousChainTopology("AutomaticChain"); }
+                    if(receipt is null || receipt.Reason=="runtime_protected") { chainPending=true;break; }
+                    }
+                }
+            }
+            var keywordMatcher = Resolve<KeywordMatcher>();
+            if (keywordMatcher?.TakeManualChainOptionsRequest() == true)
+            {
+                try
+                {
+                    if (_ini.ManualChainRecordingEnabled) ManualKeywordChainPolicy.Apply(_store, _ini, _log, DateTime.Now);
+                }
+                catch
+                {
+                    keywordMatcher.RestoreManualChainOptionsRequest();
+                    throw;
+                }
+            }
+
+            if (Interlocked.Exchange(ref _disabledChainConvergenceRequested, 0) != 0
+                && !_ini.UserChainRecordingEnabled)
+            {
+                try
+                {
+                    var lifecycle = Resolve<ChainLifecycleCoordinator>()
+                        ?? throw new InvalidOperationException("Chain lifecycle coordinator is unavailable.");
+                    var convergence = lifecycle.ConvergeDisabledFeature($"{request.Source}:{request.Action}");
+                    if (!convergence.DetachApplied)
+                        throw new InvalidOperationException($"Chain disable convergence failed: {convergence.Reason}");
+                }
+                catch
+                {
+                    Interlocked.Exchange(ref _disabledChainConvergenceRequested, 1);
+                    throw;
+                }
             }
 
             var userChainPairs = _store.GetChainPredecessors();
@@ -365,7 +872,7 @@ public sealed class ReservationAllocationRouteService
                 configuredChainFeature, userChainPairs.Count);
 
             _log.Add("ALLOC_POLICY", "Effective",
-                $"source={request.Source} action={request.Action} executionMode={request.ExecutionMode} later={effectiveLater} configuredChainFeature={configuredChainFeature} chainRecordingSetting={_ini.ChainRecordingEnabled} storedChainPairs={userChainPairs.Count} continuousChainPlanning={continuousChainPlanning} rule=common_allocation_route_contract");
+                $"source={request.Source} action={request.Action} executionMode={request.ExecutionMode} later={effectiveLater} configuredChainFeature={configuredChainFeature} chainMode={_ini.ChainReservationMode} chainRecordingSetting={_ini.ChainRecordingEnabled} storedChainPairs={userChainPairs.Count} continuousChainPlanning={continuousChainPlanning} rule=common_allocation_route_contract");
 
             var evaluation = EvaluateWithSingleRetry(effectiveLater, continuousChainPlanning, configuredChainFeature, request);
             changes = evaluation.Changes.ToList();
@@ -374,6 +881,9 @@ public sealed class ReservationAllocationRouteService
             retryRequired = evaluation.RetryRequired;
             allocationReason = evaluation.Reason;
         }
+
+        if(chainPending) { retryRequired=true;allocationReason="chain_convergence_pending"; }
+        if(promotionPending is not null) { retryRequired=true;allocationReason="projection_promotion_pending"; }
 
         if (request.RefreshPreRecordEpgEntries && !retryRequired)
         {
@@ -413,7 +923,8 @@ public sealed class ReservationAllocationRouteService
         _log.Add("ALLOC_TRACE", "CycleExit",
             $"[ALLOC] source={request.Source} action={request.Action} stage=core_cycle_exit changed={result.ChangedCount} on={result.ConflictOnCount} off={result.ConflictOffCount} allocationGeneration={result.AllocationGeneration} retryRequired={result.RetryRequired} reason={result.Reason} elapsedMs={(int)(DateTime.Now - startedAt).TotalMilliseconds} tunerStatusBefore={tunerStatusBefore} tunerStatusAfter={_tunerPool.GetStatusSummary()}");
 
-        return new CycleResult(result, changes, rowChanges, request.ReevaluateAllocations);
+        return new CycleResult(result, changes, rowChanges, request.ReevaluateAllocations,
+            deferredKeywordRefresh, deferredProgramSync, chainPending, promotionPending, promotionAttempted);
     }
 
     private static void AccumulateConflictChanges(
@@ -509,6 +1020,8 @@ public sealed class ReservationAllocationRouteService
             ConflictOnCount = changes.Count(x => x.FinalConflicted),
             ConflictOffCount = changes.Count(x => !x.FinalConflicted)
         };
+        if (lastCycle.Result.Deferred)
+            result = result with { Deferred = true, Reason = lastCycle.Result.Reason };
         return new CycleResult(result, changes, rowChanges, latestAllocationResult is not null);
     }
 
@@ -518,34 +1031,52 @@ public sealed class ReservationAllocationRouteService
         CycleResult finalCycle,
         ReservationMutationJournal? mutationJournal)
     {
+        if (!request.IncludesOrdinaryWork && !finalCycle.AllocationAttempted
+            && finalCycle.Result.Reason == "chain_command_rejected") return;
+
+        if (!finalCycle.AllocationAttempted && finalCycle.RowChanges.Count == 0
+            && (finalCycle.Result.Deferred || request.StopPreparationBarrier is not null)) return;
+
         var queuedAt = DateTime.Now;
-        lock (_derivedProjectionQueueGate)
+        // The projection owns a fresh event/Wake scope after the synchronous operation ends.
+        // Capturing AsyncLocal outbox/batch here would attach notifications to disposed scopes.
+        var restoreFlow = !ExecutionContext.IsFlowSuppressed();
+        var flow = restoreFlow ? ExecutionContext.SuppressFlow() : default;
+        try
         {
-            _derivedProjectionTail = _derivedProjectionTail.ContinueWith(
-                _ =>
-                {
-                    var startedAt = DateTime.Now;
-                    var queueWaitMs = (int)(startedAt - queuedAt).TotalMilliseconds;
-                    try
+            lock (_derivedProjectionQueueGate)
+            {
+                _derivedProjectionTail = _derivedProjectionTail.ContinueWith(
+                    _ =>
                     {
-                        using var projectionScope = BeginTypedEventOutboxScope(out var commitProjectionEvents);
-                        ApplyFinalDerivedEffects(request, finalCycle, mutationJournal);
-                        commitProjectionEvents();
-                        var executionMs = (int)(DateTime.Now - startedAt).TotalMilliseconds;
-                        _log.Add("ALLOCATION_DERIVED_PROJECTION", "Completed",
-                            $"source={request.Source} action={request.Action} allocationGeneration={finalCycle.Result.AllocationGeneration} rowChanges={finalCycle.RowChanges.Count} queueWaitMs={queueWaitMs} executionMs={executionMs} totalElapsedMs={(int)(DateTime.Now - queuedAt).TotalMilliseconds} ordering=serialized_after_authoritative_commit rule=release_contract");
-                    }
-                    catch (Exception ex)
-                    {
-                        // 正本commitは完了済み。派生投影失敗で割当をrollbackせず、次Mutation/再読込が
-                        // 最新DBから再投影できるよう失敗だけを記録する。
-                        _log.Add("ALLOCATION_DERIVED_PROJECTION", "Failed",
-                            $"source={request.Source} action={request.Action} allocationGeneration={finalCycle.Result.AllocationGeneration} error={ex.Message} authoritativeCommitPreserved=True rule=release_contract");
-                    }
-                },
-                CancellationToken.None,
-                TaskContinuationOptions.None,
-                TaskScheduler.Default);
+                        var startedAt = DateTime.Now;
+                        var queueWaitMs = (int)(startedAt - queuedAt).TotalMilliseconds;
+                        try
+                        {
+                            using var projectionScope = BeginTypedEventOutboxScope(out var commitProjectionEvents);
+                            ApplyFinalDerivedEffects(request, finalCycle, mutationJournal);
+                            commitProjectionEvents();
+                            var executionMs = (int)(DateTime.Now - startedAt).TotalMilliseconds;
+                            _log.Add("ALLOCATION_DERIVED_PROJECTION", "Completed",
+                                $"source={request.Source} action={request.Action} allocationGeneration={finalCycle.Result.AllocationGeneration} rowChanges={finalCycle.RowChanges.Count} queueWaitMs={queueWaitMs} executionMs={executionMs} totalElapsedMs={(int)(DateTime.Now - queuedAt).TotalMilliseconds} ordering=serialized_after_authoritative_commit rule=release_contract");
+                        }
+                        catch (Exception ex)
+                        {
+                            // 正本commitは完了済み。派生投影失敗で割当をrollbackせず、次Mutation/再読込が
+                            // 最新DBから再投影できるよう失敗だけを記録する。
+                            _log.Add("ALLOCATION_DERIVED_PROJECTION", "Failed",
+                                $"source={request.Source} action={request.Action} allocationGeneration={finalCycle.Result.AllocationGeneration} error={ex.Message} authoritativeCommitPreserved=True rule=release_contract");
+                        }
+                    },
+                    CancellationToken.None,
+                    TaskContinuationOptions.None,
+                    TaskScheduler.Default);
+            }
+
+        }
+        finally
+        {
+            if (restoreFlow) flow.Undo();
         }
 
         _log.Add("ALLOCATION_DERIVED_PROJECTION", "Queued",
@@ -563,6 +1094,12 @@ public sealed class ReservationAllocationRouteService
                 _log.Add("ALLOC_ROUTE", "WakeSkipped", $"source={request.Source} action={request.Action} reason=allocation_retry_required allocationReason={finalCycle.Result.Reason} rule=release_contract");
             return;
         }
+
+        // Preserve already committed row projections, but leave Wake in the same deferred
+        // queue while physical ownership is still held. Do not claim its generation early.
+        if (request.RefreshWakeTask && StopPhaseGate.TryDeferWakeForPhysicalRelease(
+            "AllocationDerived", msg => _log.Add("ALLOC_ROUTE", "PhysicalReleaseWake", msg)))
+            request = request with { RefreshWakeTask = false };
 
         // Typed eventは最終確定周回だけ配送する。
         var allocationProjection = _store.PublishAllocationMutationEvents(
@@ -666,6 +1203,10 @@ public sealed class ReservationAllocationRouteService
         _pendingWaiters.Clear();
     }
 
+    internal static ReservationAllocationRouteRequest? MergeStopResumeRetries(
+        ReservationAllocationRouteRequest? left, ReservationAllocationRouteRequest? right)
+        => left is null ? right : right is null || ReferenceEquals(left, right) ? left : MergeRequests(left, right);
+
     private static ReservationAllocationRouteRequest MergeRequests(
         ReservationAllocationRouteRequest left,
         ReservationAllocationRouteRequest right)
@@ -692,7 +1233,21 @@ public sealed class ReservationAllocationRouteService
             WakeRefreshMode: left.WakeRefreshMode == ReservationAllocationWakeRefreshMode.BoundedCoalesce
                 || right.WakeRefreshMode == ReservationAllocationWakeRefreshMode.BoundedCoalesce
                     ? ReservationAllocationWakeRefreshMode.BoundedCoalesce
-                    : ReservationAllocationWakeRefreshMode.Immediate);
+                    : ReservationAllocationWakeRefreshMode.Immediate,
+            TopologyCommands: MergeTopologyCommands(left.TopologyCommands, right.TopologyCommands))
+        { IncludesOrdinaryWork = left.IncludesOrdinaryWork || right.IncludesOrdinaryWork,
+            RetainRuleRefresh = left.RetainRuleRefresh || right.RetainRuleRefresh,
+            RetainChainConvergence=left.RetainChainConvergence || right.RetainChainConvergence,
+            RetainedProjectionPromotion=right.RetainedProjectionPromotion ?? left.RetainedProjectionPromotion,
+            StopResumeRetry = MergeStopResumeRetries(left.StopResumeRetry, right.StopResumeRetry) };
+    }
+
+    internal static IReadOnlyList<ReservationTopologyCommand>? MergeTopologyCommands(
+        IReadOnlyList<ReservationTopologyCommand>? left, IReadOnlyList<ReservationTopologyCommand>? right)
+    {
+        if (left is null && right is null) return null;
+        return Array.AsReadOnly((left ?? Array.Empty<ReservationTopologyCommand>())
+            .Concat(right ?? Array.Empty<ReservationTopologyCommand>()).Distinct().ToArray());
     }
 
     private static string MergeLabel(string left, string right)

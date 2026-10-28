@@ -202,7 +202,7 @@ public sealed class PluginTypedEventHub : IDisposable
             OperationId = source.OperationId, SourceOwnerId = source.SourceOwnerId, DataRevision = source.DataRevision, ChangeKind = source.ChangeKind,
             EventType = source.EventType, ReservationId = source.ReservationId, ServiceName = ResolveEventServiceName(source), ProgramTitle = source.ProgramTitle,
             Reservation = NormalizeSnapshot(source.Reservation), BeforeReservation = NormalizeSnapshot(source.BeforeReservation), AfterReservation = NormalizeSnapshot(source.AfterReservation),
-            ChangedFields = source.ChangedFields, RecordingResult = NormalizeRecordingResult(source.RecordingResult), ExternalJob = source.ExternalJob, RuntimeWindowLifecycle = source.RuntimeWindowLifecycle, ViewerReservation = source.ViewerReservation, Details = source.Details
+            ChangedFields = source.ChangedFields, PluginBindings = source.PluginBindings, RecordingResult = NormalizeRecordingResult(source.RecordingResult), ExternalJob = source.ExternalJob, RuntimeWindowLifecycle = source.RuntimeWindowLifecycle, ViewerReservation = source.ViewerReservation, Details = source.Details
         };
         Subscriber[] targets;
         lock (gate)

@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
@@ -67,6 +67,7 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
         Reservations = hostApis.Reservations;
         Rules = hostApis.Rules;
         Recordings = hostApis.Recordings;
+        RecordingFiles = hostApis.RecordingFiles;
         PlaybackProgress = hostApis.PlaybackProgress;
         MediaInsights = hostApis.MediaInsights;
         ContentDiscovery = hostApis.ContentDiscovery;
@@ -74,6 +75,7 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
         ExternalProgramSource = hostApis.ExternalProgramSource;
         Epg = hostApis.Epg;
         ExternalJobs = hostApis.ExternalJobs;
+        PowerInhibition = hostApis.PowerInhibition;
         Channels = hostApis.Channels;
         Tuners = hostApis.Tuners;
         _runtimeViewersApi = new RuntimeViewersApi(hostApis.Viewers);
@@ -85,6 +87,7 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
         System = hostApis.System;
         Logs = hostApis.Logs;
         Plugins = hostApis.Plugins;
+        PluginSelections = hostApis.PluginSelections;
         ExternalLookup = hostApis.ExternalLookup;
         InternetAccess = hostApis.InternetAccess;
     }
@@ -117,6 +120,7 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
     public ITvAirReservationsApi Reservations { get; }
     public ITvAirRulesApi Rules { get; }
     public ITvAirRecordingsApi Recordings { get; }
+    public ITvAirRecordingFilesApi RecordingFiles { get; }
     public ITvAirPlaybackProgressApi PlaybackProgress { get; }
     public ITvAirMediaInsightsApi MediaInsights { get; }
     public ITvAirContentDiscoveryApi ContentDiscovery { get; }
@@ -124,6 +128,7 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
     public ITvAirExternalProgramSourceApi ExternalProgramSource { get; }
     public ITvAirEpgApi Epg { get; }
     public ITvAirExternalJobsApi ExternalJobs { get; }
+    public ITvAirPowerInhibitionApi PowerInhibition { get; }
     public ITvAirChannelsApi Channels { get; }
     public ITvAirTunersApi Tuners { get; }
     public TvAIrPlugin.Viewers.ITvAirViewersApi Viewers { get; }
@@ -134,6 +139,7 @@ internal sealed class PluginRuntimeContext : ITvAirPluginRuntimeContext, IDispos
     public ITvAirSystemApi System { get; }
     public ITvAirLogsApi Logs { get; }
     public ITvAirPluginsApi Plugins { get; }
+    public ITvAirPluginSelectionsApi PluginSelections { get; }
     public ITvAirExternalLookupApi ExternalLookup { get; }
     public ITvAirInternetAccessApi InternetAccess { get; }
 

@@ -1,4 +1,4 @@
-using Microsoft.Data.Sqlite;
+﻿using Microsoft.Data.Sqlite;
 using TvAIr.Core;
 using TvAIr.Epg.Projection;
 
@@ -43,7 +43,14 @@ public sealed class ReservationProjectionMetadataStore
     public ReservationProjectionMetadata? Get(int reservationId)
     {
         using var con = db.Open();
-        using var cmd = con.CreateCommand();
+        return Get(con, null, reservationId);
+    }
+
+    internal bool UsesDatabase(Database owner) => ReferenceEquals(db, owner);
+
+    internal static ReservationProjectionMetadata? Get(SqliteConnection con, SqliteTransaction? tx, int reservationId)
+    {
+        using var cmd = con.CreateCommand(); cmd.Transaction = tx;
         cmd.CommandText = """
             SELECT reservation_id,
                    projection_state,
@@ -78,7 +85,12 @@ public sealed class ReservationProjectionMetadataStore
     public IReadOnlyList<ReservationProjectionMetadata> GetPendingPromotionCandidates()
     {
         using var con = db.Open();
-        using var cmd = con.CreateCommand();
+        return GetPendingPromotionCandidates(con,null);
+    }
+
+    internal static IReadOnlyList<ReservationProjectionMetadata> GetPendingPromotionCandidates(SqliteConnection con,SqliteTransaction? tx)
+    {
+        using var cmd = con.CreateCommand();cmd.Transaction=tx;
         cmd.CommandText = """
             SELECT reservation_id,
                    projection_state,
@@ -194,8 +206,12 @@ public sealed class ReservationProjectionMetadataStore
 
     public void UpsertFromProjectedEvent(int reservationId, ProjectedProgramEvent projectedEvent)
     {
-        var now = DateTime.Now;
-        Upsert(new ReservationProjectionMetadata(
+        Upsert(CaptureProjectedEvent(reservationId, projectedEvent, DateTime.Now));
+    }
+
+    internal static ReservationProjectionMetadata CaptureProjectedEvent(
+        int reservationId, ProjectedProgramEvent projectedEvent, DateTime now)
+        => new ReservationProjectionMetadata(
             ReservationId: reservationId,
             ProjectionState: projectedEvent.ProjectionState,
             ProjectionSourceKind: projectedEvent.SourceKind,
@@ -216,13 +232,11 @@ public sealed class ReservationProjectionMetadataStore
             PromotedAt: null,
             SourceMissingAt: null,
             CreatedAt: now,
-            UpdatedAt: now));
-    }
+            UpdatedAt: now);
 
-    public void RebindExternalSource(int reservationId, ExternalEpgEvent externalEvent)
+    internal static int RebindExternalSource(SqliteConnection con,SqliteTransaction tx,int reservationId, ExternalEpgEvent externalEvent)
     {
-        using var con = db.Open();
-        using var cmd = con.CreateCommand();
+        using var cmd = con.CreateCommand();cmd.Transaction=tx;
         cmd.CommandText = """
             UPDATE reservation_projection_metadata
             SET projection_state = 'OverlayOnly',
@@ -254,16 +268,16 @@ public sealed class ReservationProjectionMetadataStore
         cmd.Parameters.AddWithValue("$endTime", ToDbTime(externalEvent.End));
         cmd.Parameters.AddWithValue("$title", Safe(externalEvent.Title));
         cmd.Parameters.AddWithValue("$updatedAt", ToDbTime(DateTime.Now));
-        cmd.ExecuteNonQuery();
+        return cmd.ExecuteNonQuery();
     }
 
     private static string BuildProjectedEventId(ExternalEpgEvent externalEvent)
         => ProjectedEventKey.FromExternal(externalEvent).Value;
 
-    public void MarkPromoted(int reservationId, ushort networkId, ushort transportStreamId, ushort serviceId, ushort eventId, DateTime promotedAt)
+    internal static int MarkPromoted(SqliteConnection con, SqliteTransaction tx, int reservationId,
+        ushort networkId, ushort transportStreamId, ushort serviceId, ushort eventId, DateTime promotedAt)
     {
-        using var con = db.Open();
-        using var cmd = con.CreateCommand();
+        using var cmd = con.CreateCommand(); cmd.Transaction = tx;
         cmd.CommandText = """
             UPDATE reservation_projection_metadata
             SET projection_state = 'PromotedToDbEvent',
@@ -282,13 +296,12 @@ public sealed class ReservationProjectionMetadataStore
         cmd.Parameters.AddWithValue("$eventId", eventId);
         cmd.Parameters.AddWithValue("$promotedAt", ToDbTime(promotedAt));
         cmd.Parameters.AddWithValue("$updatedAt", ToDbTime(DateTime.Now));
-        cmd.ExecuteNonQuery();
+        return cmd.ExecuteNonQuery();
     }
 
-    public void MarkSourceMissing(int reservationId, DateTime sourceMissingAt)
+    internal static int MarkSourceMissing(SqliteConnection con,SqliteTransaction tx,int reservationId, DateTime sourceMissingAt)
     {
-        using var con = db.Open();
-        using var cmd = con.CreateCommand();
+        using var cmd = con.CreateCommand();cmd.Transaction=tx;
         cmd.CommandText = """
             UPDATE reservation_projection_metadata
             SET projection_state = 'SourceMissing',
@@ -300,7 +313,7 @@ public sealed class ReservationProjectionMetadataStore
         cmd.Parameters.AddWithValue("$reservationId", reservationId);
         cmd.Parameters.AddWithValue("$sourceMissingAt", ToDbTime(sourceMissingAt));
         cmd.Parameters.AddWithValue("$updatedAt", ToDbTime(DateTime.Now));
-        cmd.ExecuteNonQuery();
+        return cmd.ExecuteNonQuery();
     }
 
     public void Delete(int reservationId)

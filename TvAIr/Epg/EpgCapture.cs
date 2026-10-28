@@ -132,7 +132,7 @@ public sealed class EpgCapture
         public long Offset;
         public PsiSectionAssembler Assembler = new();
         public EitSectionReader Reader = new(EitTransportStreamScope.ActualOnly);
-        public readonly Dictionary<string, string> CommittedSignatures = new(StringComparer.Ordinal);
+        public readonly Dictionary<string, string> AcceptedSignatures = new(StringComparer.Ordinal);
         public readonly SemaphoreSlim Gate = new(1, 1);
 
         public void ResetParser()
@@ -162,7 +162,7 @@ public sealed class EpgCapture
             if (stream.Length < state.Offset)
             {
                 state.Offset = 0;
-                state.CommittedSignatures.Clear();
+                state.AcceptedSignatures.Clear();
                 state.ResetParser();
             }
             if (state.Offset >= stream.Length) return 0;
@@ -236,46 +236,26 @@ public sealed class EpgCapture
             {
                 var key = Identity(e);
                 var sig = Signature(e);
-                if (state.CommittedSignatures.TryGetValue(key, out var old) && string.Equals(old, sig, StringComparison.Ordinal)) continue;
+                if (state.AcceptedSignatures.TryGetValue(key, out var old) && string.Equals(old, sig, StringComparison.Ordinal)) continue;
                 changed.Add(e);
-                state.CommittedSignatures[key] = sig;
             }
             if (changed.Count == 0) return 0;
 
-            await epgImportCommitGate.WaitAsync(ct).ConfigureAwait(false);
-            int committed;
-            int promoted;
-            try
-            {
-                var result = store.CommitCapture(changed, retireEvents: null, preserveEvents: changed);
-                committed = result.Upsert.Count;
-                promoted = projectionPromotion.PromotePending($"RecordingTsSupplement:R{reservationId}", runAllocationRoute: false);
-            }
-            finally
-            {
-                epgImportCommitGate.Release();
-            }
-
-            var keywordAdded = 0;
-            if (committed > 0)
-            {
-                try
-                {
-                    keywordAdded = keywordMatcher.RunMatching(changed);
-                    if (keywordAdded > 0)
-                        projectionPromotion.RunAllocationRoute($"RecordingTsSupplement:R{reservationId}:KeywordMatch", ReservationAllocationWakeRefreshMode.BoundedCoalesce);
-                    else if (promoted > 0)
-                        projectionPromotion.RunAllocationRoute($"RecordingTsSupplement:R{reservationId}:ProjectionPromote", ReservationAllocationWakeRefreshMode.BoundedCoalesce);
-                }
-                catch (Exception ex)
-                {
-                    Log("RECORDING_EPG_SUPPLEMENT", $"R{reservationId}", $"result=POST_COMMIT_ERROR error={SafeLogValue(ex.Message)} committed={committed} action=keep_epg_commit recordingImpact=none rule=recording_ts_epg_supplement_contract");
-                }
-            }
+            // The existing allocation queue owns accepted input before parser state advances.
+            var submission = projectionPromotion.SubmitCapturedEpg(store, changed, null, changed,
+                epgImportCommitGate, ct, Array.Empty<EpgEvent>(),
+                new EpgCaptureImportContext($"RecordingTsSupplement:R{reservationId}", MatchKeywords: true));
+            if (submission.Result is { Applied: true } || submission.RetainIfUnexecuted)
+                foreach (var e in changed) state.AcceptedSignatures[Identity(e)] = Signature(e);
+            var committed = submission.Result?.Capture?.Upsert.Count ?? 0;
+            var promoted = submission.PromotionResult?.PromotedIds.Count ?? 0;
+            if (!submission.IsComplete)
+                Log("RECORDING_EPG_SUPPLEMENT", $"R{reservationId}",
+                    $"result=DEFERRED rawCommitted={submission.Result?.Applied == true} accepted={changed.Count} action=existing_allocation_queue recordingImpact=none rule=recording_ts_epg_supplement_contract");
 
 #if TVAIR_DEVELOPER_DIAGNOSTICS
             Log("RECORDING_EPG_SUPPLEMENT", $"R{reservationId}",
-                $"result=COMMITTED group={SafeLogValue(groupName)} tsid={tsid} bytesRead={consumed} offset={state.Offset} services={targetSids.Length} parsed={rawEvents.Count} changed={changed.Count} committed={committed} promoted={promoted} keywordAdded={keywordAdded} staleRetire=none tunerMutation=none recordingMutation=none followMutation=none rule=recording_ts_epg_supplement_contract");
+                $"result={(submission.IsComplete ? "COMMITTED" : submission.Result?.Applied == true ? "RAW_COMMITTED_PENDING" : "ACCEPTED_PENDING")} group={SafeLogValue(groupName)} tsid={tsid} bytesRead={consumed} offset={state.Offset} services={targetSids.Length} parsed={rawEvents.Count} changed={changed.Count} committed={committed} promoted={promoted} keywordMatch=common_route staleRetire=none tunerMutation=none recordingMutation=none followMutation=none rule=recording_ts_epg_supplement_contract");
 #endif
             return committed;
         }
@@ -2255,6 +2235,8 @@ public sealed class EpgCapture
             // 正常captureもowned process exit確認後にleaseを解放する。固定時間待機は設けない。
 
             int imported;
+            var importDeferred = false;
+            var captureParsed = false;
             EpgWorkerLaunchResult? activeLaunch = null;
             var activeLaunchRetired = false;
             try
@@ -2508,9 +2490,12 @@ public sealed class EpgCapture
                         // USER_CHAIN_PRE_REC_OBSERVED_SNAPSHOT_INVARIANT:
                         // chain-rootも今回のworkerが実観測したsnapshotをschedulerへ返す。
                         // 既存DB保存は表示投影用に維持するが、時間追従の正本はこの観測snapshotとする。
-                        imported = probe.Events.Count > 0
-                            ? probe.Events.Count
-                            : await ParseAndStoreAsync(group, tsFile, attempt, maxAttempts, ct, isPreRecordCheck);
+                        if (probe.Events.Count > 0) imported = probe.Events.Count;
+                        else
+                        {
+                            var fallbackImport = await ParseAndStoreAsync(group, tsFile, attempt, maxAttempts, ct, isPreRecordCheck);
+                            imported = fallbackImport.CommittedCount; importDeferred = fallbackImport.Deferred; captureParsed = fallbackImport.ParsedCapture;
+                        }
                         if (probe.Events.Count > 0)
                         {
                             foreach (var observedEvent in probe.Events)
@@ -2638,7 +2623,8 @@ public sealed class EpgCapture
 
 
                     // TSパース。取得完了判定はRunPassAsync側で一度だけ行う。
-                    imported = await ParseAndStoreAsync(group, tsFile, attempt, maxAttempts, ct, isPreRecordCheck);
+                    var normalImport = await ParseAndStoreAsync(group, tsFile, attempt, maxAttempts, ct, isPreRecordCheck);
+                    imported = normalImport.CommittedCount; importDeferred = normalImport.Deferred; captureParsed = normalImport.ParsedCapture;
                     // EPG_WORKER_TERMINAL_EVIDENCE_INVARIANT:
                     // Parsing a partially written TS and the worker process completing successfully are
                     // independent facts. Always capture the worker-owned terminal result before cleanup;
@@ -2695,9 +2681,11 @@ public sealed class EpgCapture
                     workerTaskState.ReleaseLeaseForAttempt(attemptGeneration);
             }
 
-            if (imported > 0)
+            if (!new EpgImportOutcome(imported, importDeferred, captureParsed).ShouldRetryCapture)
             {
                 currentRunCaptureFailures.TryRemove(group.Key, out _);
+                if (importDeferred) Log("EPG_IMPORT_DEFERRED", $"TS{group.TsId}",
+                    $"result=ACCEPTED imported={imported} action=release_capture_resources_without_rf_retry rule=epg_import_commit_contract");
                 return imported;
             }
 
@@ -4116,7 +4104,7 @@ public sealed class EpgCapture
             .ToList();
     }
 
-    private async Task<int> ParseAndStoreAsync(
+    private async Task<EpgImportOutcome> ParseAndStoreAsync(
         TsGroup group, string tsFile, int attempt, int maxAttempts, CancellationToken ct, bool isPreRecordCheck)
     {
         var fi = new FileInfo(tsFile);
@@ -4125,8 +4113,10 @@ public sealed class EpgCapture
             Log("EPG_TS_EMPTY", $"TS{group.TsId}",
                 $"result=EMPTY purpose={(isPreRecordCheck ? "pre_record_check" : "normal_epg_capture")} file={SafeLogValue(tsFile)} cleanup=delete_empty_ts rule=release_contract");
             try { if (fi.Exists) File.Delete(tsFile); } catch { }
-            return 0;
+            return EpgImportOutcome.Empty;
         }
+
+        EpgImportOutcome? committedImport = null;
 
         try
         {
@@ -4351,8 +4341,9 @@ public sealed class EpgCapture
             }
 
             var rawEvents = BuildRawEventsFromAccumulatorProjection(epg.Events, targetSidSet, serviceNameBySid);
-            rawEvents = FilterCurrentOrFutureImportEvents(rawEvents, canonicalImportCutoff);
+            // Compare the accumulator with its direct projection before applying the import-time retention policy.
             LogAccumulatorRawEventProjectionContract(group, purpose, targetServiceIds, epg.EventAccumulatorAudits, epg.Events, rawEvents);
+            rawEvents = FilterCurrentOrFutureImportEvents(rawEvents, canonicalImportCutoff);
 
             LogDbInsertPrecheck(group, purpose, targetServiceIds, rawEvents);
             var strictTitleBodyMergeStats = ApplyStrictTitleBodyCanonicalMerge(group, purpose, targetServiceIds, epg, rawEvents);
@@ -4418,212 +4409,102 @@ public sealed class EpgCapture
             if (epg.ToleratedSameVersionScheduleMetadataDriftCount > 0) staleRetireBlockReasons.Add("same_version_schedule_metadata_drift_during_capture");
             var staleRetireEligible = staleAuthorityEvents.Count > 0 && staleRetireBlockReasons.Count == 0;
 
-            var importGateWaitStartedAt = DateTime.Now;
-            await epgImportCommitGate.WaitAsync(ct).ConfigureAwait(false);
-            int upsertedCount;
-            int promotedReservations;
-            EpgUpsertStorageStats storageStats;
-            EpgStaleRetireStats staleStats;
-            var retiredKeywordReservations = 0;
-            List<EpgEvent> otherSupplementCommittedEvents = new();
-            try
+            var submission = projectionPromotion.SubmitCapturedEpg(store, rawEvents,
+                staleRetireEligible ? staleAuthorityEvents : null,
+                staleRetireEligible ? staleAuthorityEvents : rawEvents, epgImportCommitGate, ct,
+                otherSupplementCandidates, new EpgCaptureImportContext($"EpgCapture:{purpose}:{group.Group}:TS{group.TsId}", !isPreRecordCheck));
+            // Normal capture completion belongs to this capture task and its
+            // transaction receipt. Physical admission/lease were released before
+            // parsing; do not return imported=0 merely because another flight owns
+            // the existing allocation queue. RunPassAsync awaits all capture tasks
+            // before committing the daily terminal state.
+            if (!isPreRecordCheck && submission.Result is null)
+                Log("EPG_IMPORT_WAIT", $"TS{group.TsId}",
+                    $"result=PENDING_COMMIT purpose={purpose} accepted={rawEvents.Count} physicalResources=released waitOwner=capture_task action=await_existing_commit_receipt rule=epg_import_commit_contract");
+            var outcome = isPreRecordCheck
+                ? EpgImportOutcome.From(submission)
+                : await EpgImportOutcome.FromCommittedAsync(submission, ct).ConfigureAwait(false);
+            if (submission.Result is not { Applied: true, Capture: not null } receipt)
             {
-                var importGateWaitMs = (int)Math.Max(0, (DateTime.Now - importGateWaitStartedAt).TotalMilliseconds);
-                Log("EPG_IMPORT_COMMIT_GATE", $"TS{group.TsId}",
-                    $"result=ENTER purpose={purpose} group={group.Group} waitMs={importGateWaitMs} action=serialize_sqlite_write_keep_ts_analysis_parallel rule=epg_import_commit_contract");
-
-                // Canonical existence authority is Basic schedule EIT only. PF / extended / other
-                // observations may enrich a current identity but must never preserve an older EID
-                // after Basic EIT has moved the same service/time interval to a new identity.
-                var commitResult = store.CommitCapture(
-                    rawEvents,
-                    staleRetireEligible ? staleAuthorityEvents : null,
-                    staleRetireEligible ? staleAuthorityEvents : rawEvents);
-                upsertedCount = commitResult.Upsert.Count;
-                storageStats = commitResult.Upsert.Stats;
-                staleStats = commitResult.StaleRetire;
-
-                // The canonical EPG transition owns the lifecycle of automatic reservations that
-                // were derived from the retired exact occurrence. Do this while still holding the
-                // import commit lane so no later projection/allocation pass can observe a stale
-                // Scheduled keyword reservation as if it were still backed by canonical EPG.
-                if (staleStats.RetiredEvents.Count > 0)
-                {
-                    retiredKeywordReservations = reservationStore
-                        .DeleteScheduledKeywordReservationsForRetiredEpgEvents(staleStats.RetiredEvents);
-                    Log("EPG_AUTHORITY_RESERVATION_RECONCILE", $"TS{group.TsId}",
-                        $"result=OK purpose={purpose} group={group.Group} retiredEvents={staleStats.RetiredEvents.Count} removedScheduledKeyword={retiredKeywordReservations} " +
-                        "source=canonical_basic_eit_generation_transition manualProgramRuntimePreserved=True rule=epg_authority_reservation_reconcile_contract");
-                }
+                Log("EPG_IMPORT", $"TS{group.TsId}",
+                    $"result={(outcome.Deferred ? "DEFERRED" : "REJECTED")} purpose={purpose} accepted={rawEvents.Count} imported=0 reason={submission.Result?.Reason ?? "common_route_pending"} action=existing_allocation_queue rule=epg_import_commit_contract");
+                try { File.Delete(tsFile); } catch { }
+                return outcome;
+            }
+            committedImport = outcome;
+            var commitResult = receipt.Capture;
+            var upsertedCount = commitResult.Upsert.Count;
+            var storageStats = commitResult.Upsert.Stats;
+            var staleStats = commitResult.StaleRetire;
+            var retiredKeywordReservations = receipt.RemovedIds.Count;
+            var promotedReservations = submission.PromotionResult?.PromotedIds.Count ?? 0;
+            var otherSupplementCommittedEvents = commitResult.OtherSupplement?.InsertedEvents.ToList() ?? new List<EpgEvent>();
+            if (outcome.Deferred) Log("EPG_IMPORT_POST_COMMIT_DEFERRED", $"TS{group.TsId}",
+                $"result=RAW_COMMITTED purpose={purpose} imported={upsertedCount} action=resume_promotion_without_epg_rewrite rule=epg_import_commit_contract");
+            if (staleStats.RetiredEvents.Count > 0)
+                Log("EPG_AUTHORITY_RESERVATION_RECONCILE", $"TS{group.TsId}",
+                    $"result=OK purpose={purpose} group={group.Group} retiredEvents={staleStats.RetiredEvents.Count} removedScheduledKeyword={retiredKeywordReservations} source=common_allocation_route rule=epg_authority_reservation_reconcile_contract");
 
 #if TVAIR_DEVELOPER_DIAGNOSTICS
-                if (rawEvents.Count > 0)
-                {
-                    var committedKeys = rawEvents
-                        .Select(e => (e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId))
-                        .Distinct()
-                        .ToArray();
-                    var storedAfterCommit = store.GetByEventKeys(committedKeys);
-                    var exactRetained = rawEvents
-                        .Where(e => storedAfterCommit.Any(dbEvent =>
-                            dbEvent.NetworkId == e.NetworkId &&
-                            dbEvent.TransportStreamId == e.TransportStreamId &&
-                            dbEvent.ServiceId == e.ServiceId &&
-                            dbEvent.EventId == e.EventId &&
-                            dbEvent.Start == e.Start &&
-                            dbEvent.DurationSeconds == e.DurationSeconds))
-                        .ToArray();
-                    coverageAttribution.MarkActualPresentAfterCommit(exactRetained);
-                    Log("EPG_ACTUAL_COMMIT_CONTINUITY", $"TS{group.TsId}",
-                        $"result=OBSERVED purpose={purpose} group={group.Group} commitCandidates={rawEvents.Count} exactPresentAfterCommit={exactRetained.Length} exactMissingAfterCommit={Math.Max(0, rawEvents.Count - exactRetained.Length)} mutation=none observerOnly=True rule=epg_actual_commit_continuity_observer");
-                }
+            if (rawEvents.Count > 0)
+            {
+                var committedKeys = rawEvents
+                    .Select(e => (e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId))
+                    .Distinct()
+                    .ToArray();
+                var storedAfterCommit = store.GetByEventKeys(committedKeys);
+                var exactRetained = rawEvents
+                    .Where(e => storedAfterCommit.Any(dbEvent =>
+                        dbEvent.NetworkId == e.NetworkId &&
+                        dbEvent.TransportStreamId == e.TransportStreamId &&
+                        dbEvent.ServiceId == e.ServiceId &&
+                        dbEvent.EventId == e.EventId &&
+                        dbEvent.Start == e.Start &&
+                        dbEvent.DurationSeconds == e.DurationSeconds))
+                    .ToArray();
+                coverageAttribution.MarkActualPresentAfterCommit(exactRetained);
+                Log("EPG_ACTUAL_COMMIT_CONTINUITY", $"TS{group.TsId}",
+                    $"result=OBSERVED purpose={purpose} group={group.Group} commitCandidates={rawEvents.Count} exactPresentAfterCommit={exactRetained.Length} exactMissingAfterCommit={Math.Max(0, rawEvents.Count - exactRetained.Length)} mutation=none observerOnly=True rule=epg_actual_commit_continuity_observer");
+            }
 
-                if (incomingEventIdTimingCollisions.Length > 0)
+            if (incomingEventIdTimingCollisions.Length > 0)
+            {
+                var collisionKeys = incomingEventIdTimingCollisions
+                    .Select(x => (x.Key.NetworkId, x.Key.TransportStreamId, x.Key.ServiceId, x.Key.EventId))
+                    .ToArray();
+                var storedCollisionRows = store.GetByEventKeys(collisionKeys);
+                var exactIncomingRetained = incomingEventIdTimingCollisions.Sum(c =>
+                    c.Events.Count(e => storedCollisionRows.Any(dbEvent =>
+                        dbEvent.NetworkId == e.NetworkId &&
+                        dbEvent.TransportStreamId == e.TransportStreamId &&
+                        dbEvent.ServiceId == e.ServiceId &&
+                        dbEvent.EventId == e.EventId &&
+                        dbEvent.Start == e.Start &&
+                        dbEvent.DurationSeconds == e.DurationSeconds)));
+                var distinctIncoming = incomingEventIdTimingCollisions.Sum(x => x.Events.Length);
+                var sample = string.Join(" | ", incomingEventIdTimingCollisions.Take(12).Select(c =>
                 {
-                    var collisionKeys = incomingEventIdTimingCollisions
-                        .Select(x => (x.Key.NetworkId, x.Key.TransportStreamId, x.Key.ServiceId, x.Key.EventId))
+                    var retained = storedCollisionRows
+                        .Where(e => e.NetworkId == c.Key.NetworkId && e.TransportStreamId == c.Key.TransportStreamId && e.ServiceId == c.Key.ServiceId && e.EventId == c.Key.EventId)
+                        .Select(e => $"{e.Start:MM-ddTHH:mm:ss}/d{e.DurationSeconds}")
                         .ToArray();
-                    var storedCollisionRows = store.GetByEventKeys(collisionKeys);
-                    var exactIncomingRetained = incomingEventIdTimingCollisions.Sum(c =>
-                        c.Events.Count(e => storedCollisionRows.Any(dbEvent =>
-                            dbEvent.NetworkId == e.NetworkId &&
-                            dbEvent.TransportStreamId == e.TransportStreamId &&
-                            dbEvent.ServiceId == e.ServiceId &&
-                            dbEvent.EventId == e.EventId &&
-                            dbEvent.Start == e.Start &&
-                            dbEvent.DurationSeconds == e.DurationSeconds)));
-                    var distinctIncoming = incomingEventIdTimingCollisions.Sum(x => x.Events.Length);
-                    var sample = string.Join(" | ", incomingEventIdTimingCollisions.Take(12).Select(c =>
-                    {
-                        var retained = storedCollisionRows
-                            .Where(e => e.NetworkId == c.Key.NetworkId && e.TransportStreamId == c.Key.TransportStreamId && e.ServiceId == c.Key.ServiceId && e.EventId == c.Key.EventId)
-                            .Select(e => $"{e.Start:MM-ddTHH:mm:ss}/d{e.DurationSeconds}")
-                            .ToArray();
-                        return $"{c.Key.NetworkId}/{c.Key.TransportStreamId}/{c.Key.ServiceId}/{c.Key.EventId}:incoming={c.Events.Length}:stored=[{string.Join(",", retained)}]";
-                    }));
-                    Log("EPG_EVENT_ID_TIMING_COLLISION", $"TS{group.TsId}",
-                        $"result=OBSERVED phase=after_commit purpose={purpose} group={group.Group} collisionKeys={incomingEventIdTimingCollisions.Length} distinctIncomingEvents={distinctIncoming} " +
-                        $"storedRows={storedCollisionRows.Count} exactIncomingRetained={exactIncomingRetained} overwrittenOrUnrepresented={Math.Max(0, distinctIncoming - exactIncomingRetained)} " +
-                        $"storagePrimaryKey=nid_tsid_sid_eventId mutation=none observerOnly=True sample=[{SafeLogValue(sample)}] rule=epg_event_identity_collision_observer");
-                }
+                    return $"{c.Key.NetworkId}/{c.Key.TransportStreamId}/{c.Key.ServiceId}/{c.Key.EventId}:incoming={c.Events.Length}:stored=[{string.Join(",", retained)}]";
+                }));
+                Log("EPG_EVENT_ID_TIMING_COLLISION", $"TS{group.TsId}",
+                    $"result=OBSERVED phase=after_commit purpose={purpose} group={group.Group} collisionKeys={incomingEventIdTimingCollisions.Length} distinctIncomingEvents={distinctIncoming} " +
+                    $"storedRows={storedCollisionRows.Count} exactIncomingRetained={exactIncomingRetained} overwrittenOrUnrepresented={Math.Max(0, distinctIncoming - exactIncomingRetained)} " +
+                    $"storagePrimaryKey=nid_tsid_sid_eventId mutation=none observerOnly=True sample=[{SafeLogValue(sample)}] rule=epg_event_identity_collision_observer");
+            }
 #endif
-
-                var otherSupplementInserted = 0;
-                var otherSupplementExisting = 0;
-                if (otherSupplementCandidates.Count > 0)
-                {
-                    // Re-check identity under the serialized import gate. Other-TS schedule is
-                    // supplement-only: it may insert a missing event, but never overwrites an
-                    // existing row and never participates in stale retirement. A later actual-TS
-                    // capture remains authoritative and may update the inserted row normally.
-                    var candidateKeys = otherSupplementCandidates
-                        .Select(e => (e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId))
-                        .Distinct()
-                        .ToArray();
-                    var existingKeys = store.GetByEventKeys(candidateKeys)
-                        .Select(e => (e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId))
-                        .ToHashSet();
-                    var missingOnly = otherSupplementCandidates
-                        .Where(e => !existingKeys.Contains((e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId)))
-                        .ToList();
-                    otherSupplementExisting = candidateKeys.Length - missingOnly.Count;
-                    if (existingKeys.Count > 0)
-                        store.MarkOtherScheduleSeen(existingKeys);
-                    if (missingOnly.Count > 0)
-                    {
-                        otherSupplementInserted = store.UpsertOtherScheduleSupplement(missingOnly).Count;
-                        if (otherSupplementInserted > 0)
-                        {
-                            otherSupplementCommittedEvents = missingOnly.Take(otherSupplementInserted).ToList();
 #if TVAIR_DEVELOPER_DIAGNOSTICS
-                            coverageAttribution.MarkInserted(otherSupplementCommittedEvents);
+            if (otherSupplementCommittedEvents.Count > 0) coverageAttribution.MarkInserted(otherSupplementCommittedEvents);
 #endif
-                        }
-                    }
+            if (otherSupplementCandidates.Count > 0 || otherEpg is not null)
+                Log("EPG_OTHER_TS_EIT_SUPPLEMENT", $"TS{group.TsId}",
+                    $"result=OK group={group.Group} candidates={otherSupplementCandidates.Count} existingAtCommit={commitResult.OtherSupplement?.Existing ?? 0} insertedMissing={otherSupplementCommittedEvents.Count} actualPriority=existing_row_preserved staleRetire=none rule=epg_other_ts_schedule_supplement");
 
-                    Log("EPG_OTHER_TS_EIT_SUPPLEMENT", $"TS{group.TsId}",
-                        $"result=OK group={group.Group} candidates={otherSupplementCandidates.Count} existingAtCommit={otherSupplementExisting} insertedMissing={otherSupplementInserted} " +
-                        $"identity=onid_tsid_sid_eventId serviceResolution=configured_ch2_exact existenceAuthority=0x60-0x67 enrichment=0x68-0x6F actualPriority=existing_row_preserved auxiliaryObservation=other_schedule_seen existenceVetoAgainstActualBasic=none staleRetire=none pfOther=ignored schedulerWindow=unchanged workerCeiling=unchanged " +
-                        $"rule=epg_other_ts_schedule_supplement");
-                }
-                else if (otherEpg is not null)
-                {
-                    Log("EPG_OTHER_TS_EIT_SUPPLEMENT", $"TS{group.TsId}",
-                        $"result=OK group={group.Group} candidates=0 existingAtCommit=0 insertedMissing=0 identity=onid_tsid_sid_eventId serviceResolution=configured_ch2_exact existenceAuthority=0x60-0x67 enrichment=0x68-0x6F actualPriority=existing_row_preserved auxiliaryObservation=other_schedule_seen existenceVetoAgainstActualBasic=none staleRetire=none pfOther=ignored schedulerWindow=unchanged workerCeiling=unchanged rule=epg_other_ts_schedule_supplement");
-                }
-                try
-                {
-                    // DB identity promotion belongs to the same SQLite commit lane, but the common
-                    // allocation route must not hold this gate. Normal EPG already runs one complete
-                    // post-import route at the EpgScheduler boundary.
-                    promotedReservations = projectionPromotion.PromotePending(
-                        $"EpgCapture:{purpose}:{group.Group}:TS{group.TsId}",
-                        runAllocationRoute: false);
-                }
-                catch (Exception ex)
-                {
-                    promotedReservations = 0;
-                    Log("RESERVATION_PROJECTION_PROMOTE", $"TS{group.TsId}",
-                        $"result=ERROR source=EpgCapture error={SafeLogValue(ex.Message)} rule=release_contract");
-                }
-            }
-            finally
-            {
-                epgImportCommitGate.Release();
-            }
-
-            // release_contract IncrementalKeywordMatchAfterCommittedEpgImport:
-            // A normal EPG run commits each transport stream independently, and the programme
-            // guide can expose those committed rows immediately. Waiting until the entire
-            // multi-TS run completes before running KeywordMatcher creates a dangerous interval
-            // where a visible matching programme is still unreserved. If the run is cancelled or
-            // fails later, that interval becomes permanent. Match immediately after each
-            // successful DB commit, outside the SQLite commit gate. The existing final
-            // EpgCompletePostImport pass remains as an idempotent convergence pass.
-            if (!isPreRecordCheck && (upsertedCount > 0 || otherSupplementCommittedEvents.Count > 0))
-            {
-                try
-                {
-                    var keywordEvents = rawEvents
-                        .Concat(otherSupplementCommittedEvents)
-                        .GroupBy(e => (e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId))
-                        .Select(g => g.First())
-                        .ToList();
-                    var keywordAdded = keywordMatcher.RunMatching(keywordEvents);
-                    var keywordReservationChanged = keywordAdded > 0 || retiredKeywordReservations > 0;
-                    if (keywordReservationChanged)
-                    {
-                        projectionPromotion.RunAllocationRoute(
-                            $"EpgCapture:{purpose}:{group.Group}:TS{group.TsId}:KeywordAuthorityConverge",
-                            ReservationAllocationWakeRefreshMode.BoundedCoalesce);
-                    }
-                    Log("EPG_INCREMENTAL_KEYWORD_MATCH", $"TS{group.TsId}",
-                        $"result=OK purpose={purpose} group={group.Group} imported={upsertedCount} otherSupplementInserted={otherSupplementCommittedEvents.Count} retiredKeyword={retiredKeywordReservations} keywordAdded={keywordAdded} allocationRun={keywordReservationChanged} timing=after_committed_ts_import_before_full_epg_completion rule=incremental_keyword_match_contract");
-                }
-                catch (Exception ex)
-                {
-                    Log("EPG_INCREMENTAL_KEYWORD_MATCH", $"TS{group.TsId}",
-                        $"result=ERROR purpose={purpose} group={group.Group} imported={upsertedCount} error={SafeLogValue(ex.Message)} action=retry_by_final_epg_complete_pass rule=incremental_keyword_match_contract");
-                }
-            }
-
-            // Pre-record probes do not pass through EpgScheduler's post-import route. If this
-            // narrowly scoped import promoted a reservation, run its route only after releasing
-            // the SQLite import gate. Normal EPG defers all allocation work to the single
-            // EpgCompletePostImport route.
-            if (isPreRecordCheck && promotedReservations > 0)
-            {
-                try
-                {
-                    projectionPromotion.RunAllocationRoute(
-                        $"EpgCapture:{purpose}:{group.Group}:TS{group.TsId}");
-                }
-                catch (Exception ex)
-                {
-                    Log("RESERVATION_PROJECTION_PROMOTE", $"TS{group.TsId}",
-                        $"result=ERROR phase=post_commit_allocation source=EpgCapture promoted={promotedReservations} error={SafeLogValue(ex.Message)} rule=release_contract");
-                }
-            }
+            // Matching, topology repair, allocation, PreRec and Wake now belong to the
+            // same canonical request. Do not invoke a second producer-owned matching pass.
 
             Log("EPG_EVENT_DESCRIPTOR_STORAGE_CONTRACT", $"TS{group.TsId}",
                 $"result=OK purpose={purpose} group={group.Group} incoming={storageStats.Incoming} " +
@@ -4653,7 +4534,7 @@ public sealed class EpgCapture
                 $"rule=release_contract");
 
             try { File.Delete(tsFile); } catch { }
-            return upsertedCount;
+            return outcome;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -4663,9 +4544,17 @@ public sealed class EpgCapture
         }
         catch (Exception ex)
         {
+            // A diagnostic/follow-up failure cannot undo the canonical raw commit.
+            // Preserve its count; cancellation above still ends the run as cancelled.
+            if (committedImport is { } committed)
+            {
+                Log("EPG_IMPORT_POST_COMMIT_ERROR", $"TS{group.TsId}",
+                    $"result=RAW_COMMITTED purpose={(isPreRecordCheck ? "pre_record_check" : "normal_epg_capture")} imported={committed.CommittedCount} error={ex.GetType().Name}:{SafeLogValue(ex.Message)} action=preserve_committed_count_no_rf_retry rule=epg_import_commit_contract");
+                return committed;
+            }
             Log("EPG_PARSE_FAIL", $"TS{group.TsId}",
                 $"result=ERROR purpose={(isPreRecordCheck ? "pre_record_check" : "normal_epg_capture")} error={ex.GetType().Name}:{SafeLogValue(ex.Message)} rule=release_contract");
-            return 0;
+            return EpgImportOutcome.Empty;
         }
     }
 

@@ -6,22 +6,24 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.13"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.13"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.14"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.14"/>
 
-<link href="/tvair-ui-foundation.css?v=1.2.13" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.13" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.13" rel="stylesheet"/>
-<link href="/tvair-epg-panel.css?v=1.2.13" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.13" rel="stylesheet"/>
-<link href="/tvair-settings-host.css?v=1.2.13" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-epg-panel.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.14" rel="stylesheet"/>
 
-<script src="/tvair-theme.js?v=1.2.13"></script>
-<script src="/tvair-page-view-state.js?v=1.2.13"></script>
-<script src="/tvair-action-button-state.js?v=1.2.13"></script>
-<script src="/tvair-reservation-action-state.js?v=1.2.13"></script>
-<script>var TVA_IR_UI_VERSION="1.2.13";</script>
-<script src="/genre-shared.js?v=1.2.13"></script>
+<script src="/tvair-theme.js?v=1.2.14"></script>
+<script src="/tvair-guide-read-request.js?v=1.2.14"></script>
+<script src="/tvair-page-view-state.js?v=1.2.14"></script>
+<script src="/tvair-action-button-state.js?v=1.2.14"></script>
+<script src="/tvair-reservation-cancel-request.js?v=1.2.14"></script>
+<script src="/tvair-reservation-action-state.js?v=1.2.14"></script>
+<script>var TVA_IR_UI_VERSION="1.2.14";</script>
+<script src="/genre-shared.js?v=1.2.14"></script>
 
 
 
@@ -38,6 +40,79 @@
 .cfg-network-master-toggle input:checked + .cfg-network-master-switch::after{transform:translateX(20px)}
 .cfg-network-disabled{opacity:.52}
 .cfg-network-disabled input[type="checkbox"],.cfg-network-disabled input[type="radio"]{accent-color:gray}
+
+/* Inline with HTML to guarantee updated floating layout on product-version-stable upgrades.
+   Single owner: ProgramGuideFloatingActionController. */
+/* ProgramGuide floating actions: one positioning, visibility and interaction contract.
+   Geometry variants are next-day (bottom) and horizontal pan (sides). */
+body.tvair-guide-page button.tvair-guide-floating-action{
+  position:fixed;
+  z-index:1850;
+  display:none;
+  align-items:center;
+  justify-content:center;
+  box-sizing:border-box;
+  margin:0;
+  border:1px solid var(--tvair-guide-next-day-floating-border,var(--tvair-role-control-border));
+  border-radius:999px;
+  background:var(--tvair-guide-next-day-floating-bg,var(--tvair-role-control-active-bg));
+  color:var(--tvair-guide-next-day-floating-fg,var(--tvair-role-control-active-fg));
+  box-shadow:var(--tvair-guide-next-day-floating-shadow,var(--tvair-shadow-a));
+  font:700 12px/1 "Meiryo","メイリオ",sans-serif;
+  text-decoration:none;
+  white-space:nowrap;
+  cursor:pointer;
+  user-select:none;
+  pointer-events:auto;
+  transition:opacity .12s ease,background-color .12s ease,border-color .12s ease;
+}
+body.tvair-guide-page button.tvair-guide-floating-action[hidden],
+body.tvair-guide-page button.tvair-guide-floating-action[aria-hidden="true"]{
+  display:none;
+  pointer-events:none;
+}
+body.tvair-guide-page button.tvair-guide-floating-action.is-visible:not([hidden]){display:inline-flex;}
+body.tvair-guide-page button.tvair-guide-floating-action:hover{
+  background:var(--tvair-guide-next-day-floating-hover-bg,var(--tvair-role-control-hover-bg));
+  color:var(--tvair-guide-next-day-floating-hover-fg,var(--tvair-role-control-active-fg));
+  border-color:var(--tvair-guide-next-day-floating-hover-border,var(--tvair-role-control-border));
+}
+body.tvair-guide-page button.tvair-guide-floating-action:focus-visible{
+  outline:2px solid var(--tvair-role-focus);outline-offset:2px;
+}
+body.tvair-guide-page button#next-day-btn.tvair-guide-floating-action{
+  left:50%;right:auto;bottom:18px;
+  min-width:112px;min-height:28px;padding:6px 14px;
+  transform:translateX(-50%);
+}
+body.tvair-guide-page button.tvair-guide-pan.tvair-guide-floating-action{
+  left:0;top:0;right:auto;bottom:auto;
+  width:46px;min-width:46px;max-width:46px;
+  height:54px;min-height:54px;max-height:54px;
+  padding:0;transform:translate(-50%,-50%);
+  border-radius:16px;
+  background:var(--tvair-guide-pan-bg,var(--tvair-guide-next-day-floating-bg));
+  color:var(--tvair-guide-pan-fg,var(--tvair-guide-next-day-floating-fg));
+  border-color:var(--tvair-guide-pan-border,var(--tvair-guide-next-day-floating-border));
+  touch-action:none;
+}
+/* The chevron paths have mirrored, mathematically centered bounds (x=8..16,
+   center=12 in a 24-unit viewBox). No rotation or optical offset is needed. */
+body.tvair-guide-page button.tvair-guide-pan.tvair-guide-floating-action svg{
+  display:block;width:24px;height:24px;flex:0 0 24px;
+  overflow:visible;pointer-events:none;
+  fill:none;stroke:currentColor;stroke-width:3.5;
+  stroke-linecap:round;stroke-linejoin:round;
+}
+body.tvair-guide-page button.tvair-guide-pan.tvair-guide-floating-action:hover{
+  background:var(--tvair-guide-pan-hover-bg,var(--tvair-guide-next-day-floating-hover-bg));
+  border-color:var(--tvair-guide-pan-hover-border,var(--tvair-guide-next-day-floating-hover-border));
+}
+body.tvair-guide-page button.tvair-guide-pan.tvair-guide-floating-action.is-pressed{
+  background:var(--tvair-guide-pan-pressed-bg,var(--tvair-guide-pan-bg));
+}
+
+
 </style></head>
 <body class="tvair-guide-page">
 <script>if(new URLSearchParams(location.search).get('settingsHost')==='1'){document.body.classList.add('tvair-settings-frame');document.title='TvAIr 設定';}</script>
@@ -339,8 +414,8 @@
 </div>
 <div class="cfg-row" id="cfg-chain-row">
 <label>チェーン予約</label>
-<label class="ui-checkbox-inline"><input class="ui-check-inline" id="cfg-chain-recording" type="checkbox"/> チェーン予約を実行する</label>
-<div class="cfg-note">「後番組を優先する」を選ぶと設定できます。同じ局の連続番組を番組境界で受信を止めずに録画し、重なる録画マージンも各番組の別TSファイルへ保存します。番組表のチェーンボタンで追加した予約は「(C)」と表示します。無効にしても未開始の予約は通常予約として残ります。</div>
+<select id="cfg-chain-recording"><option value="disabled">無効</option><option value="manual">手動（チェーンボタン有り）</option><option value="automatic">自動（チェーンボタン無し）</option></select>
+<div id="cfg-chain-note" class="cfg-note" style="margin-top:12px" aria-live="polite"></div>
 </div>
 
 </div>
@@ -439,7 +514,9 @@
 </div>
 </div>
 </div>
-<button id="next-day-btn" class="tvair-guide-floating-next-day" type="button" hidden aria-hidden="true" aria-label="翌日の番組表へ移動" data-floating-action="next-day">▼ 翌日へ</button>
+<button id="guide-pan-left" class="tvair-guide-floating-action tvair-guide-pan" type="button" aria-label="番組表を左へスクロール" title="クリックで移動・ダブルクリックで左端・長押しで連続移動" hidden aria-hidden="true"><svg aria-hidden="true" viewBox="0 0 24 24" focusable="false"><path d="M16 5 L8 12 L16 19"/></svg></button>
+<button id="guide-pan-right" class="tvair-guide-floating-action tvair-guide-pan" type="button" aria-label="番組表を右へスクロール" title="クリックで移動・ダブルクリックで右端・長押しで連続移動" hidden aria-hidden="true"><svg aria-hidden="true" viewBox="0 0 24 24" focusable="false"><path d="M8 5 L16 12 L8 19"/></svg></button>
+<button id="next-day-btn" class="tvair-guide-floating-action tvair-guide-floating-next-day" type="button" hidden aria-hidden="true" aria-label="翌日の番組表へ移動" data-floating-action="next-day">▼ 翌日へ</button>
 <div id="epg-panel">
 <div id="epg-box">
 <div id="epg-box-head">
@@ -458,9 +535,9 @@
 </div>
 </div>
 </div>
-<script src="/tvair-notification.js?v=1.2.13"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.13"></script>
-<script src="/tvair-epg-widget.js?v=1.2.13"></script>
+<script src="/tvair-notification.js?v=1.2.14"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.14"></script>
+<script src="/tvair-epg-widget.js?v=1.2.14"></script>
 <script>
 const PROGRAM_GUIDE_GEOMETRY=Object.freeze({
   dayStartHour:4,
@@ -477,6 +554,7 @@ document.documentElement.style.setProperty('--tvair-program-guide-frame-min-heig
 const PROGRAM_CELL_ACTION_DEFINITIONS=Object.freeze({
   reserve:Object.freeze({label:'予約', execute:(mouseEvt,btn)=>reserveNow(mouseEvt,btn)}),
   'record-now':Object.freeze({label:'今すぐ録画', execute:(mouseEvt,btn)=>reserveNow(mouseEvt,btn)}),
+  'live-view':Object.freeze({label:'視聴', execute:(_mouseEvt,btn)=>programGuideLiveView(btn)}),
   chain:Object.freeze({label:'チェーン', execute:(mouseEvt,btn)=>reserveChain(mouseEvt,btn)}),
   cancel:Object.freeze({label:'予約取消', className:'reserved', execute:(_mouseEvt,btn,ctx)=>cancelReservation(ctx.rsvId,ctx.evKey||'',btn)}),
   disable:Object.freeze({label:'無効', execute:(_mouseEvt,btn,ctx)=>toggleProgramReservationEnabled(ctx.rsvId,false,btn)}),
@@ -500,6 +578,58 @@ function getProgramCellActionDefinition(actionName){
   return PROGRAM_CELL_ACTION_DEFINITIONS[String(actionName||'')] || null;
 }
 let currentDate=guideTodayStr();
+// A service appears as viewable only after exact Host Viewer-profile preflight.
+window.tvairLiveViewEligibleServices=new Set();
+function liveViewServiceKey(ev){
+  return [Number(ev.networkId),Number(ev.transportStreamId),Number(ev.serviceId)].join(':');
+}
+async function refreshProgramGuideLiveViewCapability(events,request){
+  const next=new Set();
+  try{
+    const now=Date.now(), unique=new Map();
+    for(const ev of (events||[])){
+      const t=getProgramEventTimeFrame(ev);
+      if(!(t.st<=now&&now<t.en) || isProgramGuideActionUnsafeEvent(ev)) continue;
+      const values=[Number(ev.networkId),Number(ev.transportStreamId),Number(ev.serviceId)];
+      if(!values.every(v=>Number.isInteger(v)&&v>0&&v<=65535)) continue;
+      unique.set(values.join(':'),{networkId:values[0],transportStreamId:values[1],serviceId:values[2]});
+    }
+    // Bound each Host request, including large CATV channel sets.
+    const rows=[...unique.values()];
+    for(let offset=0;offset<rows.length;offset+=128){
+      const data=await window.TvAirGuideReadRequest.json('/api/program-guide/live-view-capability',{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(rows.slice(offset,offset+128)),signal:request&&request.signal
+      },{isCurrent:()=>!request||(typeof request.isCurrent==='function'?request.isCurrent():ProgramGuideDateState.isCurrentLoad(request.generation))});
+      if(!data||data.available!==true)break;
+      if(Array.isArray(data.eligible))for(const key of data.eligible)next.add(String(key));
+    }
+  }catch(error){
+    if(error.name!=='AbortError')uiTrace('LIVE_VIEW_CAPABILITY_READ_ERROR',String(error.message||error),'poll');
+    return null;
+  }
+  return next;
+}
+async function programGuideLiveView(btn){
+  const cell=btn && btn.closest ? btn.closest('.prog') : null;
+  const ev=getProgramGuideEventFromCell(cell);
+  if(!ev || !window.tvairLiveViewEligibleServices.has(liveViewServiceKey(ev)) || !validateProgramCellActionIdentity(btn,'live-view')) return false;
+  const now=Date.now(), frame=getProgramEventTimeFrame(ev);
+  if(!(frame.st<=now && now<frame.en)) return false;
+  const payload={networkId:Number(ev.networkId),transportStreamId:Number(ev.transportStreamId),serviceId:Number(ev.serviceId),eventId:Number(ev.eventId)};
+  if(![payload.networkId,payload.transportStreamId,payload.serviceId].every(v=>Number.isInteger(v)&&v>0&&v<=65535)) return false;
+  btn.disabled=true;
+  try{
+    const response=await fetch('/api/program-guide/live-view',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)
+    });
+    const result=await response.json();
+    if(!response.ok || result.success!==true) uiTrace('LIVE_VIEW_FAILED','status='+response.status+' code='+String(result&&result.errorCode||'viewerOperationFailed'),'live-view');
+  }catch(error){ uiTrace('LIVE_VIEW_FAILED','transport='+String(error&&error.name||'Error'),'live-view'); }
+  finally{ if(btn.isConnected) btn.disabled=false; }
+  return false;
+}
+
 
 // ProgramGuideDateState is the single owner of the visible broadcast-day range.
 // The guide exposes today through six days ahead, with each day starting at 04:00.
@@ -660,6 +790,7 @@ function setProgramGuideVerticalMinute(minute){
   return programGuideVerticalMinute;
 }
 
+// 番組表の翌日移動と左右フローティング操作は、このコントローラーで一元管理する。
 // ProgramGuideFloatingActionController.
 //
 // 原則:
@@ -677,7 +808,15 @@ const ProgramGuideFloatingActionController=(()=>{
     pointerDown:false,
     userScrollActive:false,
     programmaticScrollOwner:null,
-    initialized:false
+    initialized:false,
+    panButtons:[],
+    panPointer:{x:-1,y:-1},
+    panHold:null,
+    panHoldTimer:0,
+    panFrame:0,
+    panLastFrame:0,
+    panClickTimer:0,
+    panClickDirection:0
   };
 
   function metrics(){
@@ -717,6 +856,135 @@ const ProgramGuideFloatingActionController=(()=>{
     btn.dataset.hiddenReason="";
   }
 
+  // Single ProgramGuide floating-action owner: next-day, left, right.
+  // No separate pan module or alternate hidden/display ownership.
+  const panThreshold=60, panHoldDelay=300, panSpeed=520;
+  function setFloatingVisible(btn,visible,reason){
+    if(!btn)return;
+    btn.hidden=!visible;
+    btn.setAttribute('aria-hidden',visible?'false':'true');
+    btn.classList.toggle('is-visible',visible);
+    btn.dataset.visibleReason=visible?String(reason||'available'):'';
+  }
+  function panAvailable(dir){
+    const gs=state.gs;if(!gs)return false;
+    const max=Math.max(0,gs.scrollWidth-gs.clientWidth);
+    return dir<0?gs.scrollLeft>1:gs.scrollLeft<max-1;
+  }
+  function panRefresh(){
+    const gs=state.gs;if(!gs||state.panButtons.length!==2)return;
+    const r=gs.getBoundingClientRect();
+    const x=state.panPointer.x,y=state.panPointer.y;
+    const inVertical=y>=r.top&&y<=r.bottom;
+    const mid=Math.max(r.top+27,Math.min(r.bottom-27,(r.top+r.bottom)/2));
+    state.panButtons.forEach((btn,i)=>{
+      const dir=i===0?-1:1;
+      const close=inVertical&&(dir<0?x>=r.left&&x<=r.left+panThreshold:x>=r.right-panThreshold&&x<=r.right);
+      const shown=panAvailable(dir)&&(close||(state.panHold&&state.panHold.dir===dir));
+      if(shown){btn.style.left=(dir<0?r.left+27:r.right-27)+'px';btn.style.top=mid+'px';}
+      setFloatingVisible(btn,shown,'edge-hover');
+    });
+    if(state.panHold&&!panAvailable(state.panHold.dir))panStop();
+  }
+  function panStop(){
+    clearTimeout(state.panHoldTimer);state.panHoldTimer=0;
+    if(state.panFrame)cancelAnimationFrame(state.panFrame);
+    state.panFrame=0;state.panLastFrame=0;
+    const hold=state.panHold;state.panHold=null;
+    if(hold)hold.button.classList.remove('is-pressed');
+    panRefresh();
+  }
+  function panTick(timestamp){
+    if(!state.panHold||!state.panHold.started)return;
+    if(state.panLastFrame){
+      const delta=Math.min(50,timestamp-state.panLastFrame);
+      state.gs.scrollLeft+=state.panHold.dir*panSpeed*delta/1000;
+    }
+    state.panLastFrame=timestamp;
+    panRefresh();
+    if(state.panHold)state.panFrame=requestAnimationFrame(panTick);
+  }
+  function cancelPendingPanClick(){
+    if(state.panClickTimer)clearTimeout(state.panClickTimer);
+    state.panClickTimer=0;
+    state.panClickDirection=0;
+  }
+  function panToEnd(dir){
+    const gs=state.gs;
+    if(!gs)return;
+    gs.scrollLeft=dir<0?0:Math.max(0,gs.scrollWidth-gs.clientWidth);
+    panRefresh();
+  }
+  function queuePanClick(dir){
+    cancelPendingPanClick();
+    state.panClickDirection=dir;
+    // The single-click action must not execute before a double-click is resolved.
+    state.panClickTimer=setTimeout(()=>{
+      state.panClickTimer=0;
+      state.panClickDirection=0;
+      const gs=state.gs;
+      if(gs&&panAvailable(dir))gs.scrollLeft+=dir*Math.max(1,gs.clientWidth*.8);
+      panRefresh();
+    },350);
+  }
+  function panRelease(ev){
+    const hold=state.panHold;
+    if(!hold||(ev&&ev.pointerId!==undefined&&ev.pointerId!==hold.pointerId))return;
+    const wasContinuous=hold.started,dir=hold.dir;
+    panStop();
+    if(!wasContinuous)queuePanClick(dir);
+    panRefresh();
+  }
+  function bindPan(){
+    const gs=state.gs;
+    const buttons=[document.getElementById('guide-pan-left'),document.getElementById('guide-pan-right')];
+    if(buttons.some(btn=>!btn))return;
+    state.panButtons=buttons;
+    buttons.forEach((btn,i)=>{
+      const dir=i===0?-1:1;
+      btn.addEventListener('pointerdown',ev=>{
+        if(ev.button!==0)return;
+        ev.preventDefault();
+        cancelPendingPanClick();
+        if(state.panHold)panStop();
+        if(!panAvailable(dir))return;
+        state.panHold={button:btn,dir,pointerId:ev.pointerId,started:false};
+        btn.classList.add('is-pressed');
+        try{btn.setPointerCapture(ev.pointerId);}catch(_){}
+        state.panHoldTimer=setTimeout(()=>{
+          if(!state.panHold||state.panHold.button!==btn)return;
+          state.panHold.started=true;
+          state.panFrame=requestAnimationFrame(panTick);
+        },panHoldDelay);
+      });
+      btn.addEventListener('pointerup',panRelease);
+      btn.addEventListener('pointercancel',panStop);
+      btn.addEventListener('lostpointercapture',()=>{if(state.panHold&&state.panHold.button===btn)panStop();});
+      btn.addEventListener('click',ev=>{
+        // Keyboard activation (detail=0) has no pointerdown / pointerup.
+        if(ev.detail===0)queuePanClick(dir);
+      });
+      btn.addEventListener('dblclick',ev=>{
+        if(ev.button!==0)return;
+        ev.preventDefault();
+        cancelPendingPanClick();
+        panStop();
+        panToEnd(dir);
+      });
+    });
+    window.addEventListener('pointermove',ev=>{
+      if(ev.pointerType==='touch')return;
+      state.panPointer.x=ev.clientX;state.panPointer.y=ev.clientY;
+      panRefresh();
+    },{passive:true});
+    window.addEventListener('pointerup',panRelease,{passive:true});
+    window.addEventListener('blur',()=>{panStop();cancelPendingPanClick();});
+    document.addEventListener('visibilitychange',()=>{if(document.hidden){panStop();cancelPendingPanClick();}});
+    window.addEventListener('resize',panRefresh,{passive:true});
+    if(typeof ResizeObserver!=='undefined')new ResizeObserver(panRefresh).observe(gs);
+    panRefresh();
+  }
+
   function markUserInput(){
     // User input is the only event that can release programmatic scroll ownership.
     // No timeout is used: render/layout induced scroll events remain non-authoritative
@@ -749,6 +1017,7 @@ const ProgramGuideFloatingActionController=(()=>{
 
     state.lastTop=gs.scrollTop;
     state.lastLeft=gs.scrollLeft;
+    panRefresh();
 
     // Vertical-position ownership contract:
     // while a render/restore owner exists, every scroll event (including delayed
@@ -794,7 +1063,28 @@ const ProgramGuideFloatingActionController=(()=>{
       jumpNextDay();
     });
 
+    // Station-header double-click gesture. Header and body share the same
+    // buildProgramGuideColumns schema and canonical CSS column widths; use the
+    // header's layout position so intervening secondary time rails stay accounted
+    // for. No additional width constant, alternate scroll owner, or cell action.
+    const stationHeader=document.getElementById("ch-header");
+    if(stationHeader) stationHeader.addEventListener("dblclick", ev=>{
+      const cell=ev.target instanceof Element
+        ? ev.target.closest('.program-guide-service-head[data-role="service"]') : null;
+      if(!cell || !stationHeader.contains(cell)) return;
+      const viewport=state.gs;
+      if(!viewport) return;
+      ev.preventDefault();
+      const maxLeft=Math.max(0,viewport.scrollWidth-viewport.clientWidth);
+      const columnCenter=cell.offsetLeft+cell.offsetWidth/2;
+      const centeredLeft=Math.max(0,Math.min(maxLeft,columnCenter-viewport.clientWidth/2));
+      beforeProgrammaticScroll("stationHeaderDoubleClick");
+      viewport.scrollTo({left:centeredLeft,behavior:"smooth"});
+      syncHeader();
+    });
+
     gs.addEventListener("scroll", onScroll, {passive:true});
+    bindPan();
     hide("init");
     state.initialized=true;
   }
@@ -824,13 +1114,15 @@ const ProgramGuideFloatingActionController=(()=>{
       state.lastLeft=gs.scrollLeft;
     }
     beginProgrammaticScrollOwnership(reason||"render");
+    panRefresh();
   }
 
-  return {bind, hide, beforeProgrammaticScroll, afterProgrammaticScroll, afterRender, syncHeader};
+  return {bind, hide, beforeProgrammaticScroll, afterProgrammaticScroll, afterRender, syncHeader, refresh:panRefresh};
 })();
 
 // 初期バインド。DOMはこの時点で guide-scroll / next-day-btn まで構築済み。
 ProgramGuideFloatingActionController.bind();
+
 
 function buildDateNav(){
   const container=document.getElementById("date-btns");
@@ -1347,7 +1639,7 @@ function createProgButtonsWrap(defs, actionLayoutProfile){
     const el=createProgButton(def);
     if(!el) return;
     const action=String(def.action||'');
-    if(action==='chain'){
+    if(action==='chain' || action==='live-view'){
       el.classList.add('prog-btn-slot-chain');
       chainRow.appendChild(el);
       return;
@@ -1363,7 +1655,7 @@ function createProgButtonsWrap(defs, actionLayoutProfile){
 
   // Keep an empty top row only when the profile itself reserves action geometry.
   if(top.childElementCount>0 || hasReservedRows) wrap.appendChild(top);
-  if(profile==='future-two-row') wrap.appendChild(chainRow);
+  if(profile==='future-two-row' || profile==='live-view-two-row') wrap.appendChild(chainRow);
   return wrap.childElementCount>0 ? wrap : null;
 }
 
@@ -1383,7 +1675,7 @@ function measureFooterHeight(actionLayoutProfile){
   // recording cells budget one.  This prevents Chain eligibility/pending/canonical refresh
   // from changing the number of description lines.
   const profile=String(actionLayoutProfile||'none');
-  const rows=profile==='future-two-row' ? 2 : (profile==='single-row' ? 1 : 0);
+  const rows=(profile==='future-two-row'||profile==='live-view-two-row') ? 2 : (profile==='single-row' ? 1 : 0);
   if(rows<=0) return 0;
   return _cellConst.footerTopGap
     + _cellConst.footerBottomPad
@@ -1743,6 +2035,7 @@ function resolveProgramCellActionSetContract(ev, evKey, timeState, displayState)
   const baseActions=PROGRAM_CELL_ACTION_MATRIX[matrixKey] || PROGRAM_CELL_ACTION_MATRIX.none;
   const actions=baseActions.slice();
   if(matrixKey==='future-unreserved' && canUserChain) actions.push('chain');
+  if(isOnAir && !offair && !unsafe && window.tvairLiveViewEligibleServices.has(liveViewServiceKey(ev))) actions.push('live-view');
 
   return { state, timeState:time, isEnded, isOnAir, offair, unsafe, stateKind, matrixKey, actions, canUserChain, reservedInfo, isEnabled };
 }
@@ -1764,7 +2057,7 @@ function buildProgramCellActionStateStructureContract(ev, evKey, timeState, disp
   // eligible or not.  On-air/recording/conflict terminal projections use one row.  The
   // profile is time/state structure, not a consequence of the current button count.
   const isFutureActionCell=!resolved.offair && !resolved.unsafe && !resolved.isEnded && !resolved.isOnAir && !resolved.state.isRecording;
-  const actionLayoutProfile=isFutureActionCell ? 'future-two-row' : (resolved.actions.length>0 || transient ? 'single-row' : 'none');
+  const actionLayoutProfile=isFutureActionCell ? 'future-two-row' : (resolved.actions.includes('live-view') ? 'live-view-two-row' : (resolved.actions.length>0 || transient ? 'single-row' : 'none'));
   return Object.assign({}, resolved, { mode, baseMode:resolved.stateKind, transient, actionClasses, actionLayoutProfile });
 }
 
@@ -2414,10 +2707,12 @@ async function loadGuide(date, verticalMinuteTo=null, scrollLeftTo=null, traceRe
       fetchJson("/api/settings?ts="+Date.now(),{}),
       fetchJson("/api/epg/scheduled-daily-windows",[])
     ]);
+    const liveViewEligible=await refreshProgramGuideLiveViewCapability(data.events||[],request);
     if(!ProgramGuideDateState.isCurrentLoad(request.generation)){
       uiTrace('loadGuide-stale', 'date='+targetDate+' generation='+request.generation, traceReason);
       return;
     }
+    window.tvairLiveViewEligibleServices=liveViewEligible||new Set();
     window.channelGroupMap=new Map((chData.channels||[]).map(c=>{
       const nid=Number(c.originalNetworkId ?? c.OriginalNetworkId ?? c.networkId ?? c.NetworkId ?? 0);
       const tsid=Number(c.transportStreamId ?? c.TransportStreamId ?? 0);
@@ -2436,7 +2731,7 @@ async function loadGuide(date, verticalMinuteTo=null, scrollLeftTo=null, traceRe
       applyThemeLinkedGenrePalette(window._cfgThemeGenrePalettes, currentGenreTheme());
     }
     window.laterProgramPriorityEnabled = settingsData && settingsData.laterProgramPriority === true;
-    window.chainRecordingEnabled = window.laterProgramPriorityEnabled === true && settingsData && settingsData.chainRecordingEnabled === true;
+    window.chainRecordingEnabled = window.laterProgramPriorityEnabled === true && settingsData && settingsData.chainRecordingEnabled === true && (settingsData.chainReservationMode || 'manual') === 'manual';
     buildReservationMaps(rsvData);
     window.programGuideReservationRows=Array.isArray(rsvData)?rsvData:[];
     window.programGuideScheduledDailyWindows=Array.isArray(scheduledDailyWindows)?scheduledDailyWindows:[];
@@ -2625,6 +2920,9 @@ function traceChainSettingIfChanged(reason){
   }catch(_){}
 }
 
+let chainHintInFlightGeneration=0;
+let chainHintRetryAfter=0;
+let chainHintRetryDelayMs=2000;
 let chainHintRequestGeneration = 0;
 
 function clearChainHintsForGuideData(data){
@@ -2694,6 +2992,7 @@ async function refreshChainHintsForGuideDataAndTrace(data, reason){
   }
 
   const generation=++chainHintRequestGeneration;
+  chainHintInFlightGeneration=generation;
   // release_contract ProgramCellChainHintStableProjectionContract:
   // Keep the last Host-confirmed chain hint visible while a fresh Host evaluation is in flight.
   // Never clear the current projection pre-emptively: the new Host result replaces it atomically.
@@ -2702,14 +3001,12 @@ async function refreshChainHintsForGuideDataAndTrace(data, reason){
   applyCachedChainHintsToData(data);
   const payload=buildChainHintPreviewRequest(data);
   try{
-    const response=await fetch('/api/chain-reservation-candidates', {
+    const result=await window.TvAirGuideReadRequest.json('/api/chain-reservation-candidates', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       cache:'no-store',
       body:JSON.stringify(payload)
-    });
-    if(!response.ok) throw new Error('chain candidate preview failed: '+response.status);
-    const result=await response.json();
+    },{isCurrent:()=>generation===chainHintRequestGeneration});
     if(generation!==chainHintRequestGeneration)
       return Object.assign({}, lastChainHintSummary, { stale:true });
 
@@ -2741,6 +3038,7 @@ async function refreshChainHintsForGuideDataAndTrace(data, reason){
     lastChainHintCandidateMap=nextCandidateMap;
 
     lastChainHintSignature=sig;
+    chainHintRetryDelayMs=2000;chainHintRetryAfter=0;
     lastChainHintSummary={
       candidates:candidates.length,
       checked:Number(result && result.checkedCount)||0,
@@ -2763,10 +3061,14 @@ async function refreshChainHintsForGuideDataAndTrace(data, reason){
       // commit-time Host revalidation; do not flicker it off merely because preview refresh failed.
       lastChainHintSignature='';
       applyCachedChainHintsToData(data);
-      lastChainHintSummary=Object.assign({}, lastChainHintSummary, { cacheHit:false, error:true });
+      lastChainHintSummary=Object.assign({}, lastChainHintSummary, { cacheHit:false, error:true,changedKeys:[] });
+      chainHintRetryAfter=Date.now()+chainHintRetryDelayMs;
+      chainHintRetryDelayMs=Math.min(30000,chainHintRetryDelayMs*2);
       chainDiagTrace('CHAIN_HINTS_ERROR', String(e && (e.stack||e.message)||e), reason||'chain-hints');
     }
     return lastChainHintSummary;
+  }finally{
+    if(chainHintInFlightGeneration===generation)chainHintInFlightGeneration=0;
   }
 }
 
@@ -3031,11 +3333,7 @@ const GUIDE_FULL_FETCH_FAILURE_PERSIST_THRESHOLD = 3;
 // 起動直後・ページ遷移直後・host再起動境界の一過性 fetch 失敗をユーザーログのエラーとして汚さない。
 // 連続失敗時だけ永続ログへ昇格し、単発失敗は次回の正規pollへ委ねる。
 async function fetchGuideReservationsForDiffSync(){
-  const res = await fetch('/api/reservations', { cache:'no-store' });
-  if(!res.ok){
-    throw new Error('http_status_'+res.status);
-  }
-  return await res.json();
+  return await window.TvAirGuideReadRequest.json('/api/reservations');
 }
 
 // release_contract: 番組表本体の低頻度pollも、起動直後・ページ遷移直後・host境界の
@@ -3136,6 +3434,13 @@ async function refreshGuide(){
       uiTrace('refreshGuide-stale-date', 'requestedDate='+refreshDate+' currentDate='+currentDate+' pendingDate='+ProgramGuideDateState.currentPendingDate()+' '+guideDomSummary(), 'poll');
       return;
     }
+    const liveEligible=await refreshProgramGuideLiveViewCapability(data.events||[],{
+      signal:refreshAbortController.signal,
+      isCurrent:()=>refreshDate===currentDate&&!ProgramGuideDateState.currentPendingDate()
+    });
+    if(refreshDate!==currentDate||ProgramGuideDateState.currentPendingDate()||refreshAbortController.signal.aborted)return;
+    const liveCapabilityChanged=liveEligible!==null&&([...liveEligible].sort().join('|')!==[...window.tvairLiveViewEligibleServices].sort().join('|'));
+    if(liveEligible!==null)window.tvairLiveViewEligibleServices=liveEligible;
     clearGuideFullRefreshFetchFailure();
     window.programGuideReservationRows=Array.isArray(rsvData)?rsvData:[];
     window.programGuideScheduledDailyWindows=Array.isArray(scheduledDailyWindows)?scheduledDailyWindows:[];
@@ -3144,6 +3449,7 @@ async function refreshGuide(){
     const scheduledDailyWindowSignature = stableGuideSignature(scheduledDailyWindows);
     const nextSignature = stableGuideSignature({ data, rsvData, scheduledDailyWindows });
     if(nextSignature === lastGuideRefreshSignature){
+      if(liveCapabilityChanged&&lastGuideData)applyReservationDiffToGuide(lastGuideData);
       // 起動直後の予約状態同期だけ実行する。
       // チェーンは排他modeではなく、未来番組の通常予約に並ぶoptional actionとして差分更新する。
       if(lastGuideData && chainHintWarmupPasses < CHAIN_HINT_WARMUP_MAX){
@@ -4491,9 +4797,7 @@ async function cancelReservation(rsvId, evKey, btn){
     target:makeProgramGuideActionTarget('unreserved', ev, rsvId, {completionMode:'sync'}),
     errorPrefix:'取消失敗',
     execute:async function(){
-      const res=await fetch("/api/reservations/"+rsvId,{method:"DELETE"});
-      let d={};
-      try{ d=await res.json(); }catch(_){ }
+      const {response:res,body:d}=await window.TvAirReservationCancelRequest.send(rsvId);
       if(!res.ok) return {ok:false, message:d.message||d.detail||String(res.status)};
       return {ok:true, data:d};
     }
@@ -4508,11 +4812,14 @@ async function executeGuideReservationRefresh(options){
   const syncOptions=(options && typeof options==='object') ? options : {};
   const forceApply=syncOptions.forceApply===true;
   const forceEventKeys=new Set(Array.isArray(syncOptions.forceEventKeys)?syncOptions.forceEventKeys.filter(Boolean).map(String):[]);
+  const sourceGuideData=lastGuideData, sourceDate=currentDate;
   const [rsvData, scheduledDailyWindows] = await Promise.all([
     fetchGuideReservationsForDiffSync(),
-    fetch('/api/epg/scheduled-daily-windows',{cache:'no-store'}).then(r=>r.ok?r.json():[])
+    window.TvAirGuideReadRequest.json('/api/epg/scheduled-daily-windows')
   ]);
+  if(lastGuideData!==sourceGuideData||currentDate!==sourceDate||ProgramGuideDateState.currentPendingDate())return;
   clearGuideReservationFetchFailure();
+  if(lastChainHintSummary.error&&!chainHintInFlightGeneration&&Date.now()>=chainHintRetryAfter&&!document.hidden) scheduleChainHintRefresh(lastGuideData,'read-recovery');
   const reservationSignature = stableGuideSignature(rsvData);
   const scheduledDailyWindowSignature = stableGuideSignature(scheduledDailyWindows);
   const hasActionPending=!!document.querySelector('.prog [data-program-guide-action-busy="1"]');
@@ -4774,7 +5081,7 @@ function completeCfgSave(){
   hideCfgModal();
 }
 window.TvAIrSettingsModule = window.TvAIrSettingsModule || {
-  version:'1.2.13',
+  version:'1.2.14',
   open:()=>showCfgModal(),
   close:()=>hideCfgModal(),
   contract:'single-settings-module-web-modal-basis'
@@ -5121,7 +5428,7 @@ function updateCfgSliderLabels(){
 function applyRecordingOptionPreviewToGuide(){
   try{
     window.laterProgramPriorityEnabled = document.getElementById('cfg-priority-after')?.checked===true;
-    window.chainRecordingEnabled = window.laterProgramPriorityEnabled === true && document.getElementById('cfg-chain-recording')?.checked===true;
+    window.chainRecordingEnabled = window.laterProgramPriorityEnabled === true && document.getElementById('cfg-chain-recording')?.value==='manual';
     chainDiagTrace('CHAIN_SETTING_PREVIEW', chainUiSettingsSignature(), 'settings-preview');
     if(lastGuideData){
       applyReservationDiffToGuide(lastGuideData, {reason:'settings-preview'});
@@ -5135,9 +5442,22 @@ function updateRecordingOptionState(){
   const row=document.getElementById('cfg-chain-row');
   if(chain){
     chain.disabled=!later;
-    if(!later) chain.checked=false;
+
   }
   if(row) row.classList.toggle('cfg-disabled', !later);
+  const note=document.getElementById('cfg-chain-note');
+  if(note){
+    const descriptions={
+      disabled:'チェーン予約を利用しません。各番組を通常予約として録画します。',
+      manual:'番組表のチェーンボタンから連続する番組を追加します。自動検索予約でもルールごとにチェーン予約を設定できます。方式を切り替えても作成済みチェーンは残り、以後の自動結合を止めます。(C)は先頭番組を除く2番組目から最後まで表示します。',
+      automatic:'同じ局で終了時刻と次の開始時刻が一致する予約を自動でチェーンにします。予約した順番や予約方法は問いません。方式を切り替えても作成済みチェーンは残ります。以前からある単独予約も結合対象になります。(C)はチェーンを構成する先頭番組から最後まで全てに表示します。'
+    };
+    const mode=chain?.value;
+    const enabledMode=later && (mode==='manual' || mode==='automatic');
+    note.textContent=(later ? '' : '「後番組を優先する」を選ぶと設定できます。')
+      +(later ? (descriptions[mode] || descriptions.disabled) : '')
+      +(enabledMode ? '受信を止めずに録画し、番組ごとに別のTSファイルへ保存します。' : '');
+  }
 }
 async function loadWakeStatus(){
   const dot=document.getElementById('wake-status-dot');
@@ -5503,8 +5823,8 @@ async function loadCfg(){
     document.getElementById('cfg-priority-before').checked = d.laterProgramPriority !== true;
     document.getElementById('cfg-priority-after').checked = d.laterProgramPriority === true;
     window.laterProgramPriorityEnabled = d.laterProgramPriority === true;
-    window.chainRecordingEnabled = d.laterProgramPriority === true && d.chainRecordingEnabled === true;
-    document.getElementById('cfg-chain-recording').checked = window.chainRecordingEnabled;
+    window.chainRecordingEnabled = d.laterProgramPriority === true && d.chainRecordingEnabled === true && (d.chainReservationMode || 'manual') === 'manual';
+    document.getElementById('cfg-chain-recording').value = d.chainReservationMode || (d.chainRecordingEnabled===true?'manual':'disabled');
     updateRecordingOptionState();
     _bonDriverList = Array.isArray(d.bonDriverList) ? d.bonDriverList : [];
     if(!_bonDriverList.length && d.bonDriverDirectory) await refreshBonDriverList(d.bonDriverDirectory);
@@ -5545,7 +5865,7 @@ async function applyReservationActionUiAfterSettingsSave(dto, reason){
   // Host判定済みのチェーン操作可否を再投影してセル内表示へ反映する。
   const oldSig=chainUiSettingsSignature();
   window.laterProgramPriorityEnabled = dto && dto.laterProgramPriority === true;
-  window.chainRecordingEnabled = window.laterProgramPriorityEnabled === true && dto && dto.chainRecordingEnabled === true;
+  window.chainRecordingEnabled = window.laterProgramPriorityEnabled === true && dto && dto.chainRecordingEnabled === true && (dto.chainReservationMode || 'manual') === 'manual';
   const newSig=chainUiSettingsSignature();
   chainDiagTrace('CHAIN_SETTING_HOT_RELOAD',
     'reason='+(reason||'settings-save')+
@@ -5642,7 +5962,8 @@ async function saveCfgCore(){
     userLogDetailStateChange: document.getElementById('cfg-user-log-detail-state-change').checked,
     userLogDetailEndOrFailureReason: document.getElementById('cfg-user-log-detail-end-or-failure-reason').checked,
     laterProgramPriority: document.getElementById('cfg-priority-after').checked,
-    chainRecordingEnabled: document.getElementById('cfg-priority-after').checked && document.getElementById('cfg-chain-recording').checked,
+    chainRecordingEnabled: document.getElementById('cfg-chain-recording').value !== 'disabled',
+    chainReservationMode: document.getElementById('cfg-chain-recording').value,
     themeGenrePalettes: collectThemeGenrePalettesFromSettings(),
     tuners: tuners,
   };
@@ -5802,8 +6123,8 @@ if(!tvairSettingsFrameMode){
   bindGuideTopOperationUi();
 }
 </script>
-<script src="/tvair-settings-host.js?v=1.2.13"></script>
-<script src="/tvair-menu-spine.js?v=1.2.13"></script>
+<script src="/tvair-settings-host.js?v=1.2.14"></script>
+<script src="/tvair-menu-spine.js?v=1.2.14"></script>
 <script>
 (function(){
   try{
@@ -5817,5 +6138,6 @@ if(!tvairSettingsFrameMode){
 </script>
 </body>
 </html>
+
 
 

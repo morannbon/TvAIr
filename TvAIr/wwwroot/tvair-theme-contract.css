@@ -1,4 +1,4 @@
-/* Theme ownership
+﻿/* Theme ownership
    Shared theme values and transitional projections are owned here. */
 /* TvAIr UI foundation
    Active UI color foundation. Page-local CSS must not own theme values.
@@ -1888,3 +1888,45 @@ body[data-tvair-effective-theme="dark"]{
   --tvair-programcell-default-bg:transparent;
 }
 
+
+/* Guide edge-pan semantic colors; paired with next-day floating action. */
+:root,
+html[data-tvair-selected-theme="light"],body[data-tvair-selected-theme="light"],
+html.tvair-theme-light,body.tvair-theme-light,
+html[data-theme="light"],body[data-theme="light"],body.theme-light,
+body[data-tvair-effective-theme="light"]{
+  --tvair-guide-pan-bg:#36a9da;
+  --tvair-guide-pan-fg:#ffffff;
+  --tvair-guide-pan-border:#168bbf;
+  --tvair-guide-pan-hover-bg:#198dbf;
+  --tvair-guide-pan-hover-border:#116d9a;
+  --tvair-guide-pan-pressed-bg:#116d9a;
+}
+html[data-tvair-selected-theme="dark"],body[data-tvair-selected-theme="dark"],
+html.tvair-theme-dark,body.tvair-theme-dark,
+html[data-theme="dark"],body[data-theme="dark"],body.theme-dark,
+body[data-tvair-effective-theme="dark"]{
+  --tvair-guide-pan-bg:#57c6ef;
+  --tvair-guide-pan-fg:#102532;
+  --tvair-guide-pan-border:#80d7f6;
+  --tvair-guide-pan-hover-bg:#87dcf5;
+  --tvair-guide-pan-hover-border:#b5eafc;
+  --tvair-guide-pan-pressed-bg:#39a9d3;
+}
+
+/* Program guide live-view button palette. */
+:root,
+html[data-theme="light"],
+body.theme-light,
+body[data-theme="light"]{
+  --tvair-programcell-button-live-view-bg:#876088;
+  --tvair-programcell-button-live-view-fg:#FFFFFF;
+  --tvair-programcell-button-live-view-border:#684669;
+}
+html[data-theme="dark"],
+body.theme-dark,
+body[data-theme="dark"]{
+  --tvair-programcell-button-live-view-bg:#C8AD8D;
+  --tvair-programcell-button-live-view-fg:#30251B;
+  --tvair-programcell-button-live-view-border:#94785B;
+}

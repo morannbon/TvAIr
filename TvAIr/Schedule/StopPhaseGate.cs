@@ -15,6 +15,7 @@ namespace TvAIr.Schedule
     {
         private static readonly object Sync = new();
         private static int _activeStops;
+        private static int _physicalReleaseBarriers;
         private static readonly Dictionary<string, int> ActiveStopResources = new(StringComparer.OrdinalIgnoreCase);
         private static int _deferredAllocRoute;
         private static int _deferredWakeRebuild;
@@ -37,15 +38,40 @@ namespace TvAIr.Schedule
         }
 
         public static IDisposable Enter(string reservationId, string? resourceKey, Action<string>? log = null)
+            => EnterCore(reservationId, resourceKey, log, null);
+
+        // The caller must transfer this scope to the existing physical-stop lifecycle.
+        // No timer or automatic replay owns its lifetime.
+        public static PhysicalReleaseBarrier EnterPhysicalReleaseBarrier(
+            int reservationId, string? resourceKey, Action<string>? log = null)
         {
+            if (reservationId <= 0) throw new ArgumentOutOfRangeException(nameof(reservationId));
+            return (PhysicalReleaseBarrier)EnterCore($"R{reservationId}", resourceKey, log, reservationId);
+        }
+
+        private static IDisposable EnterCore(string reservationId, string? resourceKey, Action<string>? log,
+            int? physicalReservationId)
+        {
+            var physicalReleaseBarrier = physicalReservationId.HasValue;
+            IDisposable scope = physicalReleaseBarrier
+                ? new PhysicalReleaseBarrier(physicalReservationId!.Value, NormalizeResourceKey(resourceKey), log)
+                : new Releaser(reservationId, NormalizeResourceKey(resourceKey), log);
+            string message;
             lock (Sync)
             {
                 _activeStops++;
+                if (physicalReleaseBarrier) _physicalReleaseBarriers++;
                 var key = NormalizeResourceKey(resourceKey);
                 ActiveStopResources[key] = ActiveStopResources.TryGetValue(key, out var count) ? count + 1 : 1;
-                log?.Invoke($"STOP_PHASE_ENTER reservation={reservationId} resource={key} activeStops={_activeStops}");
+                message = $"STOP_PHASE_ENTER reservation={reservationId} resource={key} activeStops={_activeStops}";
             }
-            return new Releaser(reservationId, NormalizeResourceKey(resourceKey), log);
+            try { log?.Invoke(message); }
+            catch
+            {
+                try { scope.Dispose(); } catch { }
+                throw;
+            }
+            return scope;
         }
 
         public static bool TryDeferAllocRoute(ReservationAllocationRouteRequest request, Action<string>? log = null)
@@ -53,11 +79,36 @@ namespace TvAIr.Schedule
             lock (Sync)
             {
                 if (_activeStops <= 0) return false;
+                if (request.StopPreparationBarrier is { } preparation && preparation.IsActiveLocked)
+                    return false;
+                if (request.BypassStopPhaseGate && _physicalReleaseBarriers == 0) return false;
+
+                if (request.RejectDeferredTopologyCommands && request.TopologyCommands is { Count: > 0 })
+                    return true; // rejected before enqueue; caller may retry after the stop
 
                 _deferredAllocRoute++;
                 _deferredAllocationRequest = MergeRequests(_deferredAllocationRequest, request);
                 log?.Invoke($"STOP_PHASE_DEFER kind=ALLOC_ROUTE source={request.Source} action={request.Action} activeStops={_activeStops} pendingAlloc={_deferredAllocRoute} matcher={_deferredAllocationRequest.RunKeywordMatcher} syncProgram={_deferredAllocationRequest.SyncProgramRuleReservations} reevaluate={_deferredAllocationRequest.ReevaluateAllocations} preEpg={_deferredAllocationRequest.RefreshPreRecordEpgEntries} wake={_deferredAllocationRequest.RefreshWakeTask}");
                 return true;
+            }
+        }
+
+        public static bool TryDeferAllocRouteForPhysicalRelease(
+            ReservationAllocationRouteRequest request, Action<string>? log = null)
+        {
+            lock (Sync)
+            {
+                if (_physicalReleaseBarriers == 0) return false;
+                return TryDeferAllocRoute(request, log);
+            }
+        }
+
+        public static bool TryDeferWakeForPhysicalRelease(string context, Action<string>? log = null)
+        {
+            lock (Sync)
+            {
+                if (_physicalReleaseBarriers == 0) return false;
+                return TryDeferWakeRebuild(context, log);
             }
         }
 
@@ -94,6 +145,9 @@ namespace TvAIr.Schedule
         {
             lock (Sync)
             {
+                // A different worker may finish while this worker still owns its resource.
+                // Keep requests in the existing queue until the last explicit barrier ends.
+                if (_physicalReleaseBarriers > 0) return (null, false, 0, 0);
                 var request = _deferredAllocationRequest;
                 var alloc = _deferredAllocRoute;
                 var wake = _deferredWakeRebuild;
@@ -132,10 +186,32 @@ namespace TvAIr.Schedule
                 WakeRefreshMode: current.WakeRefreshMode == ReservationAllocationWakeRefreshMode.BoundedCoalesce
                     || incoming.WakeRefreshMode == ReservationAllocationWakeRefreshMode.BoundedCoalesce
                         ? ReservationAllocationWakeRefreshMode.BoundedCoalesce
-                        : ReservationAllocationWakeRefreshMode.Immediate);
+                        : ReservationAllocationWakeRefreshMode.Immediate,
+                TopologyCommands: ReservationAllocationRouteService.MergeTopologyCommands(
+                    current.TopologyCommands, incoming.TopologyCommands))
+            { IncludesOrdinaryWork = current.IncludesOrdinaryWork || incoming.IncludesOrdinaryWork,
+                RetainRuleRefresh = current.RetainRuleRefresh || incoming.RetainRuleRefresh,
+                RetainChainConvergence = current.RetainChainConvergence || incoming.RetainChainConvergence,
+                RetainedProjectionPromotion = incoming.RetainedProjectionPromotion ?? current.RetainedProjectionPromotion,
+                StopResumeRetry = ReservationAllocationRouteService.MergeStopResumeRetries(current.StopResumeRetry, incoming.StopResumeRetry) };
         }
 
-        private sealed class Releaser : IDisposable
+        public sealed class PhysicalReleaseBarrier : Releaser
+        {
+            private bool _active = true;
+            internal PhysicalReleaseBarrier(int reservationId, string resourceKey, Action<string>? log)
+                : base($"R{reservationId}", resourceKey, log) => ReservationId = reservationId;
+            public int ReservationId { get; }
+            internal bool IsActiveLocked => _active;
+            public bool IsActive { get { lock (Sync) return _active; } }
+            protected override void ReleaseBarrierLocked()
+            {
+                _active = false;
+                if (_physicalReleaseBarriers > 0) _physicalReleaseBarriers--;
+            }
+        }
+
+        public class Releaser : IDisposable
         {
             private readonly string _reservationId;
             private readonly string _resourceKey;
@@ -149,12 +225,15 @@ namespace TvAIr.Schedule
                 _log = log;
             }
 
-            public void Dispose()
+            protected virtual void ReleaseBarrierLocked() { }
+
+            public virtual void Dispose()
             {
                 if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
 
                 lock (Sync)
                 {
+                    ReleaseBarrierLocked();
                     if (_activeStops > 0) _activeStops--;
                     if (ActiveStopResources.TryGetValue(_resourceKey, out var count))
                     {

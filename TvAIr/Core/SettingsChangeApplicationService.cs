@@ -1,4 +1,4 @@
-using TvAIr.Channel;
+﻿using TvAIr.Channel;
 using TvAIr.Epg;
 using TvAIr.Schedule;
 using TvAIr.Tuner;
@@ -110,13 +110,11 @@ public sealed class SettingsChangeApplicationService
     private readonly IniSettingsService _ini;
     private readonly ChannelFileLoader _channelLoader;
     private readonly EpgScheduler _epgScheduler;
-    private readonly WindowsAutoStartService _startupService;
+    private readonly SettingsOsProjectionBoundary _osProjections;
     private readonly NetworkAccessSecurity _networkSecurity;
     private readonly NetworkUsageGate _networkUsage;
-    private readonly NetworkEndpointBindingConfiguration _networkEndpointBinding;
     private readonly ReservationAllocationRouteService _allocationRoute;
     private readonly ReservationScheduler _reservationScheduler;
-    private readonly ChainLifecycleCoordinator _chainLifecycle;
     private readonly LogRepository _log;
     private readonly SettingsRuntimeState _runtimeState;
     private readonly PluginToolWindowHostService _toolWindows;
@@ -136,7 +134,6 @@ public sealed class SettingsChangeApplicationService
         NetworkEndpointBindingConfiguration networkEndpointBinding,
         ReservationAllocationRouteService allocationRoute,
         ReservationScheduler reservationScheduler,
-        ChainLifecycleCoordinator chainLifecycle,
         LogRepository log,
         SettingsRuntimeState runtimeState,
         PluginToolWindowHostService toolWindows,
@@ -148,13 +145,18 @@ public sealed class SettingsChangeApplicationService
         _ini = ini;
         _channelLoader = channelLoader;
         _epgScheduler = epgScheduler;
-        _startupService = startupService;
         _networkSecurity = networkSecurity;
         _networkUsage = networkUsage;
-        _networkEndpointBinding = networkEndpointBinding;
+        _osProjections = new SettingsOsProjectionBoundary(
+            () => startupService.SetCurrentPolicy(ini),
+            () =>
+            {
+                var binding = networkEndpointBinding.ApplyCurrentPolicy();
+                log.Add("NETWORK_ENDPOINT_BINDING", "Settings",
+                    $"result=APPLIED network={binding.NetworkUsageEnabled} lanEffective={binding.LanAccessEffective} endpoints=[{string.Join(',', binding.BoundAddresses)}] threatBoundary=non_loopback_external action=physical_listener_reconfigured rule=network_usage_master_contract");
+            }, log);
         _allocationRoute = allocationRoute;
         _reservationScheduler = reservationScheduler;
-        _chainLifecycle = chainLifecycle;
         _log = log;
         _runtimeState = runtimeState;
         _toolWindows = toolWindows;
@@ -171,12 +173,8 @@ public sealed class SettingsChangeApplicationService
         // SETTINGS_WEB_EDITABLE_SCOPE_CONTRACT
         // Web画面に存在しない内部設定をブラウザへ持ち回らせない。保存要求は画面で編集可能な値だけを受け取り、
         // Wake/EPG worker/TVTest内部起動オプションは現在の永続正本からここで合成する。
-        lock (_applyGate)
-        {
-            var current = _ini.ToDto();
-            var merged = MergeWebRequest(current, dto);
-            return ApplyCore(merged);
-        }
+        var frozen = FreezeRequest(dto);
+        return ApplyInAllocationRoute(() => MergeWebRequest(_ini.ToDto(), frozen));
     }
 
 
@@ -234,6 +232,7 @@ public sealed class SettingsChangeApplicationService
         EpgPreRecordMinutes = requested.EpgPreRecordMinutes,
         LaterProgramPriority = requested.LaterProgramPriority,
         ChainRecordingEnabled = requested.ChainRecordingEnabled,
+        ChainReservationMode = requested.ChainReservationMode,
         PreStartMarginSeconds = requested.PreStartMarginSeconds,
         PostEndMarginSeconds = requested.PostEndMarginSeconds,
         WakeMinutesBefore = current.WakeMinutesBefore,
@@ -272,13 +271,64 @@ public sealed class SettingsChangeApplicationService
         // SETTINGS_SAVE_SERIALIZATION_CONTRACT
         // IniSettingsServiceはSingletonであり、設定保存は差分取得→INI確定→Runtime/EPG/Allocation/Wake反映までを
         // 一つの変更単位として扱う。同時保存を許すと、後着要求が先着要求のbefore/afterや副作用を上書きするため直列化する。
-        lock (_applyGate)
-        {
-            return ApplyCore(dto);
-        }
+        var frozen = FreezeRequest(dto);
+        return ApplyInAllocationRoute(() => frozen);
     }
 
-    private SettingsChangeResult ApplyCore(IniSettingsUpdateDto dto)
+    private static T FreezeRequest<T>(T dto)
+        => System.Text.Json.JsonSerializer.Deserialize<T>(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(dto))!;
+
+    private SettingsChangeResult ApplyInAllocationRoute(Func<IniSettingsUpdateDto> request)
+    {
+        // Do not hold the settings lock while waiting for a different allocation owner.
+        // Both UI producers publish under the same existing single-flight as chain edits.
+        SettingsChangeCommand? command = null;
+        command = new SettingsChangeCommand(() =>
+        {
+            var owner = command!;
+            lock (_applyGate) return ApplyCore(request(), owner.SetFollowup, owner.RequestOsProjections);
+        });
+        ReservationAllocationRouteResult? routeResult = null;
+        Exception? routeError = null;
+        try
+        {
+            routeResult = _allocationRoute.Run(new("Settings", "ApplyRequest", SyncProgramRuleReservations: false,
+                ReevaluateAllocations: false, TopologyCommands: new[] { command },
+                RejectDeferredTopologyCommands: true));
+        }
+        catch (Exception ex) { routeError = ex; }
+
+        // Run has released ownership (or rejected the request). No settings lock or
+        // allocation admission is held while OS integrations execute on this caller.
+        var warnings = new List<string>();
+        if (command.TryTakeOsProjections(out var refreshNetwork))
+        {
+            var applied = _osProjections.Apply(refreshNetwork);
+            if (!applied.NetworkApplied)
+                warnings.Add("ネットワーク待受設定の反映に失敗しました。設定を再度保存してログを確認してください。");
+            if (!applied.StartupApplied)
+                warnings.Add("Windows自動起動設定の反映に失敗しました。ログを確認してください。");
+        }
+        if (command.Error is { } error)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw();
+        if (routeError is not null && command.Result is null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(routeError).Throw();
+        var result = command.Result ?? throw new SettingsValidationException("settings",
+            "録画処理の切替中です。設定は保存していません。切替が終わってから保存してください。");
+        if (routeError is not null)
+        {
+            _log.Add("SETTINGS_POST_COMMIT_WARNING", "AllocationRoute",
+                $"result=FAILED stage=after_settings_request persisted={result.PersistedChanged} exception={routeError.GetType().Name} reason={routeError.Message} rule=settings_post_commit_side_effect_contract");
+            warnings.Add("予約の再評価が完了していません。次の予約再評価で再試行します。");
+        }
+        else if (result.PersistedChanged && (routeResult is { RetryRequired: true } or { Deferred: true }))
+            warnings.Add("予約の再評価を待機しています。次の予約再評価で再試行します。");
+        return warnings.Count == 0 ? result : result with
+            { Message = result.Message + string.Join(string.Empty, warnings.Distinct(StringComparer.Ordinal)) };
+    }
+
+    private SettingsChangeResult ApplyCore(IniSettingsUpdateDto dto, Action<ReservationAllocationRouteRequest> requestReevaluation,
+        Action<bool> requestOsProjections)
     {
         ValidateRequest(dto);
 
@@ -296,13 +346,11 @@ public sealed class SettingsChangeApplicationService
             // StartupEnabledはINIだけでなくWindowsログオン自動起動タスクへの外部投影を持つ。
             // 前回の反映失敗や利用者による自動起動タスク削除後、保存値が同じという理由だけで
             // NO_CHANGE終了すると設定画面から再試行できないため、差分0件でも保存済み値へ再同期する。
-            var noChangeStartupApplySucceeded = _startupService.Set(before.StartupEnabled);
+            requestOsProjections(false);
             _log.Add("SETTINGS_SAVE", "Settings",
-                $"result=NO_CHANGE persistedChanges=0 save=False runtimeApply=False epgUpdate=False allocation=False wake=False startupApply={noChangeStartupApplySucceeded} rule=settings_canonical_diff_contract");
+                $"result=NO_CHANGE persistedChanges=0 save=False runtimeApply=False epgUpdate=False allocation=False wake=False startupStage=after_common_owner rule=settings_canonical_diff_contract");
 
             var noChangeMessageParts = new List<string> { "変更はありません。" };
-            if (!noChangeStartupApplySucceeded)
-                noChangeMessageParts.Add("Windows自動起動設定の反映に失敗しました。ログを確認してください。");
             if (topologyRestartPendingBefore)
                 noChangeMessageParts.Add("保存済みのチューナー変更はTvAIrの再起動後に反映されます。");
             if (hostRestartPendingBefore)
@@ -358,10 +406,13 @@ public sealed class SettingsChangeApplicationService
             throw new SettingsValidationException("epgDepth", "EPG取得中は取得深度を変更できません。完了後に変更してください。");
         }
 
-        _ini.SaveFromApplicationService(
+        if (!_reservationScheduler.TryPublishSettingsCore(() => _ini.SaveFromApplicationService(
             dto,
             applyTunerTopologyToRuntime: requestedTopologyMatchesRuntime,
-            applyHostSettingsToRuntime: requestedHostMatchesRuntime);
+            applyHostSettingsToRuntime: requestedHostMatchesRuntime)))
+            throw new SettingsValidationException("settings",
+                "録画処理の状態を更新中です。設定は保存していません。少し待ってから保存してください。");
+        requestOsProjections(false);
         var after = _ini.ToDto();
         var topologyRestartPendingAfter = _ini.IsTunerTopologyRestartPending();
         var hostRestartPendingAfter = _ini.IsHostSettingsRestartPending();
@@ -395,12 +446,13 @@ public sealed class SettingsChangeApplicationService
             before.NetworkSessionLifetimeMinutes != after.NetworkSessionLifetimeMinutes ||
             before.NetworkHasPassword != after.NetworkHasPassword ||
             networkPasswordChanged;
+        requestOsProjections(networkAccessChanged);
         // SETTINGS_RECORDING_POLICY_SCOPE_CONTRACT
         // 予約割当・PreRec・Wakeへ影響する録画スケジュール方針と、録画完了後動作／worker表示設定を分離する。
         // 後者だけの変更でFinalAllocationやPreRec再構築を走らせてはならない。
         var reservationActionUiPolicyChanged =
             before.LaterProgramPriority != after.LaterProgramPriority ||
-            before.ChainRecordingEnabled != after.ChainRecordingEnabled;
+            before.ChainRecordingEnabled != after.ChainRecordingEnabled || before.ChainReservationMode != after.ChainReservationMode;
         var recordingSchedulePolicyChanged =
             reservationActionUiPolicyChanged ||
             before.PreStartMarginSeconds != after.PreStartMarginSeconds ||
@@ -501,17 +553,6 @@ public sealed class SettingsChangeApplicationService
                 $"reason={(networkPasswordChanged ? "credential_changed" : (before.NetworkUsageEnabled && !after.NetworkUsageEnabled ? "network_master_disabled" : "lan_disabled"))} revoked={revokedNetworkSessions} clearedLoginFailures={clearedNetworkLoginFailures} network={before.NetworkUsageEnabled}->{after.NetworkUsageEnabled} lan={before.NetworkLanAccessEnabled}->{after.NetworkLanAccessEnabled} rule=network_access_immediate_apply_contract");
         }
 
-        if (networkAccessChanged)
-        {
-            // NETWORK_ACCESS_PHYSICAL_BINDING_CONTRACT
-            // master OFF / LAN非許可では非loopback listenerそのものを閉じる。
-            // 「全interface待受のまま403」は外部peerからsocketへ到達できるため完全閉域ではない。
-            // loopbackはTvAIr内部IPCとして常時残し、本体機能をネットワーク非依存で継続させる。
-            var binding = _networkEndpointBinding.ApplyCurrentPolicy();
-            _log.Add("NETWORK_ENDPOINT_BINDING", "Settings",
-                $"result=APPLIED network={binding.NetworkUsageEnabled} lanEffective={binding.LanAccessEffective} endpoints=[{string.Join(',', binding.BoundAddresses)}] threatBoundary=non_loopback_external action=physical_listener_reconfigured rule=network_usage_master_contract");
-        }
-
         if (channelMapChanged)
         {
             _channelLoader.Invalidate();
@@ -548,30 +589,11 @@ public sealed class SettingsChangeApplicationService
                 $"changed=True beforeLater={before.LaterProgramPriority} afterLater={after.LaterProgramPriority} beforeChain={before.ChainRecordingEnabled} afterChain={after.ChainRecordingEnabled} pre={before.PreStartMarginSeconds}->{after.PreStartMarginSeconds} post={before.PostEndMarginSeconds}->{after.PostEndMarginSeconds} activeRecordingMarginApply=future_session_only rule=release_contract");
         }
 
-        var chainFeatureTransition = new ChainFeatureTransitionResult(false, true, 0, "not_applicable");
-        var chainTransitionWarning = false;
-        try
-        {
-            chainFeatureTransition = _chainLifecycle.ApplyFeatureTransition(
-                before.LaterProgramPriority,
-                before.ChainRecordingEnabled,
-                after.LaterProgramPriority,
-                after.ChainRecordingEnabled,
-                "Settings.Save");
-            if (chainFeatureTransition.TransitionedToDisabled && !chainFeatureTransition.DetachApplied)
-            {
-                chainTransitionWarning = true;
-                postCommitWarnings.Add("チェーン予約の通常予約への切り替えに失敗しました。ログを確認してください。");
-            }
-        }
-        catch (Exception ex)
-        {
-            chainTransitionWarning = true;
-            postCommitWarnings.Add("チェーン予約の通常予約への切り替えに失敗しました。ログを確認してください。");
-            _log.Add("SETTINGS_POST_COMMIT_WARNING", "ChainLifecycle",
-                $"result=FAILED stage=chain_feature_transition persisted=True exception={ex.GetType().Name} reason={ex.Message} " +
-                "action=preserve_stored_topology_and_runtime_then_retry_from_persisted_settings rule=settings_post_commit_side_effect_contract");
-        }
+        var chainDisableRequested = ChainReservationContract.IsFeatureEnabled(
+            before.LaterProgramPriority, before.ChainRecordingEnabled)
+            && !ChainReservationContract.IsFeatureEnabled(after.LaterProgramPriority, after.ChainRecordingEnabled);
+        if (chainDisableRequested)
+            _allocationRoute.RequestDisabledChainConvergence();
 
         if (recordingCompletionPolicyChanged)
         {
@@ -612,12 +634,12 @@ public sealed class SettingsChangeApplicationService
         // すべての設定保存成功後に正本へ再同期する。実行中に自動起動タスクが削除・変更されていても、
         // unrelated setting saveで古い外部状態を残さない。Setは同値ならno-op。
         // 反映失敗は保存済みINIを巻き戻さず、部分適用として呼出元へ明示する。
-        var startupApplySucceeded = _startupService.Set(after.StartupEnabled);
+        // The caller reconciles Startup from current committed policy after this core cycle.
 
         // チューナー構成は保存のみでRuntime未変更、ChannelMapはChannelFileLoaderの即時再読込責務であるため、
         // どちらも共通割当・PreRec・Wakeの再実行理由にしない。
         var epgScheduleRefreshRequired = dailyEpgScheduleChanged || preRecordEpgPolicyChanged;
-        var allocationRefreshRequired = recordingSchedulePolicyChanged || chainFeatureTransition.DetachedScheduledReservations > 0 || epgScheduleRefreshRequired;
+        var allocationRefreshRequired = recordingSchedulePolicyChanged || epgScheduleRefreshRequired;
         // SETTINGS_PROGRAM_RULE_SYNC_SCOPE_CONTRACT
         // ProgramRule予約の発生時刻・曜日・期限・局指定はProgramRule自身が正本であり、
         // 後番組優先／チェーン予約設定／録画前後マージン／EPG設定を参照しない。
@@ -627,9 +649,9 @@ public sealed class SettingsChangeApplicationService
         // Daily EPGのON/OFF・時刻・深度変更はDaily行だけの責務であり、
         // 録画前EPG確認行を削除・再生成する理由にはしない。
         // PreRec再構築は録画スケジュール方針または録画前EPG確認時刻が変わった場合だけ行う。
-        var preRecordRefreshRequired = recordingSchedulePolicyChanged || chainFeatureTransition.DetachedScheduledReservations > 0 || preRecordEpgPolicyChanged;
+        var preRecordRefreshRequired = recordingSchedulePolicyChanged || preRecordEpgPolicyChanged;
         var wakeRefreshRequired = allocationRefreshRequired || wakePolicyChanged;
-        var conflictLogRequired = recordingSchedulePolicyChanged || chainFeatureTransition.DetachedScheduledReservations > 0;
+        var conflictLogRequired = recordingSchedulePolicyChanged;
         // Route起動条件は、現在の包含関係（WakeがAllocationを内包する等）へ依存させない。
         // 各副作用フラグのどれかがtrueなら必ず共通Routeを通し、将来の責務分離で
         // PreRecやProgramRuleだけがtrueになっても処理が黙って脱落しないようにする。
@@ -639,30 +661,17 @@ public sealed class SettingsChangeApplicationService
             preRecordRefreshRequired ||
             wakeRefreshRequired ||
             conflictLogRequired;
-        var allocationRouteSucceeded = true;
         if (routeExecutionRequired)
         {
-            try
-            {
-                _allocationRoute.Run(new ReservationAllocationRouteRequest(
-                    Source: "Settings",
-                    Action: "Save",
-                    RunKeywordMatcher: false,
-                    SyncProgramRuleReservations: programRuleSyncRequired,
-                    ReevaluateAllocations: allocationRefreshRequired,
-                    RefreshPreRecordEpgEntries: preRecordRefreshRequired,
-                    RefreshWakeTask: wakeRefreshRequired,
-                    EmitConflictLogs: conflictLogRequired,
-                    ConflictLogCategory: "Settings",
-                    ConflictLogTitle: "Conflict"));
-            }
-            catch (Exception ex)
-            {
-                allocationRouteSucceeded = false;
-                postCommitWarnings.Add("予約割当・録画前EPG・Wakeの再反映に失敗しました。ログを確認してください。");
-                _log.Add("SETTINGS_POST_COMMIT_WARNING", "AllocationRoute",
-                    $"result=FAILED stage=allocation_route persisted=True exception={ex.GetType().Name} reason={ex.Message} action=retry_from_persisted_settings rule=settings_post_commit_side_effect_contract");
-            }
+            // The settings command passes these flags to its current core cycle.
+            // Recalculate before a later settings request can publish another policy.
+            requestReevaluation(new ReservationAllocationRouteRequest(
+                Source: "Settings", Action: "Save", RunKeywordMatcher: false,
+                SyncProgramRuleReservations: programRuleSyncRequired,
+                ReevaluateAllocations: allocationRefreshRequired,
+                RefreshPreRecordEpgEntries: preRecordRefreshRequired,
+                RefreshWakeTask: wakeRefreshRequired, EmitConflictLogs: conflictLogRequired,
+                ConflictLogCategory: "Settings", ConflictLogTitle: "Conflict"));
         }
 
         // TunerTopologyの再起動要否は「今回保存値が変わったか」ではなく、
@@ -675,14 +684,12 @@ public sealed class SettingsChangeApplicationService
         var requiresRestart = topologyRestartPendingAfter || hostRestartPendingAfter;
 
         _log.Add("SETTINGS_SAVE", "Settings",
-            $"result=APPLIED persistedChanges={changedAreas.Count} areas=[{string.Join(',', changedAreas.OrderBy(x => x, StringComparer.Ordinal))}] persistedTopologyChanged={tunerTopologyChanged} runtimeTopologyPending={topologyRestartPendingAfter} runtimeHostPending={hostRestartPendingAfter} recordingSchedule={recordingSchedulePolicyChanged} chainFeatureDisabled={chainFeatureTransition.TransitionedToDisabled} chainDetached={chainFeatureTransition.DetachedScheduledReservations} chainDetachWarning={chainTransitionWarning} recordingCompletion={recordingCompletionPolicyChanged} workerPresentation={recordingWorkerPresentationChanged} epgDaily={dailyEpgScheduleChanged} epgPreRecord={preRecordEpgPolicyChanged} epgWorker={epgWorkerPolicyChanged} networkImmediate={networkAccessChanged} revokedSessions={revokedNetworkSessions} clearedLoginFailures={clearedNetworkLoginFailures} route={routeExecutionRequired} routeApply={allocationRouteSucceeded} syncProgram={programRuleSyncRequired} allocation={allocationRefreshRequired} preRecRefresh={preRecordRefreshRequired} wake={wakeRefreshRequired} conflictLog={conflictLogRequired} startupApply={startupApplySucceeded} postCommitWarnings={postCommitWarnings.Count} restart={requiresRestart} rule=settings_canonical_diff_contract");
+            $"result=APPLIED persistedChanges={changedAreas.Count} areas=[{string.Join(',', changedAreas.OrderBy(x => x, StringComparer.Ordinal))}] persistedTopologyChanged={tunerTopologyChanged} runtimeTopologyPending={topologyRestartPendingAfter} runtimeHostPending={hostRestartPendingAfter} recordingSchedule={recordingSchedulePolicyChanged} chainDisableRequested={chainDisableRequested} chainConvergencePending={_allocationRoute.HasPendingDisabledChainConvergence} recordingCompletion={recordingCompletionPolicyChanged} workerPresentation={recordingWorkerPresentationChanged} epgDaily={dailyEpgScheduleChanged} epgPreRecord={preRecordEpgPolicyChanged} epgWorker={epgWorkerPolicyChanged} networkImmediate={networkAccessChanged} revokedSessions={revokedNetworkSessions} clearedLoginFailures={clearedNetworkLoginFailures} route={routeExecutionRequired} routeStage={(routeExecutionRequired ? "current_core_followup" : "not_requested")} syncProgram={programRuleSyncRequired} allocation={allocationRefreshRequired} preRecRefresh={preRecordRefreshRequired} wake={wakeRefreshRequired} conflictLog={conflictLogRequired} startupStage=after_common_owner postCommitWarnings={postCommitWarnings.Count} restart={requiresRestart} rule=settings_canonical_diff_contract");
 
         // SETTINGS_SAVE_RESULT_MESSAGE_COMPOSITION_CONTRACT
         // 外部副作用の部分失敗と再起動待ちは同時に成立し得るため、優先順位で片方を隠さず加算して通知する。
         // 特にStartup反映失敗とTuner topology保留が同時に起きた保存で、再起動条件をメッセージから脱落させない。
         var messageParts = new List<string> { "設定を保存しました。" };
-        if (!startupApplySucceeded)
-            messageParts.Add("Windows自動起動設定の反映に失敗しました。ログを確認してください。");
         messageParts.AddRange(postCommitWarnings.Distinct(StringComparer.Ordinal));
         if (topologyRestartPendingAfter)
             messageParts.Add("チューナー変更はTvAIrの再起動後に反映されます。");
@@ -730,6 +737,7 @@ public sealed class SettingsChangeApplicationService
             current.EpgPreRecordMinutes != SettingsDefaults.NormalizeEpgPreRecordMinutes(requested.EpgPreRecordMinutes) ||
             current.LaterProgramPriority != requested.LaterProgramPriority ||
             current.ChainRecordingEnabled != requested.ChainRecordingEnabled ||
+            current.ChainReservationMode != ChainModeContract.Requested(requested.ChainReservationMode, requested.ChainRecordingEnabled, current.ChainReservationMode!) ||
             current.PreStartMarginSeconds != SettingsDefaults.NormalizePreStartMarginSeconds(requested.PreStartMarginSeconds) ||
             current.PostEndMarginSeconds != SettingsDefaults.NormalizePostEndMarginSeconds(requested.PostEndMarginSeconds) ||
             current.WakeMinutesBefore != SettingsDefaults.NormalizeWakeMinutesBefore(requested.WakeMinutesBefore) ||

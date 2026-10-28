@@ -1,4 +1,4 @@
-using TvAIrPlugin.Assets;
+﻿using TvAIrPlugin.Assets;
 using TvAIrPlugin.Bridge;
 using TvAIrPlugin.Data;
 using TvAIrPlugin.Events;
@@ -336,6 +336,13 @@ public sealed class RuntimeUiActionContext
     public DateTime RequestedAt { get; init; } = DateTime.Now;
 }
 
+/// <summary>
+/// Declarative DOM update by stable element ID; up to 64 patches per request.
+/// Attributes permits title, aria-* and data-* only (null removes an attribute).
+/// TextContent is plain text, not HTML. Class and property updates share the Host document bridge.
+/// Missing targets are rejected before any target is changed; Host-managed ToolWindows may
+/// fall back to the existing content refresh path and report the reason in Developer diagnostics.
+/// </summary>
 public sealed class RuntimeUiPatch
 {
     public required string ElementId { get; init; }
@@ -367,6 +374,9 @@ public sealed class RuntimeUiActionResult
     public string Message { get; set; } = string.Empty;
     public string ErrorCode { get; set; } = string.Empty;
     public string Diagnostics { get; set; } = string.Empty;
+    /// <summary>Nonempty patches are applied to a Host ToolWindow when RefreshRequested=false,
+    /// independently of the form response mode and the window refresh preference.
+    /// Explicit RefreshRequested=true requests content refresh; business state remains Plugin-owned.</summary>
     public IReadOnlyList<RuntimeUiPatch> UiPatches { get; set; } = Array.Empty<RuntimeUiPatch>();
     /// <summary>Runtime UI Action後に、RuntimeUiDefinition.Kindで特定される現在の表示surfaceを再描画する正式な要求。PageはWindowInstanceIdを要求せず、ToolWindowは現在のWindowContentを対象とする。</summary>
     public bool RefreshRequested { get; set; }
@@ -465,6 +475,8 @@ public interface ITvAirPluginRuntimeContext
     global::TvAIrPlugin.ITvAirReservationsApi Reservations { get; }
     global::TvAIrPlugin.ITvAirRulesApi Rules { get; }
     global::TvAIrPlugin.ITvAirRecordingsApi Recordings { get; }
+    /// <summary>Recording files API; requires Host Contract 1.1.16.</summary>
+    global::TvAIrPlugin.ITvAirRecordingFilesApi RecordingFiles => throw new global::System.NotSupportedException("RecordingFiles requires Host Contract 1.1.16.");
     global::TvAIrPlugin.ITvAirPlaybackProgressApi PlaybackProgress { get; }
     global::TvAIrPlugin.ITvAirMediaInsightsApi MediaInsights { get; }
     global::TvAIrPlugin.ITvAirContentDiscoveryApi ContentDiscovery { get; }
@@ -472,6 +484,8 @@ public interface ITvAirPluginRuntimeContext
     global::TvAIrPlugin.ITvAirExternalProgramSourceApi ExternalProgramSource { get; }
     global::TvAIrPlugin.ITvAirEpgApi Epg { get; }
     global::TvAIrPlugin.ITvAirExternalJobsApi ExternalJobs { get; }
+    /// <summary>Plugin-scoped Host-managed sleep inhibition; requires Host Contract 1.1.17.</summary>
+    global::TvAIrPlugin.ITvAirPowerInhibitionApi PowerInhibition => throw new global::System.NotSupportedException("PowerInhibition requires Host Contract 1.1.17.");
     global::TvAIrPlugin.ITvAirChannelsApi Channels { get; }
     global::TvAIrPlugin.ITvAirTunersApi Tuners { get; }
     global::TvAIrPlugin.Viewers.ITvAirViewersApi Viewers { get; }
@@ -482,6 +496,7 @@ public interface ITvAirPluginRuntimeContext
     global::TvAIrPlugin.ITvAirSystemApi System { get; }
     global::TvAIrPlugin.ITvAirLogsApi Logs { get; }
     global::TvAIrPlugin.ITvAirPluginsApi Plugins { get; }
+    global::TvAIrPlugin.ITvAirPluginSelectionsApi PluginSelections { get; }
     global::TvAIrPlugin.ITvAirExternalLookupApi ExternalLookup { get; }
     global::TvAIrPlugin.ITvAirInternetAccessApi InternetAccess { get; }
 }

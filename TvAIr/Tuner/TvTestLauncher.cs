@@ -1,4 +1,4 @@
-/* TvTestLauncherはTvAIrから管理するTVTestプロセスの起動・維持に使用し、録画実行はTvAIrEpgRecが担当する。 */
+﻿/* TvTestLauncherはTvAIrから管理するTVTestプロセスの起動・維持に使用し、録画実行はTvAIrEpgRecが担当する。 */
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -654,57 +654,27 @@ public sealed class TvTestLauncher
 
     public LaunchResult StopManagedViewerProcess(int processId, string reason)
     {
-        if (processId <= 0)
-            return new LaunchResult(true, 0, "no pid");
+        if (processId <= 0) return new LaunchResult(true, 0, "no pid");
         try
         {
             using var process = Process.GetProcessById(processId);
-            if (process.HasExited)
-            {
-                _log.Add("VIEWER_PROCESS_STOP", "Viewer", $"result=ALREADY_EXITED previousPid={processId} reason={reason} rule=release_contract");
-                return new LaunchResult(true, processId, "already exited");
-            }
-
-            var closeIssued = false;
-            try
-            {
-                closeIssued = process.CloseMainWindow();
-            }
-            catch { }
-
-            if (closeIssued)
-            {
-                try
-                {
-                    if (process.WaitForExit(3000))
-                    {
-                        TvAirManagedProcessRegistry.Unregister(processId);
-                        _log.Add("VIEWER_PROCESS_STOP", "Viewer", $"result=CLOSED previousPid={processId} closeMainWindow=True reason={reason} rule=release_contract");
-                        return new LaunchResult(true, processId, "closed");
-                    }
-                }
-                catch { }
-            }
-
-            try
-            {
-                process.Kill(entireProcessTree: false);
-                try { process.WaitForExit(3000); } catch { }
-                TvAirManagedProcessRegistry.Unregister(processId);
-                _log.Add("VIEWER_PROCESS_STOP", "Viewer", $"result=KILLED_SINGLE_PID previousPid={processId} closeMainWindow={closeIssued} treeKill=False reason={reason} rule=release_contract");
-                return new LaunchResult(true, processId, "killed single pid");
-            }
-            catch (Exception killEx)
-            {
-                _log.Add("VIEWER_PROCESS_STOP", "Viewer", $"result=FAILED previousPid={processId} closeMainWindow={closeIssued} treeKill=False reason={reason} message={killEx.Message} rule=release_contract");
-                return new LaunchResult(false, processId, killEx.Message);
-            }
+            var stopped = ViewerProcessStopContract.Stop(new ViewerProcessStopTarget(process));
+            if (stopped.Success) TvAirManagedProcessRegistry.Unregister(processId);
+            _log.Add("VIEWER_PROCESS_STOP", "Viewer",
+                $"result={stopped.Outcome} previousPid={processId} closeMainWindow={stopped.CloseIssued} treeKill=False reason={reason} message={SafeLog(stopped.Message)} processExitConfirmed={stopped.Success} ownershipPreserved={!stopped.Success} rule=release_contract");
+            return new LaunchResult(stopped.Success, processId, stopped.Message);
+        }
+        catch (ArgumentException)
+        {
+            // Only GetProcessById's missing-PID result proves absence.
+            TvAirManagedProcessRegistry.Unregister(processId);
+            _log.Add("VIEWER_PROCESS_STOP", "Viewer", $"result=NOT_FOUND previousPid={processId} reason={reason} processExitConfirmed=True rule=release_contract");
+            return new LaunchResult(true, processId, "not found");
         }
         catch (Exception ex)
         {
-            TvAirManagedProcessRegistry.Unregister(processId);
-            _log.Add("VIEWER_PROCESS_STOP", "Viewer", $"result=NOT_FOUND previousPid={processId} reason={reason} message={ex.Message} rule=release_contract");
-            return new LaunchResult(true, processId, "not found");
+            _log.Add("VIEWER_PROCESS_STOP", "Viewer", $"result=STOP_FAILED previousPid={processId} reason={reason} message={SafeLog(ex.Message)} processExitConfirmed=False ownershipPreserved=True rule=release_contract");
+            return new LaunchResult(false, processId, "process_exit_not_confirmed");
         }
     }
 

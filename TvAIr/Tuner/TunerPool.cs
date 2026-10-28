@@ -736,6 +736,7 @@ public sealed class TunerPool : IDisposable
     }
 
 
+#if TVAIR_DEVELOPER_DIAGNOSTICS
     /// <summary>
     /// チューナー設定正本とTunerPool実体の投影差分を診断する。
     /// 実行挙動は一切変えず、Wake/EPG/Plugin(viewer profile)が同じ前提を見ているかを確認するためのログ用。
@@ -783,6 +784,8 @@ public sealed class TunerPool : IDisposable
             return $"viewerReserved={viewing.Count} viewerGroups=[{groups}] viewerSlots=[{slots}] rule=release_contract";
         }
     }
+
+#endif
 
     /// <summary>
     /// 指定グループのEPG用スロットが空くまで、TunerPoolの状態変更シグナルで待つ。

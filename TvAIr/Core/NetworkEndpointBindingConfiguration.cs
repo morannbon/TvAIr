@@ -45,9 +45,9 @@ public sealed class NetworkEndpointBindingConfiguration : IDisposable
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
 
-            var lanEffective = _networkUsage.Enabled
-                && _settings.NetworkLanAccessEnabled
-                && !string.IsNullOrWhiteSpace(_settings.NetworkPasswordEncrypted);
+            var policy = _settings.CaptureOsPolicySnapshot();
+            var networkEnabled = policy.NetworkUsageEnabled && _networkUsage.Enabled;
+            var lanEffective = networkEnabled && policy.LanAccessEnabled && policy.HasNetworkPassword;
 
             var endpoints = new List<IPAddress> { IPAddress.Loopback };
             if (lanEffective)
@@ -59,9 +59,9 @@ public sealed class NetworkEndpointBindingConfiguration : IDisposable
                 .ThenBy(a => a.ToString(), StringComparer.Ordinal)
                 .ToArray();
 
-            _provider.Apply(_settings.Port, unique, notify);
+            _provider.Apply(policy.RuntimePort, unique, notify);
             return new NetworkEndpointBindingSnapshot(
-                _networkUsage.Enabled,
+                networkEnabled,
                 lanEffective,
                 unique.Select(a => a.ToString()).ToArray());
         }

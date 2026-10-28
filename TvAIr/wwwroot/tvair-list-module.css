@@ -974,8 +974,7 @@ body.tvair-program-reservation-page #program-rules-table .act-wrap{
   text-align:center;
 }
 body.tvair-rule-list-page #rules-table .actions-inline,
-body.tvair-reservation-page .program-cell-action-btn--list-context,
-body.tvair-keyword-page .rsv-btn,
+body.tvair-keyword-page .rsv-btn:not(.tvair-program-action-control),
 body.tvair-rule-list-page .order-btn,
 body.tvair-rule-list-page .action-btn,
 body.tvair-program-reservation-page .btn-edit,
@@ -1013,7 +1012,7 @@ body.tvair-keyword-page #result-table td:nth-child(5){
   text-align:center;
   line-height:1;
 }
-body.tvair-keyword-page #result-table td[data-cell-role="reservation-action"] .rsv-btn,
+body.tvair-keyword-page #result-table td[data-cell-role="reservation-action"] .rsv-btn:not(.tvair-program-action-control),
 body.tvair-keyword-page #result-table td[data-cell-role="reservation-action"] .rsv-state-label{
   box-sizing:border-box;
   display:inline-flex;

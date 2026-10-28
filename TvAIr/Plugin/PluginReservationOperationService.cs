@@ -1,4 +1,4 @@
-using TvAIr.Channel;
+﻿using TvAIr.Channel;
 using TvAIr.Core;
 using TvAIr.Schedule;
 
@@ -8,7 +8,7 @@ internal sealed record PluginReservationMutationResult(bool Success, int? Reserv
 
 /// <summary>
 /// Plugin reservation mutations shared by the Runtime capability API.
-/// ReservationStore mutation, ownership, allocation refresh and audit logging have one owner here.
+/// Normal reservation ownership and audit live here; chain topology commits belong to the common allocation route.
 /// </summary>
 internal sealed class PluginReservationOperationService
 {
@@ -85,20 +85,7 @@ internal sealed class PluginReservationOperationService
             Reservation committedReservation;
             if (draft.AllowChain && draft.ChainPreviousReservationId.HasValue)
             {
-                var predecessor = _reservationStore.GetById(draft.ChainPreviousReservationId.Value);
-                if (predecessor is null)
-                    return new PluginReservationMutationResult(false, null, "チェーン前番組が見つかりません。");
-                var canonicalRoot = predecessor.UserChainRootId ?? predecessor.Id;
-                var chainResult = _reservationStore.AddOrPromoteUserChain(
-                    reservation,
-                    draft.ChainPreviousReservationId.Value,
-                    canonicalRoot,
-                    _ini.UserChainRecordingEnabled);
-                if (!chainResult.Applied || chainResult.Reservation is not { } committedChainReservation)
-                    return new PluginReservationMutationResult(false, chainResult.ReservationId == 0 ? null : chainResult.ReservationId, chainResult.Reason);
-                id = chainResult.ReservationId;
-                added = chainResult.Added;
-                committedReservation = committedChainReservation;
+                return AddChain(owner, draft, reservation, commitEvents);
             }
             else
             {
@@ -131,6 +118,42 @@ internal sealed class PluginReservationOperationService
         catch (Exception ex)
         {
             return new PluginReservationMutationResult(false, null, ex.Message);
+        }
+    }
+
+    private PluginReservationMutationResult AddChain(string owner, PluginReservationMutationDraft draft,
+        Reservation reservation, Action commitEvents)
+    {
+        var command = new UserChainAllocationCommand(reservation, draft.ChainPreviousReservationId!.Value);
+        try
+        {
+            var allocation = _allocationRoute.Run(new ReservationAllocationRouteRequest(
+                Source: "Plugin", Action: "ChainReservation", SyncProgramRuleReservations: false,
+                RefreshPreRecordEpgEntries: true, RefreshWakeTask: true,
+                WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce,
+                TopologyCommands: new[] { command }, RejectDeferredTopologyCommands: true));
+            var mutation = command.Result;
+            if (mutation is null)
+                return new(false, null, "停止処理または別の予約処理が進行中のため保存していません。しばらくしてから再度操作してください。");
+            commitEvents();
+            if (!mutation.Applied)
+                return new(false, mutation.ReservationId == 0 ? null : mutation.ReservationId, mutation.Reason);
+            AddAuditLog(owner, "AddReservation",
+                $"result=CHAIN_COMMITTED title={draft.Title} id=R{mutation.ReservationId} added={mutation.Added} allocationRetryRequired={allocation.RetryRequired} rule=common_allocation_route_contract");
+            return new(true, mutation.ReservationId, allocation.RetryRequired
+                ? "チェーン設定を保存しました。割当には再評価が必要です。"
+                : mutation.Added ? "チェーン予約を追加しました。" : "既存予約のチェーン設定を更新しました。");
+        }
+        catch (Exception ex)
+        {
+            if (command.Result is { Applied: true } saved)
+            {
+                commitEvents();
+                AddAuditLog(owner, "AddReservation",
+                    $"result=CHAIN_COMMITTED_REFRESH_FAILED title={draft.Title} id=R{saved.ReservationId} errorType={ex.GetType().Name} rule=common_allocation_route_contract");
+                return new(false, saved.ReservationId, "チェーン設定は保存済みですが、保存後の処理に失敗しました。");
+            }
+            return new(false, null, ex.Message);
         }
     }
 
@@ -176,6 +199,7 @@ internal sealed class PluginReservationOperationService
     public PluginReservationMutationResult Delete(string pluginId, int reservationId, bool force)
     {
         using var eventScope = _typedEvents.BeginOutboxScope(out var commitEvents);
+        TerminalReservationDeleteCommand? command = null;
         try
         {
             var owner = PluginIdentity.Normalize(pluginId);
@@ -190,28 +214,39 @@ internal sealed class PluginReservationOperationService
             // 物理削除はUIと同じ終端予約Status＋DataVersion＋チェーントポロジーCASを必ず通す。
             if (existing.Status is not (ReservationStatus.Completed or ReservationStatus.Failed or ReservationStatus.Cancelled))
                 return new PluginReservationMutationResult(false, reservationId, "未開始または実行中の予約は物理削除できません。先に正規の取消・停止操作を行ってください。");
-            if (!_reservationStore.TryDeleteTerminalReservationAtomicCas(existing, out _))
-                return new PluginReservationMutationResult(false, reservationId, "予約状態またはチェーン構造が同時に更新されました。");
-
-            ReevaluateAllocations(owner, "DeleteReservation");
+            command = new TerminalReservationDeleteCommand(existing);
+            var allocation = _allocationRoute.Run(new ReservationAllocationRouteRequest(
+                Source: "Plugin", Action: "DeleteReservation", SyncProgramRuleReservations: false,
+                RefreshPreRecordEpgEntries: true, RefreshWakeTask: true,
+                WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce,
+                TopologyCommands: new[] { command }, RejectDeferredTopologyCommands: true));
+            if (command.Result is null)
+                return new(false, reservationId, "別の予約処理が進行中のため削除していません。しばらくしてから再度操作してください。");
+            if (!command.Result.Applied)
+                return new(false, reservationId, "予約状態またはチェーン構造が同時に更新されました。");
             commitEvents();
             AddAuditLog(owner, "DeleteReservation", $"id=R{reservationId} force={force} terminalCas=True events=OUTBOX_COMMITTED rule=release_contract");
-            return new PluginReservationMutationResult(true, reservationId, "予約を削除しました。");
+            return new PluginReservationMutationResult(true, reservationId, allocation.RetryRequired ? "予約は削除済みです。割当には再評価が必要です。" : "予約を削除しました。");
         }
         catch (Exception ex)
         {
+            if (command?.Result is { Applied: true })
+            {
+                commitEvents();
+                return new(false, reservationId, "予約は削除済みですが、保存後の処理に失敗しました。予約一覧を確認してください。");
+            }
             return new PluginReservationMutationResult(false, reservationId, ex.Message);
         }
     }
 
-    private void ReevaluateAllocations(string pluginId, string action)
+    private ReservationAllocationRouteResult ReevaluateAllocations(string pluginId, string action)
     {
         // PLUGIN_RESERVATION_ALLOCATION_INPUT_INVARIANT:
         // Pluginの予約Mutationも本体UIと同じALLOC_ROUTE/TUNER_ALLOCを正本とする。
         // Add/Update/DeleteはProgramRule定義そのものを変更しないため、無関係なProgramRule全件同期を
         // クリティカルパスへ混載しない。一方、InteractiveProgramEvent/Keyword系はPreRec親候補になり得るため、
         // PreRec再評価を省略して本体UI予約と責務差を作ってはならない。System/ProgramはPreRec側のSource判定で除外される。
-        _allocationRoute.Run(new ReservationAllocationRouteRequest(
+        return _allocationRoute.Run(new ReservationAllocationRouteRequest(
             Source: "Plugin",
             Action: action,
             RunKeywordMatcher: false,

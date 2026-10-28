@@ -143,7 +143,7 @@
 
   connectCommitStream();
 
-  window.TvAIrSettingsHost={version:'1.2.13',open,close,contract:'shared-non-navigating-settings-host'};
+  window.TvAIrSettingsHost={version:'1.2.14',open,close,contract:'shared-non-navigating-settings-host'};
 })();
 
 

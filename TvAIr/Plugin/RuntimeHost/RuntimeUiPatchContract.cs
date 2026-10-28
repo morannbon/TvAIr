@@ -8,6 +8,13 @@ using TvAIrPlugin.Runtime;
 /// </summary>
 internal static class RuntimeUiPatchContract
 {
+    internal static bool ShouldApplyActionPatches(string responseMode, bool refreshRequested, int patchCount,
+        TvAIrPlugin.Windows.PluginWindowRefreshMode? declaredMode)
+        => (!refreshRequested && patchCount > 0)
+            || responseMode.Equals("patchWindow", StringComparison.OrdinalIgnoreCase)
+            || (responseMode.Equals("refreshWindow", StringComparison.OrdinalIgnoreCase)
+                && declaredMode == TvAIrPlugin.Windows.PluginWindowRefreshMode.StatePatch);
+
     public static IReadOnlyList<RuntimeUiPatch> Normalize(IReadOnlyList<RuntimeUiPatch>? patches)
     {
         if (patches is null || patches.Count == 0) return Array.Empty<RuntimeUiPatch>();
@@ -63,8 +70,10 @@ internal static class RuntimeUiPatchContract
                 ElementId = elementId,
                 TextContent = normalized.TextContent ?? existing.TextContent,
                 ClassName = normalized.ClassName ?? existing.ClassName,
-                AddClasses = NormalizeClassTokens(existing.AddClasses.Concat(normalized.AddClasses).ToArray()),
-                RemoveClasses = NormalizeClassTokens(existing.RemoveClasses.Concat(normalized.RemoveClasses).ToArray()),
+                AddClasses = NormalizeClassTokens((normalized.ClassName is null ? existing.AddClasses : Array.Empty<string>())
+                    .Except(normalized.RemoveClasses, StringComparer.Ordinal).Concat(normalized.AddClasses).ToArray()),
+                RemoveClasses = NormalizeClassTokens((normalized.ClassName is null ? existing.RemoveClasses : Array.Empty<string>())
+                    .Concat(normalized.RemoveClasses).Except(normalized.AddClasses, StringComparer.Ordinal).ToArray()),
                 Disabled = normalized.Disabled ?? existing.Disabled,
                 Hidden = normalized.Hidden ?? existing.Hidden,
                 Checked = normalized.Checked ?? existing.Checked,

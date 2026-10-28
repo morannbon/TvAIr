@@ -51,6 +51,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         PluginManagedExternalLookupHost externalLookupHost,
         PluginInternetAccessGate internetAccessGate,
         PluginExternalJobHost externalJobHost,
+        PluginPowerInhibitionHost powerInhibitionHost,
         string pluginId,
         string pluginDisplayName,
         string pluginsDirectory,
@@ -98,8 +99,10 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             permissionGate);
         Events = new EventsApi(normalizedPluginId, log, typedEvents, permissionGate);
         ExternalJobs = new ExternalJobsApi(normalizedPluginId, externalJobHost, permissionGate);
+        PowerInhibition = new PowerInhibitionApi(normalizedPluginId, powerInhibitionHost, permissionGate);
         Hosts = new HostsApi(permissionGate);
         Plugins = new PluginsApi(registry, permissionGate);
+        PluginSelections = new PluginSelectionsApi(registry, normalizedPluginId);
         ExternalLookup = new ExternalLookupApi(normalizedPluginId, pluginDisplayName, externalLookupHost, permissionGate);
         InternetAccess = new InternetAccessApi(normalizedPluginId, internetAccessGate, permissionGate);
     }
@@ -133,11 +136,29 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
     public ITvAirPluginStorageApi Storage { get; }
     public ITvAirEventsApi Events { get; }
     public ITvAirExternalJobsApi ExternalJobs { get; }
+    public ITvAirPowerInhibitionApi PowerInhibition { get; }
     public ITvAirHostsApi Hosts { get; }
     public ITvAirPluginsApi Plugins { get; }
+    public ITvAirPluginSelectionsApi PluginSelections { get; }
     public ITvAirExternalLookupApi ExternalLookup { get; }
     public ITvAirInternetAccessApi InternetAccess { get; }
 
+
+    private sealed class PowerInhibitionApi(string pluginId, PluginPowerInhibitionHost host, CapabilityPermissionGate permissions) : ITvAirPowerInhibitionApi
+    {
+        public IDisposable Acquire(string operation)
+        {
+            permissions.Require(nameof(PowerInhibitionApi), PluginPermission.UsePowerInhibition);
+            return host.Acquire(pluginId, operation);
+        }
+    }
+
+    private sealed class PluginSelectionsApi(PluginRegistry registry, string ownerId) : ITvAirPluginSelectionsApi
+    {
+        public void Publish(string featureId, string displayName, bool enabled, IReadOnlyList<TvAirPluginSelectionOptionDto> options)
+            => registry.PublishSelectionFeature(ownerId, featureId, displayName, enabled, options);
+        public void Remove(string featureId) => registry.RemoveSelectionFeature(ownerId, featureId);
+    }
 
     private sealed class CapabilityPermissionGate
     {
@@ -349,6 +370,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
             return rules.OrderBy(rule => rule.SortOrder).ThenBy(rule => rule.Id).Take(limit).Select(rule => new TvAirKeywordRuleDto
             {
                 RuleId = rule.Id,
+                PluginBindings = ReservationStore.DecodePluginBindings(rule.PluginBindingJson),
                 Name = rule.Name,
                 Pattern = rule.Pattern,
                 ExcludePattern = rule.ExcludePattern,
@@ -812,6 +834,12 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
 
         public TvAirRecordingFileDto? GetByReservationId(string reservationId)
             => List(new TvAirRecordingFileQueryDto { ReservationId = reservationId }).FirstOrDefault();
+
+        public TvAirFinalizedRecordingFilePageDto ListFinalized(TvAirFinalizedRecordingFileQueryDto? query = null)
+        {
+            permissions.Require(nameof(RecordingFilesApi), PluginPermission.ReadRecordingHistory);
+            return recordingResults.Files.ListFinalized(query);
+        }
     }
 
     private sealed class RecordingInspectionApi(RecordingResultStore recordingResults, CapabilityPermissionGate permissions) : ITvAirRecordingInspectionApi

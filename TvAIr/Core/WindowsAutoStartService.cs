@@ -23,6 +23,7 @@ public sealed class WindowsAutoStartService
     private const int TaskRunlevelLua = 0;
 
     private readonly LogRepository _log;
+    private readonly object _gate = new();
 
     public WindowsAutoStartService(LogRepository log)
     {
@@ -30,6 +31,24 @@ public sealed class WindowsAutoStartService
     }
 
     public bool Set(bool enabled)
+    {
+        lock (_gate) return SetCore(enabled);
+    }
+
+    internal bool SetCurrentPolicy(IniSettingsService settings)
+    {
+        lock (_gate)
+        {
+            while (true)
+            {
+                var enabled = settings.CaptureOsPolicySnapshot().StartupEnabled;
+                var applied = SetCore(enabled);
+                if (enabled == settings.CaptureOsPolicySnapshot().StartupEnabled) return applied;
+            }
+        }
+    }
+
+    private bool SetCore(bool enabled)
     {
         try
         {

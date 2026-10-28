@@ -1671,6 +1671,14 @@ public sealed class UserEventLogService
     public int EnrichRecordingResult(
         TvAIrPlugin.TvAirRecordingResultDto result,
         IReadOnlyDictionary<string, string>? terminationEvidence = null)
+        => EnrichRecordingResultCore(result, terminationEvidence, preserveObservedEvidence: false);
+
+    internal int EnrichRecoveredRecordingResult(TvAirRecordingResultDto result,
+        IReadOnlyDictionary<string, string> terminationEvidence)
+        => EnrichRecordingResultCore(result, terminationEvidence, preserveObservedEvidence: true);
+
+    private int EnrichRecordingResultCore(TvAirRecordingResultDto result,
+        IReadOnlyDictionary<string, string>? terminationEvidence, bool preserveObservedEvidence)
     {
         if (result is null || string.IsNullOrWhiteSpace(result.ReservationId)) return 0;
         lock (gate)
@@ -1690,8 +1698,10 @@ public sealed class UserEventLogService
                     scramble_count = $scrambleCount,
                     file_path = $filePath,
                     completion_reason = $completionReason,
-                    recording_recovery_chain_id = $recordingRecoveryChainId,
-                    power_resume_cycle_id = $powerResumeCycleId,
+                    recording_recovery_chain_id = CASE WHEN $preserveObserved = 1 AND recording_recovery_chain_id <> ''
+                        THEN recording_recovery_chain_id ELSE $recordingRecoveryChainId END,
+                    power_resume_cycle_id = CASE WHEN $preserveObserved = 1 AND power_resume_cycle_id <> ''
+                        THEN power_resume_cycle_id ELSE $powerResumeCycleId END,
                     details_json = $detailsJson
                 WHERE id = (
                     SELECT id FROM user_event_logs
@@ -1703,6 +1713,7 @@ public sealed class UserEventLogService
                 );
                 """;
             cmd.Parameters.AddWithValue("$reservationId", result.ReservationId);
+            cmd.Parameters.AddWithValue("$preserveObserved", preserveObservedEvidence ? 1 : 0);
             cmd.Parameters.AddWithValue("$recordingId", result.RecordingId ?? string.Empty);
             cmd.Parameters.AddWithValue("$serviceName", result.ServiceName ?? string.Empty);
             cmd.Parameters.AddWithValue("$programTitle", result.EventTitle ?? string.Empty);
@@ -1761,14 +1772,18 @@ public sealed class UserEventLogService
             mergedDetails["qualityDataAvailable"] = result.QualityDataAvailable.ToString();
             mergedDetails["qualityCompleteness"] = result.QualityCompleteness ?? string.Empty;
             mergedDetails["qualitySource"] = result.QualitySource ?? string.Empty;
-            mergedDetails["resourceReleaseState"] = result.ResourceReleaseState ?? string.Empty;
+            if (!preserveObservedEvidence || !mergedDetails.TryGetValue("resourceReleaseState", out var existingRelease)
+                || string.IsNullOrWhiteSpace(existingRelease))
+                mergedDetails["resourceReleaseState"] = result.ResourceReleaseState ?? string.Empty;
             mergedDetails["resultFinalized"] = result.ResultFinalized.ToString();
             mergedDetails["fileCreated"] = result.FileCreated?.ToString() ?? string.Empty;
             if (terminationEvidence is not null)
             {
                 foreach (var pair in terminationEvidence)
                 {
-                    if (!string.IsNullOrWhiteSpace(pair.Value))
+                    if (!string.IsNullOrWhiteSpace(pair.Value)
+                        && (!preserveObservedEvidence || !mergedDetails.TryGetValue(pair.Key, out var observed)
+                            || string.IsNullOrWhiteSpace(observed)))
                         mergedDetails[pair.Key] = pair.Value;
                 }
             }

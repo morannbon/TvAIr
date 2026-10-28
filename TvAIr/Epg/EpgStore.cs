@@ -15,7 +15,10 @@ public sealed record EpgUpsertResult(
 
 public sealed record EpgCaptureCommitResult(
     EpgUpsertResult Upsert,
-    EpgStaleRetireStats StaleRetire);
+    EpgStaleRetireStats StaleRetire,
+    EpgOtherScheduleSupplementResult? OtherSupplement = null);
+
+public sealed record EpgOtherScheduleSupplementResult(int Existing, IReadOnlyList<EpgEvent> InsertedEvents);
 
 public sealed record EpgRetiredEventIdentity(
     ushort NetworkId,
@@ -175,14 +178,34 @@ public sealed class EpgStore
     {
         using var con = db.Open();
         using var tx = con.BeginTransaction();
+        var result = PrepareCapture(con, tx, upsertEvents, retireEvents, preserveEvents);
+        tx.Commit();
+        PublishCapture(result);
+        return result;
+    }
+
+    internal bool UsesDatabase(Database database) => ReferenceEquals(db, database);
+
+    // SQL only; publication belongs to the transaction owner after successful commit.
+    internal static EpgCaptureCommitResult PrepareCapture(SqliteConnection con, SqliteTransaction tx,
+        IEnumerable<EpgEvent> upsertEvents, IEnumerable<EpgEvent>? retireEvents,
+        IEnumerable<EpgEvent>? preserveEvents = null,
+        IReadOnlyList<EpgEvent>? otherSupplementCandidates = null)
+    {
+        if (!ReferenceEquals(tx.Connection, con)) throw new ArgumentException("Transaction connection mismatch.", nameof(tx));
         var upsert = UpsertCore(con, tx, upsertEvents);
         var staleRetire = retireEvents is null
             ? EpgStaleRetireStats.Empty
             : RetireStaleEventsForCapturedScopeCore(con, tx, retireEvents, preserveEvents ?? upsertEvents);
-        tx.Commit();
-        if (upsert.Count > 0 || staleRetire.DeletedRows > 0)
+        var supplement = otherSupplementCandidates is null ? null
+            : PrepareOtherScheduleSupplement(con, tx, otherSupplementCandidates);
+        return new EpgCaptureCommitResult(upsert, staleRetire, supplement);
+    }
+
+    internal void PublishCapture(EpgCaptureCommitResult result)
+    {
+        if (result.Upsert.Count > 0 || result.StaleRetire.DeletedRows > 0 || result.OtherSupplement?.InsertedEvents.Count > 0)
             Interlocked.Increment(ref projectionRevision);
-        return new EpgCaptureCommitResult(upsert, staleRetire);
     }
 
     private static EpgUpsertResult UpsertCore(
@@ -493,6 +516,14 @@ public sealed class EpgStore
 
         using var con = db.Open();
         using var tx = con.BeginTransaction();
+        var updated = MarkOtherScheduleSeenCore(con, tx, distinct);
+        tx.Commit();
+        return updated;
+    }
+
+    private static int MarkOtherScheduleSeenCore(SqliteConnection con, SqliteTransaction tx,
+        IReadOnlyList<(ushort NetworkId, ushort TransportStreamId, ushort ServiceId, ushort EventId)> distinct)
+    {
         using var cmd = con.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = """
@@ -516,7 +547,6 @@ public sealed class EpgStore
             pEid.Value = (int)key.EventId;
             updated += cmd.ExecuteNonQuery();
         }
-        tx.Commit();
         return updated;
     }
 
@@ -535,33 +565,46 @@ public sealed class EpgStore
         using var tx = con.BeginTransaction();
         var result = UpsertCore(con, tx, list);
 
-        using var cmd = con.CreateCommand();
-        cmd.Transaction = tx;
-        cmd.CommandText = """
-            UPDATE epg_events
-            SET other_schedule_seen = 1
-            WHERE network_id = $nid
-              AND transport_stream_id = $tsid
-              AND service_id = $sid
-              AND event_id = $eid;
-            """;
-        var pNid = cmd.Parameters.Add("$nid", SqliteType.Integer);
-        var pTsid = cmd.Parameters.Add("$tsid", SqliteType.Integer);
-        var pSid = cmd.Parameters.Add("$sid", SqliteType.Integer);
-        var pEid = cmd.Parameters.Add("$eid", SqliteType.Integer);
-        foreach (var ev in list)
-        {
-            pNid.Value = (int)ev.NetworkId;
-            pTsid.Value = (int)ev.TransportStreamId;
-            pSid.Value = (int)ev.ServiceId;
-            pEid.Value = (int)ev.EventId;
-            cmd.ExecuteNonQuery();
-        }
+        MarkOtherScheduleSeenCore(con, tx, list.Select(e =>
+            (e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId)).Distinct().ToArray());
 
         tx.Commit();
         if (result.Count > 0)
             Interlocked.Increment(ref projectionRevision);
         return result;
+    }
+
+    private static EpgOtherScheduleSupplementResult PrepareOtherScheduleSupplement(
+        SqliteConnection con, SqliteTransaction tx, IReadOnlyList<EpgEvent> candidates)
+    {
+        // Recheck existence inside the owning write transaction: other-TS data may
+        // insert missing identities, but can never overwrite an existing actual row.
+        var keys = candidates.Select(e => (e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId)).Distinct().ToArray();
+        var existing = new HashSet<(ushort, ushort, ushort, ushort)>();
+        const int batchSize = 200;
+        for (var offset = 0; offset < keys.Length; offset += batchSize)
+        {
+            using var read = con.CreateCommand(); read.Transaction = tx;
+            var batch = keys.Skip(offset).Take(batchSize).ToArray();
+            var predicates = new List<string>();
+            for (var i = 0; i < batch.Length; i++)
+            {
+                predicates.Add($"(network_id=$n{i} AND transport_stream_id=$t{i} AND service_id=$s{i} AND event_id=$e{i})");
+                read.Parameters.AddWithValue($"$n{i}", batch[i].NetworkId);
+                read.Parameters.AddWithValue($"$t{i}", batch[i].TransportStreamId);
+                read.Parameters.AddWithValue($"$s{i}", batch[i].ServiceId);
+                read.Parameters.AddWithValue($"$e{i}", batch[i].EventId);
+            }
+            read.CommandText = "SELECT network_id,transport_stream_id,service_id,event_id FROM epg_events WHERE "
+                + string.Join(" OR ", predicates);
+            using var reader = read.ExecuteReader();
+            while (reader.Read()) existing.Add(((ushort)reader.GetInt32(0), (ushort)reader.GetInt32(1),
+                (ushort)reader.GetInt32(2), (ushort)reader.GetInt32(3)));
+        }
+        var missing = candidates.Where(e => !existing.Contains((e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId))).ToArray();
+        if (missing.Length > 0) UpsertCore(con, tx, missing);
+        MarkOtherScheduleSeenCore(con, tx, keys);
+        return new EpgOtherScheduleSupplementResult(existing.Count, Array.AsReadOnly(missing));
     }
 
     // ─── 読み取り ────────────────────────────────────────────────
@@ -602,6 +645,24 @@ public sealed class EpgStore
             ORDER BY start_time, network_id, transport_stream_id, service_id, event_id, table_id, section_number;
             """;
         return ReadEvents(cmd);
+    }
+
+    internal static EpgEvent? ReadPromotionEvent(SqliteConnection con, SqliteTransaction tx,
+        ushort nid, ushort tsid, ushort sid, ushort eid)
+    {
+        using var cmd = con.CreateCommand(); cmd.Transaction = tx;
+        cmd.CommandText = """
+            SELECT network_id, transport_stream_id, service_id, event_id,
+                   service_name, title, description,
+                   genre, genre_codes, table_id, section_number, version_number,
+                   raw_descriptor_loop, raw_short_event_descriptor, raw_extended_event_descriptor, raw_content_descriptor,
+                   duration_seconds, start_time, end_time, updated_at
+            FROM epg_events WHERE network_id=$nid AND transport_stream_id=$tsid
+              AND service_id=$sid AND event_id=$eid LIMIT 1;
+            """;
+        cmd.Parameters.AddWithValue("$nid", nid); cmd.Parameters.AddWithValue("$tsid", tsid);
+        cmd.Parameters.AddWithValue("$sid", sid); cmd.Parameters.AddWithValue("$eid", eid);
+        return ReadEvents(cmd).FirstOrDefault();
     }
 
     /// <summary>指定サービス・イベントIDのイベントを1件取得する。</summary>

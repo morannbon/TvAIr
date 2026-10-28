@@ -1,4 +1,4 @@
-using Microsoft.Data.Sqlite;
+﻿using Microsoft.Data.Sqlite;
 
 namespace TvAIr.Core;
 
@@ -52,6 +52,34 @@ public sealed class Database
         CreateTables(con);
         Migrate(con);
         CreatePostMigrationIndexes(con);
+        using var bindingTransaction = con.BeginTransaction();
+        using var bindingTrigger = con.CreateCommand();
+        bindingTrigger.Transaction = bindingTransaction;
+        bindingTrigger.CommandText = $$"""
+            DROP TRIGGER IF EXISTS trg_keyword_reservation_plugin_binding;
+            CREATE TRIGGER trg_keyword_reservation_plugin_binding
+            AFTER INSERT ON reservations
+            WHEN NEW.recovery_parent_reservation_id IS NOT NULL
+              OR (NEW.source_rule_id IS NOT NULL AND lower(NEW.source) = 'keyword')
+            BEGIN
+                -- Recovery inherits the saved reservation snapshot, even if empty.
+                -- Only an original keyword reservation reads the current rule.
+                SELECT RAISE(ABORT, 'Recovery binding parent does not exist')
+                WHERE NEW.recovery_parent_reservation_id IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM reservations
+                                  WHERE id = NEW.recovery_parent_reservation_id);
+                UPDATE reservations
+                SET plugin_binding_json = CASE
+                    WHEN NEW.recovery_parent_reservation_id IS NOT NULL THEN
+                        (SELECT plugin_binding_json FROM reservations
+                         WHERE id = NEW.recovery_parent_reservation_id)
+                    ELSE {{KeywordReservationBindingProjection.RuleValue("NEW.source_rule_id")}}
+                    END
+                WHERE id = NEW.id;
+            END;
+            """;
+        bindingTrigger.ExecuteNonQuery();
+        bindingTransaction.Commit();
     }
 
     private static void CreateTables(SqliteConnection con)
@@ -111,6 +139,7 @@ public sealed class Database
                 scheduled_start_time TEXT   NOT NULL DEFAULT '',
                 source_rule_id      INTEGER NULL,
                 source_rule_name    TEXT    NOT NULL DEFAULT '',
+                plugin_binding_json TEXT NOT NULL DEFAULT '[]',
                 is_user_chain       INTEGER NOT NULL DEFAULT 0,
                 user_chain_previous_id INTEGER NULL,
                 user_chain_root_id  INTEGER NULL,
@@ -203,6 +232,7 @@ public sealed class Database
                 record_current_service_only INTEGER NOT NULL DEFAULT 1,
                 record_subtitles INTEGER NOT NULL DEFAULT 1,
                 auto_chain_reservations INTEGER NOT NULL DEFAULT 0,
+                plugin_binding_json TEXT NOT NULL DEFAULT '[]',
                 enabled         INTEGER NOT NULL DEFAULT 1,
                 created_at      TEXT    NOT NULL DEFAULT '',
                 updated_at      TEXT    NOT NULL DEFAULT ''
@@ -387,12 +417,16 @@ public sealed class Database
         EnsureColumn(con, "reservations", "scheduled_start_time","TEXT NOT NULL DEFAULT ''");
         EnsureColumn(con, "reservations", "source_rule_id",     "INTEGER NULL");
         EnsureColumn(con, "reservations", "source_rule_name",   "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(con, "reservations", "plugin_binding_json", "TEXT NOT NULL DEFAULT '[]'");
+        EnsureColumn(con, "keyword_rules", "plugin_binding_json", "TEXT NOT NULL DEFAULT '[]'");
         EnsureColumn(con, "reservations", "is_user_chain",     "INTEGER NOT NULL DEFAULT 0");
         EnsureColumn(con, "reservations", "user_chain_previous_id", "INTEGER NULL");
         EnsureColumn(con, "reservations", "user_chain_root_id", "INTEGER NULL");
         EnsureColumn(con, "reservations", "recording_recovery_chain_id", "TEXT NOT NULL DEFAULT ''");
         EnsureColumn(con, "reservations", "recovery_parent_reservation_id", "INTEGER NULL");
         EnsureColumn(con, "reservations", "data_version", "INTEGER NOT NULL DEFAULT 0");
+        EnsureColumn(con, "reservations", "chain_finalization_receipt", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(con, "reservations", "chain_stop_receipt", "TEXT NOT NULL DEFAULT ''");
         EnsureColumn(con, "reservations", "reservation_intent", "TEXT NOT NULL DEFAULT 'unspecified'");
         EnsureColumn(con, "reservations", "created_through", "TEXT NOT NULL DEFAULT ''");
         EnsureColumn(con, "reservations", "created_by_plugin_id", "TEXT NOT NULL DEFAULT ''");

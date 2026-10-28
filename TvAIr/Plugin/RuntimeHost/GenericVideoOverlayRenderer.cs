@@ -1,5 +1,4 @@
-using System.Collections.Concurrent;
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Globalization;
@@ -18,7 +17,12 @@ internal sealed record VideoOverlayViewerTarget(string ViewerSessionId, long Gen
 /// </summary>
 internal sealed class GenericVideoOverlayRenderer : IDisposable
 {
-    private readonly BlockingCollection<Action> _commands = new();
+    // Each update is a complete scene snapshot. Pending history has no rendering
+    // value: retain the latest update/close per scene while the UI thread is busy.
+    private sealed record PendingSceneCommand(string SceneInstanceId, bool ResetWindow, Action Apply);
+    private readonly Dictionary<string, PendingSceneCommand> _commands = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _commandGate = new();
+    private bool _exitRequested;
     private readonly Dictionary<string, OverlayWindow> _windows = new(StringComparer.OrdinalIgnoreCase);
     private readonly Thread _thread;
     private int _disposed;
@@ -37,7 +41,7 @@ internal sealed class GenericVideoOverlayRenderer : IDisposable
     public void Update(VideoOverlayViewerTarget target, VideoOverlaySceneState scene, IReadOnlyList<VideoOverlayLayerState> layers)
     {
         if (Volatile.Read(ref _disposed) != 0) return;
-        Enqueue(() =>
+        Enqueue(scene.SceneInstanceId, () =>
         {
             if (!_windows.TryGetValue(scene.SceneInstanceId, out var window))
             {
@@ -53,18 +57,30 @@ internal sealed class GenericVideoOverlayRenderer : IDisposable
     public void Close(string sceneInstanceId)
     {
         if (Volatile.Read(ref _disposed) != 0) return;
-        Enqueue(() =>
-        {
-            if (!_windows.Remove(sceneInstanceId, out var window)) return;
-            window.Close();
-            window.Dispose();
-        });
+        EnqueueCore(sceneInstanceId, static () => { }, resetWindow: true);
     }
 
-    private void Enqueue(Action action)
+    private void Enqueue(string sceneInstanceId, Action action)
+        => EnqueueCore(sceneInstanceId, action, resetWindow: false);
+
+    private void EnqueueCore(string sceneInstanceId, Action action, bool resetWindow)
     {
-        try { _commands.Add(action); }
-        catch (InvalidOperationException) { }
+        lock (_commandGate)
+        {
+            if (Volatile.Read(ref _disposed) != 0) return;
+            // A close followed by recreation must still release the previous
+            // window and its expiry/GDI state before applying the newest scene.
+            if (_commands.TryGetValue(sceneInstanceId, out var previous))
+                resetWindow |= previous.ResetWindow;
+            _commands[sceneInstanceId] = new(sceneInstanceId, resetWindow, action);
+        }
+    }
+
+    private void CloseWindow(string sceneInstanceId)
+    {
+        if (!_windows.Remove(sceneInstanceId, out var window)) return;
+        window.Close();
+        window.Dispose();
     }
 
     private void Run()
@@ -72,11 +88,36 @@ internal sealed class GenericVideoOverlayRenderer : IDisposable
         using var timer = new System.Windows.Forms.Timer { Interval = 15 };
         timer.Tick += (_, _) =>
         {
-            while (_commands.TryTake(out var action))
+            PendingSceneCommand[] batch;
+            bool exit;
+            lock (_commandGate)
             {
-                try { action(); }
+                exit = _exitRequested;
+                batch = _commands.Values.ToArray();
+                _commands.Clear();
+            }
+            if (exit)
+            {
+                foreach (var window in _windows.Values.ToArray())
+                {
+                    window.Close();
+                    window.Dispose();
+                }
+                _windows.Clear();
+                Application.ExitThread();
+                return;
+            }
+            foreach (var command in batch)
+            {
+                if (Volatile.Read(ref _disposed) != 0) break;
+                try
+                {
+                    if (command.ResetWindow) CloseWindow(command.SceneInstanceId);
+                    command.Apply();
+                }
                 catch { }
             }
+            if (Volatile.Read(ref _disposed) != 0) return;
             foreach (var window in _windows.Values)
                 window.RefreshTargetAndContent();
         };
@@ -87,20 +128,14 @@ internal sealed class GenericVideoOverlayRenderer : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        Enqueue(() =>
+        lock (_commandGate)
         {
-            foreach (var window in _windows.Values.ToArray())
-            {
-                window.Close();
-                window.Dispose();
-            }
-            _windows.Clear();
-            Application.ExitThread();
-        });
-        _commands.CompleteAdding();
+            _commands.Clear();
+            _exitRequested = true;
+        }
+        // Windows and the timer are released by their owning STA thread.
         if (Thread.CurrentThread != _thread)
             _thread.Join(TimeSpan.FromSeconds(2));
-        _commands.Dispose();
     }
 
     private sealed class OverlayWindow : Form

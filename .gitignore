@@ -10,3 +10,5 @@ obj/
 
 TvAIr/data/
 TvAIr/appsettings.json
+
+/package/

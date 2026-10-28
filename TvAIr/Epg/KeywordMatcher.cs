@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Globalization;
 using System.Text.RegularExpressions;
 using TvAIr.Channel;
@@ -61,6 +61,17 @@ public sealed class KeywordMatcher
     private readonly ChannelServiceAccessPolicy _serviceAccess;
     private readonly IniSettingsService _ini;
     private readonly LogRepository _log;
+    private int _manualChainOptionsPending;
+    private int _inactiveCleanupPending;
+    internal bool HasPendingInactiveCleanup => Volatile.Read(ref _inactiveCleanupPending) != 0;
+    internal bool TakeInactiveCleanupRequest() => Interlocked.Exchange(ref _inactiveCleanupPending, 0) != 0;
+    internal void RestoreInactiveCleanupRequest() => Interlocked.Exchange(ref _inactiveCleanupPending, 1);
+    internal (ChannelServiceAccessSnapshot Channels, IReadOnlyList<TunerProfileDto> Tuners) CaptureInactiveCleanupContext()
+        => (_serviceAccess.Capture(), _ini.GetEffectiveTuners());
+
+    internal bool TakeManualChainOptionsRequest() => Interlocked.Exchange(ref _manualChainOptionsPending, 0) != 0;
+    internal void RestoreManualChainOptionsRequest() => Interlocked.Exchange(ref _manualChainOptionsPending, 1);
+
 
     public KeywordMatcher(IProgramEventSource programEvents, ReservationStore rsvStore, ReservationProjectionMetadataStore projectionMetadataStore, ChannelServiceAccessPolicy serviceAccess, IniSettingsService ini, LogRepository log)
     {
@@ -158,29 +169,13 @@ public sealed class KeywordMatcher
     }
 
 
-    public KeywordRuleReconcileResult ReconcileScheduledReservationsForRule(KeywordRule rule)
+    internal KeywordRuleReconcilePlan PrepareRuleReconciliation(KeywordRule rule,
+        IReadOnlyList<Reservation> existing)
     {
         var result = new KeywordRuleReconcileResult();
-        var existing = _rsvStore.GetAll()
-            .Where(r => r.Source == ReservationSource.Keyword
-                        && r.Status == ReservationStatus.Scheduled
-                        && r.SourceRuleId == rule.Id)
-            .ToList();
-
         if (existing.Count == 0)
-            return result;
-
-        // KEYWORD_RULE_RECORDING_OPTIONS_HANDOFF_INVARIANT:
-        // KeywordRule is the authoring source for automatic-reservation recording options, while
-        // reservation_recording_options is the immutable-at-launch reservation snapshot consumed
-        // by ReservationScheduler/TvAIrEpgRec.  Rule edits must therefore update every still-Scheduled
-        // reservation owned by that rule before matching/removal decisions continue.  Starting,
-        // Recording, Stopping and terminal rows are intentionally excluded by ReservationStore.
-        // This is the single handoff boundary; UI, scheduler and worker must not re-derive the policy.
-        result.RecordingOptionsUpdated = _rsvStore.SyncScheduledKeywordReservationRecordingOptions(
-            rule.Id,
-            new ReservationRecordingOptions(rule.RecordCurrentServiceOnly, rule.RecordSubtitles));
-
+            return new(Array.Empty<Reservation>(), Array.Empty<int>(), 0, 0,
+                string.IsNullOrWhiteSpace(rule.Name) ? TrimRuleLabel(rule.Pattern) : rule.Name);
         var desiredKeys = new HashSet<string>(StringComparer.Ordinal);
         var availableKeys = new HashSet<string>(StringComparer.Ordinal);
         CompiledKeywordRule? compiledRule = null;
@@ -234,11 +229,9 @@ public sealed class KeywordMatcher
             staleIds.Add(reservation.Id);
         }
 
-        result.Removed = _rsvStore.DeleteScheduledKeywordReservationsByIds(rule.Id, staleIds);
-        _rsvStore.UpdateScheduledKeywordReservationRuleName(
-            rule.Id,
-            string.IsNullOrWhiteSpace(rule.Name) ? TrimRuleLabel(rule.Pattern) : rule.Name);
-        return result;
+        var label = string.IsNullOrWhiteSpace(rule.Name) ? TrimRuleLabel(rule.Pattern) : rule.Name;
+        return new(Array.AsReadOnly(existing.Select(r => r.SnapshotForChainRequest()).ToArray()),
+            Array.AsReadOnly(staleIds.ToArray()), result.Preserved, result.PreservedSourceMissing, label);
     }
 
     public int RunMatching()
@@ -279,8 +272,8 @@ public sealed class KeywordMatcher
         var repairedRecordingOptions = _rsvStore.SyncScheduledKeywordReservationRecordingOptionsFromRules();
         if (repairedRecordingOptions > 0)
         {
-            _log.Add("KEYWORD_RECORDING_OPTIONS_SYNC", "KeywordMatcher",
-                $"result=UPDATED reservations={repairedRecordingOptions} source=current_keyword_rules target=scheduled_keyword_reservation_snapshot rule=keyword_rule_recording_options_handoff_contract");
+            _log.Add("KEYWORD_RESERVATION_SNAPSHOT_SYNC", "KeywordMatcher",
+                $"result=UPDATED reservations={repairedRecordingOptions} source=current_keyword_rules target=scheduled_keyword_reservation_snapshot fields=recording_options_and_plugin_bindings rule=keyword_rule_reservation_snapshot_contract");
         }
 #if TVAIR_DEVELOPER_DIAGNOSTICS
         var matcherAllocatedAtEntry = GC.GetAllocatedBytesForCurrentThread();
@@ -320,11 +313,11 @@ public sealed class KeywordMatcher
         // state=0 だけでなく .ch2 に存在しないサービスも「ユーザーが有効化していない」ため、
         // 自動検索予約は現在利用可能なサービスだけを対象にする。
         // 一方、.ch2では有効だがChSet経路だけ一時的に解決できないActiveRouteUnavailableは削除しない。
-        var removedInactiveScheduled = ReconcileInactiveScheduledKeywordReservations(channelMap);
-        if (disabledFutureCount > 0 || routeUnavailableFutureCount > 0 || unknownFutureCount > 0 || removedInactiveScheduled > 0)
+        var inactiveScheduledPending = ObserveInactiveScheduledKeywordReservations(channelMap);
+        if (disabledFutureCount > 0 || routeUnavailableFutureCount > 0 || unknownFutureCount > 0 || inactiveScheduledPending > 0)
         {
             _log.Add("KEYWORD_MATCH_SERVICE_ELIGIBILITY", "KeywordMatcher",
-                $"result=FILTERED safeFuture={safeFutureEvents.Count} activeFuture={events.Count} disabledFuture={disabledFutureCount} activeRouteUnavailableFuture={routeUnavailableFutureCount} unknownFuture={unknownFutureCount} removedInactiveScheduled={removedInactiveScheduled} identity=nid_tsid_sid activationSource=tvtest_ch2_state routeSource=chset action=keep_epg_filter_auto_search_reservation_recording rule=keyword_service_activation_contract");
+                $"result=FILTERED safeFuture={safeFutureEvents.Count} activeFuture={events.Count} disabledFuture={disabledFutureCount} activeRouteUnavailableFuture={routeUnavailableFutureCount} unknownFuture={unknownFutureCount} inactiveScheduledPending={inactiveScheduledPending} identity=nid_tsid_sid activationSource=tvtest_ch2_state routeSource=chset action=keep_epg_filter_auto_search_reservation_recording rule=keyword_service_activation_contract");
         }
 
         // ServiceId単独をキーにすると地上波とBS/CSでServiceIdが衝突した際に
@@ -751,7 +744,9 @@ public sealed class KeywordMatcher
 
         }
 
-        ApplyAutomaticKeywordChains(rules, now);
+        // Only request chain-option processing. The common allocation route owns
+        // topology mutation after matching/sync and duplicate suppression.
+        Interlocked.Exchange(ref _manualChainOptionsPending, 1);
 
         // release_contract KeywordMatcherPostCommitConservation:
         // Reclassify only the pre-commit pending occurrences against the authoritative state after
@@ -872,119 +867,6 @@ public sealed class KeywordMatcher
 
     private bool IsPastNewKeywordAdmissionBoundary(ProjectedProgramEvent ev, DateTime now)
         => now >= GetKeywordAdmissionBoundary(ev);
-
-    private void ApplyAutomaticKeywordChains(IReadOnlyList<KeywordRule> rules, DateTime now)
-    {
-        // AUTOMATIC_KEYWORD_CHAIN_ASSIST_CONTRACT:
-        // This is not a new chain policy. It automates explicit chain topology construction only
-        // for Keyword rules that opted in. A contiguous existing Scheduled sequence is validated
-        // and committed atomically before the normal common allocation runs, so a transient
-        // pre-chain conflict cannot split the intended topology halfway through construction.
-        // Priority, margins, conflict propagation/restoration, cancellation, Wake, PreRec and
-        // recording execution remain owned by the existing chain/allocation contracts.
-        if (!_ini.UserChainRecordingEnabled)
-        {
-            var requested = rules.Count(r => r.AutoChainReservations);
-            if (requested > 0)
-                _log.Add("KEYWORD_AUTO_CHAIN", "KeywordMatcher",
-                    $"result=DISABLED requestedRules={requested} reason=global_chain_feature_disabled required=later_program_priority_and_chain_recording action=preserve_rule_preference_no_topology_mutation rule=automatic_keyword_chain_assist_contract");
-            return;
-        }
-
-        var enabledRuleIds = rules
-            .Where(r => r.Enabled && r.AutoChainReservations)
-            .Select(r => r.Id)
-            .ToHashSet();
-        if (enabledRuleIds.Count == 0) return;
-
-        var reservations = _rsvStore.GetAll()
-            .Where(r => r.Source == ReservationSource.Keyword
-                && r.SourceRuleId.HasValue
-                && enabledRuleIds.Contains(r.SourceRuleId.Value)
-                && r.IsEnabled
-                && r.Status == ReservationStatus.Scheduled
-                && r.EndTime > now)
-            .OrderBy(r => r.SourceRuleId)
-            .ThenBy(r => r.NetworkId)
-            .ThenBy(r => r.TransportStreamId)
-            .ThenBy(r => r.ServiceId)
-            .ThenBy(r => r.StartTime)
-            .ThenBy(r => r.Id)
-            .ToList();
-
-        var attempted = 0;
-        var applied = 0;
-        var alreadyLinked = 0;
-        var rejected = 0;
-        var sequences = 0;
-        var samples = new List<string>();
-
-        foreach (var group in reservations.GroupBy(r => new
-                 {
-                     RuleId = r.SourceRuleId!.Value,
-                     r.NetworkId,
-                     r.TransportStreamId,
-                     r.ServiceId
-                 }))
-        {
-            var ordered = group.OrderBy(r => r.StartTime).ThenBy(r => r.Id).ToList();
-            var run = new List<Reservation>();
-
-            void FlushRun()
-            {
-                if (run.Count < 2)
-                {
-                    run.Clear();
-                    return;
-                }
-
-                sequences++;
-                var pairCount = run.Count - 1;
-                attempted += pairCount;
-                var mutation = _rsvStore.PromoteExistingScheduledUserChainSequence(
-                    run.Select(x => x.Id).ToArray(),
-                    featureEnabled: true);
-
-                if (mutation.Applied)
-                {
-                    applied += mutation.AppliedPairs;
-                    alreadyLinked += mutation.AlreadyLinkedPairs;
-                }
-                else
-                {
-                    rejected += pairCount;
-                    if (samples.Count < 12)
-                        samples.Add($"rule={group.Key.RuleId}:R{run[0].Id}->R{run[^1].Id}:{mutation.Reason}");
-                }
-
-                run.Clear();
-            }
-
-            foreach (var reservation in ordered)
-            {
-                if (run.Count == 0)
-                {
-                    run.Add(reservation);
-                    continue;
-                }
-
-                var predecessor = run[^1];
-                if (predecessor.EndTime == reservation.StartTime)
-                {
-                    run.Add(reservation);
-                    continue;
-                }
-
-                FlushRun();
-                run.Add(reservation);
-            }
-
-            FlushRun();
-        }
-
-        _log.Add("KEYWORD_AUTO_CHAIN", "KeywordMatcher",
-            $"result=OK rules={enabledRuleIds.Count} candidates={reservations.Count} sequences={sequences} attempted={attempted} applied={applied} alreadyLinked={alreadyLinked} rejected={rejected} samples=[{string.Join(',', samples)}] source=KeywordRuleId+service_identity+exact_adjacency operation=atomic_existing_scheduled_sequence priorityMutation=none marginMutation=none conflictMutation=none cancellationMutation=none finalConflictOwner=common_allocation rule=automatic_keyword_chain_assist_contract");
-    }
 
     private static bool IsRuleExpired(KeywordRule rule, DateTime now)
         => !string.IsNullOrWhiteSpace(rule.ExpiresOn)
@@ -1134,20 +1016,16 @@ public sealed class KeywordMatcher
             .Where(e => IsRecordingServiceAvailable(channelMap, e.NetworkId, e.TransportStreamId, e.ServiceId))
             .ToList();
 
-    private int ReconcileInactiveScheduledKeywordReservations(ChannelServiceAccessSnapshot channelMap)
+    // This method runs under the matcher gate. Never enter the allocation route or
+    // mutate topology here: all direct callers hand off after RunMatching returns.
+    private int ObserveInactiveScheduledKeywordReservations(ChannelServiceAccessSnapshot channelMap)
     {
-        var inactive = _rsvStore.GetAll()
-            .Where(r => r.Source == ReservationSource.Keyword
-                        && r.Status == ReservationStatus.Scheduled
-                        && r.SourceRuleId.HasValue
-                        && !channelMap.IsEnabledForConfiguredRecordingTuners(r.NetworkId, r.TransportStreamId, r.ServiceId, _ini.GetEffectiveTuners()))
-            .GroupBy(r => r.SourceRuleId!.Value)
-            .ToList();
-
-        var removed = 0;
-        foreach (var group in inactive)
-            removed += _rsvStore.DeleteScheduledKeywordReservationsByIds(group.Key, group.Select(r => r.Id).ToArray());
-        return removed;
+        var tuners = _ini.GetEffectiveTuners();
+        var pending = _rsvStore.GetAll().Count(r => r.Source == ReservationSource.Keyword
+            && r.Status == ReservationStatus.Scheduled && r.SourceRuleId.HasValue
+            && !channelMap.IsEnabledForConfiguredRecordingTuners(r.NetworkId, r.TransportStreamId, r.ServiceId, tuners));
+        if (pending > 0) RestoreInactiveCleanupRequest();
+        return pending;
     }
 
     private static Dictionary<(ushort Nid, ushort Tsid, ushort Sid), string> BuildServiceNameMap(IEnumerable<ChannelTarget> targets)

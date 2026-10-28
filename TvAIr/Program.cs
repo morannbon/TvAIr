@@ -407,6 +407,7 @@ builder.Services.AddSingleton<ReservationMutationJournal>();
 builder.Services.AddSingleton<ReservationMutationSideEffectProjection>();
 builder.Services.AddSingleton<PluginTypedEventHub>();
 builder.Services.AddSingleton<RecordingResultStore>();
+builder.Services.AddHostedService<RecordingFileCatalogService>();
 builder.Services.AddSingleton<PlaybackProgressStore>();
 builder.Services.AddSingleton<NormalEpgWaveOccupation>();
 builder.Services.AddSingleton<ReservationStore>();
@@ -414,6 +415,7 @@ builder.Services.AddSingleton<ReservationProjectionMetadataStore>();
 builder.Services.AddSingleton<ReservationProjectionPromotionService>();
 builder.Services.AddSingleton<ProgramProjectionReservationSyncService>();
 builder.Services.AddSingleton<ReservationAllocationRouteService>();
+builder.Services.AddSingleton<ScheduledChainEditAdmission>();
 builder.Services.AddSingleton<ChainLifecycleCoordinator>();
 builder.Services.AddSingleton<SystemEpgResponsibilityPlanService>();
 builder.Services.AddSingleton<ReservationPresentationService>();
@@ -519,7 +521,9 @@ builder.Services.AddSingleton<ReservationScheduler>(sp =>
         sp.GetRequiredService<NormalEpgWaveOccupation>(),
         sp.GetRequiredService<ExternalTunerLeaseService>(),
         sp.GetRequiredService<ApplicationOperationGate>(),
-        sp.GetRequiredService<BroadcastTimeReference>()));
+        sp.GetRequiredService<BroadcastTimeReference>(),
+        sp.GetRequiredService<ScheduledChainEditAdmission>()));
+builder.Services.AddSingleton<IScheduledChainRuntimeProtectionSource>(sp => sp.GetRequiredService<ReservationScheduler>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ReservationScheduler>());
 // 録画due監視と同じ正本時刻でPower Requestを先取りし、EPG等の先行owner解放との隙間を作らない。
 builder.Services.AddHostedService<RecordingPowerResponsibilityGuardService>();
@@ -553,6 +557,8 @@ builder.Services.AddSingleton<PluginOperationalReadService>();
 builder.Services.AddSingleton<PluginScopedServiceFactory>();
 builder.Services.AddSingleton<PluginExternalJobHost>();
 builder.Services.AddHostedService<PluginLoader>();
+// Reverse stop order: release managed Viewer ownership before Plugin teardown; leave TVTest running.
+builder.Services.AddHostedService(sp => sp.GetRequiredService<ViewerOperationService>());
 
 // ─── JSON ────────────────────────────────────────────────────────
 builder.Services.ConfigureHttpJsonOptions(opts =>
@@ -857,7 +863,7 @@ app.MapGet("/network-login", (HttpContext context) =>
     context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'self'; base-uri 'none'";
     var html = $$$"""
 <!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>TvAIr 接続</title><link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.13"></head><body class="tvair-generated-login"><main><h1>TvAIrへ接続</h1><form id="login"><label for="password">接続用パスワード</label><input id="password" type="password" autocomplete="current-password" required minlength="12"><button type="submit">接続</button><div id="message" class="message" role="status"></div></form></main>
+<title>TvAIr 接続</title><link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.14"></head><body class="tvair-generated-login"><main><h1>TvAIrへ接続</h1><form id="login"><label for="password">接続用パスワード</label><input id="password" type="password" autocomplete="current-password" required minlength="12"><button type="submit">接続</button><div id="message" class="message" role="status"></div></form></main>
 <script>
 const form=document.getElementById('login'),password=document.getElementById('password'),message=document.getElementById('message');
 form.addEventListener('submit',async e=>{e.preventDefault();message.textContent='確認しています…';try{const r=await fetch('/api/network-auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:password.value}),credentials:'same-origin'});const j=await r.json().catch(()=>({}));if(!r.ok){message.textContent=j.message||'接続できませんでした。';return;}location.replace({{{returnUrlJson}}});}catch{message.textContent='接続できませんでした。';}});
@@ -982,6 +988,132 @@ app.MapGet("/api/plugins", (PluginRegistry registry) =>
         })
         .ToList();
     return Results.Ok(new { plugins, source = "runtime.descriptor" });
+});
+
+// Isolated ProgramGuide immediate-view branch. Plugin runtime/window and Viewer operation
+// remain owned by their existing Host contracts; no recording/chain code is involved.
+app.MapPost("/api/program-guide/live-view-capability", (
+    List<LiveProgramViewerRequest> services, PluginRegistry registry,
+    ChannelServiceAccessPolicy serviceAccess, ViewerOperationService viewerOperations,
+    PluginDefaultMenuActionService menuActions, PluginBoundaryGate boundaryGate, HttpRequest http) =>
+{
+    var eligible = new List<string>();
+    var aircon = registry.FindRuntimePlugin("aircon.basic");
+    if (aircon is not ITvAirRuntimeUiPlugin
+        || !boundaryGate.HasPermission(aircon, PluginPermission.ControlViewer)
+        || !menuActions.ResolveActions("liveViewCapability").Any(action =>
+            string.Equals(action.PluginId, "aircon.basic", StringComparison.OrdinalIgnoreCase)
+            && action.Kind.Equals(PluginMenuActionKinds.ToolWindow, StringComparison.OrdinalIgnoreCase))
+        || !boundaryGate.CheckWindow(aircon, "openWindow", http.Path.Value ?? string.Empty).Allowed)
+        return Results.Ok(new { available = false, eligible });
+    var access = serviceAccess.Capture();
+    foreach (var item in (services ?? new List<LiveProgramViewerRequest>()).Take(128))
+    {
+        if (item is null || item.NetworkId <= 0 || item.NetworkId > ushort.MaxValue
+            || item.TransportStreamId <= 0 || item.TransportStreamId > ushort.MaxValue
+            || item.ServiceId <= 0 || item.ServiceId > ushort.MaxValue) continue;
+        var nid = (ushort)item.NetworkId;
+        var tsid = (ushort)item.TransportStreamId;
+        var sid = (ushort)item.ServiceId;
+        if (!access.IsAvailableForDisplay(nid, tsid, sid)) continue;
+        var prepared = viewerOperations.Prepare(new ViewerOperationPreparationRequest(
+            "aircon.basic", "ensureTuned", "auto", null, null, nid, tsid, sid,
+            PreserveViewerWindowState: true, ViewerActivation: "activate", EmitDiagnosticLog: false));
+        if (prepared.Success && prepared.Plan is not null)
+            eligible.Add($"{nid}:{tsid}:{sid}");
+    }
+    return Results.Ok(new { available = true, eligible });
+});
+
+app.MapPost("/api/program-guide/live-view", async (
+    LiveProgramViewerRequest request, PluginRegistry registry, ChannelServiceAccessPolicy serviceAccess,
+    ViewerOperationService viewerOperations, ViewerOperationPreemptionHub preemption,
+    PluginDefaultMenuActionService menuActions, PluginWindowSessionStore windows,
+    PluginToolWindowHostService toolWindows, PluginBoundaryGate boundaryGate,
+    HttpRequest http, LogRepository log, IProgramEventSource programEvents) =>
+{
+    var aircon = registry.FindRuntimePlugin("aircon.basic");
+    if (aircon is not ITvAirRuntimeUiPlugin || !boundaryGate.HasPermission(aircon, PluginPermission.ControlViewer))
+        return Results.BadRequest(new { success = false, errorCode = "airconUnavailable", message = "AIrConを利用できません。" });
+    if (request is null || request.NetworkId <= 0 || request.NetworkId > ushort.MaxValue
+        || request.TransportStreamId <= 0 || request.TransportStreamId > ushort.MaxValue
+        || request.ServiceId <= 0 || request.ServiceId > ushort.MaxValue)
+        return Results.BadRequest(new { success = false, errorCode = "invalidService", message = "放送サービスが不正です。" });
+    var nid = (ushort)request.NetworkId;
+    var tsid = (ushort)request.TransportStreamId;
+    var sid = (ushort)request.ServiceId;
+    var access = serviceAccess.Capture();
+    if (!access.IsAvailableForDisplay(nid, tsid, sid))
+        return Results.BadRequest(new { success = false, errorCode = "serviceUnavailable", message = access.GetRejectReason(nid, tsid, sid) });
+    if (request.EventId < 0 || request.EventId > ushort.MaxValue)
+        return Results.BadRequest(new { success = false, errorCode = "invalidEvent", message = "番組の識別情報が不正です。" });
+    var onAirEvent = programEvents.GetByEventKey(nid, tsid, sid, (ushort)request.EventId);
+    if (!ProgramGuideLiveViewContract.IsOnAir(request, onAirEvent, DateTime.Now))
+        return Results.BadRequest(new { success = false, errorCode = "eventNotOnAir", message = "現在放送中の番組ではありません。番組表を更新してください。" });
+    // Preflight before opening an AIrCon window: it must be a usable Viewing profile.
+    var prepared = viewerOperations.Prepare(new ViewerOperationPreparationRequest(
+        "aircon.basic", "ensureTuned", "auto", null, null, nid, tsid, sid,
+        PreserveViewerWindowState: true, ViewerActivation: "activate", EmitDiagnosticLog: false));
+    if (!prepared.Success || prepared.Plan is null)
+        return Results.BadRequest(new { success = false, errorCode = prepared.ErrorCode, message = prepared.Message });
+
+    // Runtime lifecycle is Host-started at plugin registration; its ToolWindow may be
+    // closed/hidden. Open or reuse it using the very same descriptor/menu route as the
+    // ordinary AIrCon menu. Do NOT launch Viewer until the Host has accepted the window.
+    var menuAction = menuActions.ResolveActions("liveView").FirstOrDefault(action =>
+        string.Equals(action.PluginId, "aircon.basic", StringComparison.OrdinalIgnoreCase)
+        && action.Kind.Equals(PluginMenuActionKinds.ToolWindow, StringComparison.OrdinalIgnoreCase));
+    if (menuAction is null)
+        return Results.BadRequest(new { success = false, errorCode = "airconWindowUnavailable", message = "AIrConの起動操作が利用できません。" });
+    var boundary = boundaryGate.CheckWindow(aircon, "openWindow", http.Path.Value ?? string.Empty);
+    if (!boundary.Allowed)
+        return Results.BadRequest(new { success = false, errorCode = "airconWindowDenied", message = "AIrConの起動が許可されていません。" });
+
+    var existing = windows.ListByPluginId("aircon.basic").FirstOrDefault(session =>
+        !session.IsClosed
+        && string.Equals(session.RouteSegment, menuAction.RouteSegment, StringComparison.OrdinalIgnoreCase)
+        && toolWindows.IsHostAlive(session.WindowId));
+    var windowId = existing?.WindowId;
+    if (existing is null)
+    {
+        var route = menuAction.RouteSegment;
+        var requestWindow = new PluginWindowRequest
+        {
+            Action = "openWindow", PluginId = "aircon.basic", RouteSegment = route,
+            Title = string.IsNullOrWhiteSpace(menuAction.Label) ? aircon.Descriptor.DisplayName : menuAction.Label,
+            Resizable = true, Movable = true, ContentRoute = $"/plugin/{Uri.EscapeDataString(route)}",
+            ReuseExisting = true, ActivateExisting = true, ResponseMode = "hostHandled",
+            Payload = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["source"] = "programGuideLiveView", ["defaultMenuAction"] = "true",
+                ["showInTaskbar"] = menuAction.ShowInTaskbar ? "true" : "false",
+                ["runtimeActionId"] = menuAction.ActionId,
+                ["windowDefinitionId"] = menuAction.WindowDefinitionId,
+                ["surfaceDefinitionId"] = menuAction.SurfaceDefinitionId
+            }
+        };
+        var opened = OpenOrActivatePluginToolWindowUnified(aircon, "aircon.basic", route,
+            requestWindow, "programGuideLiveView", "default_menu_toolwindow", http, windows, toolWindows, log);
+        windowId = opened.Session.WindowId;
+    }
+    if (windowId is null || !await toolWindows.WaitForHostReadyAsync(windowId, TimeSpan.FromSeconds(10), http.HttpContext.RequestAborted))
+    {
+        log.Add("PROGRAM_GUIDE_LIVE_VIEW", onAirEvent!.Title, $"result=FAILED stage=window_ready errorCode=airconStartFailed windowId={windowId} notification=silent");
+        return Results.BadRequest(new { success = false, errorCode = "airconStartFailed" });
+    }
+    if (!ProgramGuideLiveViewContract.IsOnAir(request,
+        programEvents.GetByEventKey(nid, tsid, sid, (ushort)request.EventId), DateTime.Now))
+        return Results.BadRequest(new { success = false, errorCode = "eventNotOnAir", message = "番組が終了しました。番組表を更新してください。" });
+    // The Host owns profile gate/preemption, Viewer session reuse and physical tuner lease.
+    var operationId = "program-guide-live-view:" + Guid.NewGuid().ToString("N");
+    var result = viewerOperations.EnsureTunedHostManaged(
+        new ViewerOperationEnsureTunedRequest("aircon.basic", prepared.Plan.Profile.Id, nid, tsid, sid,
+            PreserveViewerWindowState: true, ViewerActivation: "activate",
+            SourceDisplayName: "ProgramGuide", ActionName: "liveView"),
+        () => preemption.Preempt(prepared.Plan.Profile.Id, operationId, "ProgramGuideLiveView", "aircon.basic", null));
+    log.Add("PROGRAM_GUIDE_LIVE_VIEW", onAirEvent!.Title, $"result={(result.Success ? "OK" : "FAILED")} errorCode={result.ErrorCode} viewerProfile={result.ViewerProfileId} windowHostAlive=True route=common_viewer_operation");
+    return Results.Ok(new { success = result.Success, result.ErrorCode, result.Message,
+        result.ViewerProfileId, result.ViewerSessionId, result.State });
 });
 
 app.MapGet("/api/plugins/ui", (PluginRegistry registry) =>
@@ -1968,7 +2100,7 @@ static IResult RenderPluginWindowHost(string windowId, HttpRequest http, PluginW
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{title}}</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.13">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.14">
 </head>
 <body class="tvair-plugin-window-page">
 <div class="{{hostClass}}" data-window-id="{{encodedWindowId}}" data-window-revision="{{initialRevision}}" data-tool-host="{{toolHost.ToString().ToLowerInvariant()}}">
@@ -2365,10 +2497,10 @@ static IResult RenderPluginVersionInfoPage(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-notification.css?v=1.2.13">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.2.14">
 </head>
 <body>
-<script src="/tvair-notification.js?v=1.2.13"></script>
+<script src="/tvair-notification.js?v=1.2.14"></script>
 <script>
 document.addEventListener('DOMContentLoaded',function(){
   if(window.TvAIrNotify){ TvAIrNotify({ title:'{{safeTitle}}', message:'{{safeVersion}}', onOk:function(){ location.replace('{{safeReturn}}'); } }); }
@@ -2422,7 +2554,7 @@ static IResult RenderPluginDefaultMenuInfo(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeName}} 情報</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.13">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.14">
 </head>
 <body class="tvair-plugin-info-page"><div class="card"><h1>{{safeName}} 情報</h1><div class="row"><div class="k">Version</div><div class="v">{{safeVersion}}</div></div><div class="row"><div class="k">Route</div><div class="v">{{safeRoute}}</div></div><div class="row"><div class="k">Action</div><div class="v">{{safeKind}}</div></div><p>{{safeDescription}}</p><a class="button" href="/">番組表へ戻る</a></div></body>
 </html>
@@ -2443,7 +2575,7 @@ static IResult PluginHtmlMessage(string title, string message, int statusCode, s
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.13">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.14">
 </head>
 <body class="tvair-message-page"><div class="card"><h1>{{safeTitle}}</h1><p>{{safeMessage}}</p><a class="button" href="{{safeHref}}">{{safeLinkText}}</a></div></body>
 </html>
@@ -2503,7 +2635,7 @@ static string BuildPluginFloatingButtonsHtml(RuntimeUiRenderContext context, str
     if (normalized.Length == 0) return string.Empty;
 
     var sb = new System.Text.StringBuilder();
-    sb.Append("<link rel=\"stylesheet\" href=\"/tvair-generated-surfaces.css?v=1.2.13\">");
+    sb.Append("<link rel=\"stylesheet\" href=\"/tvair-generated-surfaces.css?v=1.2.14\">");
 
     foreach (var group in normalized.GroupBy(x => x.Item.Position))
     {
@@ -2671,6 +2803,32 @@ static IResult BuildPluginOwnedActionResponse(RuntimeUiActionResult result, stri
     {
         result.FloatingLabel = NormalizePluginFloatingLabel(result.FloatingLabel, null, correlationId);
     }
+    var patchSession = windows.Get(NormalizePluginWindowId(windowId));
+    var requestsStatePatch = RuntimeUiPatchContract.ShouldApplyActionPatches(responseMode,
+        result.RefreshRequested, result.UiPatches?.Count ?? 0, patchSession?.RefreshMode);
+    if (runtimeUiKind == TvAIrPlugin.Runtime.RuntimeUiKind.ToolWindow && requestsStatePatch && toolWindows is not null)
+    {
+        var requestedCount = result.UiPatches?.Count ?? 0;
+        var patches = NormalizeRuntimeUiPatches(result.UiPatches);
+        var applied = requestedCount == 0 && result.RefreshRequested
+            ? PluginToolWindowStatePatchHostResult.Failed(windowId, requestedCount, 0, "refresh_requested_without_patches")
+            : requestedCount > 0 && patches.Count == 0
+            ? PluginToolWindowStatePatchHostResult.Failed(windowId, requestedCount, 0, "no_valid_patches")
+            : toolWindows.ApplyStatePatch(windowId, patches, 0, actionResult: true);
+        log.Add("PLUGIN_RUNTIME_UI_ACTION_PATCH", pluginName,
+            $"action={SafePluginActionValue(action)} windowId={SafePluginActionValue(windowId)} requested={requestedCount} normalized={patches.Count} applied={applied.Applied} reason={SafePluginActionValue(applied.Diagnostics)} source=action_result rule=runtime_ui_patch_common_owner_contract");
+        if (applied.Applied || applied.Diagnostics == "window_hidden_deferred")
+        {
+            result.UiPatches = Array.Empty<RuntimeUiPatch>();
+            return feedbackRequested && http?.Headers["Accept"].ToString().Contains("application/json", StringComparison.OrdinalIgnoreCase) == true
+                ? Results.Json(result) : Results.NoContent();
+        }
+        // Re-render only through the existing content-refresh path; never inject a second Plugin route.
+        responseMode = "refreshWindow";
+        result.UiPatches = Array.Empty<RuntimeUiPatch>();
+        log.Add("PLUGIN_RUNTIME_UI_ACTION_PATCH_FALLBACK", pluginName,
+            $"action={SafePluginActionValue(action)} windowId={SafePluginActionValue(windowId)} reason={SafePluginActionValue(applied.Diagnostics)} fallback=content_refresh rule=runtime_ui_patch_common_owner_contract");
+    }
     if (responseMode.Equals("refreshWindow", StringComparison.OrdinalIgnoreCase))
     {
         if (runtimeUiKind == TvAIrPlugin.Runtime.RuntimeUiKind.Page)
@@ -2695,7 +2853,7 @@ static IResult BuildPluginOwnedActionResponse(RuntimeUiActionResult result, stri
             log.Add("PLUGIN_ACTION_RESPONSE_CONTRACT", pluginName, $"action={SafePluginActionValue(action)} result=NO_REFRESH declaredRefreshMode=None windowId={SafePluginActionValue(resolvedWindowId)} rule=runtime_descriptor_refresh_mode_contract");
             return Results.Json(result);
         }
-        if (declaredRefreshMode == TvAIrPlugin.Windows.PluginWindowRefreshMode.StatePatch)
+        if (declaredRefreshMode == TvAIrPlugin.Windows.PluginWindowRefreshMode.StatePatch && !requestsStatePatch)
         {
             var normalizedPatches = NormalizeRuntimeUiPatches(result.UiPatches);
             result.UiPatches = normalizedPatches;
@@ -2717,6 +2875,10 @@ static IResult BuildPluginOwnedActionResponse(RuntimeUiActionResult result, stri
             return Results.Json(result);
         }
 
+        // Standard form POST/303 must capture through the same Host state owner as API refresh.
+        var navigationPreparation = toolWindows?.ApplySession(session.WindowId, session, prepareNavigation: true);
+        log.Add("PLUGIN_TOOL_WINDOW_NAVIGATION_PREPARE", pluginName,
+            $"action={SafePluginActionValue(action)} result={navigationPreparation?.Diagnostics ?? "host_unavailable"} windowId={SafePluginActionValue(session.WindowId)} revision={session.Revision} preserveInteractionState={session.PreserveInteractionState} preserveScroll={preserveScroll} source=action_redirect rule=runtime_tool_window_interaction_state_contract");
         var contentRoute = BuildHostManagedPluginContentRoute(session.ContentRoute, session.WindowId, session.Revision);
         log.Add("PLUGIN_ACTION", pluginName, $"action={SafePluginActionValue(action)} responseMode=refreshWindow result=REDIRECT windowId={SafePluginActionValue(session.WindowId)} target=content preserveScroll={preserveScroll} revision={session.Revision} contentRoute={SafePluginActionValue(contentRoute)} rule=runtime_ui_action_result_refresh_contract");
         return PluginSeeOther(contentRoute);
@@ -2903,7 +3065,7 @@ static async Task<IResult> HandlePluginActionDispatchAsync(
                 RequestedAt = DateTime.Now
             },
             http.HttpContext.RequestAborted);
-        log.Add("PLUGIN_ACTION", pluginName, $"action={SafePluginActionValue(action)} interactionId={SafePluginActionValue(safeEventInteractionId)} result={(pluginResult.Succeeded ? "OK" : "PLUGIN_DECLINED")} route={SafePluginActionValue(route)} responseMode={SafePluginActionValue(responseMode)} endpoint={SafePluginActionValue(http.Path.Value)} rule=plugin_owned_action_dispatch");
+        log.Add("PLUGIN_ACTION", pluginName, $"action={SafePluginActionValue(action)} interactionId={SafePluginActionValue(safeEventInteractionId)} result={(pluginResult.Succeeded ? "OK" : "PLUGIN_DECLINED")} errorCode={SafePluginActionValue(pluginResult.ErrorCode)} route={SafePluginActionValue(route)} responseMode={SafePluginActionValue(responseMode)} endpoint={SafePluginActionValue(http.Path.Value)} rule=plugin_owned_action_dispatch");
         var effectiveRefreshTarget = pluginResult.RefreshRequested
             ? NormalizePluginWindowRefreshTarget(pluginResult.RefreshTarget)
             : requestedRefreshTarget;
@@ -2918,7 +3080,7 @@ static async Task<IResult> HandlePluginActionDispatchAsync(
             : responseMode;
         var effectiveRefreshAfter = pluginResult.RefreshRequested || requestedRefreshAfter;
         log.Add("PLUGIN_RUNTIME_UI_ACTION_REFRESH_CONTRACT", pluginName,
-            $"action={SafePluginActionValue(action)} result={(pluginResult.RefreshRequested ? "PLUGIN_REQUESTED" : "REQUEST_FALLBACK")} surface={SafePluginActionValue(actionUiKind?.ToString())} responseMode={SafePluginActionValue(effectiveResponseMode)} windowId={SafePluginActionValue(requestedWindowId)} refreshTarget={SafePluginActionValue(effectiveRefreshTarget)} preserveScroll={effectivePreserveScroll} contentRoute={SafePluginActionValue(effectiveContentRoute)} rule=runtime_ui_action_result_refresh_contract");
+            $"action={SafePluginActionValue(action)} result={(pluginResult.RefreshRequested ? "PLUGIN_REQUESTED" : "REQUEST_VALUES")} surface={SafePluginActionValue(actionUiKind?.ToString())} responseMode={SafePluginActionValue(effectiveResponseMode)} windowId={SafePluginActionValue(requestedWindowId)} refreshTarget={SafePluginActionValue(effectiveRefreshTarget)} preserveScroll={effectivePreserveScroll} refreshAfter={effectiveRefreshAfter} requestedResponseMode={SafePluginActionValue(responseMode)} requestedPatchCount={pluginResult.UiPatches?.Count ?? 0} refreshDecisionSource={(pluginResult.RefreshRequested ? "plugin_result" : "request_values")} contentRoute={SafePluginActionValue(effectiveContentRoute)} rule=runtime_ui_action_result_refresh_contract");
         return pluginResult.Succeeded
             ? BuildPluginOwnedActionResponse(pluginResult, effectiveResponseMode, requestedWindowId, effectiveRefreshTarget, effectivePreserveScroll, windows, GetPluginActionIdentity(plugin), log, pluginName, action, actionUiKind, effectiveRefreshAfter, toolWindows, http, effectiveContentRoute, feedbackRequested, feedbackCorrelationId)
             : BuildPluginActionDispatchError(pluginResult, effectiveResponseMode, requestedWindowId, StatusCodes.Status400BadRequest, feedbackRequested, feedbackCorrelationId);
@@ -3533,16 +3695,16 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; media-src 'self' data:">
 <title>{{{{safeTitle}}}} - TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.13">
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.13">
-<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.2.13">
-<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.13">
-<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.2.13">
-<link rel="stylesheet" href="/tvair-notification.css?v=1.2.13">
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.13">
-<link rel="stylesheet" href="/tvair-settings-host.css?v=1.2.13">
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.14">
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.14">
+<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.2.14">
+<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.14">
+<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.2.14">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.2.14">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.14">
+<link rel="stylesheet" href="/tvair-settings-host.css?v=1.2.14">
 {{{{developerThemeDiagnosticScript}}}}
-<script src="/tvair-theme.js?v=1.2.13"></script>
+<script src="/tvair-theme.js?v=1.2.14"></script>
 </head>
 <body class="tvair-non-program-page tvair-plugin-shell-page {{{{themeClass}}}}{{{{contentOnlyClass}}}}" data-plugin-route="{{{{safeRoute}}}}" data-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme="{{{{safeSelectedTheme}}}}" data-tvair-selected-theme="{{{{safeSelectedTheme}}}}" data-tvair-effective-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme-generation="{{{{safeThemeGeneration}}}}" data-tvair-theme-revision="{{{{themeRevision}}}}" data-tvair-theme-scope="all" data-tvair-theme-update-mode="{{{{themeUpdateModeToken}}}}">
 <div id="nav">
@@ -3564,11 +3726,11 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
   </main>
 </div>
 {{{{themeHotApplyScriptTag}}}}
-<script src="/tvair-notification.js?v=1.2.13"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.13"></script>
-<script src="/tvair-safe-event-host.js?v=1.2.13"></script>
-<script src="/tvair-menu-spine.js?v=1.2.13"></script>
-<script src="/tvair-settings-host.js?v=1.2.13"></script>
+<script src="/tvair-notification.js?v=1.2.14"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.14"></script>
+<script src="/tvair-safe-event-host.js?v=1.2.14"></script>
+<script src="/tvair-menu-spine.js?v=1.2.14"></script>
+<script src="/tvair-settings-host.js?v=1.2.14"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -3725,8 +3887,7 @@ function tvairCompleteActionFeedback(el,eventName,action,body,httpOk){
   tvairShowFloatingLabel(body,el,eventName,action);
   tvairClientBeacon(success?'feedback_succeeded':(nochange?'feedback_nochange':(cancelled?'feedback_cancelled':'feedback_failed')),eventName,action,el);
 }
-function tvairApplyUiPatches(patches){if(!patches||typeof patches.length==='undefined')return;for(var i=0;i<patches.length&&i<64;i++){var p=patches[i]||{};var id=p.elementId||p.ElementId||'';if(!id)continue;var target=document.getElementById(id);if(!target)continue;var text=(typeof p.textContent!=='undefined')?p.textContent:p.TextContent;if(text!==null&&typeof text!=='undefined'){try{target.textContent=String(text);}catch(_){target.innerText=String(text);}}var cls=(typeof p.className!=='undefined')?p.className:p.ClassName;if(cls!==null&&typeof cls!=='undefined')target.className=String(cls);var remove=p.removeClasses||p.RemoveClasses||[];for(var r=0;r<remove.length;r++){var rc=String(remove[r]||'');if(!rc)continue;if(target.classList)target.classList.remove(rc);else target.className=(' '+target.className+' ').replace(' '+rc+' ',' ').replace(/^\s+|\s+$/g,'');}var add=p.addClasses||p.AddClasses||[];for(var a=0;a<add.length;a++){var ac=String(add[a]||'');if(!ac)continue;if(target.classList)target.classList.add(ac);else if((' '+target.className+' ').indexOf(' '+ac+' ')<0)target.className=(target.className?target.className+' ':'')+ac;}var disabled=(typeof p.disabled!=='undefined')?p.disabled:p.Disabled;if(disabled!==null&&typeof disabled!=='undefined'){target.disabled=!!disabled;if(disabled)target.setAttribute('disabled','disabled');else target.removeAttribute('disabled');}var hidden=(typeof p.hidden!=='undefined')?p.hidden:p.Hidden;if(hidden!==null&&typeof hidden!=='undefined'){target.hidden=!!hidden;if(hidden)target.setAttribute('hidden','hidden');else target.removeAttribute('hidden');}var checked=(typeof p.checked!=='undefined')?p.checked:p.Checked;if(checked!==null&&typeof checked!=='undefined'){target.checked=!!checked;if(checked)target.setAttribute('checked','checked');else target.removeAttribute('checked');}var value=(typeof p.value!=='undefined')?p.value:p.Value;if(value!==null&&typeof value!=='undefined')target.value=String(value);var attrs=p.attributes||p.Attributes||{};for(var name in attrs){if(!Object.prototype.hasOwnProperty.call(attrs,name))continue;var lower=String(name).toLowerCase();if(!(lower==='title'||lower.indexOf('aria-')===0||lower.indexOf('data-')===0))continue;var attrValue=attrs[name];if(attrValue===null||typeof attrValue==='undefined')target.removeAttribute(name);else target.setAttribute(name,String(attrValue));} } }
-function tvairApplyUiPatchesJson(json){try{var patches=JSON.parse(String(json||'[]'));tvairApplyUiPatches(patches);var applied=0;if(patches&&typeof patches.length!=='undefined'){for(var i=0;i<patches.length&&i<64;i++){var p=patches[i]||{};var id=p.elementId||p.ElementId||'';if(id&&document.getElementById(id))applied++;}}return applied;}catch(_){return -1;}}
+{{{{RuntimeUiDocumentScript.Source}}}}
 function tvairPageRefreshStateKey(){try{var search=String(location.search||'');search=search.replace(/([?&])_tvairPageRefresh=[^&]*&?/ig,function(_,sep){return sep==='?'?'?':'';});search=search.replace(/\?&/g,'?').replace(/[?&]$/,'');return 'tvair-page-refresh:'+location.pathname+search;}catch(_){return '';}}function tvairCapturePageRefreshState(){try{var key=tvairPageRefreshStateKey();if(!key)return;var state={x:window.pageXOffset||document.documentElement.scrollLeft||0,y:window.pageYOffset||document.documentElement.scrollTop||0};sessionStorage.setItem(key,JSON.stringify(state));}catch(_){}}function tvairRestorePageRefreshState(){try{var key=tvairPageRefreshStateKey();if(!key)return;var raw=sessionStorage.getItem(key);if(!raw)return;sessionStorage.removeItem(key);var state=JSON.parse(raw);window.scrollTo(Number(state.x)||0,Number(state.y)||0);}catch(_){}}function tvairInteractionStateKey(){var id=tvairCurrentWindowId();return id?'tvair-interaction-state:'+id:'';}function tvairCaptureInteractionState(){try{var key=tvairInteractionStateKey();if(!key)return;var a=document.activeElement;var state={x:window.pageXOffset||document.documentElement.scrollLeft||0,y:window.pageYOffset||document.documentElement.scrollTop||0,id:a&&a.id?a.id:'',start:(a&&typeof a.selectionStart==='number')?a.selectionStart:null,end:(a&&typeof a.selectionEnd==='number')?a.selectionEnd:null};sessionStorage.setItem(key,JSON.stringify(state));}catch(_){}}function tvairRestoreInteractionState(){try{var key=tvairInteractionStateKey();if(!key)return;var raw=sessionStorage.getItem(key);if(!raw)return;sessionStorage.removeItem(key);var state=JSON.parse(raw);window.scrollTo(Number(state.x)||0,Number(state.y)||0);if(state.id){var a=document.getElementById(state.id);if(a&&a.focus){a.focus();if(typeof a.setSelectionRange==='function'&&state.start!==null)a.setSelectionRange(state.start,state.end===null?state.start:state.end);}}}catch(_){}}function tvairRestoreRefreshState(){tvairRestoreInteractionState();tvairRestorePageRefreshState();}if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',tvairRestoreRefreshState);else setTimeout(tvairRestoreRefreshState,0);function tvairSubmitSafeAction(el,eventName){
   var action=tvairGetAttr(el,'data-tvair-action');
   var interactionId=tvairNewInteractionId();tvairDebugSet(el,'data-tvair-debug-interaction-id',interactionId);
@@ -3770,7 +3931,7 @@ function tvairPageRefreshStateKey(){try{var search=String(location.search||'');s
       for(var j=0;j<form.elements.length;j++){var it=form.elements[j];if(it&&it.name)pairs.push(encodeURIComponent(it.name)+'='+encodeURIComponent(it.value||''));}
       var endpoint=isWindowAction?'/api/plugins/window':'/api/plugins/action';var resolvedEndpoint=location.protocol+'//'+location.host+endpoint;tvairDebugSet(el,'data-tvair-debug-endpoint',resolvedEndpoint);var xhr=new XMLHttpRequest();
       xhr.open('POST',resolvedEndpoint,true);
-      xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded; charset=UTF-8');var requestInteractionId=interactionId;xhr.onreadystatechange=function(){if(xhr.readyState===4){var previousInteractionId=tvairDebugGet(el,'data-tvair-debug-interaction-id');tvairDebugSet(el,'data-tvair-debug-interaction-id',requestInteractionId);tvairDebugSet(el,'data-tvair-debug-status',String(xhr.status||0));var body={};try{body=JSON.parse(xhr.responseText||'{}');}catch(_){if(submitResponseMode==='patchWindow'||tvairFeedbackEnabled(el))tvairDebugSet(el,'data-tvair-debug-reason','response_parse_failed');}if(xhr.status>=200&&xhr.status<400&&submitResponseMode==='patchWindow')tvairApplyUiPatches(body&&body.uiPatches?body.uiPatches:[]);var requestSucceeded=xhr.status>=200&&xhr.status<400;tvairCompleteActionFeedback(el,eventName,action,body,requestSucceeded);tvairClientBeacon(requestSucceeded?'post_completed':'post_failed',eventName,action,el);tvairDebugSet(el,'data-tvair-debug-interaction-id',previousInteractionId);var refreshSurface='';var preservePageScroll=false;var pageRefreshLocation='';try{refreshSurface=String(xhr.getResponseHeader('X-TvAIr-Refresh-Surface')||'').toLowerCase();preservePageScroll=String(xhr.getResponseHeader('X-TvAIr-Preserve-Scroll')||'').toLowerCase()==='true';pageRefreshLocation=String(xhr.getResponseHeader('X-TvAIr-Refresh-Location')||'');}catch(_){}if(requestSucceeded&&refreshSurface==='page'){if(preservePageScroll)tvairCapturePageRefreshState();tvairClientBeacon('page_refresh_issued',eventName,action,el);if(pageRefreshLocation){location.href=pageRefreshLocation;}else{location.href=location.pathname+location.search;}return;}}};xhr.onerror=function(){var previousInteractionId=tvairDebugGet(el,'data-tvair-debug-interaction-id');tvairDebugSet(el,'data-tvair-debug-interaction-id',requestInteractionId);tvairDebugSet(el,'data-tvair-debug-reason','xhr_error');tvairCompleteActionFeedback(el,eventName,action,{},false);tvairClientBeacon('post_failed',eventName,action,el);tvairDebugSet(el,'data-tvair-debug-interaction-id',previousInteractionId);};
+      xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded; charset=UTF-8');var requestInteractionId=interactionId;xhr.onreadystatechange=function(){if(xhr.readyState===4){var previousInteractionId=tvairDebugGet(el,'data-tvair-debug-interaction-id');tvairDebugSet(el,'data-tvair-debug-interaction-id',requestInteractionId);tvairDebugSet(el,'data-tvair-debug-status',String(xhr.status||0));var body={};try{body=JSON.parse(xhr.responseText||'{}');}catch(_){if(submitResponseMode==='patchWindow'||tvairFeedbackEnabled(el))tvairDebugSet(el,'data-tvair-debug-reason','response_parse_failed');}if(xhr.status>=200&&xhr.status<400&&submitResponseMode==='patchWindow')tvairApplyActionResponsePatches(body&&body.uiPatches?body.uiPatches:[],el,eventName,action);var requestSucceeded=xhr.status>=200&&xhr.status<400;tvairCompleteActionFeedback(el,eventName,action,body,requestSucceeded);tvairClientBeacon(requestSucceeded?'post_completed':'post_failed',eventName,action,el);tvairDebugSet(el,'data-tvair-debug-interaction-id',previousInteractionId);var refreshSurface='';var preservePageScroll=false;var pageRefreshLocation='';try{refreshSurface=String(xhr.getResponseHeader('X-TvAIr-Refresh-Surface')||'').toLowerCase();preservePageScroll=String(xhr.getResponseHeader('X-TvAIr-Preserve-Scroll')||'').toLowerCase()==='true';pageRefreshLocation=String(xhr.getResponseHeader('X-TvAIr-Refresh-Location')||'');}catch(_){}if(requestSucceeded&&refreshSurface==='page'){if(preservePageScroll)tvairCapturePageRefreshState();tvairClientBeacon('page_refresh_issued',eventName,action,el);if(pageRefreshLocation){location.href=pageRefreshLocation;}else{location.href=location.pathname+location.search;}return;}}};xhr.onerror=function(){var previousInteractionId=tvairDebugGet(el,'data-tvair-debug-interaction-id');tvairDebugSet(el,'data-tvair-debug-interaction-id',requestInteractionId);tvairDebugSet(el,'data-tvair-debug-reason','xhr_error');tvairCompleteActionFeedback(el,eventName,action,{},false);tvairClientBeacon('post_failed',eventName,action,el);tvairDebugSet(el,'data-tvair-debug-interaction-id',previousInteractionId);};
       xhr.send(pairs.join('&'));
       return;
     }catch(_){ }
@@ -3816,11 +3977,6 @@ function tvairBindSafeEvents(){
   }
   tvairClientBeacon('bind_complete','','',document.body);
 }
-function tvairFindActionTokenElement(){try{return document.querySelector?document.querySelector('[data-tvair-action-token],[data-tvair-token]'):null;}catch(_){return null;}}
-function tvairActionTokenIdentity(){try{var el=tvairFindActionTokenElement();if(!el)return null;var token=tvairGetAttr(el,'data-tvair-action-token')||tvairGetAttr(el,'data-tvair-token');var pluginId=tvairGetAttr(el,'data-tvair-plugin-id');var route=tvairGetAttr(el,'data-tvair-route-segment')||document.body.getAttribute('data-plugin-route')||'';if(!token||!pluginId||!route)return null;return{token:token,pluginId:pluginId,route:route};}catch(_){return null;}}
-function tvairRenewActionToken(){try{var id=tvairActionTokenIdentity();if(!id||window.__tvairPageTokenRecoveryInFlight)return;var xhr=new XMLHttpRequest();xhr.open('POST','/api/plugins/action-token/renew',true);xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded; charset=UTF-8');xhr.onreadystatechange=function(){if(xhr.readyState!==4)return;if(xhr.status>=200&&xhr.status<300)return;tvairRecoverExpiredPageToken();};xhr.send('actionToken='+encodeURIComponent(id.token)+'&pluginId='+encodeURIComponent(id.pluginId)+'&routeSegment='+encodeURIComponent(id.route));}catch(_){}}
-function tvairRecoverExpiredPageToken(){try{if(window.__tvairPageTokenRecoveryInFlight)return;var id=tvairActionTokenIdentity();if(!id)return;window.__tvairPageTokenRecoveryInFlight=true;var xhr=new XMLHttpRequest();xhr.open('POST','/api/plugins/action-token/validate',true);xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded; charset=UTF-8');xhr.onreadystatechange=function(){if(xhr.readyState!==4)return;if(xhr.status>=200&&xhr.status<300){window.__tvairPageTokenRecoveryInFlight=false;return;}if(window.__tvairHostPageNavigationInFlight){window.__tvairPageTokenRecoveryInFlight=false;return;}window.__tvairHostPageNavigationInFlight='action_token_recovery';var path='/plugin/'+encodeURIComponent(id.route);var query=window.location&&window.location.search?window.location.search:'';window.location.replace(path+query);};xhr.onerror=function(){window.__tvairPageTokenRecoveryInFlight=false;};xhr.send('actionToken='+encodeURIComponent(id.token)+'&pluginId='+encodeURIComponent(id.pluginId)+'&routeSegment='+encodeURIComponent(id.route));}catch(_){window.__tvairPageTokenRecoveryInFlight=false;}}
-function tvairStartActionTokenKeepalive(){try{if(window.__tvairActionTokenKeepaliveStarted)return;window.__tvairActionTokenKeepaliveStarted=true;tvairRenewActionToken();window.setInterval(tvairRenewActionToken,300000);if(document.addEventListener)document.addEventListener('visibilitychange',function(){if(!document.hidden)tvairRecoverExpiredPageToken();},false);if(window.addEventListener){window.addEventListener('focus',tvairRecoverExpiredPageToken,false);window.addEventListener('pageshow',tvairRecoverExpiredPageToken,false);}else if(window.attachEvent)window.attachEvent('onfocus',tvairRecoverExpiredPageToken);}catch(_){}}
 function tvairBootSafeEvents(){try{tvairBindSafeEvents();tvairStartActionTokenKeepalive();}catch(_){tvairClientBeacon('bind_failed','','',document.body);}}if(document.readyState==='complete'||document.readyState==='interactive'){tvairBootSafeEvents();}else if(window.attachEvent){window.attachEvent('onload',tvairBootSafeEvents);}else if(window.addEventListener){window.addEventListener('load',tvairBootSafeEvents,false);}else{window.onload=tvairBootSafeEvents;}</script>
 
 </body>
@@ -3866,17 +4022,17 @@ static string BuildPluginToolWindowContentHtml(string title, string route, strin
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; media-src 'self' data:">
 <title>{{safeTitle}} - TvAIr Tool Window</title>
-<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.13">
+<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.14">
 {{developerThemeDiagnosticScript}}
-<script src="/tvair-theme.js?v=1.2.13"></script>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.13">
+<script src="/tvair-theme.js?v=1.2.14"></script>
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.14">
 {{pluginHead}}
 </head>
 <body class="tvair-plugin-toolwindow-content-only {{themeClass}}" data-plugin-route="{{safeRoute}}" data-theme="{{safeEffectiveTheme}}" data-tvair-theme="{{safeSelectedTheme}}" data-tvair-selected-theme="{{safeSelectedTheme}}" data-tvair-effective-theme="{{safeEffectiveTheme}}" data-tvair-theme-generation="{{safeThemeGeneration}}" data-tvair-theme-revision="{{themeRevision}}" data-tvair-theme-scope="all" data-tvair-theme-update-mode="{{themeUpdateModeToken}}" data-tvair-host-kind="winforms_webbrowser_fallback_direct_content" data-tvair-toolwindow-contract="release_contract">
 <div class="tvair-toolwindow-content-root">
 {{pluginContent}}
 </div>
-<script src="/tvair-safe-event-host.js?v=1.2.13"></script>
+<script src="/tvair-safe-event-host.js?v=1.2.14"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -3927,14 +4083,10 @@ function tvairPreserveToolWindowLink(href){if(!href)return href;var route=docume
 function tvairTryBeginRepeatPolicy(el,eventName,action){var policy=String(tvairGetAttr(el,'data-tvair-repeat-policy')||'').toLowerCase();if(policy!=='suppressburst')return true;var windowMs=parseInt(tvairGetAttr(el,'data-tvair-burst-window-ms')||'0',10);if(!isFinite(windowMs)||windowMs<=0)return true;windowMs=Math.max(50,Math.min(1000,windowMs));var now=(new Date()).getTime();var key=String(eventName||'')+'|'+String(action||'');var guard=el.__tvairBurstGuard;if(guard&&guard.key===key&&now<guard.until){var suppressedToken=String(now)+'|'+String(Math.random());guard.until=now+windowMs;guard.token=suppressedToken;window.setTimeout(function(){try{var current=el.__tvairBurstGuard;if(current&&current.token===suppressedToken)delete el.__tvairBurstGuard;}catch(_){}},windowMs+1);tvairClientBeacon('burst_suppressed',eventName,action,el);return false;}var token=String(now)+'|'+String(Math.random());el.__tvairBurstGuard={key:key,until:now+windowMs,token:token};window.setTimeout(function(){try{var current=el.__tvairBurstGuard;if(current&&current.token===token)delete el.__tvairBurstGuard;}catch(_){}},windowMs+1);return true;}
 function tvairApplyAcceptedButtonState(el,action,eventName){if(!el||tvairTagName(el)!=='button')return;var acceptedLabel=tvairGetAttr(el,'data-tvair-accepted-label');if(!acceptedLabel)return;el.setAttribute('aria-label',acceptedLabel);try{el.innerText=acceptedLabel;}catch(_){try{el.textContent=acceptedLabel;}catch(__){}}tvairClientBeacon('accepted_button_state_applied',eventName,action,el);}
 function tvairFeedbackEnabled(el){return String(tvairGetAttr(el,'data-tvair-feedback')||'').toLowerCase()==='true';}function tvairFeedbackSetLabel(el,label){if(!el||!label)return;el.setAttribute('aria-label',label);try{el.innerText=label;}catch(_){try{el.textContent=label;}catch(__){} } }function tvairBeginActionFeedback(el,eventName,action,correlationId){if(!tvairFeedbackEnabled(el))return true;if(el.__tvairFeedbackInFlight){tvairClientBeacon('feedback_duplicate_suppressed',eventName,action,el);return false;}el.__tvairFeedbackInFlight=correlationId||'pending';if(!el.__tvairFeedbackOriginal)el.__tvairFeedbackOriginal={label:(el.innerText||el.textContent||''),aria:tvairGetAttr(el,'aria-label'),disabled:!!el.disabled};if(String(tvairGetAttr(el,'data-tvair-feedback-disable-running')||'').toLowerCase()==='true'){el.disabled=true;el.setAttribute('disabled','disabled');}tvairFeedbackSetLabel(el,tvairGetAttr(el,'data-tvair-feedback-pending-label'));el.setAttribute('aria-busy','true');tvairClientBeacon('feedback_running',eventName,action,el);return true;}function tvairFloatingLabelKind(value){var kind=String(value||'Information').toLowerCase();return kind==='success'||kind==='warning'||kind==='error'?kind:'information';}function tvairShowFloatingLabel(body,el,eventName,action){var feedback=body&&(body.feedback||body.Feedback)||{};var label=body&&(body.floatingLabel||body.FloatingLabel)||null;if(!label&&feedback&&(feedback.showFloatingLabel===false||feedback.ShowFloatingLabel===false))return;var message=label?(label.message||label.Message||''):(feedback.message||feedback.Message||'');if(!message)return;var correlation=String((label&&(label.correlationId||label.CorrelationId))||(feedback.correlationId||feedback.CorrelationId)||'');var kind=tvairFloatingLabelKind((label&&(label.kind||label.Kind))||(feedback.kind||feedback.Kind));var duration=parseInt((label&&(label.durationMilliseconds||label.DurationMilliseconds))||0,10)||0;if(duration<=0)duration=kind==='error'?3000:(kind==='warning'?2500:1800);if(duration<1000)duration=1000;if(duration>5000)duration=5000;var node=document.getElementById('tvair-host-floating-label');if(!node){node=document.createElement('div');node.id='tvair-host-floating-label';node.setAttribute('role',kind==='error'?'alert':'status');node.setAttribute('aria-live',kind==='error'?'assertive':'polite');node.setAttribute('aria-atomic','true');node.className='tvair-host-floating-label';document.body.appendChild(node);}node.setAttribute('data-tvair-feedback-kind',kind);node.setAttribute('data-tvair-correlation-id',correlation);node.innerText=String(message);node.classList.add('is-visible');if(node.__tvairHideTimer)clearTimeout(node.__tvairHideTimer);node.__tvairHideTimer=setTimeout(function(){if(node&&node.parentNode)node.parentNode.removeChild(node);},duration);tvairClientBeacon('floating_label_shown',eventName,action,el);} function tvairCompleteActionFeedback(el,eventName,action,body,httpOk){if(!tvairFeedbackEnabled(el))return;var feedback=body&&(body.feedback||body.Feedback)||{};var phase=String(feedback.phase||feedback.Phase||(httpOk?'Succeeded':'Failed')).toLowerCase();var success=phase==='succeeded'||phase==='success';var nochange=phase==='nochange'||phase==='no_change';var cancelled=phase==='cancelled'||phase==='canceled';var label=feedback.buttonLabel||feedback.ButtonLabel||'';if(!label){if(success)label=tvairGetAttr(el,'data-tvair-feedback-success-label');else if(nochange)label=tvairGetAttr(el,'data-tvair-feedback-nochange-label');else if(!cancelled)label=tvairGetAttr(el,'data-tvair-feedback-failure-label');}var original=el.__tvairFeedbackOriginal||{};if(label)tvairFeedbackSetLabel(el,label);var keepDisabled=(typeof feedback.keepDisabled!=='undefined')?!!feedback.keepDisabled:((typeof feedback.KeepDisabled!=='undefined')?!!feedback.KeepDisabled:false);if(success&&String(tvairGetAttr(el,'data-tvair-feedback-keep-disabled-success')||'').toLowerCase()==='true')keepDisabled=true;if(!success&&!nochange&&String(tvairGetAttr(el,'data-tvair-feedback-restore-failure')||'').toLowerCase()==='true'){tvairFeedbackSetLabel(el,original.label||'');if(original.aria)el.setAttribute('aria-label',original.aria);else el.removeAttribute('aria-label');}if(keepDisabled){el.disabled=true;el.setAttribute('disabled','disabled');}else{el.disabled=!!original.disabled;if(original.disabled)el.setAttribute('disabled','disabled');else el.removeAttribute('disabled');}el.removeAttribute('aria-busy');delete el.__tvairFeedbackInFlight;tvairShowFloatingLabel(body,el,eventName,action);tvairClientBeacon(success?'feedback_succeeded':(nochange?'feedback_nochange':(cancelled?'feedback_cancelled':'feedback_failed')),eventName,action,el);}
-function tvairApplyUiPatches(patches){if(!patches||typeof patches.length==='undefined')return;for(var i=0;i<patches.length&&i<64;i++){var p=patches[i]||{};var id=p.elementId||p.ElementId||'';if(!id)continue;var target=document.getElementById(id);if(!target)continue;var text=(typeof p.textContent!=='undefined')?p.textContent:p.TextContent;if(text!==null&&typeof text!=='undefined'){try{target.textContent=String(text);}catch(_){target.innerText=String(text);}}var cls=(typeof p.className!=='undefined')?p.className:p.ClassName;if(cls!==null&&typeof cls!=='undefined')target.className=String(cls);var remove=p.removeClasses||p.RemoveClasses||[];for(var r=0;r<remove.length;r++){var rc=String(remove[r]||'');if(!rc)continue;if(target.classList)target.classList.remove(rc);else target.className=(' '+target.className+' ').replace(' '+rc+' ',' ').replace(/^\s+|\s+$/g,'');}var add=p.addClasses||p.AddClasses||[];for(var a=0;a<add.length;a++){var ac=String(add[a]||'');if(!ac)continue;if(target.classList)target.classList.add(ac);else if((' '+target.className+' ').indexOf(' '+ac+' ')<0)target.className=(target.className?target.className+' ':'')+ac;}var disabled=(typeof p.disabled!=='undefined')?p.disabled:p.Disabled;if(disabled!==null&&typeof disabled!=='undefined'){target.disabled=!!disabled;if(disabled)target.setAttribute('disabled','disabled');else target.removeAttribute('disabled');}var hidden=(typeof p.hidden!=='undefined')?p.hidden:p.Hidden;if(hidden!==null&&typeof hidden!=='undefined'){target.hidden=!!hidden;if(hidden)target.setAttribute('hidden','hidden');else target.removeAttribute('hidden');}var checked=(typeof p.checked!=='undefined')?p.checked:p.Checked;if(checked!==null&&typeof checked!=='undefined'){target.checked=!!checked;if(checked)target.setAttribute('checked','checked');else target.removeAttribute('checked');}var value=(typeof p.value!=='undefined')?p.value:p.Value;if(value!==null&&typeof value!=='undefined')target.value=String(value);var attrs=p.attributes||p.Attributes||{};for(var name in attrs){if(!Object.prototype.hasOwnProperty.call(attrs,name))continue;var lower=String(name).toLowerCase();if(!(lower==='title'||lower.indexOf('aria-')===0||lower.indexOf('data-')===0))continue;var attrValue=attrs[name];if(attrValue===null||typeof attrValue==='undefined')target.removeAttribute(name);else target.setAttribute(name,String(attrValue));} } }
-function tvairApplyUiPatchesJson(json){try{var patches=JSON.parse(String(json||'[]'));tvairApplyUiPatches(patches);var applied=0;if(patches&&typeof patches.length!=='undefined'){for(var i=0;i<patches.length&&i<64;i++){var p=patches[i]||{};var id=p.elementId||p.ElementId||'';if(id&&document.getElementById(id))applied++;}}return applied;}catch(_){return -1;}}
-function tvairPageRefreshStateKey(){try{return 'tvair-page-refresh:'+location.pathname+location.search;}catch(_){return '';}}function tvairCapturePageRefreshState(){try{var key=tvairPageRefreshStateKey();if(!key)return;var state={x:window.pageXOffset||document.documentElement.scrollLeft||0,y:window.pageYOffset||document.documentElement.scrollTop||0};sessionStorage.setItem(key,JSON.stringify(state));}catch(_){}}function tvairRestorePageRefreshState(){try{var key=tvairPageRefreshStateKey();if(!key)return;var raw=sessionStorage.getItem(key);if(!raw)return;sessionStorage.removeItem(key);var state=JSON.parse(raw);window.scrollTo(Number(state.x)||0,Number(state.y)||0);}catch(_){}}function tvairInteractionStateKey(){var id=tvairCurrentWindowId();return id?'tvair-interaction-state:'+id:'';}function tvairCaptureInteractionState(){try{var key=tvairInteractionStateKey();if(!key)return;var a=document.activeElement;var state={x:window.pageXOffset||document.documentElement.scrollLeft||0,y:window.pageYOffset||document.documentElement.scrollTop||0,id:a&&a.id?a.id:'',start:(a&&typeof a.selectionStart==='number')?a.selectionStart:null,end:(a&&typeof a.selectionEnd==='number')?a.selectionEnd:null};sessionStorage.setItem(key,JSON.stringify(state));}catch(_){}}function tvairRestoreInteractionState(){try{var key=tvairInteractionStateKey();if(!key)return;var raw=sessionStorage.getItem(key);if(!raw)return;sessionStorage.removeItem(key);var state=JSON.parse(raw);window.scrollTo(Number(state.x)||0,Number(state.y)||0);if(state.id){var a=document.getElementById(state.id);if(a&&a.focus){a.focus();if(typeof a.setSelectionRange==='function'&&state.start!==null)a.setSelectionRange(state.start,state.end===null?state.start:state.end);}}}catch(_){}}function tvairRestoreRefreshState(){tvairRestoreInteractionState();tvairRestorePageRefreshState();}if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',tvairRestoreRefreshState);else setTimeout(tvairRestoreRefreshState,0);function tvairSubmitSafeAction(el,eventName){var action=tvairGetAttr(el,'data-tvair-action');var interactionId=tvairNewInteractionId();tvairDebugSet(el,'data-tvair-debug-interaction-id',interactionId);tvairClientBeacon('click_captured',eventName,action,el);tvairClientBeacon('received_before_validate',eventName,action,el);if(!action){tvairClientBeacon('denied_missing_action',eventName,action,el);return;}var confirmMessage=tvairGetAttr(el,'data-tvair-confirm-message');if(confirmMessage){var confirmed=false;try{confirmed=window.confirm(String(confirmMessage));}catch(_){confirmed=false;}if(!confirmed){tvairClientBeacon('action_cancelled_by_user',eventName,action,el);return;}}if(!tvairTryBeginRepeatPolicy(el,eventName,action))return;if(!tvairBeginActionFeedback(el,eventName,action,interactionId))return;if(!tvairFeedbackEnabled(el))tvairApplyAcceptedButtonState(el,action,eventName);var isWindowAction=(action==='refreshWindow'||action==='updateWindow'||action==='closeWindow'||action==='rerenderWindow'||action==='openWindow');var form=document.createElement('form');form.method='post';form.action=isWindowAction?'/api/plugins/window':'/api/plugins/action';tvairAppendHidden(form,'action',action);tvairAppendHidden(form,'pluginId',tvairGetAttr(el,'data-tvair-plugin-id'));tvairAppendHidden(form,'routeSegment',tvairGetAttr(el,'data-tvair-route-segment')||document.body.getAttribute('data-plugin-route')||'');tvairAppendHidden(form,'token',tvairGetAttr(el,'data-tvair-token')||tvairGetAttr(el,'data-tvair-action-token'));tvairAppendHidden(form,'actionToken',tvairGetAttr(el,'data-tvair-action-token')||tvairGetAttr(el,'data-tvair-token'));tvairAppendHidden(form,'responseMode',tvairGetAttr(el,'data-tvair-response-mode')||'hostHandled');tvairAppendHidden(form,'windowId',tvairGetAttr(el,'data-tvair-window-id')||tvairCurrentWindowId());tvairAppendHidden(form,'target',tvairGetAttr(el,'data-tvair-target')||'content');tvairAppendHidden(form,'refreshTarget',tvairGetAttr(el,'data-tvair-refresh-target')||'content');tvairAppendHidden(form,'preserveScroll',tvairGetAttr(el,'data-tvair-preserve-scroll')||'true');tvairAppendHidden(form,'safeEvent',eventName||'unknown');tvairAppendHidden(form,'safeEventAction',action);tvairAppendHidden(form,'safeEventSource','host-script-no-plugin-js');tvairAppendHidden(form,'safeEventInteractionId',interactionId);tvairAppendHidden(form,'safeEventWindowId',tvairGetAttr(el,'data-tvair-window-id')||tvairCurrentWindowId());tvairAppendHidden(form,'feedbackRequested',tvairFeedbackEnabled(el)?'true':'false');tvairCollectFormValues(el,form);if(el.attributes){for(var i=0;i<el.attributes.length;i++){var a=el.attributes[i];if(a&&a.name&&a.name.indexOf('data-tvair-payload-')===0){var pk=a.name.substring('data-tvair-payload-'.length);if(!tvairIsReservedPayloadKey(pk))tvairAppendHidden(form,pk,a.value);} } }tvairDebugSet(el,'data-tvair-debug-payload-count',String(form.elements.length));tvairClientBeacon('payload_built',eventName,action,el);document.body.appendChild(form);tvairClientBeacon('post_started',eventName,action,el);tvairClientBeacon('posting_form',eventName,action,el);var submitResponseMode=tvairGetAttr(el,'data-tvair-response-mode')||'hostHandled';if(submitResponseMode==='hostHandled'||submitResponseMode==='noContent'||submitResponseMode==='patchWindow'){try{var pairs=[];for(var j=0;j<form.elements.length;j++){var it=form.elements[j];if(it&&it.name)pairs.push(encodeURIComponent(it.name)+'='+encodeURIComponent(it.value||''));}var endpoint=isWindowAction?'/api/plugins/window':'/api/plugins/action';var resolvedEndpoint=location.protocol+'//'+location.host+endpoint;tvairDebugSet(el,'data-tvair-debug-endpoint',resolvedEndpoint);var xhr=new XMLHttpRequest();xhr.open('POST',resolvedEndpoint,true);xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded; charset=UTF-8');xhr.setRequestHeader('Accept','application/json, text/plain, */*');var requestInteractionId=interactionId;xhr.onreadystatechange=function(){if(xhr.readyState===4){var previousInteractionId=tvairDebugGet(el,'data-tvair-debug-interaction-id');tvairDebugSet(el,'data-tvair-debug-interaction-id',requestInteractionId);tvairDebugSet(el,'data-tvair-debug-status',String(xhr.status||0));var body={};try{body=JSON.parse(xhr.responseText||'{}');}catch(_){if(submitResponseMode==='patchWindow'||tvairFeedbackEnabled(el))tvairDebugSet(el,'data-tvair-debug-reason','response_parse_failed');}if(xhr.status>=200&&xhr.status<400&&submitResponseMode==='patchWindow')tvairApplyUiPatches(body&&body.uiPatches?body.uiPatches:[]);var requestSucceeded=xhr.status>=200&&xhr.status<400;tvairCompleteActionFeedback(el,eventName,action,body,requestSucceeded);tvairClientBeacon(requestSucceeded?'post_completed':'post_failed',eventName,action,el);tvairDebugSet(el,'data-tvair-debug-interaction-id',previousInteractionId);var refreshSurface='';var preservePageScroll=false;var pageRefreshLocation='';try{refreshSurface=String(xhr.getResponseHeader('X-TvAIr-Refresh-Surface')||'').toLowerCase();preservePageScroll=String(xhr.getResponseHeader('X-TvAIr-Preserve-Scroll')||'').toLowerCase()==='true';pageRefreshLocation=String(xhr.getResponseHeader('X-TvAIr-Refresh-Location')||'');}catch(_){}if(requestSucceeded&&refreshSurface==='page'){if(preservePageScroll)tvairCapturePageRefreshState();tvairClientBeacon('page_refresh_issued',eventName,action,el);if(pageRefreshLocation){location.href=pageRefreshLocation;}else{location.href=location.pathname+location.search;}return;}}};xhr.onerror=function(){var previousInteractionId=tvairDebugGet(el,'data-tvair-debug-interaction-id');tvairDebugSet(el,'data-tvair-debug-interaction-id',requestInteractionId);tvairDebugSet(el,'data-tvair-debug-reason','xhr_error');tvairCompleteActionFeedback(el,eventName,action,{},false);tvairClientBeacon('post_failed',eventName,action,el);tvairDebugSet(el,'data-tvair-debug-interaction-id',previousInteractionId);};xhr.send(pairs.join('&'));return;}catch(_){}}tvairCaptureInteractionState();form.submit();}
+{{runtimeUiCommonScript}}
+function tvairPageRefreshStateKey(){try{return 'tvair-page-refresh:'+location.pathname+location.search;}catch(_){return '';}}function tvairCapturePageRefreshState(){try{var key=tvairPageRefreshStateKey();if(!key)return;var state={x:window.pageXOffset||document.documentElement.scrollLeft||0,y:window.pageYOffset||document.documentElement.scrollTop||0};sessionStorage.setItem(key,JSON.stringify(state));}catch(_){}}function tvairRestorePageRefreshState(){try{var key=tvairPageRefreshStateKey();if(!key)return;var raw=sessionStorage.getItem(key);if(!raw)return;sessionStorage.removeItem(key);var state=JSON.parse(raw);window.scrollTo(Number(state.x)||0,Number(state.y)||0);}catch(_){}}function tvairInteractionStateKey(){var id=tvairCurrentWindowId();return id?'tvair-interaction-state:'+id:'';}function tvairCaptureInteractionState(){/* Host ToolWindow owns the refresh state. */}function tvairRestoreInteractionState(){/* Host ToolWindow owns the refresh state. */}function tvairRestoreRefreshState(){tvairRestoreInteractionState();tvairRestorePageRefreshState();}if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',tvairRestoreRefreshState);else setTimeout(tvairRestoreRefreshState,0);function tvairSubmitSafeAction(el,eventName){var action=tvairGetAttr(el,'data-tvair-action');var interactionId=tvairNewInteractionId();tvairDebugSet(el,'data-tvair-debug-interaction-id',interactionId);tvairClientBeacon('click_captured',eventName,action,el);tvairClientBeacon('received_before_validate',eventName,action,el);if(!action){tvairClientBeacon('denied_missing_action',eventName,action,el);return;}var confirmMessage=tvairGetAttr(el,'data-tvair-confirm-message');if(confirmMessage){var confirmed=false;try{confirmed=window.confirm(String(confirmMessage));}catch(_){confirmed=false;}if(!confirmed){tvairClientBeacon('action_cancelled_by_user',eventName,action,el);return;}}if(!tvairTryBeginRepeatPolicy(el,eventName,action))return;if(!tvairBeginActionFeedback(el,eventName,action,interactionId))return;if(!tvairFeedbackEnabled(el))tvairApplyAcceptedButtonState(el,action,eventName);var isWindowAction=(action==='refreshWindow'||action==='updateWindow'||action==='closeWindow'||action==='rerenderWindow'||action==='openWindow');var form=document.createElement('form');form.method='post';form.action=isWindowAction?'/api/plugins/window':'/api/plugins/action';tvairAppendHidden(form,'action',action);tvairAppendHidden(form,'pluginId',tvairGetAttr(el,'data-tvair-plugin-id'));tvairAppendHidden(form,'routeSegment',tvairGetAttr(el,'data-tvair-route-segment')||document.body.getAttribute('data-plugin-route')||'');tvairAppendHidden(form,'token',tvairGetAttr(el,'data-tvair-token')||tvairGetAttr(el,'data-tvair-action-token'));tvairAppendHidden(form,'actionToken',tvairGetAttr(el,'data-tvair-action-token')||tvairGetAttr(el,'data-tvair-token'));tvairAppendHidden(form,'responseMode',tvairGetAttr(el,'data-tvair-response-mode')||'hostHandled');tvairAppendHidden(form,'windowId',tvairGetAttr(el,'data-tvair-window-id')||tvairCurrentWindowId());tvairAppendHidden(form,'target',tvairGetAttr(el,'data-tvair-target')||'content');tvairAppendHidden(form,'refreshTarget',tvairGetAttr(el,'data-tvair-refresh-target')||'content');tvairAppendHidden(form,'preserveScroll',tvairGetAttr(el,'data-tvair-preserve-scroll')||'true');tvairAppendHidden(form,'safeEvent',eventName||'unknown');tvairAppendHidden(form,'safeEventAction',action);tvairAppendHidden(form,'safeEventSource','host-script-no-plugin-js');tvairAppendHidden(form,'safeEventInteractionId',interactionId);tvairAppendHidden(form,'safeEventWindowId',tvairGetAttr(el,'data-tvair-window-id')||tvairCurrentWindowId());tvairAppendHidden(form,'feedbackRequested',tvairFeedbackEnabled(el)?'true':'false');tvairCollectFormValues(el,form);if(el.attributes){for(var i=0;i<el.attributes.length;i++){var a=el.attributes[i];if(a&&a.name&&a.name.indexOf('data-tvair-payload-')===0){var pk=a.name.substring('data-tvair-payload-'.length);if(!tvairIsReservedPayloadKey(pk))tvairAppendHidden(form,pk,a.value);} } }tvairDebugSet(el,'data-tvair-debug-payload-count',String(form.elements.length));tvairClientBeacon('payload_built',eventName,action,el);document.body.appendChild(form);tvairClientBeacon('post_started',eventName,action,el);tvairClientBeacon('posting_form',eventName,action,el);var submitResponseMode=tvairGetAttr(el,'data-tvair-response-mode')||'hostHandled';if(submitResponseMode==='hostHandled'||submitResponseMode==='noContent'||submitResponseMode==='patchWindow'){try{var pairs=[];for(var j=0;j<form.elements.length;j++){var it=form.elements[j];if(it&&it.name)pairs.push(encodeURIComponent(it.name)+'='+encodeURIComponent(it.value||''));}var endpoint=isWindowAction?'/api/plugins/window':'/api/plugins/action';var resolvedEndpoint=location.protocol+'//'+location.host+endpoint;tvairDebugSet(el,'data-tvair-debug-endpoint',resolvedEndpoint);var xhr=new XMLHttpRequest();xhr.open('POST',resolvedEndpoint,true);xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded; charset=UTF-8');xhr.setRequestHeader('Accept','application/json, text/plain, */*');var requestInteractionId=interactionId;xhr.onreadystatechange=function(){if(xhr.readyState===4){var previousInteractionId=tvairDebugGet(el,'data-tvair-debug-interaction-id');tvairDebugSet(el,'data-tvair-debug-interaction-id',requestInteractionId);tvairDebugSet(el,'data-tvair-debug-status',String(xhr.status||0));var body={};try{body=JSON.parse(xhr.responseText||'{}');}catch(_){if(submitResponseMode==='patchWindow'||tvairFeedbackEnabled(el))tvairDebugSet(el,'data-tvair-debug-reason','response_parse_failed');}if(xhr.status>=200&&xhr.status<400&&submitResponseMode==='patchWindow')tvairApplyActionResponsePatches(body&&body.uiPatches?body.uiPatches:[],el,eventName,action);var requestSucceeded=xhr.status>=200&&xhr.status<400;tvairCompleteActionFeedback(el,eventName,action,body,requestSucceeded);tvairClientBeacon(requestSucceeded?'post_completed':'post_failed',eventName,action,el);tvairDebugSet(el,'data-tvair-debug-interaction-id',previousInteractionId);var refreshSurface='';var preservePageScroll=false;var pageRefreshLocation='';try{refreshSurface=String(xhr.getResponseHeader('X-TvAIr-Refresh-Surface')||'').toLowerCase();preservePageScroll=String(xhr.getResponseHeader('X-TvAIr-Preserve-Scroll')||'').toLowerCase()==='true';pageRefreshLocation=String(xhr.getResponseHeader('X-TvAIr-Refresh-Location')||'');}catch(_){}if(requestSucceeded&&refreshSurface==='page'){if(preservePageScroll)tvairCapturePageRefreshState();tvairClientBeacon('page_refresh_issued',eventName,action,el);if(pageRefreshLocation){location.href=pageRefreshLocation;}else{location.href=location.pathname+location.search;}return;}}};xhr.onerror=function(){var previousInteractionId=tvairDebugGet(el,'data-tvair-debug-interaction-id');tvairDebugSet(el,'data-tvair-debug-interaction-id',requestInteractionId);tvairDebugSet(el,'data-tvair-debug-reason','xhr_error');tvairCompleteActionFeedback(el,eventName,action,{},false);tvairClientBeacon('post_failed',eventName,action,el);tvairDebugSet(el,'data-tvair-debug-interaction-id',previousInteractionId);};xhr.send(pairs.join('&'));return;}catch(_){}}tvairCaptureInteractionState();form.submit();}
 function tvairHandleSafeEvent(e,eventName){e=e||window.event;var target=e.target||e.srcElement;var el=tvairFindSafeEventTarget(target,eventName);if(!el)return true;try{if(e.preventDefault)e.preventDefault();e.returnValue=false;}catch(_){ }tvairSubmitSafeAction(el,eventName);return false;}
 function tvairBindSafeEvents(){if(window.__tvairSafeEventBound){tvairClientBeacon('bind_skip_already_bound','','',document.body);return;}window.__tvairSafeEventBound=true;tvairClientBeacon('bind_start','','',document.body);if(document.addEventListener){document.addEventListener('dblclick',function(e){return tvairHandleSafeEvent(e,'dblclick');},false);document.addEventListener('mouseover',function(e){tvairHandleRuntimeHover(e,'enter');},false);document.addEventListener('mouseout',function(e){tvairHandleRuntimeHover(e,'leave');},false);document.addEventListener('click',function(e){if(tvairHandleSafeEvent(e,'click')===false)return false;var a=e.target;while(a&&a!==document&&!(a.tagName&&String(a.tagName).toLowerCase()==='a'))a=a.parentNode;if(a&&a.href){var next=tvairPreserveToolWindowLink(a.getAttribute('href')||'');if(next&&(next!==a.getAttribute('href'))){if(e.preventDefault)e.preventDefault();location.href=next;} } },false);}else if(document.attachEvent){document.attachEvent('ondblclick',function(){return tvairHandleSafeEvent(window.event,'dblclick');});document.attachEvent('onmouseover',function(){tvairHandleRuntimeHover(window.event,'enter');});document.attachEvent('onmouseout',function(){tvairHandleRuntimeHover(window.event,'leave');});document.attachEvent('onclick',function(){return tvairHandleSafeEvent(window.event,'click');});}else{var oldDbl=document.ondblclick;document.ondblclick=function(e){if(tvairHandleSafeEvent(e||window.event,'dblclick')===false)return false;return oldDbl?oldDbl(e):true;};var oldOver=document.onmouseover;document.onmouseover=function(e){tvairHandleRuntimeHover(e||window.event,'enter');return oldOver?oldOver(e):true;};var oldOut=document.onmouseout;document.onmouseout=function(e){tvairHandleRuntimeHover(e||window.event,'leave');return oldOut?oldOut(e):true;};var oldClick=document.onclick;document.onclick=function(e){if(tvairHandleSafeEvent(e||window.event,'click')===false)return false;return oldClick?oldClick(e):true;};}tvairClientBeacon('bind_complete','','',document.body);}
-function tvairFindActionTokenElement(){try{return document.querySelector?document.querySelector('[data-tvair-action-token],[data-tvair-token]'):null;}catch(_){return null;}}
-function tvairRenewActionToken(){try{var el=tvairFindActionTokenElement();if(!el)return;var token=tvairGetAttr(el,'data-tvair-action-token')||tvairGetAttr(el,'data-tvair-token');var pluginId=tvairGetAttr(el,'data-tvair-plugin-id');var route=tvairGetAttr(el,'data-tvair-route-segment')||document.body.getAttribute('data-plugin-route')||'';if(!token||!pluginId||!route)return;var xhr=new XMLHttpRequest();xhr.open('POST','/api/plugins/action-token/renew',true);xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded; charset=UTF-8');xhr.send('actionToken='+encodeURIComponent(token)+'&pluginId='+encodeURIComponent(pluginId)+'&routeSegment='+encodeURIComponent(route));}catch(_){}}
-function tvairStartActionTokenKeepalive(){try{if(window.__tvairActionTokenKeepaliveStarted)return;window.__tvairActionTokenKeepaliveStarted=true;tvairRenewActionToken();window.setInterval(tvairRenewActionToken,300000);if(document.addEventListener)document.addEventListener('visibilitychange',function(){if(!document.hidden)tvairRenewActionToken();},false);if(window.addEventListener)window.addEventListener('focus',tvairRenewActionToken,false);else if(window.attachEvent)window.attachEvent('onfocus',tvairRenewActionToken);}catch(_){}}
 function tvairBootSafeEvents(){try{tvairBindSafeEvents();tvairStartActionTokenKeepalive();}catch(_){tvairClientBeacon('bind_failed','','',document.body);}}if(document.readyState==='complete'||document.readyState==='interactive'){tvairBootSafeEvents();}else if(window.attachEvent){window.attachEvent('onload',tvairBootSafeEvents);}else if(window.addEventListener){window.addEventListener('load',tvairBootSafeEvents,false);}else{window.onload=tvairBootSafeEvents;}
 </script>
 </body>
@@ -3950,6 +4102,7 @@ function tvairBootSafeEvents(){try{tvairBindSafeEvents();tvairStartActionTokenKe
         .Replace("{{themeUpdateModeToken}}", themeUpdateModeToken, StringComparison.Ordinal)
         .Replace("{{pluginHead}}", pluginHead, StringComparison.Ordinal)
         .Replace("{{pluginContent}}", pluginContent, StringComparison.Ordinal)
+        .Replace("{{runtimeUiCommonScript}}", RuntimeUiDocumentScript.Source, StringComparison.Ordinal)
         .Replace("{{developerThemeDiagnosticScript}}", developerThemeDiagnosticScript, StringComparison.Ordinal)
         .Replace("{{developerDebugSetBody}}", developerDebugSetBody, StringComparison.Ordinal)
         .Replace("{{developerDebugGetBody}}", developerDebugGetBody, StringComparison.Ordinal)
@@ -6308,9 +6461,10 @@ app.MapPost("/api/reservations", (HttpRequest request, Reservation r, Reservatio
 
 
 // ユーザー明示チェーン予約（番組表の緑「チェーン」ボタンからのみ使用）
-app.MapPost("/api/reservations/chain", (HttpRequest request, Reservation r, ReservationStore store, IProgramEventSource programEvents, ReservationProjectionMetadataStore projectionMetadataStore, ChannelServiceAccessPolicy serviceAccess, ReservationAllocationRouteService allocationRoute, IniSettingsService ini, PluginTypedEventHub typedEvents, LogRepository log, UserEventLogService userEvents) =>
+app.MapPost("/api/reservations/chain", (HttpRequest request, Reservation r, ReservationStore store, IProgramEventSource programEvents, ChannelServiceAccessPolicy serviceAccess, ReservationAllocationRouteService allocationRoute, IniSettingsService ini, PluginTypedEventHub typedEvents, LogRepository log, UserEventLogService userEvents) =>
 {
     using var eventScope = typedEvents.BeginOutboxScope(out var commitEvents);
+    UserChainAllocationCommand? chainCommand = null;
     try
     {
         // release_contract: チェーン予約は「後番組優先ON＋チェーン録画ON」を利用条件にしたうえで、
@@ -6346,7 +6500,7 @@ app.MapPost("/api/reservations/chain", (HttpRequest request, Reservation r, Rese
             : predecessor.TunerName;
 
         // CHAIN_CREATION_ALLOCATION_INVARIANT:
-        // チェーンボタンは親子トポロジーを原子的に確定し、その直後に共通割当ルートへ渡す。
+        // チェーンボタンは操作要求だけを渡し、共通ルート内で親子トポロジーの確定と割当を行う。
         // 初の子だけ、親予約のINSERT後から共通割当完了までTunerNameが一時的に空になり得る。
         // ここで未確定Tunerを拒否すると、同じ操作を二度押しした時だけ成功する競合窓になる。
         // 作成時の物理Tuner正本はFinalConflictPlanであり、API入口で空きTunerを推測・待機・再試行しない。
@@ -6364,7 +6518,7 @@ app.MapPost("/api/reservations/chain", (HttpRequest request, Reservation r, Rese
             r.TransportStreamId,
             r.ServiceId,
             r.StartTime,
-            ini.UserChainRecordingEnabled);
+            ini.ManualChainRecordingEnabled);
         if (!chainEligibility.IsEligible)
         {
             log.Add("RESERVE_ENTRY", "UserChainRejected",
@@ -6422,7 +6576,26 @@ app.MapPost("/api/reservations/chain", (HttpRequest request, Reservation r, Rese
         log.Add("CHAIN_CONTRACT_WARNING", $"R{predecessor.Id}->pending",
             $"accepted=True continuousCaptureRequired=True overlapMarginsPreserved=True boundaryWorkerRestart=False boundaryBonDriverClose=False boundaryPhysicalRetune=False separateTsFiles=True sameSidOnly=True userExplicitButton=True message=チェーン予約は同一受信を継続し、前後マージンを重ねた別ファイルとして録画します rule=release_contract");
 
-        var chainMutation = store.AddOrPromoteUserChain(r, predecessor.Id, r.UserChainRootId.Value, ini.UserChainRecordingEnabled);
+        chainCommand = new UserChainAllocationCommand(r, predecessor.Id,
+            projectedEvent is null ? null : ReservationProjectionMetadataStore.CaptureProjectedEvent(0, projectedEvent, DateTime.Now));
+        var chainAllocation = allocationRoute.Run(new ReservationAllocationRouteRequest(
+            Source: "UserChainReservation",
+            Action: "Add",
+            RunKeywordMatcher: false,
+            SyncProgramRuleReservations: false,
+            ReevaluateAllocations: true,
+            RefreshPreRecordEpgEntries: true,
+            RefreshWakeTask: true,
+            EmitConflictLogs: true,
+            ConflictLogCategory: "Reservation",
+            ConflictLogTitle: "Conflict",
+            ExecutionMode: chainExecutionMode,
+            WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce,
+            TopologyCommands: new[] { chainCommand }, RejectDeferredTopologyCommands: true));
+        var chainMutation = chainCommand.Result;
+        if (chainMutation is null)
+            return Results.Conflict(new { message = "停止処理または別の予約処理が進行中のため保存していません。しばらくしてから再度操作してください。", reason = chainAllocation.Reason, saved = false });
+
         if (!chainMutation.Applied)
         {
             log.Add("CHAIN_MUTATION", $"R{predecessor.Id}->pending",
@@ -6436,6 +6609,7 @@ app.MapPost("/api/reservations/chain", (HttpRequest request, Reservation r, Rese
                     "chain_cycle_detected" => "循環するチェーン予約は作成できません。",
                     "chain_broken_predecessor" => "既存チェーンの参照が壊れているため追加できません。",
                     "chain_root_mismatch" => "既存チェーンのルートが一致しません。",
+                    "successor_has_external_descendant" => "既存チェーンの前への追加やチェーン同士の結合には対応していません。",
                     "compare_and_set_failed" => "予約が同時に更新されたため、再読み込みしてください。",
                     _ => "チェーン予約の構造検証に失敗しました。"
                 },
@@ -6448,7 +6622,7 @@ app.MapPost("/api/reservations/chain", (HttpRequest request, Reservation r, Rese
         existingReservation = chainMutation.Added ? null : existingReservation ?? chainMutation.Reservation;
         if (projectedEvent is not null)
         {
-            projectionMetadataStore.UpsertFromProjectedEvent(id, projectedEvent);
+            // Metadata was committed inside the common route before allocation/PreRec.
             log.Add("PROJECTED_RESERVATION_METADATA", "UserChain",
                 $"result=SAVED reservation=R{id} projectionState={projectedEvent.ProjectionState} sourceKind={projectedEvent.SourceKind} sourcePluginId={SafeProjectedEventLogValue(projectedEvent.SourcePluginId)} sourceEventKey={SafeProjectedEventLogValue(projectedEvent.SourceEventKey)} projectedEventId={SafeProjectedEventLogValue(projectedEvent.Key.Value)} dbEventExists={projectedEvent.DbEventExists} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eid={r.EventId} rule=projected_reservation_contract");
         }
@@ -6464,19 +6638,7 @@ app.MapPost("/api/reservations/chain", (HttpRequest request, Reservation r, Rese
             log.Add("CHAIN_EXECUTION_MODE", $"R{id}", $"mode={chainExecutionMode} stage=existing_reservation_converted commonRoute=ALLOC_ROUTE normalExecutorFrozen=True boundaryMode=continuous_capture_multi_sink recoveryMode=none boundaryWorkerRestart=False sameWorkerBoundaryImplemented=True predecessor=R{predecessor.Id} rule=release_contract");
         }
 
-        allocationRoute.Run(new ReservationAllocationRouteRequest(
-            Source: "UserChainReservation",
-            Action: "Add",
-            RunKeywordMatcher: false,
-            SyncProgramRuleReservations: false,
-            ReevaluateAllocations: true,
-            RefreshPreRecordEpgEntries: true,
-            RefreshWakeTask: true,
-            EmitConflictLogs: true,
-            ConflictLogCategory: "Reservation",
-            ConflictLogTitle: "Conflict",
-            ExecutionMode: chainExecutionMode,
-            WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce));
+
 
         var added = store.GetById(id);
         log.Add("CHAIN_COMMON_ENTRY", $"R{id}", $"result=ROUTED_TO_ALLOC_ROUTE executionMode={chainExecutionMode} isConflicted={(added?.IsConflicted.ToString() ?? "-")} assignedTuner={(string.IsNullOrWhiteSpace(added?.TunerName) ? "-" : added!.TunerName)} actualTuner={(string.IsNullOrWhiteSpace(added?.ActualTunerName) ? "-" : added!.ActualTunerName)} predecessor=R{predecessor.Id} normalRecordingRouteTouched=False rule=release_contract");
@@ -6484,20 +6646,30 @@ app.MapPost("/api/reservations/chain", (HttpRequest request, Reservation r, Rese
             userEvents.AddChainReservationAdded(predecessor, added, id, !chainMutation.Added);
         commitEvents();
         log.Add("PLUGIN_TYPED_EVENT_OUTBOX", "UserChain", $"result=COMMITTED operation=ChainReservation reservation=R{id} rule=typed_event_outbox");
-        return Results.Ok(new { id, message = chainMutation.Added ? "チェーン予約しました。" : "既存予約をチェーン予約に変更しました。", isConflicted = added?.IsConflicted ?? false, tunerName = added?.TunerName ?? "" });
+        return Results.Ok(new { id, message = chainAllocation.RetryRequired ? "チェーン予約を保存しました。割当には再評価が必要です。" : chainMutation.Added ? "チェーン予約しました。" : "既存予約をチェーン予約に変更しました。", allocationRetryRequired = chainAllocation.RetryRequired, isConflicted = added?.IsConflicted ?? false, tunerName = added?.TunerName ?? "" });
     }
     catch (Exception ex)
     {
+        if (chainCommand?.Result is { Applied: true } saved)
+        {
+            commitEvents();
+            log.Add("CHAIN_MUTATION", "SavedRefreshFailed",
+                $"title=[{ReservationUserTitleLogValue(saved.Reservation?.Title ?? r.Title)}] id=R{saved.ReservationId} saved=True errorType={ex.GetType().Name} rule=common_allocation_route_contract");
+            return Results.Json(new { id = saved.ReservationId, saved = true,
+                message = "チェーン予約は保存済みですが、保存後の処理に失敗しました。予約一覧を確認してください。" }, statusCode: 500);
+        }
         return Results.Problem(detail: ex.Message, statusCode: 500);
     }
 });
 // 予約キャンセル/物理削除
 // scheduled はキャンセル状態へ移行し、completed/failed/cancelled は物理削除する。
-// ユーザー明示チェーンは GetUserChainCancelTargets で対象範囲を決定し、
+// 取消範囲は共通ルートの方式別正本で選択し、
 // 単独／チェーン範囲とも同じ原子的取消・確定ID応答・共通割り当て出口へ通す。
 // 番組表／予約一覧など呼出画面を処理所有者にせず、解除後は必ず共通割り当てルートで再評価する。
-app.MapDelete("/api/reservations/{id}", (int id, ReservationStore store, ReservationProjectionMetadataStore projectionMetadataStore, ReservationAllocationRouteService allocationRoute, ReservationScheduler scheduler, PluginTypedEventHub typedEvents, LogRepository log, UserEventLogService userEvents) =>
+app.MapDelete("/api/reservations/{id}", async Task<IResult> (HttpContext context, int id, Database database, IniSettingsService ini, ReservationStore store, ReservationAllocationRouteService allocationRoute, ReservationScheduler scheduler, PluginTypedEventHub typedEvents, LogRepository log, UserEventLogService userEvents) =>
 {
+    var withdrawal = await LabWithdrawalHttpEndpoint.TryHandleAsync(context, id, database, ini, store, allocationRoute, scheduler);
+    if (withdrawal is not null) return withdrawal;
     using var eventScope = typedEvents.BeginOutboxScope(out var commitEvents);
     var r = store.GetById(id);
     if (r is null) return Results.NotFound();
@@ -6524,116 +6696,127 @@ app.MapDelete("/api/reservations/{id}", (int id, ReservationStore store, Reserva
         r.Status == ReservationStatus.Failed ||
         r.Status == ReservationStatus.Cancelled)
     {
-        // PHYSICAL_DELETE_ORDER_INVARIANT:
-        // 予約本体・チェーントポロジーの原子的CAS削除を先にcommitし、成功後だけ投影メタデータを削除する。
-        // CAS拒否時も予約本体と投影メタデータの整合を同じ順序で維持する。
-        if (!store.TryDeleteTerminalReservationAtomicCas(r, out _))
+        // Deletion and chain repair remain one Store transaction owned by the common route.
+        var command = new TerminalReservationDeleteCommand(r);
+        try
         {
-            log.Add("RESERVATION_PHYSICAL_DELETE_CAS", $"R{id}",
-                $"result=REJECTED status={r.Status} dataVersion={r.DataVersion} action=reload_and_retry_manually rule=release_contract");
-            return Results.Conflict(new { message = "予約状態またはチェーン構造が更新されたため、最新状態を確認してからもう一度削除してください。" });
+            var allocation = allocationRoute.Run(new ReservationAllocationRouteRequest(
+                Source: "ReservationDelete", Action: "TerminalDelete", SyncProgramRuleReservations: false,
+                RefreshPreRecordEpgEntries: true, RefreshWakeTask: true,
+                WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce,
+                TopologyCommands: new[] { command }, RejectDeferredTopologyCommands: true));
+            if (command.Result is null)
+                return Results.Conflict(new { message = "別の予約処理が進行中のため削除していません。しばらくしてから再度操作してください。", deleted = false });
+            if (!command.Result.Applied)
+                return Results.Conflict(new { message = "予約状態またはチェーン構造が更新されたため、最新状態を確認してからもう一度削除してください。", deleted = false });
+            commitEvents();
+            log.Add("PLUGIN_TYPED_EVENT_OUTBOX", "ReservationDelete", $"result=COMMITTED operation=PhysicalDelete reservation=R{id} rule=typed_event_outbox");
+            return Results.Ok(new { message = allocation.RetryRequired ? "予約は削除済みです。割当には再評価が必要です。" : "削除しました。", deleted = true, allocationRetryRequired = allocation.RetryRequired });
         }
-
-        projectionMetadataStore.Delete(id);
-        commitEvents();
-        log.Add("PLUGIN_TYPED_EVENT_OUTBOX", "ReservationDelete", $"result=COMMITTED operation=PhysicalDelete reservation=R{id} rule=typed_event_outbox");
-        return Results.Ok(new { message = "削除しました。" });
+        catch (Exception ex)
+        {
+            if (command.Result is { Applied: true })
+            {
+                commitEvents();
+                return Results.Json(new { id, deleted = true, message = "予約は削除済みですが、保存後の処理に失敗しました。予約一覧を確認してください。" }, statusCode: 500);
+            }
+            return Results.Problem(detail: ex.Message, statusCode: 500);
+        }
     }
 
     // scheduled → cancelled に変更（予約解除）
-    // ユーザー明示チェーンは「末尾=単体 / 途中=そこ以降 / 先頭=全体」をまとめて取り消す。
-    var chainTargets = store.GetUserChainCancelTargets(id);
+    // 自動は指定番組のみ、手動は従来の後続範囲。確定時に共通coreで再確認する。
+    var chainTargets = allocationRoute.GetReservationCancellationTargets(id);
     if (chainTargets.Count == 0)
         chainTargets = new[] { r };
 
     var recordingTarget = chainTargets.FirstOrDefault(x => x.Status == ReservationStatus.Recording);
     if (recordingTarget is not null)
-        return Results.BadRequest(new { message = $"チェーン内に録画中の予約があります。R{recordingTarget.Id} はキャンセルできません。" });
+        return Results.BadRequest(new { message = $"「{recordingTarget.Title}」が録画中のためチェーンをキャンセルできません。" });
 
     var targetIds = chainTargets.Select(x => x.Id).ToList();
     var policyTargetText = string.Join(",", chainTargets.Select(x => $"R{x.Id}:{x.ServiceName}:{ReservationUserTitleLogValue(x.Title)}:rawTitleBlank={ReservationTitleDisplayContract.RawBlankFlag(x.Title)}"));
     var policyHead = chainTargets.FirstOrDefault(x => x.Id == id) ?? chainTargets.FirstOrDefault();
     log.Add("CHAIN_CANCEL_POLICY", $"R{id}",
         $"operation=ReservationCancel service={TitleGuardLogValue(policyHead?.ServiceName)} title={ReservationUserTitleLogValue(policyHead?.Title)} rawTitleBlank={ReservationTitleDisplayContract.RawBlankFlag(policyHead?.Title)} result={(targetIds.Count > 1 ? "CANCEL_CHAIN_RANGE" : "CANCEL_SINGLE")} reason=explicit_reservation_cancel cancelSuccessors={(targetIds.Count > 1)} stopOperation=False targetCount={targetIds.Count} targets=[{policyTargetText}] rule=release_contract");
-    foreach (var target in chainTargets.Where(x => x.Source == ReservationSource.Keyword && x.Status == ReservationStatus.Scheduled))
-        store.AddKeywordCancelOnce(target);
-    var isChainCancel = targetIds.Count > 1 || chainTargets.Any(x => x.IsUserChain || x.UserChainPreviousId.HasValue || x.UserChainRootId.HasValue);
-    if (!store.TryCancelReservationsAtomicCas(
-            chainTargets.ToList(),
-            new Dictionary<string, string?>
-            {
-                ["suppressUserEvent"] = isChainCancel ? "chain_cancel_specialized" : "reservation_cancel_specialized"
-            },
-            out var cancelledTargets))
+    var cancelCommand = new ReservationCancellationCommand(id, chainTargets.ToList());
+    var userEventAttempted = false;
+    void RecordCancellationEvent(ReservationCancellationResult outcome)
     {
-        log.Add("RESERVATION_CANCEL_BATCH_CAS", $"R{id}",
-            $"result=REJECTED action=reload_and_retry_manually targets=[{string.Join(",", chainTargets.Select(x => $"R{x.Id}:v{x.DataVersion}"))}] rule=release_contract");
-        return Results.Conflict(new { message = "予約状態が更新されたため、最新状態を確認してからもう一度キャンセルしてください。" });
+        if (userEventAttempted) return;
+        userEventAttempted = true;
+        if (outcome.IsChain && !cancelCommand.IsAutomaticSingle) userEvents.AddChainReservationCancelled(outcome.Cancelled.ToList(), id);
+        else userEvents.AddReservationDeleted(r, id);
     }
-    chainTargets = cancelledTargets;
-    targetIds = chainTargets.Select(x => x.Id).ToList();
-    if (isChainCancel)
+    try
     {
-        userEvents.AddChainReservationCancelled(chainTargets.ToList(), id);
+        var allocation = allocationRoute.Run(new ReservationAllocationRouteRequest(
+            Source: "ReservationMutation", Action: "Cancel", SyncProgramRuleReservations: false,
+            RefreshPreRecordEpgEntries: true, RefreshWakeTask: true, EmitConflictLogs: true,
+            ConflictLogCategory: "Reservation", ConflictLogTitle: "Conflict",
+            TopologyCommands: new[] { cancelCommand }, RejectDeferredTopologyCommands: true));
+        var outcome = cancelCommand.Result;
+        if (outcome is null)
+            return Results.Conflict(new { message = "別の予約処理が進行中のためキャンセルしていません。しばらくしてから再度操作してください。", changed = false, cancelledIds = Array.Empty<int>() });
+        if (!outcome.Applied)
+            return Results.Conflict(new { message = "予約状態またはチェーン構造が更新されたため、再読み込みしてからもう一度キャンセルしてください。", changed = false, cancelledIds = Array.Empty<int>() });
+        RecordCancellationEvent(outcome);
+        targetIds = outcome.Cancelled.Select(x => x.Id).ToList();
+        commitEvents();
+        log.Add("Reservation", "Cancel",
+            $"title=[{ReservationUserTitleLogValue(r.Title)}] result=CANCELLED targetCount={targetIds.Count} preRecordChildren={outcome.PreRecordChildrenCancelled} commonRoute=ALLOC_ROUTE rule=release_contract");
+        return Results.Ok(new
+        {
+            message = allocation.RetryRequired ? "キャンセル済みです。割当には再評価が必要です。"
+                : targetIds.Count > 1 ? $"チェーン予約を{targetIds.Count}件キャンセルしました。" : "キャンセルしました。",
+            changed = true, mutation = "cancel", affectedReservationIds = targetIds, cancelledIds = targetIds
+        });
     }
-    else
+    catch (Exception ex)
     {
-        userEvents.AddReservationDeleted(r, id);
+        if (cancelCommand.Result is { Applied: true } saved)
+        {
+            try { RecordCancellationEvent(saved); }
+            catch (Exception eventError) { log.Add("Reservation", "CancelUserEventFailed", $"title=[{ReservationUserTitleLogValue(r.Title)}] errorType={eventError.GetType().Name}"); }
+            commitEvents();
+            var ids = saved.Cancelled.Select(x => x.Id).ToArray();
+            return Results.Json(new { changed = true, mutation = "cancel", affectedReservationIds = ids, cancelledIds = ids,
+                message = "予約はキャンセル済みですが、保存後の処理に失敗しました。予約一覧を確認してください。" }, statusCode: 500);
+        }
+        return Results.Problem(detail: ex.Message, statusCode: 500);
     }
-
-    var preRecChildCancelled = store.CancelScheduledPreRecordEpgChildrenForParents(targetIds);
-    if (preRecChildCancelled > 0)
-    {
-        log.Add("PRE_REC_EPG_CHILD_CANCEL", $"R{id}",
-            $"result=CANCELLED children={preRecChildCancelled} parents=[{string.Join(",", targetIds.Select(x => $"R{x}"))}] reason=parent_reservation_cancelled rule=release_contract");
-    }
-
-    if (targetIds.Count > 1)
-    {
-        var rangeText = string.Join(",", targetIds.Select(x => $"R{x}"));
-        log.Add("Reservation", "ChainCancel", $"チェーン予約キャンセル: start=R{id} count={targetIds.Count} targets=[{rangeText}] policy=reservation_cancel_cascades_chain rule=release_contract");
-    }
-    else
-    {
-        log.Add("Reservation", "Cancel", $"予約キャンセル: [{ReservationUserTitleLogValue(r.Title)}] {r.StartTime:HH:mm}〜{r.EndTime:HH:mm} policy=single_reservation_cancel rule=release_contract");
-    }
-
-    // CHAIN_CANONICAL_SEAM_INVARIANT:
-    // 予約topologyの取消commitを先に確定し、その同じcanonical状態をactive captureの
-    // ChainControl/lease/session/worker deadlineへ即時反映してから共通Allocationへ渡す。
-    // 500ms boundary scan待ちを正本間の暗黙の継ぎ目にしない。
-    if (isChainCancel)
-        scheduler.ReconcileActiveContinuousChainTopology($"ReservationCancel:R{id}");
-
-    allocationRoute.Run(new ReservationAllocationRouteRequest(
-        Source: "ReservationMutation",
-        Action: targetIds.Count > 1 ? "ChainCancel" : "Cancel",
-        RunKeywordMatcher: false,
-        SyncProgramRuleReservations: false,
-        ReevaluateAllocations: true,
-        RefreshPreRecordEpgEntries: true,
-        RefreshWakeTask: true,
-        EmitConflictLogs: true,
-        ConflictLogCategory: "Reservation",
-        ConflictLogTitle: "Conflict"));
-
-    commitEvents();
-    log.Add("PLUGIN_TYPED_EVENT_OUTBOX", "ReservationCancel", $"result=COMMITTED operation={(targetIds.Count > 1 ? "ChainCancel" : "Cancel")} reservation=R{id} targetCount={targetIds.Count} rule=typed_event_outbox");
-    return Results.Ok(new
-    {
-        message = targetIds.Count > 1 ? $"チェーン予約を{targetIds.Count}件キャンセルしました。" : "キャンセルしました。",
-        changed = true,
-        mutation = "cancel",
-        affectedReservationIds = targetIds,
-        cancelledIds = targetIds
-    });
 });
 
 
-app.MapDelete("/api/reservation-logs", (ReservationStore store) =>
+app.MapDelete("/api/reservation-logs", (ReservationAllocationRouteService allocationRoute, PluginTypedEventHub typedEvents) =>
 {
-    var removed = store.DeleteLogEntries();
-    return Results.Ok(new { message = $"ログを{removed}件削除しました。", removed });
+    using var eventScope = typedEvents.BeginOutboxScope(out var commitEvents);
+    var command = new TerminalLogDeletionCommand();
+    try
+    {
+        var allocation = allocationRoute.Run(new ReservationAllocationRouteRequest(
+            Source: "ReservationLogs", Action: "Clear", SyncProgramRuleReservations: false,
+            RefreshPreRecordEpgEntries: true, RefreshWakeTask: true,
+            WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce,
+            TopologyCommands: new[] { command }, RejectDeferredTopologyCommands: true));
+        if (command.Result is null)
+            return Results.Conflict(new { message = "別の予約処理が進行中のため削除していません。しばらくしてから再度操作してください。", deleted = false, removed = 0 });
+        if (!command.Result.Applied)
+            return Results.Conflict(new { message = "予約状態またはチェーン構造が変わったため削除していません。再読み込みしてください。", deleted = false, removed = 0 });
+        commitEvents();
+        return Results.Ok(new { message = allocation.RetryRequired ? "ログは削除済みです。割当には再評価が必要です。" : $"ログを{command.Result.RemovedIds.Count}件削除しました。",
+            deleted = true, removed = command.Result.RemovedIds.Count, affectedReservationIds = command.Result.RemovedIds });
+    }
+    catch (Exception ex)
+    {
+        if (command.Result is { Applied: true } saved)
+        {
+            commitEvents();
+            return Results.Json(new { deleted = true, removed = saved.RemovedIds.Count, affectedReservationIds = saved.RemovedIds,
+                message = "ログは削除済みですが、保存後の処理に失敗しました。予約一覧を確認してください。" }, statusCode: 500);
+        }
+        return Results.Problem(detail: ex.Message, statusCode: 500);
+    }
 });
 
 
@@ -6797,6 +6980,10 @@ app.MapPatch("/api/reservations/{id}/enabled", (int id, EnabledRequest req, Rese
     });
 });
 
+// Plugin-owned selection catalog. Host treats feature and selection IDs as opaque values.
+app.MapGet("/api/plugin-selection-features", (TvAIr.Plugin.PluginRegistry registry) =>
+    Results.Ok(registry.ListSelectionFeatures()));
+
 // ─── キーワードルール API ─────────────────────────────────────────
 
 app.MapGet("/api/keyword-rules", (ReservationStore store, KeywordMatcher matcher) =>
@@ -6824,6 +7011,7 @@ app.MapGet("/api/keyword-rules", (ReservationStore store, KeywordMatcher matcher
         r.RecordCurrentServiceOnly,
         r.RecordSubtitles,
         r.AutoChainReservations,
+        r.PluginBindingJson,
         r.Enabled,
         r.SortOrder,
         r.ExpiresOn,
@@ -6877,7 +7065,7 @@ app.MapGet("/api/keyword-rules/export", (ReservationStore store) =>
     return Results.File(bytes, "application/json; charset=utf-8", fileName);
 });
 
-app.MapPost("/api/keyword-rules/import", async (HttpRequest request, ReservationStore store, KeywordMatcher matcher, ReservationAllocationRouteService allocationRoute, LogRepository log) =>
+app.MapPost("/api/keyword-rules/import", async (HttpRequest request, ReservationStore store, KeywordMatcher matcher, ReservationAllocationRouteService allocationRoute, PluginTypedEventHub typedEvents, LogRepository log) =>
 {
     if (!request.HasFormContentType)
         return Results.BadRequest(new { message = "インポートファイルを指定してください。" });
@@ -6928,48 +7116,39 @@ app.MapPost("/api/keyword-rules/import", async (HttpRequest request, Reservation
             return Results.BadRequest(new { message = $"{i + 1}件目: {err}" });
     }
 
-    var previousRuleIds = store.GetKeywordRules().Select(x => x.Id).ToHashSet();
-    var importedRuleIds = ordered.Select(x => x.Id).ToHashSet();
-
-    store.ReplaceKeywordRules(ordered);
-
-    var preserved = 0;
-    var removed = 0;
-    var recordingOptionsUpdated = 0;
-    foreach (var rule in ordered)
+    using var eventScope = typedEvents.BeginOutboxScope(out var commitEvents);
+    var command = new KeywordRuleImportCommand(ordered, matcher);
+    try
     {
-        var reconcile = matcher.ReconcileScheduledReservationsForRule(rule);
-        preserved += reconcile.Preserved;
-        removed += reconcile.Removed;
-        recordingOptionsUpdated += reconcile.RecordingOptionsUpdated;
+        var allocation = allocationRoute.Run(new ReservationAllocationRouteRequest(
+            Source: "KeywordRule", Action: "Import", SyncProgramRuleReservations: false,
+            RefreshPreRecordEpgEntries: true, RefreshWakeTask: true, EmitConflictLogs: true,
+            ConflictLogCategory: "KeywordRule", ConflictLogTitle: "Conflict",
+            WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce,
+            TopologyCommands: new[] { command }, RejectDeferredTopologyCommands: true));
+        if (command.Result is not { Applied: true } saved)
+            return Results.Conflict(new { imported = false,
+                message = "予約処理が進行中かルール・予約状態が変わったためインポートしていません。しばらくしてから再度操作してください。" });
+        log.Add("KEYWORD_RULE", "Import",
+            $"自動検索予約ルールをインポート: {ordered.Count}件 / preservedScheduled={saved.Preserved} recordingOptionsUpdated={saved.RecordingOptionsUpdated} removedScheduled={saved.RemovedIds.Count} / file={file.FileName}");
+        commitEvents();
+        return Results.Ok(new { imported = true, importedCount = ordered.Count,
+            preservedReservations = saved.Preserved, recordingOptionsUpdated = saved.RecordingOptionsUpdated,
+            removedReservations = saved.RemovedIds.Count,
+            message = allocation.RetryRequired ? "インポート済みです。予約割当の再評価が必要です。" : $"{ordered.Count}件のルールをインポートしました。" });
     }
-
-    foreach (var removedRuleId in previousRuleIds.Except(importedRuleIds))
-        removed += store.DeleteScheduledByRuleId(removedRuleId);
-
-    allocationRoute.Run(new ReservationAllocationRouteRequest(
-        Source: "KeywordRule",
-        Action: "Import",
-        RunKeywordMatcher: true,
-        SyncProgramRuleReservations: true,
-        ReevaluateAllocations: true,
-        RefreshPreRecordEpgEntries: true,
-        RefreshWakeTask: true,
-        EmitConflictLogs: true,
-        ConflictLogCategory: "KeywordRule",
-        ConflictLogTitle: "Conflict",
-        WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce));
-    log.Add("KEYWORD_RULE", "Import",
-        $"自動検索予約ルールをインポート: {ordered.Count}件 / preservedScheduled={preserved} recordingOptionsUpdated={recordingOptionsUpdated} removedScheduled={removed} / file={file.FileName}");
-
-    return Results.Ok(new
+    catch (Exception ex)
     {
-        importedCount = ordered.Count,
-        preservedReservations = preserved,
-        recordingOptionsUpdated,
-        removedReservations = removed,
-        message = $"{ordered.Count}件のルールをインポートしました。"
-    });
+        if (command.Result is { Applied: true } saved)
+        {
+            commitEvents();
+            return Results.Json(new { imported = true, importedCount = ordered.Count,
+                preservedReservations = saved.Preserved, recordingOptionsUpdated = saved.RecordingOptionsUpdated,
+                removedReservations = saved.RemovedIds.Count,
+                message = "インポート済みですが保存後の処理に失敗しました。ルールと予約一覧を確認してください。" }, statusCode: 500);
+        }
+        return Results.Problem(detail: ex.Message, statusCode: 500);
+    }
 });
 
 app.MapGet("/api/keyword-rule-reservations", (ReservationPresentationService presenter, LogRepository log) =>
@@ -7039,7 +7218,7 @@ app.MapPost("/api/keyword-rules/preview", (KeywordRule r, KeywordMatcher matcher
     });
 });
 
-app.MapPut("/api/keyword-rules/{id}", (int id, KeywordRule r, ReservationStore store, KeywordMatcher matcher, ReservationAllocationRouteService allocationRoute, LogRepository log) =>
+app.MapPut("/api/keyword-rules/{id}", (int id, KeywordRule r, ReservationStore store, KeywordMatcher matcher, ReservationAllocationRouteService allocationRoute, PluginTypedEventHub typedEvents, LogRepository log) =>
 {
     var serviceIdentityError = NormalizeKeywordRule(r);
     if (serviceIdentityError is not null) return Results.BadRequest(new { message = serviceIdentityError });
@@ -7047,46 +7226,68 @@ app.MapPut("/api/keyword-rules/{id}", (int id, KeywordRule r, ReservationStore s
     if (err is not null) return Results.BadRequest(new { message = err });
     r.Id = id;
 
-    store.UpdateKeywordRule(r);
-    var reconcile = matcher.ReconcileScheduledReservationsForRule(r);
-    log.Add("KEYWORD_RULE", $"Rule{id}",
-        $"ルール更新: enabled={r.Enabled} name=[{r.Name}] pattern=[{r.Pattern}] preservedScheduled={reconcile.Preserved} preservedSourceMissing={reconcile.PreservedSourceMissing} recordingOptionsUpdated={reconcile.RecordingOptionsUpdated} removedScheduled={reconcile.Removed} autoChain={r.AutoChainReservations}");
-
-    allocationRoute.Run(new ReservationAllocationRouteRequest(
-        Source: "KeywordRule",
-        Action: "Update",
-        RunKeywordMatcher: r.Enabled,
-        SyncProgramRuleReservations: true,
-        ReevaluateAllocations: true,
-        RefreshPreRecordEpgEntries: true,
-        RefreshWakeTask: true,
-        EmitConflictLogs: true,
-        ConflictLogCategory: "KeywordRule",
-        ConflictLogTitle: "Conflict",
-        WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce));
-
-    var updatedRule = store.GetKeywordRules().FirstOrDefault(x => x.Id == id);
-    var hitCount = updatedRule is not null && updatedRule.Enabled
-        ? matcher.GetRuleHitCounts(new[] { updatedRule }).GetValueOrDefault(id)
-        : 0;
-    return Results.Ok(new
+    using var eventScope = typedEvents.BeginOutboxScope(out var commitEvents);
+    var command = new KeywordRuleUpdateCommand(r, matcher);
+    try
     {
-        message = "更新しました。",
-        preservedReservations = reconcile.Preserved,
-        recordingOptionsUpdated = reconcile.RecordingOptionsUpdated,
-        removedReservations = reconcile.Removed,
-        rule = updatedRule is null ? null : new
+        allocationRoute.Run(new ReservationAllocationRouteRequest(
+            Source: "KeywordRule",
+            Action: "Update",
+            RunKeywordMatcher: false,
+            SyncProgramRuleReservations: false,
+            ReevaluateAllocations: true,
+            RefreshPreRecordEpgEntries: true,
+            RefreshWakeTask: true,
+            EmitConflictLogs: true,
+            ConflictLogCategory: "KeywordRule",
+            ConflictLogTitle: "Conflict",
+            WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce,
+            TopologyCommands: new[] { command }, RejectDeferredTopologyCommands: true));
+
+        if (command.Result is not { Applied: true } saved)
+            return Results.Conflict(new { saved = false,
+                message = "予約処理が進行中か予約状態が変わったため更新していません。しばらくしてから再度操作してください。" });
+        var reconcile = new KeywordRuleReconcileResult { Preserved = saved.Preserved,
+            PreservedSourceMissing = saved.PreservedSourceMissing, Removed = saved.RemovedIds.Count,
+            RecordingOptionsUpdated = saved.RecordingOptionsUpdated };
+        log.Add("KEYWORD_RULE", $"Rule{id}",
+            $"ルール更新: enabled={r.Enabled} name=[{r.Name}] preservedScheduled={reconcile.Preserved} preservedSourceMissing={reconcile.PreservedSourceMissing} recordingOptionsUpdated={reconcile.RecordingOptionsUpdated} removedScheduled={reconcile.Removed} autoChain={r.AutoChainReservations}");
+        commitEvents();
+
+        var updatedRule = store.GetKeywordRules().FirstOrDefault(x => x.Id == id);
+        var hitCount = updatedRule is not null && updatedRule.Enabled
+            ? matcher.GetRuleHitCounts(new[] { updatedRule }).GetValueOrDefault(id)
+            : 0;
+        return Results.Ok(new
         {
-            updatedRule.Id, updatedRule.Name, updatedRule.Pattern, updatedRule.ExcludePattern,
-            updatedRule.UseRegex, updatedRule.SearchTitle,
-            updatedRule.SearchOutline, updatedRule.SearchDetail, updatedRule.SearchCast,
-            updatedRule.TargetGenres, updatedRule.TargetServices, updatedRule.TargetDays,
-            updatedRule.UseTimeRange, updatedRule.StartTime, updatedRule.EndTime,
-            updatedRule.RecordCurrentServiceOnly, updatedRule.RecordSubtitles, updatedRule.AutoChainReservations,
-            updatedRule.Enabled, updatedRule.UseAllChannels, updatedRule.ExpiresOn,
-            updatedRule.SortOrder, HitCount = hitCount
+            message = "更新しました。",
+            preservedReservations = reconcile.Preserved,
+            recordingOptionsUpdated = reconcile.RecordingOptionsUpdated,
+            removedReservations = reconcile.Removed,
+            rule = updatedRule is null ? null : new
+            {
+                updatedRule.Id, updatedRule.Name, updatedRule.Pattern, updatedRule.ExcludePattern,
+                updatedRule.UseRegex, updatedRule.SearchTitle,
+                updatedRule.SearchOutline, updatedRule.SearchDetail, updatedRule.SearchCast,
+                updatedRule.TargetGenres, updatedRule.TargetServices, updatedRule.TargetDays,
+                updatedRule.UseTimeRange, updatedRule.StartTime, updatedRule.EndTime,
+                updatedRule.RecordCurrentServiceOnly, updatedRule.RecordSubtitles, updatedRule.AutoChainReservations,
+                updatedRule.Enabled, updatedRule.UseAllChannels, updatedRule.ExpiresOn,
+                updatedRule.SortOrder, HitCount = hitCount
+            }
+        });
+    }
+    catch (Exception ex)
+    {
+        if (command.Result is { Applied: true } saved)
+        {
+            commitEvents();
+            return Results.Json(new { saved = true, preservedReservations = saved.Preserved,
+                recordingOptionsUpdated = saved.RecordingOptionsUpdated, removedReservations = saved.RemovedIds.Count,
+                message = "更新済みですが保存後の処理に失敗しました。ルールと予約一覧を確認してください。" }, statusCode: 500);
         }
-    });
+        return Results.Problem(detail: ex.Message, statusCode: 500);
+    }
 });
 
 app.MapPost("/api/keyword-rules/reorder", (KeywordRuleOrderRequest req, ReservationStore store, ReservationAllocationRouteService allocationRoute, LogRepository log) =>
@@ -7112,39 +7313,59 @@ app.MapPost("/api/keyword-rules/reorder", (KeywordRuleOrderRequest req, Reservat
     return Results.Ok(new { message = "並び順を更新しました。" });
 });
 
-app.MapDelete("/api/keyword-rules/{id}", (int id, ReservationStore store, ReservationAllocationRouteService allocationRoute, LogRepository log) =>
+app.MapDelete("/api/keyword-rules/{id}", (int id, ReservationAllocationRouteService allocationRoute,
+    PluginTypedEventHub typedEvents, LogRepository log) =>
 {
-    // ルール削除時は、ルール本体削除だけで終わらせず、
-    // 関連予約の解放→再マッチング→共通割当再評価まで必ず通す。
-    // さらに前後の件数をログに残し、画面側の誤認と切り分けやすくする。
-    var beforeCount = store.GetKeywordRules().Count;
-    var removed = store.DeleteScheduledByRuleId(id);
-    store.DeleteKeywordRule(id);
-    var afterDeleteCount = store.GetKeywordRules().Count;
-    log.Add("KEYWORD_RULE", $"Rule{id}", $"ルール削除: before={beforeCount} after={afterDeleteCount} removedScheduled={removed}");
-
-    allocationRoute.Run(new ReservationAllocationRouteRequest(
-        Source: "KeywordRule",
-        Action: "Delete",
-        RunKeywordMatcher: true,
-        SyncProgramRuleReservations: true,
-        ReevaluateAllocations: true,
-        RefreshPreRecordEpgEntries: true,
-        RefreshWakeTask: true,
-        EmitConflictLogs: true,
-        ConflictLogCategory: "KeywordRule",
-        ConflictLogTitle: "Conflict",
-        WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce));
-
-    if (removed > 0)
-        log.Add("KEYWORD_RULE", $"Rule{id}",
-            $"ルール削除に伴い関連予約を解放: {removed}件");
-
-    return Results.Ok(new { message = "削除しました。", beforeCount, afterDeleteCount, removedScheduled = removed });
+    using var eventScope = typedEvents.BeginOutboxScope(out var commitEvents);
+    var command = new KeywordRuleDeletionCommand(id);
+    try
+    {
+        var allocation = allocationRoute.Run(new ReservationAllocationRouteRequest(
+            Source: "KeywordRule", Action: "Delete", SyncProgramRuleReservations: false,
+            RefreshPreRecordEpgEntries: true, RefreshWakeTask: true, EmitConflictLogs: true,
+            ConflictLogCategory: "KeywordRule", ConflictLogTitle: "Conflict",
+            WakeRefreshMode: ReservationAllocationWakeRefreshMode.BoundedCoalesce,
+            TopologyCommands: new[] { command }, RejectDeferredTopologyCommands: true));
+        if (command.Result is not { Applied: true } saved)
+            return Results.Conflict(new { deleted = false,
+                message = "予約処理が進行中かチェーンの状態を確認できないため削除していません。しばらくしてから再度操作してください。" });
+        log.Add("KEYWORD_RULE", $"Rule{id}", $"ルール削除: before={saved.BeforeCount} after={saved.AfterCount} removedScheduled={saved.RemovedIds.Count}");
+        commitEvents();
+        return Results.Ok(new { deleted = true,
+            message = allocation.RetryRequired ? "削除済みです。予約割当の再評価が必要です。" : "削除しました。",
+            beforeCount = saved.BeforeCount, afterDeleteCount = saved.AfterCount, removedScheduled = saved.RemovedIds.Count });
+    }
+    catch (Exception ex)
+    {
+        if (command.Result is { Applied: true } saved)
+        {
+            commitEvents();
+            return Results.Json(new { deleted = true, beforeCount = saved.BeforeCount, afterDeleteCount = saved.AfterCount,
+                removedScheduled = saved.RemovedIds.Count,
+                message = "削除済みですが保存後の処理に失敗しました。予約一覧を確認してください。" }, statusCode: 500);
+        }
+        return Results.Problem(detail: ex.Message, statusCode: 500);
+    }
 });
+
 
 string? ValidateKeywordRule(KeywordRule r)
 {
+    // Generic identifiers only; never resolve Plugin semantics or force a fallback.
+    try
+    {
+        var bindings = System.Text.Json.JsonSerializer.Deserialize<TvAirPluginSelectionBindingDto[]>(r.PluginBindingJson ?? "[]",
+            new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? Array.Empty<TvAirPluginSelectionBindingDto>();
+        if (bindings.Length > 8 || bindings.Any(b => b is null || string.IsNullOrWhiteSpace(b.PluginId)
+            || string.IsNullOrWhiteSpace(b.FeatureId) || string.IsNullOrWhiteSpace(b.SelectionId)
+            || b.PluginId.Length > 128 || b.FeatureId.Length > 128 || b.SelectionId.Length > 256)
+            || bindings.Select(b => b.PluginId + ":" + b.FeatureId).Distinct(StringComparer.OrdinalIgnoreCase).Count() != bindings.Length)
+            return "Plugin選択設定が不正です。";
+        r.PluginBindingJson = System.Text.Json.JsonSerializer.Serialize(bindings,
+            new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase });
+    }
+    catch (System.Text.Json.JsonException) { return "Plugin選択設定が不正です。"; }
+
     if (string.IsNullOrWhiteSpace(r.Pattern)) return "キーワードは必須です。";
     if (!r.SearchTitle && !r.SearchOutline && !r.SearchDetail && !r.SearchCast)
         return "検索対象フィールドを1つ以上選択してください。";
@@ -7199,7 +7420,7 @@ string? NormalizeKeywordRule(KeywordRule r)
 
 app.MapGet("/api/program-rules", (ReservationStore store) =>
 {
-    store.PurgeExpiredProgramGuideMissingProgramRules();
+    // Read-only listing. Expiry topology cleanup belongs to the existing common sync.
     return Results.Ok(store.GetProgramRules());
 });
 
@@ -7564,13 +7785,14 @@ app.MapPut("/api/settings", (WebSettingsUpdateDto dto, SettingsChangeApplication
 
 // アプリ再起動（設定変更後の反映用）
 // スタートアップタスクが登録されている場合のみ再起動後に自動復帰する
-app.MapPost("/api/restart", (IniSettingsService ini) =>
+app.MapPost("/api/restart", (IniSettingsService ini, IHostApplicationLifetime lifetime, LogRepository log) =>
 {
     // レスポンスを返してから終了するために遅延実行
     Task.Run(async () =>
     {
         await Task.Delay(500);
-        Environment.Exit(0);
+        log.Add("APP_EXIT_REQUEST", "Restart", "source=settings_restart action=StopApplication commonRoute=host_lifetime rule=release_contract");
+        lifetime.StopApplication();
     });
     return Results.Ok(new
     {
@@ -7672,7 +7894,7 @@ app.Lifetime.ApplicationStarted.Register(() =>
     {
         var startupSvc = app.Services.GetRequiredService<WindowsAutoStartService>();
         var iniSvc     = app.Services.GetRequiredService<IniSettingsService>();
-        startupSvc.Set(iniSvc.StartupEnabled);
+        startupSvc.SetCurrentPolicy(iniSvc);
         // Wake同期はEpgScheduler StartupFinalizeが、起動時予約Mutation確定後に一度だけ所有する。
     }
     catch { /* スタートアップ・タスクスケジューラー同期失敗は無視 */ }
@@ -7680,8 +7902,21 @@ app.Lifetime.ApplicationStarted.Register(() =>
     // 7日以上経過したログエントリを削除
     try
     {
-        var store = app.Services.GetRequiredService<ReservationStore>();
-        var purged = store.PurgeOldLogEntries();
+        var command = new ExpiredTerminalLogDeletionCommand(DateTime.Now.AddDays(-7));
+        try
+        {
+            app.Services.GetRequiredService<ReservationAllocationRouteService>().Run(new(
+                "Startup", "PurgeExpiredTerminalHistory", SyncProgramRuleReservations: false,
+                TopologyCommands: new[] { command }));
+        }
+        catch (Exception ex) when (command.Result is { Applied: true })
+        {
+            app.Services.GetRequiredService<LogRepository>().Add("Startup", "Purge",
+                $"期限切れログ削除は保存済みです。後処理エラー: {ex.Message}");
+        }
+        var purged = command.Result?.RemovedIds.Count ?? 0;
+        if (command.Result is null)
+            app.Services.GetRequiredService<LogRepository>().Add("Startup", "Purge", "期限切れログ削除を共通ルートへ保留しました。");
         if (purged > 0)
         {
             var log = app.Services.GetRequiredService<LogRepository>();

@@ -23,6 +23,34 @@ public sealed class TvAirExternalLookupProviderDto
     public string ProviderId { get; init; } = string.Empty;
     public string DisplayName { get; init; } = string.Empty;
     public IReadOnlyList<string> Operations { get; init; } = Array.Empty<string>();
+    /// <summary>Host-validated operation schemas. Added in SDK/Host Contract 1.1.18.</summary>
+    public IReadOnlyList<TvAirExternalLookupOperationDto> OperationDetails { get; init; } = Array.Empty<TvAirExternalLookupOperationDto>();
+
+}
+
+public enum TvAirExternalLookupParameterKind { Text = 0, Integer = 1 }
+public enum TvAirExternalLookupResultScope { Unspecified = 0, SearchResults, CompleteCollection, SingleItem }
+
+public sealed class TvAirExternalLookupParameterDto
+{
+    public string Name { get; init; } = string.Empty;
+    public bool Required { get; init; }
+    public TvAirExternalLookupParameterKind Kind { get; init; }
+    public int? Minimum { get; init; }
+    public int? Maximum { get; init; }
+    public int? MinLength { get; init; }
+    public int? MaxLength { get; init; }
+}
+
+public sealed class TvAirExternalLookupOperationDto
+{
+    public string Operation { get; init; } = string.Empty;
+    public IReadOnlyList<TvAirExternalLookupParameterDto> Parameters { get; init; } = Array.Empty<TvAirExternalLookupParameterDto>();
+    public int MaxResponseBytes { get; init; }
+    public int TimeoutMilliseconds { get; init; }
+    public TvAirExternalLookupResultScope ResultScope { get; init; }
+    // These operations are filtered requests, not pages of the unfiltered operation.
+    public bool SupportsPagination { get; init; }
 }
 
 public sealed class TvAirExternalLookupRequestDto

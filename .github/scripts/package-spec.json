@@ -1,0 +1,8 @@
+{
+  "Name": "TvAIr",
+  "Solution": "TvAIr.sln",
+  "Dll": "TvAIr.dll",
+  "Version": "1.2.14",
+  "Project": "TvAIr",
+  "Framework": "net8.0-windows"
+}

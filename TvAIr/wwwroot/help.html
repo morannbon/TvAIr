@@ -5,14 +5,14 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
 <title>TvAIr ヘルプ</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.13"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.13"/>
-<link href="/tvair-ui-foundation.css?v=1.2.13" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.13" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.13" rel="stylesheet"/>
-<link href="/tvair-help.css?v=1.2.13" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.13" rel="stylesheet"/>
-<script src="/tvair-theme.js?v=1.2.13"></script>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.14"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.14"/>
+<link href="/tvair-ui-foundation.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-help.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.14" rel="stylesheet"/>
+<script src="/tvair-theme.js?v=1.2.14"></script>
 </head>
 <body class="tvair-non-program-page tvair-page-width-wide tvair-help-page">
 <header class="help-window-bar" aria-label="ヘルプ見出し">
@@ -99,6 +99,7 @@
         <article class="setting-card"><h3>BonDriver</h3><p>その枠で使用するBonDriverを指定します。</p></article>
         <article class="setting-card"><h3>放送波</h3><p>使用するBonDriverが対応する放送波を設定します。</p><p>地上波専用のBonDriverは<strong>地上波</strong>、BS/CS専用のBonDriverは<strong>BS/CS</strong>を選択します。</p><p><strong>CATV</strong>はケーブルテレビ用のBonDriverで使用します。再送信された地上波・BS・CSもそのBonDriverのch2に従って扱います。</p><p><strong>地デジ/BS/CS</strong>は、1つのBonDriverで複数の放送波を扱う構成で使用します。既に動作している設定は引き続き利用できます。</p></article>
         <article class="setting-card"><h3>用途</h3><p><strong>録画用</strong>は、予約録画、EPG取得、録画前EPG確認に使用します。</p><p><strong>視聴用</strong>は、AIrConなどの対応プラグインからTVTestで視聴する際に使用します。</p><p>録画用と視聴用を分けることで、視聴中の選局操作と録画処理を分離できます。</p></article>
+        <article class="setting-card"><h3>番組表からの視聴</h3><p>AIrConを導入・有効化し、視聴操作とプラグイン画面の利用を許可してください。対象局を受信できる視聴用チューナーとTVTestの設定がある場合、放送中の番組に「視聴」を表示します。設定のない放送波には表示しません。</p><p>必要に応じてAIrConとTVTestを起動して選局します。同じ視聴先で動作中のTVTestは再利用します。</p><p>TvAIrを終了・再起動しても、視聴中のTVTestは終了しません。再起動後の視聴操作では新しいTVTestを起動します。「視聴停止」を選んだ場合は、その操作対象のTVTestを終了します。</p></article>
         <article class="setting-card"><h3>操作</h3><p>行内の「削除」でそのチューナー枠を削除します。枠数の変更には上部の「設定欄を作成」を使用します。</p></article>
       </div>
     </section>
@@ -113,8 +114,8 @@
         <article class="setting-card"><h3>録画終了後アクション</h3><p>最後に残っている録画が正常完了した後の動作を「何もしない」「スリープ」「シャットダウン」から選びます。手動停止や録画失敗では実行しません。</p><p>実行1分前になると確認画面を表示します。「中止」でその回の動作を取り消し、「今すぐ実行」で直ちに実行できます。確認画面を閉じた場合も中止します。</p><p>待機中または確認中に新しい録画、EPG取得、視聴などが始まった場合は実行しません。</p></article>
         <article class="setting-card"><h3>録画終了後アクション待機</h3><p>最後に残っている録画が正常完了してから、録画終了後アクションを実行するまでの待機時間を設定します。</p></article>
         <article class="setting-card"><h3>前番組優先（デフォルト）</h3><p>同じチューナーで前後の録画時間が重なる場合に前の番組を優先します。</p><p>録画マージンが重なる場合は前の番組の終了側を優先します。</p></article>
-        <article class="setting-card"><h3>後番組を優先する</h3><p>同じチューナーで前後の録画時間が重なる場合に後の番組を優先します。</p><p>録画マージンが重なる場合は後の番組の開始側を優先します。</p><p>「後番組を優先する」を選ぶと「チェーン予約を実行する」を設定できます。</p></article>
-        <article class="setting-card"><h3>チェーン予約を実行する</h3><p>「後番組を優先する」を選んだ場合に利用できるオプションです。</p><p>同じ局の連続番組を番組境界で受信を止めずに録画します。重なる録画マージンも各番組の別TSファイルへ保存します。</p><p>有効にすると番組表にチェーンボタンを表示しチェーン予約は予約リストで「(C)」と表示します。</p><p>無効にしても未開始の予約は削除せず通常予約として残します。録画中の番組は設定変更だけでは中断しません。</p></article>
+        <article class="setting-card"><h3>後番組を優先する</h3><p>同じチューナーで前後の録画時間が重なる場合に後の番組を優先します。</p><p>録画マージンが重なる場合は後の番組の開始側を優先します。</p><p>「後番組を優先する」を選ぶとチェーン予約の方式を設定できます。</p></article>
+        <article class="setting-card"><h3>チェーン予約</h3><p>「後番組を優先する」を選んだ場合に方式を設定できます。</p><p>同じ局の連続番組を番組境界で受信を止めずに録画します。重なる録画マージンも各番組の別TSファイルへ保存します。チェーン予約は予約リストで「(C)」と表示します。手動では先頭番組を除く2番組目から最後まで、自動では先頭番組から最後まで全てに表示します。単独予約には表示しません。</p><p>「手動（チェーンボタン有り）」では番組表のチェーンボタンを使います。自動検索予約のチェーン指定も手動方式で利用できます。</p><p>「自動（チェーンボタン無し）」では予約元や追加順を問わず同じ局で終了・開始時刻が一致する予約をつなぎます。チェーンボタンと自動検索予約の手動用オプションは表示しません。</p><p>自動方式で予約を取り消すと指定した番組だけを取り消します。先頭の取消では残る後続、末尾の取消では残る前段のチェーンを維持します。途中の番組を取り消すと前後のチェーンを分割し、単独になった予約は通常予約へ戻ります。手動方式の後続一括取消とは異なります。</p><p>手動・自動の切替では作成済みチェーンを解除しません。切替後の結合判断に選択した方式を使います。自動では以前からある単独予約も結合対象になります。手動へ変えると以後の自動結合を止めます。チェーンを作った時点の方式は保持せず、(C)の表示と予約取消は現在選択中の方式に従います。</p><p>「無効」にすると未開始部分を通常予約へ戻します。録画中の接続は設定変更だけでは中断しません。前番組優先へ変えても選択した方式は保持し、後番組優先へ戻すと復元します。</p></article>
       </div>
     </section>
 
@@ -205,8 +206,8 @@
   if(window.self !== window.top){ document.body.classList.add('in-modal'); }
 })();
 </script>
-<script src="/tvair-settings-host.js?v=1.2.13"></script>
-<script src="/tvair-notification.js?v=1.2.13"></script>
+<script src="/tvair-settings-host.js?v=1.2.14"></script>
+<script src="/tvair-notification.js?v=1.2.14"></script>
 </body>
 </html>
 

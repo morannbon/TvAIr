@@ -144,6 +144,7 @@
   </Target>
 
   <ItemGroup>
+    <Compile Include="..\Shared\RecordingPfObservation.cs" Link="Shared\RecordingPfObservation.cs" />
     <Compile Include="..\Shared\EitEventGroupContract.cs" Link="Shared\EitEventGroupContract.cs" />
     <Compile Include="..\Shared\WorkerPresentationPolicy.cs" Link="Shared\WorkerPresentationPolicy.cs" />
     <Compile Include="..\Shared\WorkerFocusSnapshot.cs" Link="Shared\WorkerFocusSnapshot.cs" />

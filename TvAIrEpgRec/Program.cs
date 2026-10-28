@@ -1,4 +1,4 @@
-using System.Buffers;
+﻿using System.Buffers;
 using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.InteropServices;
@@ -612,6 +612,22 @@ internal static class Program
         return null;
     }
 
+    private static void ApplyRecordingEventIdentity(TsReadProbeSummary summary, TvAIrEpgRecJob? job)
+    {
+        // Normal recording uses the reservation identity already supplied by the Host.
+        // EPG-check retains its exclusive PreRecordProbe contract.
+        if (!string.Equals(summary.Mode, "record", StringComparison.OrdinalIgnoreCase)
+            || job?.Metadata is null
+            || !job.Metadata.TryGetValue("expectedEventId", out var rawId)
+            || !int.TryParse(rawId, out var eventId) || eventId <= 0 || eventId > ushort.MaxValue)
+            return;
+        summary.ExpectedEventId = eventId;
+        if (job.Metadata.TryGetValue("expectedEventStart", out var rawStart))
+            summary.ExpectedEventStart = rawStart;
+        if (job.Metadata.TryGetValue("expectedEventEnd", out var rawEnd))
+            summary.ExpectedEventEnd = rawEnd;
+    }
+
     private static async Task<TsReadProbeSummary> RunTsReadProbeAsync(TvAIrEpgRecJob? job, CliOptions parsed, string? progressPath, string jobId, string mode)
     {
         var bonDriver = FirstNonEmpty(job?.BonDriver, parsed.Get("bonDriver"), parsed.Get("bondriver"), "unknown");
@@ -679,6 +695,7 @@ internal static class Program
                     : "mode_epg_after_single_process_tuner_runtime_ts_output_enabled"
         };
 
+        ApplyRecordingEventIdentity(summary, job);
         summary.RuntimeStatsPath = RecordingWorkerResult.ResolveRuntimeStatsPath(job, summary.RecordOutputPath);
         // Normal recording remains one reservation / one output. Explicit user-chain recording may attach
         // additional reservation-local sinks to the same BonDriver/OpenTuner/TS-read worker through the immutable-generation
@@ -1470,12 +1487,26 @@ internal sealed class RecordingJob
     public bool SaveSubtitles { get; set; } = true;
 }
 
+// Isolated feasibility prototype. Not a product change or release implementation.
+internal sealed class ChainWithdrawalRequest
+{
+    public string OperationId { get; set; } = "";
+    public string OwnerSession { get; set; } = "";
+    public string PrepareToken { get; set; } = "";
+    public bool HostAbortedDecision { get; set; }
+    public List<int> ReservationIds { get; set; } = new();
+    public List<int> CancelledReservationIds { get; set; } = new();
+    public string Phase { get; set; } = "prepare";
+    public string ReceiptPath { get; set; } = "";
+}
+
 internal sealed class ChainRecordingControl
 {
     public int Version { get; set; }
     public int ChainRootReservationId { get; set; }
     public bool ContinuousCapture { get; set; } = true;
     public List<ChainRecordingSegment> Segments { get; set; } = new();
+    public List<ChainWithdrawalRequest> Withdrawals { get; set; } = new();
 }
 
 internal sealed class ChainRecordingSegment
@@ -1486,6 +1517,9 @@ internal sealed class ChainRecordingSegment
     public bool Enabled { get; set; } = true;
     public DateTime OpenAt { get; set; }
     public DateTime CloseAt { get; set; }
+    public DateTime? HoldUntil { get; set; }
+    [JsonIgnore]
+    public DateTime EffectiveCloseAt => HoldUntil.HasValue && HoldUntil.Value>CloseAt ? HoldUntil.Value : CloseAt;
     public string? OutputPath { get; set; }
     public string? ResultPath { get; set; }
     public string? RuntimeStatsPath { get; set; }
@@ -1608,6 +1642,8 @@ internal sealed class TsReadProbeSummary
     public int ChannelSpace { get; set; }
     public int ChannelIndex { get; set; }
     public int ReadSeconds { get; set; }
+    public RecordingPfSection? RecordingPresent { get; set; }
+    public RecordingPfSection? RecordingFollowing { get; set; }
     public int ExpectedEventId { get; set; }
     public string ExpectedEventStart { get; set; } = string.Empty;
     public string ExpectedEventEnd { get; set; } = string.Empty;
@@ -2789,12 +2825,116 @@ internal static class BonDriverNativeProbe
         }
 
         private FileStream? stream;
+        private TsReadProbeSummary? outputSummary;
         private readonly RecordingJob recording;
         private readonly string? chainControlPath;
         private readonly Dictionary<int, SegmentSink> chainSinks = new();
         private DateTime lastControlReadAt = DateTime.MinValue;
         private string lastControlVersionToken = string.Empty;
         private ChainRecordingControl? cachedChainControl;
+        private readonly string withdrawalWorkerInstance = Guid.NewGuid().ToString("N");
+        private static readonly DateTime? WithdrawalProcessStartTimeUtc = ReadWithdrawalProcessStart();
+        private static DateTime? ReadWithdrawalProcessStart()
+        {
+            try { using var process = System.Diagnostics.Process.GetCurrentProcess(); return process.StartTime.ToUniversalTime(); }
+            catch { return null; }
+        }
+        private readonly Dictionary<string, (int[] Ids, int[] CancelledIds, bool ExplicitTargets, string State)> withdrawals = new();
+        private bool IsWithdrawalHeld(int id) => withdrawals.Values.Any(w => (w.State is "prepared" or "recovery_required" && w.Ids.Contains(id))
+            || (w.State == "committed" && w.CancelledIds.Contains(id)));
+
+        private void ApplyWithdrawalRequests(ChainRecordingControl control)
+        {
+            foreach (var request in control.Withdrawals)
+            {
+                if (request.ReservationIds is null || request.CancelledReservationIds is null) continue;
+                var ids = request.ReservationIds.Distinct().OrderBy(x => x).ToArray();
+                // DB link repair guards survivors during prepare; only cancelled rows stay held after commit.
+                // An empty cancellation list preserves legacy request semantics.
+                var explicitTargets = request.CancelledReservationIds.Count != 0;
+                var cancelledIds = !explicitTargets
+                    ? ids : request.CancelledReservationIds.Distinct().OrderBy(x => x).ToArray();
+                if (cancelledIds.Length == 0 || cancelledIds.Any(id => !ids.Contains(id))) continue;
+                if (string.IsNullOrWhiteSpace(request.OperationId) || ids.Length == 0 || ids.Any(id => id <= 0)
+                    || string.IsNullOrWhiteSpace(request.ReceiptPath)) continue;
+                if (string.IsNullOrWhiteSpace(request.OwnerSession) || string.IsNullOrWhiteSpace(request.PrepareToken)) continue;
+                var identity = JsonSerializer.Serialize(new[] { request.OwnerSession, request.OperationId, request.PrepareToken });
+                var has = withdrawals.TryGetValue(identity, out var previous);
+                // Isolated recovery experiment: receipts are worker evidence, never Host DB decisions.
+                if (!has && File.Exists(request.ReceiptPath))
+                {
+                    try
+                    {
+                        using var saved = JsonDocument.Parse(File.ReadAllText(request.ReceiptPath));
+                        var evidence = saved.RootElement;
+                        var savedIds = evidence.GetProperty("reservationIds").EnumerateArray().Select(x => x.GetInt32()).OrderBy(x => x).ToArray();
+                        var savedState = evidence.GetProperty("state").GetString();
+                        if (evidence.GetProperty("operationId").GetString() == request.OperationId
+                            && evidence.GetProperty("ownerSession").GetString() == request.OwnerSession
+                            && evidence.GetProperty("prepareToken").GetString() == request.PrepareToken
+                            && savedIds.SequenceEqual(ids)
+                            && (!evidence.TryGetProperty("cancellationTargetsExplicit", out var savedExplicit) || !savedExplicit.GetBoolean()
+                                || (explicitTargets && evidence.TryGetProperty("cancelledReservationIds", out var savedCancelled)
+                                    && savedCancelled.EnumerateArray().Select(x => x.GetInt32()).OrderBy(x => x).SequenceEqual(cancelledIds)))
+                            && savedState is "prepared" or "committed" or "aborted")
+                        {
+                            previous = (ids, cancelledIds, explicitTargets, savedState!);
+                            withdrawals[identity] = previous;
+                            has = true;
+                        }
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or KeyNotFoundException) { }
+                }
+                // No evidence means no permission to reopen a potentially committed cancellation.
+                if (!has && request.Phase != "prepare" && !(request.Phase == "abort" && request.HostAbortedDecision))
+                {
+                    previous = (ids, cancelledIds, explicitTargets, "recovery_required");
+                    withdrawals[identity] = previous;
+                    has = true;
+                }
+                // A legacy prepare guarded the entire repair scope. Upgrade its target declaration once;
+                // explicit targets are thereafter immutable for this operation.
+                if (has && !previous.ExplicitTargets && explicitTargets && previous.Ids.SequenceEqual(ids))
+                {
+                    previous = (ids, cancelledIds, true, previous.State);
+                    withdrawals[identity] = previous;
+                }
+                string state;
+                if (has && (!previous.Ids.SequenceEqual(ids) || !previous.CancelledIds.SequenceEqual(cancelledIds)
+                    || (previous.ExplicitTargets && !explicitTargets))) state = "identity_mismatch";
+                else if (request.Phase == "prepare")
+                {
+                    if (has) state = previous.State;
+                    else if (ids.Any(id => id == recording.ReservationId || chainSinks.ContainsKey(id))) state = "already_started";
+                    else if (ids.Any(IsWithdrawalHeld)) state = "busy";
+                    else state = "prepared";
+                }
+                else if (request.Phase == "abort" && request.HostAbortedDecision
+                    && (!has || previous.State is "prepared" or "already_started" or "busy" or "recovery_required"))
+                    state = "aborted";
+                else if (has && previous.State == "prepared" && request.Phase is "commit" or "abort")
+                    state = request.Phase == "commit" ? "committed" : "aborted";
+                else if (has) state = previous.State;
+                else state = "prepare_required";
+                if (state is "prepared" or "committed" or "aborted" or "already_started" or "busy")
+                    withdrawals[identity] = (ids, cancelledIds, explicitTargets, state);
+                // An absent receipt must never be interpreted by the Host as permission to commit.
+                var receipt = JsonSerializer.Serialize(new { operationId = request.OperationId, ownerSession = request.OwnerSession, prepareToken = request.PrepareToken, workerInstance = withdrawalWorkerInstance, workerProcessId = Environment.ProcessId, workerProcessStartTimeUtc = WithdrawalProcessStartTimeUtc, reservationIds = ids, cancelledReservationIds = cancelledIds, cancellationTargetsExplicit = explicitTargets, state });
+                var path = Path.GetFullPath(request.ReceiptPath);
+                try
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                    var temp = path + ".tmp";
+                    File.WriteAllText(temp, receipt);
+                    File.Move(temp, path, overwrite: true);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    // Lab only: keep the hold and let Host acknowledgement timeout. Never stop A.
+                }
+            }
+        }
+
         private DateTime? primaryCloseAt;
         private ChainRecordingSegment? primarySegment;
         private bool primaryClosed;
@@ -2828,6 +2968,7 @@ internal static class BonDriverNativeProbe
 
         private async Task OpenCoreAsync(TsReadProbeSummary summary, Func<string, string, Task> progress)
         {
+            outputSummary = summary;
             var path = Path.GetFullPath(recording.OutputPath ?? string.Empty);
             if (string.IsNullOrWhiteSpace(path)) return;
             var parent = Path.GetDirectoryName(path);
@@ -2875,12 +3016,13 @@ internal static class BonDriverNativeProbe
 
             var control = cachedChainControl;
             if (control is null || control.Segments.Count == 0) return;
+            ApplyWithdrawalRequests(control);
 
             foreach (var segment in control.Segments)
             {
                 if (segment.ReservationId == recording.ReservationId)
                 {
-                    primaryCloseAt = segment.CloseAt;
+                    primaryCloseAt = segment.EffectiveCloseAt;
                     primarySegment = segment;
                     continue;
                 }
@@ -2898,8 +3040,8 @@ internal static class BonDriverNativeProbe
                     }
                     continue;
                 }
-                if (!segment.Enabled) continue;
-                if (now < segment.OpenAt || now >= segment.CloseAt) continue;
+                if (!segment.Enabled || IsWithdrawalHeld(segment.ReservationId)) continue;
+                if (now < segment.OpenAt || now >= segment.EffectiveCloseAt) continue;
                 try
                 {
                     var sink = new SegmentSink(segment);
@@ -3013,9 +3155,14 @@ internal static class BonDriverNativeProbe
                 await progress("chain_capture_primary_sink_close", $"result=OK reservation=R{recording.ReservationId} closeAt={primaryCloseAt.Value:yyyy-MM-dd HH:mm:ss.fff} bytes={summary.RecordBytesWritten} packets={summary.OutputPacketsAnalyzed} drops={summary.OutputContinuityDrops} cc={summary.OutputContinuityErrors} sync={summary.OutputSyncErrors} scramble={summary.OutputScrambledLikePackets} targetScramble={summary.OutputTargetMediaScrambledPackets} captureContinues={chainSinks.Any(pair => !pair.Value.Closed)} physicalRetune=False rule=chain_continuous_capture_contract").ConfigureAwait(false);
             }
 
+            if (chainSinks.Any(pair => !pair.Value.Closed && now >= pair.Value.Segment.EffectiveCloseAt))
+            {
+                await RefreshChainControlAsync(summary, progress, force: true).ConfigureAwait(false);
+                now = DateTime.Now;
+            }
             foreach (var pair in chainSinks.ToArray())
             {
-                if (pair.Value.Closed || now < pair.Value.Segment.CloseAt) continue;
+                if (pair.Value.Closed || now < pair.Value.Segment.EffectiveCloseAt) continue;
                 await pair.Value.CloseAsync("segment_close_time_reached").ConfigureAwait(false);
                 WorkerPresentation.RecordingClosed(pair.Key);
                 await progress("chain_capture_sink_close", $"result=OK reservation=R{pair.Key} closeAt={pair.Value.Segment.CloseAt:yyyy-MM-dd HH:mm:ss.fff} bytes={pair.Value.BytesWritten} packets={pair.Value.Quality.Packets} drops={pair.Value.Quality.ContinuityDrops} cc={pair.Value.Quality.ContinuityErrors} sync={pair.Value.Quality.SyncErrors} scramble={pair.Value.Quality.ScrambledPackets} targetScramble={pair.Value.TargetMediaScrambledPackets} physicalRetune=False rule=chain_continuous_capture_contract").ConfigureAwait(false);
@@ -3040,7 +3187,7 @@ internal static class BonDriverNativeProbe
             {
                 if (sink.Closed) continue;
                 var now = DateTime.Now;
-                if (now < sink.Segment.OpenAt || now >= sink.Segment.CloseAt) continue;
+                if (now < sink.Segment.OpenAt || now >= sink.Segment.EffectiveCloseAt) continue;
                 await sink.WriteAsync(primaryBuffer, broadBuffer, recording, summary).ConfigureAwait(false);
             }
             return primaryBytes;
@@ -3062,7 +3209,12 @@ internal static class BonDriverNativeProbe
                 await stream.FlushAsync().ConfigureAwait(false);
                 await stream.DisposeAsync().ConfigureAwait(false);
                 stream = null;
+                primaryClosed = true;
                 WorkerPresentation.RecordingClosed(recording.ReservationId);
+                // Use the same post-dispose proof as a chain boundary. Ordinary stop and
+                // partial/manual stop must not lose their independent physical-file evidence.
+                if (outputSummary is not null)
+                    await WritePrimarySegmentResultAsync(outputSummary, "recording_sink_disposed").ConfigureAwait(false);
             }
             foreach (var pair in chainSinks)
             {
@@ -3088,7 +3240,7 @@ internal static class BonDriverNativeProbe
                 return false;
             var maxClose = control.Segments
                 .Where(segment => segment.Enabled)
-                .Select(segment => segment.CloseAt)
+                .Select(segment => segment.EffectiveCloseAt)
                 .DefaultIfEmpty(DateTime.MinValue)
                 .Max();
             if (maxClose == DateTime.MinValue)
@@ -3292,9 +3444,10 @@ internal static class BonDriverNativeProbe
             summary.RecordBytesWritten += primaryBytesWritten;
             summary.RecordChunksWritten++;
             AnalyzeRecordOutputBuffer(writeBytes.AsMemory(0, primaryBytesWritten), summary);
-            RecordingWorkerResult.AppendRuntimeStatsSnapshot(summary, DateTimeOffset.Now, "RECORDING", final: false);
         }
-        if (summary.RecordChunksWritten == 1 || summary.RecordChunksWritten % 1000 == 0)
+        // Physical capture observations continue after the primary TS segment closes.
+        RecordingWorkerResult.AppendRuntimeStatsSnapshot(summary, DateTimeOffset.Now, "RECORDING", final: false);
+        if (primaryBytesWritten > 0 && (summary.RecordChunksWritten == 1 || summary.RecordChunksWritten % 1000 == 0))
         {
             await progress("record_write_chunk", $"reservation=R{summary.RecordReservationId} title={summary.RecordTitle} outputPath={summary.RecordOutputPath} chunks={summary.RecordChunksWritten} bytesWritten={summary.RecordBytesWritten} outputPackets={summary.OutputPacketsAnalyzed} outputSyncErrors={summary.OutputSyncErrors} outputScrambled={summary.OutputScrambledLikePackets} externalB25Available={summary.ExternalB25Available} externalB25Loaded={summary.ExternalB25LoadedPath ?? "-"} externalB25DecodeCalls={summary.ExternalB25DecodeCalls} externalB25DecodeOk={summary.ExternalB25DecodeOk} externalB25Passthrough={summary.ExternalB25Passthrough} externalB25DecodeNg={summary.ExternalB25DecodeNg} externalB25BufferedEmpty={summary.ExternalB25BufferedEmpty} rawFallbackSuppressed={summary.ExternalB25RawFallbackSuppressed} serviceScopeReady={summary.RecordServiceScopeReady} targetPmt=0x{Math.Max(0, summary.RecordTargetPmtPid):X} targetStreams={string.Join(',', summary.RecordTargetStreamPids.Select(x => "0x" + x.ToString("X")))} mediaPackets={summary.RecordServiceScopeMediaPackets} rule=release_contract").ConfigureAwait(false);
         }
@@ -4455,52 +4608,7 @@ internal static class BonDriverNativeProbe
 
                         var isEpgCheckMode = string.Equals(summary.CommonTsRoute?.Mode, "epg-check", StringComparison.OrdinalIgnoreCase)
                             || string.Equals(summary.Purpose, "mode_epg_check_after_directrecbridge_common_ts_route_facade_dbwrite_false", StringComparison.OrdinalIgnoreCase);
-                        var baseTsReadOk = summary.BytesRead > 0 && summary.PacketsRead > 0 && summary.SyncErrors == 0;
-                        // PRE_REC_EXECUTION_OWNER_INVARIANT:
-                        // Worker success describes transport/service observation health only. Exact expected-event
-                        // success/failure belongs exclusively to the Host PreRec lifecycle. This prevents a worker
-                        // observation from becoming a second terminal owner beside EpgCapture.
-                        var epgCheckTargetOk = summary.TargetServiceEitPriorityOk
-                            && string.Equals(summary.TargetServiceEitWaitResult, "TARGET_SEEN", StringComparison.OrdinalIgnoreCase)
-                            && summary.EpgIntermediateModelOk
-                            && summary.TargetServiceIntermediateEventsBuilt >= Math.Max(1, summary.TargetServiceEventMin);
-
-                        var isRecordMode = string.Equals(summary.Mode, "record", StringComparison.OrdinalIgnoreCase);
-                        summary.TsReadOk = isRecordMode
-                            ? baseTsReadOk && summary.RecordBytesWritten > 0
-                            : isEpgCheckMode && isEpgNormalize
-                                ? baseTsReadOk && epgCheckTargetOk
-                                : baseTsReadOk && summary.PsiMinimalOk && summary.EitMinimalDecodeOk;
-
-                        if (!summary.TsReadOk)
-                        {
-                            if (isRecordMode)
-                            {
-                                summary.Error = !baseTsReadOk
-                                    ? $"RECORD_TS_READ_INCOMPLETE bytes={summary.BytesRead} packets={summary.PacketsRead} syncErrors={summary.SyncErrors}"
-                                    : $"RECORD_WRITE_EMPTY output={summary.RecordOutputPath ?? "-"} written={summary.RecordBytesWritten}";
-                            }
-                            else if (isEpgCheckMode && isEpgNormalize)
-                            {
-                                summary.Error = !baseTsReadOk
-                                    ? $"EPG_CHECK_TS_READ_INCOMPLETE bytes={summary.BytesRead} packets={summary.PacketsRead} syncErrors={summary.SyncErrors}"
-                                    : !summary.TargetServiceEitPriorityOk
-                                        ? $"TARGET_SERVICE_EIT_NOT_SEEN target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} targetEvents={summary.TargetServiceEventsDecoded} allEvents={summary.EitEventsDecoded} shortEvent={summary.TargetServiceEventsWithShortEvent} readSeconds={readSecondsLimit} targetEventsMin={summary.TargetServiceEventMin} chunks={summary.ChunksRead} calls={summary.GetTsCalls} serviceIdCounts={FormatIntCounts(summary.EitServiceIdCounts)} tripletCounts={FormatStringCounts(summary.EitTripletCounts, 16)} actualOther={FormatStringCounts(summary.EitActualOtherCounts, 16)}"
-                                        : !summary.EpgIntermediateModelOk
-                                            ? $"EPG_CHECK_INTERMEDIATE_MODEL_NG target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} targetBuilt={summary.TargetServiceIntermediateEventsBuilt} targetEventsMin={summary.TargetServiceEventMin}"
-                                            : $"EPG_CHECK_TARGET_EVENTS_NOT_ENOUGH target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} targetBuilt={summary.TargetServiceIntermediateEventsBuilt} targetEventsMin={summary.TargetServiceEventMin}";
-                            }
-                            else
-                            {
-                                summary.Error = isEitMinimal
-                                    ? (isTargetServiceEit
-                                        ? $"TARGET_NOT_SEEN target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} targetEvents={summary.TargetServiceEventsDecoded} allEvents={summary.EitEventsDecoded} shortEvent={summary.TargetServiceEventsWithShortEvent} readSeconds={readSecondsLimit} targetEventsMin={summary.TargetServiceEventMin} chunks={summary.ChunksRead} calls={summary.GetTsCalls} serviceIdCounts={FormatIntCounts(summary.EitServiceIdCounts)} tripletCounts={FormatStringCounts(summary.EitTripletCounts, 16)} actualOther={FormatStringCounts(summary.EitActualOtherCounts, 16)}"
-                                        : $"EIT minimal decode did not produce events. eit={summary.EitSeen} events={summary.EitEventsDecoded} shortEvent={summary.EitEventsWithShortEvent}")
-                                    : isPsiMinimal
-                                        ? $"PSI minimal extraction did not include all required tables. pat={summary.PatSeen} pmt={summary.PmtSeen} sdt={summary.SdtSeen} eit={summary.EitSeen}"
-                                        : $"GetTsStream continuous read did not produce valid TS. variant={summary.Variant} bytes={summary.BytesRead} packets={summary.PacketsRead} syncErrors={summary.SyncErrors}";
-                            }
-                        }
+                        FinalizeTsReadOutcome(summary, isEpgCheckMode, isEpgNormalize, isEitMinimal, isTargetServiceEit, readSecondsLimit);
                         if (recordStream is not null && summary.RecordDescrambler is not null && summary.RecordDescrambler.Available)
                         {
                             await MarkRecordShutdownStageAsync(summary, progress, "b25_flush_enter", "phase=before_b25_flush").ConfigureAwait(false);
@@ -4964,6 +5072,64 @@ internal static class BonDriverNativeProbe
         }
     }
 
+    // Keep terminal success and its failure reason at the same boundary for both TS read overloads.
+    private static void FinalizeTsReadOutcome(TsReadProbeSummary summary, bool isEpgCheckMode,
+        bool isEpgNormalize, bool isEitMinimal, bool isTargetServiceEit, int readSecondsLimit)
+    {
+        var baseTsReadOk = summary.BytesRead > 0 && summary.PacketsRead > 0 && summary.SyncErrors == 0;
+        // PRE_REC_EXECUTION_OWNER_INVARIANT:
+        // Worker success describes transport/service observation health only. Exact expected-event
+        // success/failure belongs exclusively to the Host PreRec lifecycle. This prevents a worker
+        // observation from becoming a second terminal owner beside EpgCapture.
+        var epgCheckTargetOk = summary.TargetServiceEitPriorityOk
+            && string.Equals(summary.TargetServiceEitWaitResult, "TARGET_SEEN", StringComparison.OrdinalIgnoreCase)
+            && summary.EpgIntermediateModelOk
+            && summary.TargetServiceIntermediateEventsBuilt >= Math.Max(1, summary.TargetServiceEventMin);
+
+        var isRecordMode = string.Equals(summary.Mode, "record", StringComparison.OrdinalIgnoreCase);
+        summary.TsReadOk = isRecordMode
+            ? baseTsReadOk && summary.RecordBytesWritten > 0
+            : isEpgCheckMode && isEpgNormalize
+                ? baseTsReadOk && epgCheckTargetOk
+                : baseTsReadOk && summary.PsiMinimalOk && summary.EitMinimalDecodeOk;
+
+        if (!summary.TsReadOk)
+        {
+            if (isRecordMode)
+            {
+                summary.Error = !baseTsReadOk
+                    ? $"RECORD_TS_READ_INCOMPLETE bytes={summary.BytesRead} packets={summary.PacketsRead} syncErrors={summary.SyncErrors}"
+                    : $"RECORD_WRITE_EMPTY output={summary.RecordOutputPath ?? "-"} written={summary.RecordBytesWritten}";
+            }
+            else if (isEpgCheckMode && isEpgNormalize)
+            {
+                summary.Error = !baseTsReadOk
+                    ? $"EPG_CHECK_TS_READ_INCOMPLETE bytes={summary.BytesRead} packets={summary.PacketsRead} syncErrors={summary.SyncErrors}"
+                    : !summary.TargetServiceEitPriorityOk
+                        ? $"TARGET_SERVICE_EIT_NOT_SEEN target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} targetEvents={summary.TargetServiceEventsDecoded} allEvents={summary.EitEventsDecoded} shortEvent={summary.TargetServiceEventsWithShortEvent} readSeconds={readSecondsLimit} targetEventsMin={summary.TargetServiceEventMin} chunks={summary.ChunksRead} calls={summary.GetTsCalls} serviceIdCounts={FormatIntCounts(summary.EitServiceIdCounts)} tripletCounts={FormatStringCounts(summary.EitTripletCounts, 16)} actualOther={FormatStringCounts(summary.EitActualOtherCounts, 16)}"
+                        : !summary.EpgIntermediateModelOk
+                            ? $"EPG_CHECK_INTERMEDIATE_MODEL_NG target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} targetBuilt={summary.TargetServiceIntermediateEventsBuilt} targetEventsMin={summary.TargetServiceEventMin}"
+                            : $"EPG_CHECK_TARGET_EVENTS_NOT_ENOUGH target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} targetBuilt={summary.TargetServiceIntermediateEventsBuilt} targetEventsMin={summary.TargetServiceEventMin}";
+            }
+            else
+            {
+                summary.Error = !baseTsReadOk
+                    ? $"TS_READ_INCOMPLETE bytes={summary.BytesRead} packets={summary.PacketsRead} syncErrors={summary.SyncErrors}"
+                    : !summary.PsiMinimalOk
+                        ? $"PSI_MINIMAL_INCOMPLETE pat={summary.PatSeen} pmt={summary.PmtSeen} sdt={summary.SdtSeen} eit={summary.EitSeen}"
+                        : isEitMinimal && (!summary.EitSeen || summary.EitEventsDecoded <= 0)
+                            ? $"EIT_EVENTS_NOT_SEEN eit={summary.EitSeen} events={summary.EitEventsDecoded}"
+                            : isTargetServiceEit && !summary.TargetServiceEitPriorityOk
+                                ? $"TARGET_NOT_SEEN target={summary.TargetOriginalNetworkId}/{summary.TargetTransportStreamId}/{summary.TargetServiceId} targetEvents={summary.TargetServiceEventsDecoded} allEvents={summary.EitEventsDecoded} shortEvent={summary.TargetServiceEventsWithShortEvent} readSeconds={readSecondsLimit} targetEventsMin={summary.TargetServiceEventMin} chunks={summary.ChunksRead} calls={summary.GetTsCalls} serviceIdCounts={FormatIntCounts(summary.EitServiceIdCounts)} tripletCounts={FormatStringCounts(summary.EitTripletCounts, 16)} actualOther={FormatStringCounts(summary.EitActualOtherCounts, 16)}"
+                                : isEitMinimal && !summary.AribShortEventDecodeOk
+                                    ? $"ARIB_SHORT_EVENT_DECODE_FAILED targetDecoded={summary.TargetServiceEventsWithDecodedShortEvent} allDecoded={summary.EitEventsWithDecodedShortEvent}"
+                                    : isEitMinimal && isEpgNormalize && !summary.EpgIntermediateModelOk
+                                        ? $"EPG_INTERMEDIATE_MODEL_EMPTY targetBuilt={summary.TargetServiceIntermediateEventsBuilt}"
+                                        : $"EIT_MINIMAL_DECODE_INCOMPLETE eit={summary.EitSeen} events={summary.EitEventsDecoded} targetOk={summary.TargetServiceEitPriorityOk} aribOk={summary.AribShortEventDecodeOk} intermediateOk={summary.EpgIntermediateModelOk}";
+            }
+        }
+    }
+
     private static void AnalyzeTsBuffer(byte[] buffer, int length, TsReadProbeSummary summary)
     {
         var packets = length / 188;
@@ -5301,6 +5467,20 @@ internal static class BonDriverNativeProbe
     private static void ParseEitEvents(byte[] buffer, int sectionOffset, int sectionEnd, int tableId, int sectionLength, bool sectionCrcValid, TsReadProbeSummary summary)
     {
         if (sectionOffset + 14 > sectionEnd) return;
+        if (string.Equals(summary.Mode, "record", StringComparison.OrdinalIgnoreCase))
+        {
+            var length = 3 + sectionLength;
+            if (sectionOffset + length <= sectionEnd)
+            {
+                var observed = RecordingPfSection.Parse(buffer.AsSpan(sectionOffset, length), sectionCrcValid, DateTimeOffset.Now);
+                if (observed is not null && observed.NetworkId == summary.TargetOriginalNetworkId
+                    && observed.TransportStreamId == summary.TargetTransportStreamId && observed.ServiceId == summary.TargetServiceId)
+                {
+                    if (observed.SectionNumber == 0) summary.RecordingPresent = observed;
+                    else summary.RecordingFollowing = observed;
+                }
+            }
+        }
         var serviceId = (buffer[sectionOffset + 3] << 8) | buffer[sectionOffset + 4];
         var currentNextIndicator = buffer[sectionOffset + 5] & 0x01;
         var sectionNumber = buffer[sectionOffset + 6];
@@ -5875,6 +6055,8 @@ internal sealed class RecordingWorkerResult
                 targetOriginalNetworkId = summary.TargetOriginalNetworkId,
                 targetTransportStreamId = summary.TargetTransportStreamId,
                 targetServiceId = summary.TargetServiceId,
+                recordingPresent = summary.RecordingPresent,
+                recordingFollowing = summary.RecordingFollowing,
                 expectedEventId = summary.ExpectedEventId,
                 liveExpectedEventStart = summary.LiveExpectedEventStart,
                 liveExpectedEventEnd = summary.LiveExpectedEventEnd,

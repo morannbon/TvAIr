@@ -5,25 +5,26 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>予約リスト — TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.13"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.13"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.14"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.14"/>
 
-<link href="/tvair-ui-foundation.css?v=1.2.13" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.13" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.13" rel="stylesheet"/>
-<link href="/tvair-list-module.css?v=1.2.13" rel="stylesheet"/>
-<link href="/tvair-reservations.css?v=1.2.13" rel="stylesheet"/>
-<link href="/tvair-user-log.css?v=1.2.13" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.13" rel="stylesheet"/>
-<link href="/tvair-settings-host.css?v=1.2.13" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-reservations.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-user-log.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.14" rel="stylesheet"/>
 
-<script src="/tvair-theme.js?v=1.2.13"></script>
-<script src="/tvair-page-view-state.js?v=1.2.13"></script>
-<script src="/tvair-action-button-state.js?v=1.2.13"></script>
-<script src="/tvair-reservation-action-state.js?v=1.2.13"></script>
-<script src="/tvair-program-time-action.js?v=1.2.13"></script>
-<script src="/genre-shared.js?v=1.2.13"></script>
-<script src="/tvair-user-log.js?v=1.2.13"></script>
+<script src="/tvair-theme.js?v=1.2.14"></script>
+<script src="/tvair-page-view-state.js?v=1.2.14"></script>
+<script src="/tvair-action-button-state.js?v=1.2.14"></script>
+<script src="/tvair-reservation-cancel-request.js?v=1.2.14"></script>
+<script src="/tvair-reservation-action-state.js?v=1.2.14"></script>
+<script src="/tvair-program-time-action.js?v=1.2.14"></script>
+<script src="/genre-shared.js?v=1.2.14"></script>
+<script src="/tvair-user-log.js?v=1.2.14"></script>
 
 
 
@@ -1520,9 +1521,8 @@ function render(){
     const toggleBtn = buildReservationEnabledToggle(r);
 
     const displayTunerName = reservationDisplayTunerName(r, { logPlain: currentFilter === 'done' });
-    // (C) means this reservation itself was added by the explicit Chain button.
-    // Do not infer it from head/mid/tail topology: A→B→C marks B/C, not the ordinary head A.
-    const explicitChainMark = r.isUserChain === true;
+    // Role and (C) are projected together by the common server presentation.
+    const explicitChainMark = r.showChainMark === true;
     const tunerText = (displayTunerName || '—') + (explicitChainMark ? '（C）' : '');
     const tunerCell = currentFilter === 'done'
       ? `<span class="tuner-normal">${esc(tunerText)}</span>`
@@ -1741,8 +1741,7 @@ async function cancelReservation(id, btn){
   if(!state) return;
   btn.disabled = true; btn.textContent = state.text;
   try{
-    const res = await fetch(`/api/reservations/${id}`, { method: 'DELETE' });
-    const d = await readJsonSafely(res, {});
+    const {response:res,body:d}=await window.TvAirReservationCancelRequest.send(id);
     if(res.ok){
       acceptReservationActionState(id);
       // RESERVATION_CANCEL_PROJECTION_SINGLE_SOURCE:
@@ -1875,10 +1874,10 @@ document.addEventListener('DOMContentLoaded', ()=>{
 });
 
 </script>
-<script src="/tvair-notification.js?v=1.2.13"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.13"></script>
-<script src="/tvair-settings-host.js?v=1.2.13"></script>
-<script src="/tvair-menu-spine.js?v=1.2.13"></script>
+<script src="/tvair-notification.js?v=1.2.14"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.14"></script>
+<script src="/tvair-settings-host.js?v=1.2.14"></script>
+<script src="/tvair-menu-spine.js?v=1.2.14"></script>
 </body>
 </html>
 

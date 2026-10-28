@@ -1,4 +1,4 @@
-namespace TvAIr.Plugin;
+﻿namespace TvAIr.Plugin;
 
 using System.Collections.Concurrent;
 using System.Threading;
@@ -40,7 +40,7 @@ public sealed class PluginToolWindowHostService
         var windowId = session.WindowId;
         lock (_gate)
         {
-            if (_windows.TryGetValue(windowId, out var existing) && existing.IsAlive)
+            if (_windows.TryGetValue(windowId, out var existing) && (existing.IsAlive || !existing.Ready.IsCompleted))
             {
                 existing.PostShow(absoluteUrl, session, iconSpec, activate);
                 _sessions.MarkHostAlive(windowId, true);
@@ -92,7 +92,7 @@ public sealed class PluginToolWindowHostService
     private static bool IsDirectContentNavigation(string? absoluteUrl)
         => (absoluteUrl ?? string.Empty).Contains("__tvairToolHostContent=1", StringComparison.OrdinalIgnoreCase);
 
-    public PluginToolWindowStatePatchHostResult ApplyStatePatch(string? windowId, IReadOnlyList<RuntimeUiPatch>? patches, long stateRevision)
+    public PluginToolWindowStatePatchHostResult ApplyStatePatch(string? windowId, IReadOnlyList<RuntimeUiPatch>? patches, long stateRevision, bool actionResult = false)
     {
         if (string.IsNullOrWhiteSpace(windowId))
             return PluginToolWindowStatePatchHostResult.CreateSkipped(windowId, 0, stateRevision, "window_closed");
@@ -104,7 +104,7 @@ public sealed class PluginToolWindowHostService
                 return PluginToolWindowStatePatchHostResult.CreateSkipped(windowId, patches?.Count ?? 0, stateRevision, "window_closed");
         }
 
-        return target.ApplyStatePatchWithAudit(patches, stateRevision);
+        return target.ApplyStatePatchWithAudit(patches, stateRevision, actionResult);
     }
 
     internal bool TryExecuteOwnedDialog<T>(string? windowId, Func<IWin32Window, T> dialog, out T? result)
@@ -191,6 +191,20 @@ public sealed class PluginToolWindowHostService
             ContractVersion: TvAIrVersionContract.PluginHostContractVersion);
     }
 
+    // Opening is asynchronous: ISSUED is not failure and is not proof of a created Form.
+    // Wait outside the host lock, and never require Plugin HTML to finish loading.
+    internal async Task<bool> WaitForHostReadyAsync(string windowId, TimeSpan timeout, CancellationToken ct)
+    {
+        HostedWindow? host;
+        lock (_gate) _windows.TryGetValue(windowId, out host);
+        if (host is null) return false;
+        try
+        {
+            return await host.Ready.WaitAsync(timeout, ct).ConfigureAwait(false) && host.IsAlive;
+        }
+        catch (TimeoutException) { return false; }
+    }
+
     public bool IsHostAlive(string? windowId)
     {
         if (string.IsNullOrWhiteSpace(windowId)) return false;
@@ -210,7 +224,7 @@ public sealed class PluginToolWindowHostService
         }
     }
 
-    public PluginToolWindowApplyResult ApplySession(string? windowId, PluginWindowSession session)
+    public PluginToolWindowApplyResult ApplySession(string? windowId, PluginWindowSession session, bool prepareNavigation = false)
     {
         if (string.IsNullOrWhiteSpace(windowId) || session is null)
             return PluginToolWindowApplyResult.NotFound(windowId);
@@ -222,7 +236,7 @@ public sealed class PluginToolWindowHostService
                 return PluginToolWindowApplyResult.NotFound(windowId);
         }
 
-        return existing.ApplySessionWithAudit(session);
+        return existing.ApplySessionWithAudit(session, prepareNavigation);
     }
 
     public bool Close(string? windowId)
@@ -430,6 +444,8 @@ public sealed class PluginToolWindowHostService
         private readonly BlockingCollection<QueuedToolWindowAction> _actions = new();
         private Thread? _thread;
         private volatile bool _alive;
+        private readonly TaskCompletionSource<bool> _hostReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task<bool> Ready => _hostReady.Task;
         private PluginWindowCloseBehavior _currentCloseBehavior;
         private PluginWindowBackgroundExecution _currentBackgroundExecution;
         private int _sessionDetachedAtClosing;
@@ -464,7 +480,8 @@ public sealed class PluginToolWindowHostService
         {
             _thread = new Thread(Run) { IsBackground = true, Name = $"TvAIr.PluginToolWindow.{_initialSession.WindowId}" };
             _thread.SetApartmentState(ApartmentState.STA);
-            _thread.Start();
+            try { _thread.Start(); }
+            catch { _hostReady.TrySetResult(false); throw; }
         }
 
         public void PostShow(string url, PluginWindowSession session, PluginToolWindowIconSpec? iconSpec, bool activate)
@@ -511,7 +528,7 @@ public sealed class PluginToolWindowHostService
             }
         }
 
-        public PluginToolWindowStatePatchHostResult ApplyStatePatchWithAudit(IReadOnlyList<RuntimeUiPatch>? patches, long stateRevision)
+        public PluginToolWindowStatePatchHostResult ApplyStatePatchWithAudit(IReadOnlyList<RuntimeUiPatch>? patches, long stateRevision, bool actionResult = false)
         {
             if (!_alive)
                 return PluginToolWindowStatePatchHostResult.CreateSkipped(_initialSession.WindowId, patches?.Count ?? 0, stateRevision, "window_closed");
@@ -522,7 +539,7 @@ public sealed class PluginToolWindowHostService
                     _initialSession.WindowId, patches?.Count ?? 0, stateRevision, "accepted_pending");
                 _actions.Add(new QueuedToolWindowAction("apply_statepatch_with_audit", form =>
                 {
-                    try { result = form.ApplyStatePatchWithAudit(patches, stateRevision); }
+                    try { result = form.ApplyStatePatchWithAudit(patches, stateRevision, actionResult); }
                     catch (Exception ex)
                     {
                         result = PluginToolWindowStatePatchHostResult.Failed(
@@ -559,7 +576,7 @@ public sealed class PluginToolWindowHostService
             }
         }
 
-        public PluginToolWindowApplyResult ApplySessionWithAudit(PluginWindowSession session)
+        public PluginToolWindowApplyResult ApplySessionWithAudit(PluginWindowSession session, bool prepareNavigation = false)
         {
             if (session is null) return PluginToolWindowApplyResult.NotFound(_initialSession.WindowId);
             UpdateLifetimeContract(session);
@@ -571,7 +588,7 @@ public sealed class PluginToolWindowHostService
                 {
                     try
                     {
-                        result = form.ApplySessionWithAudit(session);
+                        result = form.ApplySessionWithAudit(session, prepareNavigation);
                     }
                     catch (Exception ex)
                     {
@@ -729,6 +746,7 @@ public sealed class PluginToolWindowHostService
                         SignalClosing(state, source, closeBehavior, backgroundExecution),
                     _log);
                 _form = form;
+                form.Shown += (_, _) => _hostReady.TrySetResult(true);
                 using var timer = new System.Windows.Forms.Timer { Interval = 250 };
                 timer.Tick += (_, _) =>
                 {
@@ -745,14 +763,16 @@ public sealed class PluginToolWindowHostService
                 };
                 Application.Run(form);
             }
-            catch
+            catch (Exception ex)
             {
+                TryLogActionFailure("startup", "host_ready", ex);
                 _alive = false;
                 _onClosed(_initialSession, HostInstanceId, finalState, Volatile.Read(ref _sessionDetachedAtClosing) != 0, _currentCloseBehavior, _currentBackgroundExecution);
             }
             finally
             {
                 _alive = false;
+                _hostReady.TrySetResult(false);
                 _form = null;
                 try { _actions.CompleteAdding(); } catch { }
                 while (_actions.TryTake(out _)) { }
@@ -784,6 +804,7 @@ public sealed class PluginToolWindowHostService
         private PluginWindowStatePersistence _statePersistence;
         private PluginWindowActivationPolicy _activationPolicy;
         private bool _explicitDispose;
+        private bool _shownLifecyclePublished;
         private bool _loaded;
         private bool _applyingSizeContract;
         private bool _userResized;
@@ -799,6 +820,18 @@ public sealed class PluginToolWindowHostService
         private int? _pendingRefreshScrollLeft;
         private int? _pendingRefreshScrollTop;
         private long? _pendingRefreshRevision;
+        private string? _pendingInteractionJson;
+        private bool _pendingPreserveScroll;
+        private bool _pendingRestoreFocus;
+        private PluginWindowSession? _interactionSession;
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        private string? _lastBrowserCapabilities;
+#endif
+        private string? _deferredNavigationUrl;
+        private bool _deferredNavigationForce;
+        private IReadOnlyList<RuntimeUiPatch>? _deferredStatePatches;
+        private long _deferredStatePatchRevision;
+        private bool _deferredStatePatchIsAction;
         private long? _pendingThemeRevision;
         private string _pendingThemeSelected = string.Empty;
         private string _pendingThemeEffective = string.Empty;
@@ -809,6 +842,7 @@ public sealed class PluginToolWindowHostService
         public ToolWindowForm(PluginWindowSession session, string url, PluginToolWindowIconSpec? iconSpec, bool initialActivateRequested, string hostKind, bool webView2RuntimeAvailable, Action<PluginWindowHostState> onStateChanged, Action<PluginWindowLifecycleState, string, PluginWindowCloseBehavior, PluginWindowBackgroundExecution> onLifecycleChanged, Action<PluginWindowHostState, string, PluginWindowCloseBehavior, PluginWindowBackgroundExecution> onClosing, LogRepository log)
         {
             _windowId = session.WindowId;
+            _interactionSession = session;
             _initialActivateRequested = initialActivateRequested;
             _hostKind = hostKind;
             _webView2RuntimeAvailable = webView2RuntimeAvailable;
@@ -875,21 +909,44 @@ public sealed class PluginToolWindowHostService
                 BackColor = System.Drawing.SystemColors.Window
             };
             Controls.Add(_browser);
-            _browser.Navigating += (_, _) => FitBrowserToClient();
-
-            _browser.DocumentCompleted += (_, _) =>
+            _browser.Navigating += (_, args) =>
             {
+                FitBrowserToClient();
+                if (!_pendingRefreshRevision.HasValue && _interactionSession is not null && _browser?.Document?.Body is not null
+                    && args.Url is not null && (args.Url.AbsolutePath.Equals("/api/plugins/action", StringComparison.OrdinalIgnoreCase)
+                        || args.Url.AbsolutePath.Equals("/api/plugins/window", StringComparison.OrdinalIgnoreCase)))
+                    PrepareRefreshState(_interactionSession);
+            };
+
+            _browser.DocumentCompleted += (_, args) =>
+            {
+                if (_browser.ReadyState != WebBrowserReadyState.Complete || _browser.Url != args.Url) return;
                 FitBrowserToClient();
                 ApplyScrollPolicyToDocument("document_completed");
                 ApplyContentSizePolicy("document_completed");
                 RestoreThemeScrollAfterRerender();
                 RestoreRefreshScrollAfterRerender();
+                ApplyDeferredStatePatch();
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+                try
+                {
+                    var capabilities = _browser.Document?.InvokeScript("tvairHostBrowserCapabilitiesJson") as string;
+                    if (capabilities is not null && capabilities != _lastBrowserCapabilities)
+                    {
+                        _lastBrowserCapabilities = capabilities;
+                        _log.Add("PLUGIN_TOOL_WINDOW_BROWSER_CAPABILITIES", _pluginName,
+                            $"windowId={SafeLogValue(_windowId)} features={capabilities} rule=runtime_browser_capabilities_contract");
+                    }
+                }
+                catch { }
+#endif
                 PublishStateIfLoaded();
             };
+            VisibleChanged += (_, _) => { if (Visible) FlushDeferredRendering(); else _shownLifecyclePublished = false; };
             Shown += (_, _) =>
             {
                 LogPlacementTrace(session, "shown_actual");
-                _onLifecycleChanged(PluginWindowLifecycleState.Shown, "host_shown", _closeBehavior, _backgroundExecution);
+                PublishShownOnce("host_shown");
             };
             Load += (_, _) =>
             {
@@ -967,6 +1024,7 @@ public sealed class PluginToolWindowHostService
             _backgroundExecution = session.BackgroundExecution;
             _statePersistence = session.StatePersistence;
             var activateRequested = activate && _activationPolicy != PluginWindowActivationPolicy.Never;
+            var hadDeferredNavigation = _deferredNavigationUrl is not null;
             var wasVisible = Visible;
             var minimizedBefore = WindowState == FormWindowState.Minimized && IsActuallyMinimized();
             // A non-activating reuse/content update must preserve the user's minimized state.
@@ -981,7 +1039,7 @@ public sealed class PluginToolWindowHostService
                 else ShowWindowWithoutActivation();
             }
             if (!wasVisible && Visible)
-                _onLifecycleChanged(PluginWindowLifecycleState.Shown, "host_reveal", _closeBehavior, _backgroundExecution);
+                PublishShownOnce("host_reveal");
             if (activateRequested)
                 ForceForeground();
             else if (minimizedBefore)
@@ -990,7 +1048,7 @@ public sealed class PluginToolWindowHostService
                     string.IsNullOrWhiteSpace(_pluginName) ? "ToolWindow" : _pluginName,
                     $"result=PRESERVED_MINIMIZED windowId={SafeLogValue(_windowId)} activationRequested=False minimizedBefore=True minimizedAfter={(WindowState == FormWindowState.Minimized && IsActuallyMinimized())} foregroundChange=none rule=runtime_descriptor_window_activation_contract");
             }
-            Navigate(url, force: false);
+            if (!hadDeferredNavigation) Navigate(url, force: false);
             PublishState();
         }
 
@@ -1043,10 +1101,7 @@ public sealed class PluginToolWindowHostService
             }
 
             // direct-content fallbackにはiframe pollが無い。実documentのviewportだけHostで保存する。
-            if (preserveInteraction)
-                CaptureRefreshScroll(session.Revision);
-            else
-                ClearPendingRefreshScroll();
+            PrepareRefreshState(session);
 
             Navigate(url, force: true);
             _log.Add("PLUGIN_TOOL_WINDOW_INTERACTION_STATE",
@@ -1055,14 +1110,34 @@ public sealed class PluginToolWindowHostService
             PublishState();
         }
 
+        private void PrepareRefreshState(PluginWindowSession session)
+        {
+            _interactionSession = session;
+            if (!session.PreserveInteractionState && !session.PreserveScroll)
+            {
+                ClearPendingRefreshScroll();
+                return;
+            }
+            CaptureRefreshScroll(session.Revision);
+            _pendingPreserveScroll = session.PreserveScroll;
+            _pendingRestoreFocus = session.PreserveInteractionState && ContainsFocus;
+            try
+            {
+                var captured = _browser.Document?.InvokeScript("tvairCaptureHostInteractionStateJson",
+                    new object[] { session.PreserveScroll, session.PreserveInteractionState }) as string;
+                _pendingInteractionJson = captured is not null && captured.Length <= 1024 * 1024 ? captured : null;
+            }
+            catch { _pendingInteractionJson = null; }
+        }
+
         private void CaptureRefreshScroll(long revision)
         {
             try
             {
                 var root = _browser.Document?.GetElementsByTagName("html").Cast<HtmlElement>().FirstOrDefault();
                 var body = _browser.Document?.Body;
-                _pendingRefreshScrollLeft = body?.ScrollLeft ?? root?.ScrollLeft ?? 0;
-                _pendingRefreshScrollTop = body?.ScrollTop ?? root?.ScrollTop ?? 0;
+                _pendingRefreshScrollLeft = Math.Max(body?.ScrollLeft ?? 0, root?.ScrollLeft ?? 0);
+                _pendingRefreshScrollTop = Math.Max(body?.ScrollTop ?? 0, root?.ScrollTop ?? 0);
                 _pendingRefreshRevision = revision;
             }
             catch
@@ -1073,23 +1148,38 @@ public sealed class PluginToolWindowHostService
 
         private void RestoreRefreshScrollAfterRerender()
         {
-            if (!_pendingRefreshRevision.HasValue || _browser.Document is null) return;
-
+            if (!_pendingRefreshRevision.HasValue || _browser.Document is null || !Visible) return;
             var revision = _pendingRefreshRevision.Value;
-            var left = _pendingRefreshScrollLeft ?? 0;
-            var top = _pendingRefreshScrollTop ?? 0;
+            var outcome = "viewport_fallback";
+            var completed = true;
             try
             {
-                _browser.Document.Window?.ScrollTo(left, top);
-                _log.Add("PLUGIN_TOOL_WINDOW_INTERACTION_STATE",
-                    string.IsNullOrWhiteSpace(_pluginName) ? "ToolWindow" : _pluginName,
-                    $"result=RESTORED mode=direct_content windowId={SafeLogValue(_windowId)} revision={revision} scroll={left},{top} activation=False focus=False rule=runtime_tool_window_interaction_state_contract");
+                if (_pendingInteractionJson is not null)
+                {
+                    outcome = _browser.Document.InvokeScript("tvairRestoreHostInteractionStateJson",
+                        new object[] { _pendingInteractionJson, _pendingRestoreFocus && ContainsFocus && ActiveForm == this }) as string ?? "bridge_unavailable";
+                    if (outcome == "context_changed") { completed = false; return; }
+                    // Intermediate documents can complete before the shared script is available.
+                    // Retain the captured controls until the next document completion can restore them.
+                    if (outcome == "bridge_unavailable")
+                    {
+                        completed = false;
+                        if (_pendingPreserveScroll)
+                            _browser.Document.Window?.ScrollTo(_pendingRefreshScrollLeft ?? 0, _pendingRefreshScrollTop ?? 0);
+                    }
+                }
+                else if (_pendingPreserveScroll)
+                    _browser.Document.Window?.ScrollTo(_pendingRefreshScrollLeft ?? 0, _pendingRefreshScrollTop ?? 0);
+                _log.Add("PLUGIN_TOOL_WINDOW_INTERACTION_STATE", _pluginName,
+                    $"result={SafeLogValue(outcome)} mode=direct_content windowId={SafeLogValue(_windowId)} revision={revision} preservesScroll={_pendingPreserveScroll} activation=False rule=runtime_tool_window_interaction_state_contract");
             }
-            catch { }
-            finally
+            catch (Exception ex)
             {
-                ClearPendingRefreshScroll();
+                completed = false;
+                _log.Add("PLUGIN_TOOL_WINDOW_INTERACTION_STATE", _pluginName,
+                    $"result=RESTORE_FAILED windowId={SafeLogValue(_windowId)} reason={ex.GetType().Name} rule=runtime_tool_window_interaction_state_contract");
             }
+            finally { if (completed) ClearPendingRefreshScroll(); }
         }
 
         private void ClearPendingRefreshScroll()
@@ -1097,6 +1187,7 @@ public sealed class PluginToolWindowHostService
             _pendingRefreshScrollLeft = null;
             _pendingRefreshScrollTop = null;
             _pendingRefreshRevision = null;
+            _pendingInteractionJson = null;
         }
 
         public void RefreshThemeSilently(long themeRevision, string selectedTheme, string effectiveTheme)
@@ -1215,14 +1306,14 @@ public sealed class PluginToolWindowHostService
             }
         }
 
-        public PluginToolWindowStatePatchHostResult ApplyStatePatchWithAudit(IReadOnlyList<RuntimeUiPatch>? patches, long stateRevision)
+        public PluginToolWindowStatePatchHostResult ApplyStatePatchWithAudit(IReadOnlyList<RuntimeUiPatch>? patches, long stateRevision, bool actionResult = false)
         {
             if (InvokeRequired)
             {
                 try
                 {
                     PluginToolWindowStatePatchHostResult? result = null;
-                    Invoke(new Action(() => result = ApplyStatePatchWithAudit(patches, stateRevision)));
+                    Invoke(new Action(() => result = ApplyStatePatchWithAudit(patches, stateRevision, actionResult)));
                     return result ?? PluginToolWindowStatePatchHostResult.Failed(_windowId, patches?.Count ?? 0, stateRevision, "invoke_no_result");
                 }
                 catch (Exception ex)
@@ -1234,28 +1325,50 @@ public sealed class PluginToolWindowHostService
             var requestedCount = patches?.Count ?? 0;
             if (IsDisposed || Disposing || !IsHandleCreated)
                 return PluginToolWindowStatePatchHostResult.CreateSkipped(_windowId, requestedCount, stateRevision, "window_closed");
-            if (stateRevision <= 0)
+            if (!actionResult && stateRevision <= 0)
                 return PluginToolWindowStatePatchHostResult.Failed(_windowId, requestedCount, stateRevision, "invalid_state_revision");
-            if (stateRevision < _latestAcceptedStatePatchRevision
-                || stateRevision <= _lastAppliedStatePatchRevision)
+            if (!actionResult && (stateRevision < _latestAcceptedStatePatchRevision
+                || stateRevision <= _lastAppliedStatePatchRevision))
                 return PluginToolWindowStatePatchHostResult.CreateSkipped(_windowId, requestedCount, stateRevision, "stale_revision");
 
             // Accept the newest authoritative generation before touching the document.
             // If the DOM is temporarily unavailable, an older callback must never be able to
             // overtake this generation. The same revision remains retryable until actually applied.
-            if (stateRevision > _latestAcceptedStatePatchRevision)
+            if (!actionResult && stateRevision > _latestAcceptedStatePatchRevision)
                 _latestAcceptedStatePatchRevision = stateRevision;
 
             var normalized = RuntimeUiPatchContract.Normalize(patches);
             if (normalized.Count == 0)
             {
-                _lastAppliedStatePatchRevision = stateRevision;
-                return PluginToolWindowStatePatchHostResult.CreateApplied(_windowId, requestedCount, 0, stateRevision, "no_valid_patches");
+                if (requestedCount > 0)
+                    return PluginToolWindowStatePatchHostResult.Failed(_windowId, requestedCount, stateRevision, "no_valid_patches");
+                if (!actionResult) _lastAppliedStatePatchRevision = stateRevision;
+                else if (_deferredNavigationUrl is null) ClearPendingRefreshScroll();
+                return PluginToolWindowStatePatchHostResult.CreateApplied(_windowId, requestedCount, 0, stateRevision, "empty_request");
             }
 
+            if (!Visible)
+            {
+                var retained = (_deferredStatePatches ?? Array.Empty<RuntimeUiPatch>())
+                    .ToDictionary(patch => patch.ElementId, StringComparer.Ordinal);
+                foreach (var patch in normalized)
+                {
+                    retained[patch.ElementId] = retained.TryGetValue(patch.ElementId, out var previous)
+                        ? RuntimeUiPatchContract.Normalize(new[] { previous, patch })[0] : patch;
+                }
+                if (retained.Count > 64)
+                    return PluginToolWindowStatePatchHostResult.Failed(_windowId, requestedCount, stateRevision, "hidden_patch_capacity_exceeded");
+                _deferredStatePatchIsAction = actionResult && (_deferredStatePatches is null || _deferredStatePatchIsAction);
+                _deferredStatePatches = retained.Values.ToArray();
+                if (!actionResult || _deferredStatePatchIsAction) _deferredStatePatchRevision = stateRevision;
+                return PluginToolWindowStatePatchHostResult.CreateSkipped(_windowId, requestedCount, stateRevision, "window_hidden_deferred");
+            }
             var document = _browser.Document;
             if (document is null || document.Body is null)
                 return PluginToolWindowStatePatchHostResult.CreateSkipped(_windowId, requestedCount, stateRevision, "document_not_ready");
+            foreach (var patch in normalized)
+                if (document.GetElementById(patch.ElementId) is null)
+                    return PluginToolWindowStatePatchHostResult.CreateSkipped(_windowId, requestedCount, stateRevision, "target_not_found:" + patch.ElementId);
 
             try
             {
@@ -1264,12 +1377,14 @@ public sealed class PluginToolWindowHostService
                 if (invokeResult is null)
                     return PluginToolWindowStatePatchHostResult.CreateSkipped(_windowId, requestedCount, stateRevision, "statepatch_bridge_unavailable");
                 var appliedCount = Convert.ToInt32(invokeResult, System.Globalization.CultureInfo.InvariantCulture);
+                if (appliedCount == -2 || appliedCount == 0)
+                    return PluginToolWindowStatePatchHostResult.CreateSkipped(_windowId, requestedCount, stateRevision, "target_not_found");
                 if (appliedCount < 0)
                     return PluginToolWindowStatePatchHostResult.Failed(_windowId, requestedCount, stateRevision, "statepatch_bridge_parse_failed");
-
-                _lastAppliedStatePatchRevision = stateRevision;
-                if (appliedCount == 0)
-                    return PluginToolWindowStatePatchHostResult.CreateSkipped(_windowId, requestedCount, stateRevision, "target_not_found");
+                if (appliedCount != normalized.Count)
+                    return PluginToolWindowStatePatchHostResult.Failed(_windowId, requestedCount, stateRevision, "partial_statepatch_applied");
+                if (!actionResult) _lastAppliedStatePatchRevision = stateRevision;
+                else if (_deferredNavigationUrl is null) ClearPendingRefreshScroll();
                 return PluginToolWindowStatePatchHostResult.CreateApplied(_windowId, requestedCount, Math.Min(appliedCount, normalized.Count), stateRevision, "host_statepatch_applied");
             }
             catch (Exception ex)
@@ -1278,14 +1393,14 @@ public sealed class PluginToolWindowHostService
             }
         }
 
-        public PluginToolWindowApplyResult ApplySessionWithAudit(PluginWindowSession session)
+        public PluginToolWindowApplyResult ApplySessionWithAudit(PluginWindowSession session, bool prepareNavigation = false)
         {
             if (InvokeRequired)
             {
                 try
                 {
                     PluginToolWindowApplyResult? result = null;
-                    Invoke(new Action(() => result = ApplySessionWithAudit(session)));
+                    Invoke(new Action(() => result = ApplySessionWithAudit(session, prepareNavigation)));
                     return result ?? PluginToolWindowApplyResult.Failed(_windowId, "invoke_no_result");
                 }
                 catch (Exception ex)
@@ -1295,6 +1410,8 @@ public sealed class PluginToolWindowHostService
             }
 
             var before = BuildSnapshot();
+            _interactionSession = session;
+            if (prepareNavigation) PrepareRefreshState(session);
             // Background/runtime session updates are content and policy updates only.
             // They must not restore a minimized window or replace the running placement.
             ApplySession(session, restoreFromMinimized: false);
@@ -1367,6 +1484,7 @@ public sealed class PluginToolWindowHostService
 
         private void ApplySession(PluginWindowSession session, bool restoreFromMinimized)
         {
+            _interactionSession = session;
             // The running Form owns the current placement. Descriptor defaults and saved placement
             // are creation-time inputs only. Existing-host session application may update content
             // and live policies, but it must not turn transient WinForms bounds into the new placement.
@@ -1861,14 +1979,52 @@ public sealed class PluginToolWindowHostService
             catch { }
         }
 
+        private void PublishShownOnce(string source)
+        {
+            if (!Visible || _shownLifecyclePublished) return;
+            _shownLifecyclePublished = true;
+            _onLifecycleChanged(PluginWindowLifecycleState.Shown, source, _closeBehavior, _backgroundExecution);
+        }
+
+        private void ApplyDeferredStatePatch()
+        {
+            if (!Visible || _deferredStatePatches is null || _browser.ReadyState != WebBrowserReadyState.Complete) return;
+            var patches = _deferredStatePatches;
+            var revision = _deferredStatePatchRevision;
+            _deferredStatePatches = null;
+            var result = ApplyStatePatchWithAudit(patches, revision, _deferredStatePatchIsAction);
+            _log.Add("PLUGIN_TOOL_WINDOW_DEFERRED_PATCH", _pluginName,
+                $"result={result.Diagnostics} windowId={SafeLogValue(_windowId)} revision={revision} rule=runtime_hidden_render_contract");
+        }
+
+        private void FlushDeferredRendering()
+        {
+            if (!Visible) return;
+            var url = _deferredNavigationUrl;
+            var force = _deferredNavigationForce;
+            _deferredNavigationUrl = null;
+            if (url is not null) Navigate(url, force);
+            else ApplyDeferredStatePatch();
+        }
+
         private void Navigate(string url, bool force)
         {
             try
             {
                 if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return;
                 var requestedUrl = uri.AbsoluteUri;
+                if (!Visible)
+                {
+                    _deferredNavigationUrl = requestedUrl;
+                    _deferredNavigationForce = force;
+                    _log.Add("PLUGIN_TOOL_WINDOW_RENDER_DEFERRED", _pluginName,
+                        $"result=LATEST_RETAINED windowId={SafeLogValue(_windowId)} reason=window_hidden rule=runtime_hidden_render_contract");
+                    return;
+                }
                 if (!force && string.Equals(_currentRequestedUrl, requestedUrl, StringComparison.OrdinalIgnoreCase))
                     return;
+                if (!_pendingRefreshRevision.HasValue && _browser.Document?.Body is not null && _interactionSession is not null)
+                    PrepareRefreshState(_interactionSession);
                 _currentRequestedUrl = requestedUrl;
                 _browser.Navigate(uri);
             }

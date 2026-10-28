@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Text;
 using TvAIr.Core;
 using TvAIrPlugin;
@@ -132,7 +132,7 @@ internal sealed class PluginExternalJobHost : IDisposable
         {
             if (!jobs.TryGetValue(jobId.Trim(), out entry) || !SameOwner(entry, owner) || entry.IsTerminal) return false;
             entry.CancelRequested = true;
-            if (entry.State == TvAirExternalJobState.Queued)
+            if (entry.State == TvAirExternalJobState.Queued && entry.Process is null)
             {
                 entry.State = TvAirExternalJobState.Cancelled;
                 entry.FinishedAt = DateTimeOffset.Now;
@@ -159,7 +159,7 @@ internal sealed class PluginExternalJobHost : IDisposable
             foreach (var entry in active)
             {
                 entry.CancelRequested = true;
-                if (entry.State == TvAirExternalJobState.Queued)
+                if (entry.State == TvAirExternalJobState.Queued && entry.Process is null)
                 {
                     entry.State = TvAirExternalJobState.Cancelled;
                     entry.FinishedAt = DateTimeOffset.Now;
@@ -178,18 +178,24 @@ internal sealed class PluginExternalJobHost : IDisposable
             }
         }
         if (terminalPublished) PruneTerminalHistory(owner);
+        WaitForStoppedJobs(active, owner);
     }
 
     private async Task RunAsync(JobEntry entry)
     {
-        lock (gate)
-        {
-            if (entry.IsTerminal || entry.CancelRequested) return;
-        }
-
         Process? process = null;
+        Task? outputDrain = null;
+        bool started = false;
+        bool released = true;
+        int? exitCode = null;
+        Exception? executionError = null;
+        string? releaseFailure = null;
         try
         {
+            lock (gate)
+            {
+                if (entry.IsTerminal || entry.CancelRequested) return;
+            }
             var spec = entry.ProcessSpec;
             var executable = Path.GetFullPath(spec.ExecutablePath.Trim());
             if (!File.Exists(executable)) throw new FileNotFoundException("Executable file was not found.", executable);
@@ -197,18 +203,13 @@ internal sealed class PluginExternalJobHost : IDisposable
                 ? Path.GetDirectoryName(executable) ?? AppContext.BaseDirectory
                 : Path.GetFullPath(spec.WorkingDirectory.Trim());
             if (!Directory.Exists(workingDirectory)) throw new DirectoryNotFoundException($"Working directory was not found: {workingDirectory}");
-
             var psi = new ProcessStartInfo
             {
-                FileName = executable,
-                WorkingDirectory = workingDirectory,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
+                FileName = executable, WorkingDirectory = workingDirectory,
+                UseShellExecute = false, RedirectStandardOutput = true,
+                RedirectStandardError = true, CreateNoWindow = true
             };
             foreach (var argument in spec.Arguments ?? Array.Empty<string>()) psi.ArgumentList.Add(argument ?? string.Empty);
-
             process = new Process { StartInfo = psi, EnableRaisingEvents = true };
             lock (gate)
             {
@@ -216,76 +217,112 @@ internal sealed class PluginExternalJobHost : IDisposable
                 entry.Process = process;
             }
             if (!process.Start()) throw new InvalidOperationException("External process did not start.");
-
+            started = true;
+            outputDrain = Task.WhenAll(CaptureTailAsync(process.StandardOutput, entry.StdoutTail),
+                CaptureTailAsync(process.StandardError, entry.StderrTail));
             lock (gate)
             {
-                if (entry.CancelRequested)
-                {
-                    // cancellation wins over the start race
-                }
-                else
+                if (!entry.CancelRequested)
                 {
                     entry.State = TvAirExternalJobState.Running;
                     entry.StartedAt = DateTimeOffset.Now;
                     entry.Message = null;
                 }
             }
-            if (entry.CancelRequested)
-            {
-                TryKillTree(entry);
-            }
-            else
-            {
-                Publish(entry);
-            }
-
-            var stdoutTask = CaptureTailAsync(process.StandardOutput, entry.StdoutTail);
-            var stderrTask = CaptureTailAsync(process.StandardError, entry.StderrTail);
+            if (entry.CancelRequested) TryKillTree(entry); else Publish(entry);
             await process.WaitForExitAsync().ConfigureAwait(false);
-            await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
-
-            lock (gate)
-            {
-                entry.ExitCode = process.ExitCode;
-                entry.FinishedAt = DateTimeOffset.Now;
-                if (entry.CancelRequested)
-                {
-                    entry.State = TvAirExternalJobState.Cancelled;
-                    entry.Message = "Cancelled.";
-                }
-                else if (process.ExitCode == 0)
-                {
-                    entry.State = TvAirExternalJobState.Succeeded;
-                    entry.Message = null;
-                }
-                else
-                {
-                    entry.State = TvAirExternalJobState.Failed;
-                    entry.FailureCode = "nonzero_exit_code";
-                    entry.Message = $"External process exited with code {process.ExitCode}.";
-                }
-                entry.Process = null;
-            }
-            Publish(entry);
-            PruneTerminalHistory(entry.PluginId);
+            exitCode = process.ExitCode;
         }
         catch (Exception ex)
         {
-            lock (gate)
-            {
-                if (entry.IsTerminal && entry.State == TvAirExternalJobState.Cancelled) return;
-                entry.State = entry.CancelRequested ? TvAirExternalJobState.Cancelled : TvAirExternalJobState.Failed;
-                entry.FinishedAt = DateTimeOffset.Now;
-                entry.FailureCode = entry.CancelRequested ? null : FailureCode(ex);
-                entry.Message = entry.CancelRequested ? "Cancelled." : Sanitize(ex.Message);
-                entry.Process = null;
-            }
-            Publish(entry);
-            PruneTerminalHistory(entry.PluginId);
+            executionError = ex;
         }
         finally
         {
-            try { process?.Dispose(); } catch { }
+            // One terminal boundary for success, nonzero exit, cancellation and exceptions.
+            // A failure notification must never precede the owned process/file-handle cleanup.
+            if (process is not null && started)
+            {
+                try
+                {
+                    if (!process.HasExited)
+                    {
+                        TryKillTree(entry, process);
+                        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+                    }
+                    exitCode = process.ExitCode;
+                }
+                catch (Exception ex)
+                {
+                    released = false;
+                    releaseFailure = "process_stop_not_confirmed";
+                    log.Add("PLUGIN_EXTERNAL_JOB_STOP", entry.PluginId,
+                        $"jobId={entry.JobId} result=STOP_FAILED error={Sanitize(ex.Message)} rule=plugin_external_job_host_contract");
+                }
+                if (outputDrain is not null)
+                {
+                    try { await outputDrain.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); }
+                    catch (Exception ex)
+                    {
+                        released = false;
+                        releaseFailure ??= "output_drain_failed";
+                        executionError ??= ex;
+                        // Closing our pipe readers cannot terminate or reconnect a process.
+                        try { process.StandardOutput.Dispose(); } catch { }
+                        try { process.StandardError.Dispose(); } catch { }
+                        _ = outputDrain.ContinueWith(task => { _ = task.Exception; },
+                            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
+                    }
+                }
+            }
+            try { process?.Dispose(); }
+            catch (Exception ex) { released = false; releaseFailure ??= "process_handle_release_failed"; executionError ??= ex; }
+            bool publishTerminal;
+            lock (gate)
+            {
+                entry.Process = null;
+                entry.ResourcesReleased = released;
+                publishTerminal = !entry.IsTerminal;
+                if (publishTerminal)
+                {
+                    entry.ExitCode = exitCode;
+                    entry.FinishedAt = DateTimeOffset.Now;
+                    if (!released)
+                    {
+                        entry.State = TvAirExternalJobState.Failed;
+                        entry.FailureCode = releaseFailure;
+                        entry.Message = "External process resource release was not confirmed.";
+                    }
+                    else if (entry.CancelRequested)
+                    {
+                        entry.State = TvAirExternalJobState.Cancelled;
+                        entry.Message = "Cancelled.";
+                    }
+                    else if (executionError is not null)
+                    {
+                        entry.State = TvAirExternalJobState.Failed;
+                        entry.FailureCode = FailureCode(executionError);
+                        entry.Message = Sanitize(executionError.Message);
+                    }
+                    else if (exitCode == 0)
+                    {
+                        entry.State = TvAirExternalJobState.Succeeded;
+                        entry.Message = null;
+                    }
+                    else
+                    {
+                        entry.State = TvAirExternalJobState.Failed;
+                        entry.FailureCode = "nonzero_exit_code";
+                        entry.Message = $"External process exited with code {exitCode}.";
+                    }
+                }
+            }
+            try
+            {
+                if (publishTerminal) Publish(entry);
+                PruneTerminalHistory(entry.PluginId);
+            }
+            finally { entry.Completion.TrySetResult(); }
         }
     }
 
@@ -373,10 +410,35 @@ internal sealed class PluginExternalJobHost : IDisposable
         return text.Length <= 240 ? text : text[..240];
     }
 
-    private static void TryKillTree(JobEntry? entry)
+    private void TryKillTree(JobEntry? entry, Process? ownedProcess = null)
     {
-        if (entry?.Process is not { } process) return;
-        try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { }
+        if (entry is null) return;
+        var process = ownedProcess ?? entry.Process;
+        if (process is null) return;
+        try
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+        }
+        catch (InvalidOperationException)
+        {
+            // A queued cancellation can precede Process.Start. RunAsync rechecks cancellation
+            // after Start and owns the final termination/Completion signal.
+        }
+        catch (Exception ex)
+        {
+            log.Add("PLUGIN_EXTERNAL_JOB_STOP", entry.PluginId,
+                $"jobId={entry.JobId} result=STOP_FAILED error={Sanitize(ex.Message)} rule=plugin_external_job_host_contract");
+        }
+    }
+
+    private void WaitForStoppedJobs(IReadOnlyCollection<JobEntry> active, string source)
+    {
+        if (active.Count == 0) return;
+        var completion = Task.WhenAll(active.Select(x => x.Completion.Task));
+        var completed = completion.Wait(TimeSpan.FromSeconds(5));
+        log.Add("PLUGIN_EXTERNAL_JOB_STOP", source,
+            $"result={(!completed ? "TIMEOUT" : active.All(x => x.ResourcesReleased) ? "COMPLETED" : "RELEASE_FAILED")} requested={active.Count} completed={active.Count(x => x.Completion.Task.IsCompleted && x.ResourcesReleased)} " +
+            "timeoutMs=5000 boundary=process_exit_and_output_drain rule=plugin_external_job_host_contract");
     }
 
     public void Dispose()
@@ -386,10 +448,17 @@ internal sealed class PluginExternalJobHost : IDisposable
         {
             if (disposed) return;
             disposed = true;
-            active = jobs.Values.Where(x => !x.IsTerminal).ToList();
-            foreach (var entry in active) entry.CancelRequested = true;
+            // Include runners whose terminal state was published but whose process/streams
+            // are still being disposed. Admission closes before cancellation is sent.
+            active = jobs.Values.Where(x => !x.Completion.Task.IsCompleted).ToList();
+            foreach (var entry in active)
+                if (!entry.IsTerminal) entry.CancelRequested = true;
         }
-        foreach (var entry in active) TryKillTree(entry);
+        foreach (var entry in active)
+        {
+            if (!Cancel(entry.PluginId, entry.JobId)) TryKillTree(entry);
+        }
+        WaitForStoppedJobs(active, "HostShutdown");
     }
 
     private void ThrowIfDisposed()
@@ -416,6 +485,8 @@ internal sealed class PluginExternalJobHost : IDisposable
         public string? Message { get; set; }
         public bool CancelRequested { get; set; }
         public Process? Process { get; set; }
+        public bool ResourcesReleased { get; set; }
+        public TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public BoundedTail StdoutTail { get; } = new(TailCharacterLimit);
         public BoundedTail StderrTail { get; } = new(TailCharacterLimit);
         public bool IsTerminal => State is TvAirExternalJobState.Succeeded or TvAirExternalJobState.Failed or TvAirExternalJobState.Cancelled;

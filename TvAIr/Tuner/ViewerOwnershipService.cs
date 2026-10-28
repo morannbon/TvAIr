@@ -1,4 +1,4 @@
-using TvAIr.Core;
+﻿using TvAIr.Core;
 
 namespace TvAIr.Tuner;
 
@@ -230,6 +230,30 @@ public sealed class ViewerOwnershipService
         _log.Add("VIEWER_OWNERSHIP_STOP", "Viewer",
             $"result=OK leaseId={ownershipId} processesStopped={processIds.Count} processIds={Safe(string.Join(",", processIds))} rule=release_contract");
         return ViewerOwnershipStopResult.Succeeded(details);
+    }
+
+    /// <summary>Releases Host ownership without closing, retuning or adopting the Viewer process.</summary>
+    public ViewerOwnershipStopResult Detach(ExternalTunerLeaseDto lease, string reason)
+    {
+        ArgumentNullException.ThrowIfNull(lease);
+        var owned = TvAirManagedProcessRegistry.GetViewers()
+            .Where(x => string.Equals(x.OwnershipId, lease.LeaseId, StringComparison.OrdinalIgnoreCase)).ToList();
+        // Keep registration available for retry if the authoritative tuner release fails.
+        if (!_leases.Release(lease.LeaseId, reason))
+        {
+            _log.Add("VIEWER_OWNERSHIP_DETACH", "Viewer",
+                $"result=FAILED leaseId={Safe(lease.LeaseId)} reason=lease_release_failed action=preserve_ownership processStopRequested=False rule=viewer_session_contract");
+            return ViewerOwnershipStopResult.Failed("lease_release_failed", Array.Empty<string>());
+        }
+        foreach (var process in owned)
+        {
+            if (TvAirManagedProcessRegistry.TryGet(process.ProcessId, out var current) &&
+                current.IsViewer && string.Equals(current.OwnershipId, lease.LeaseId, StringComparison.OrdinalIgnoreCase))
+                TvAirManagedProcessRegistry.Unregister(process.ProcessId);
+        }
+        _log.Add("VIEWER_OWNERSHIP_DETACH", "Viewer",
+            $"result=RELEASED leaseId={Safe(lease.LeaseId)} pid={lease.ProcessId?.ToString() ?? "-"} processStopRequested=False processRetuneRequested=False registryReleased=True rule=viewer_session_contract");
+        return ViewerOwnershipStopResult.Succeeded(Array.Empty<string>());
     }
 
     public ViewerOwnershipRollbackResult RollbackNewOwnership(string leaseId, int processId, string reason)

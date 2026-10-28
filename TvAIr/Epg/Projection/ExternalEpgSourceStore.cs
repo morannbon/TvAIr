@@ -1,4 +1,4 @@
-namespace TvAIr.Epg.Projection;
+﻿namespace TvAIr.Epg.Projection;
 
 /// <summary>
 /// 外部EPGイベントの一時保持領域。TvAIr DB / epg_events には書き戻さない。
@@ -85,6 +85,14 @@ public sealed class ExternalEpgSourceStore
                 ? events.ToArray()
                 : Array.Empty<ExternalEpgEvent>();
         }
+    }
+
+    // Keep the source snapshot stable only through the DB commit. Publish observers after this returns.
+    internal T WithSourceSnapshot<T>(string sourcePluginId,Func<IReadOnlyList<ExternalEpgEvent>,T> commit)
+    {
+        var owner=TvAIr.Plugin.PluginIdentity.Normalize(sourcePluginId);
+        lock(_gate)return commit(_eventsByPlugin.TryGetValue(owner,out var rows)
+            ? rows.AsReadOnly() : Array.Empty<ExternalEpgEvent>());
     }
 
     public IReadOnlyList<ExternalEpgEvent> GetAll()

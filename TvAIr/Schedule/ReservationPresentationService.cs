@@ -1,4 +1,4 @@
-using TvAIr.Channel;
+﻿using TvAIr.Channel;
 using TvAIr.Core;
 using TvAIr.Epg;
 using TvAIr.Epg.Projection;
@@ -252,7 +252,7 @@ public sealed class ReservationPresentationService
 
     private IReadOnlyList<ReservationPresentationItem> BuildPresentationItems(IReadOnlyList<Reservation> reservations, IReadOnlyDictionary<int, string>? priorityOverrides = null)
     {
-        var chainMap = BuildChainMap();
+        var chainMap = BuildChainMap(_store.GetChainPredecessorsForPresentation(), _ini.ChainReservationMode);
         var items = new List<ReservationPresentationItem>(reservations.Count);
         var serviceAccessSnapshot = _serviceAccess.Capture();
         var recordingTuners = GetRecordingTuners();
@@ -324,6 +324,7 @@ public sealed class ReservationPresentationService
                     CanToggleEnabled = ReservationOperationPolicy.CanToggleEnabled(r),
                     CanCancel = ReservationOperationPolicy.CanCancel(r),
                     IsUserChain = r.IsUserChain,
+                    ShowChainMark = chainInfo?.ShowMark ?? false,
                     ChainRole = chainInfo?.Role ?? string.Empty,
                     ChainLabel = chainInfo?.Label ?? string.Empty,
                     CreatedAt = r.CreatedAt,
@@ -402,9 +403,9 @@ public sealed class ReservationPresentationService
             reservation.EventId);
     }
 
-    private Dictionary<int, ReservationChainInfo> BuildChainMap()
+    internal static Dictionary<int, ReservationChainInfo> BuildChainMap(
+        IReadOnlyDictionary<int, int> predecessors, string chainMode)
     {
-        var predecessors = _store.GetChainPredecessors();
         var result = new Dictionary<int, ReservationChainInfo>();
         foreach (var pair in predecessors)
         {
@@ -429,6 +430,11 @@ public sealed class ReservationPresentationService
                 result[successorId] = new ReservationChainInfo("mid", "チェーン");
             }
         }
+        // Role and mark share the same persisted topology projection. A mode change
+        // changes this presentation only; recording linkage remains authoritative.
+        var automatic = chainMode == ChainModeContract.Automatic;
+        foreach (var id in result.Keys.ToArray())
+            result[id] = result[id] with { ShowMark = automatic || result[id].Role != "head" };
         return result;
     }
 
@@ -566,6 +572,7 @@ public sealed class ReservationPresentationItem
     public bool CanToggleEnabled { get; set; }
     public bool CanCancel { get; set; }
     public bool IsUserChain { get; set; }
+    public bool ShowChainMark { get; set; }
     public string ChainRole { get; set; } = "";
     public string ChainLabel { get; set; } = "";
     public DateTime CreatedAt { get; set; }
@@ -580,4 +587,4 @@ public sealed class KeywordRuleReservationPresentationGroup
     public IReadOnlyList<ReservationPresentationItem> Items { get; set; } = Array.Empty<ReservationPresentationItem>();
 }
 
-public sealed record ReservationChainInfo(string Role, string Label);
+public sealed record ReservationChainInfo(string Role, string Label, bool ShowMark = false);

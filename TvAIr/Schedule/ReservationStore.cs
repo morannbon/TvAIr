@@ -93,12 +93,30 @@ public sealed record UserChainSequenceMutationResult(
     int AttemptedPairs,
     int AppliedPairs,
     int AlreadyLinkedPairs,
-    IReadOnlyList<int> UpdatedReservationIds);
+    IReadOnlyList<int> UpdatedReservationIds,
+    bool NotificationIncomplete = false);
+
+/// <summary>Immutable display snapshot; receiving paths and allocation are not changed by preview.</summary>
+public sealed record ScheduledChainPreviewMember(
+    int Id, string Title, DateTime StartTime, DateTime EndTime,
+    long DataVersion, bool IsUserChain, int? PreviousId, int? RootId);
+
+public sealed record ScheduledChainJoinPreview(
+    bool CanJoin, string Reason, string SnapshotToken,
+    IReadOnlyList<ScheduledChainPreviewMember> Members);
 
 public sealed record UserChainFeatureDisableDetachResult(
     bool Applied,
     string Reason,
     IReadOnlyList<Reservation> DetachedReservations);
+
+internal sealed record ContinuousChainFinalizationArtifact(string OutputPath, string ResultPath, string RuntimeStatsPath)
+{
+    public string JobPath { get; init; } = string.Empty;
+    public string ControlPath { get; init; } = string.Empty;
+}
+internal sealed record ContinuousChainFinalizationEvidence(Reservation Reservation, ContinuousChainFinalizationArtifact Artifact, string? FailureReason);
+internal sealed record ContinuousChainStopEvidence(Reservation Reservation, ContinuousChainFinalizationArtifact Artifact);
 
 public sealed record ReservationLifecycleTransitionResult(
     bool Applied,
@@ -116,6 +134,7 @@ public sealed record ReservationLifecycleTransitionResult(
 public sealed class ReservationStore
 {
     private readonly Database db;
+    internal LabWithdrawalJournal LabOpenWithdrawalJournal() => new(db);
     private readonly LogRepository log;
     private readonly ChainRuntimeSnapshotRegistry chainSessionRegistry;
     private readonly ChannelServiceAccessPolicy serviceAccess;
@@ -208,24 +227,8 @@ public sealed class ReservationStore
     private static bool HasBroadcastTimeOverlap(Reservation a, Reservation b)
         => a.StartTime < b.EndTime && b.StartTime < a.EndTime;
 
-    private int AutoDeleteResolvedProgramGuideMissingDuplicates(List<Reservation> allScheduled, List<Reservation> scheduled)
-    {
-        // release_contract: 一覧上のReservation照合ではなく、DB上の予約実体で完全一致を確認する。
-        // UI説明は追加しない。安全な空欄ProgramRule重複だけ削除する。
-        var targets = new List<(int MissingId, int? RuleId, int ResolvedId, string ServiceName, string StartText, string EndText, string ResolvedSource)>();
-
-        using (var con = db.Open())
-        {
-            using var scan = con.CreateCommand();
-            scan.CommandText = """
-                SELECT m.id,
-                       m.source_rule_id,
-                       r.id,
-                       COALESCE(m.service_name, ''),
-                       COALESCE(m.start_time, ''),
-                       COALESCE(m.end_time, ''),
-                       COALESCE(r.source, '')
-                FROM reservations m
+    private const string ResolvedProgramGuideMissingDuplicateMatch = """
+        FROM reservations m
                 JOIN reservations r
                   ON r.id <> m.id
                  AND r.network_id = m.network_id
@@ -247,143 +250,35 @@ public sealed class ReservationStore
                   AND r.is_enabled = 1
                   AND (r.recording_started_at IS NULL OR r.recording_started_at = '')
                   AND (r.recording_finished_at IS NULL OR r.recording_finished_at = '')
-                ORDER BY m.id, CASE WHEN r.source = 'manual' THEN 0 ELSE 1 END, r.id;
-                """;
-            using var reader = scan.ExecuteReader();
-            var seenMissing = new HashSet<int>();
-            while (reader.Read())
-            {
-                var missingId = Convert.ToInt32(reader.GetValue(0));
-                if (!seenMissing.Add(missingId)) continue;
+        """;
 
-                int? ruleId = reader.IsDBNull(1) ? null : Convert.ToInt32(reader.GetValue(1));
-                var resolvedId = Convert.ToInt32(reader.GetValue(2));
-                var serviceName = reader.GetString(3);
-                var startText = reader.GetString(4);
-                var endText = reader.GetString(5);
-                var resolvedSource = reader.GetString(6);
-                targets.Add((missingId, ruleId, resolvedId, serviceName, startText, endText, resolvedSource));
-            }
-        }
 
-        if (targets.Count == 0) return 0;
-
-        using var writeCon = db.Open();
-        using var tx = writeCon.BeginTransaction();
-        var deletedReservationIds = new HashSet<int>();
-        var deletedRuleIds = new HashSet<int>();
-        var removedReservations = new List<Reservation>();
-
-        foreach (var target in targets)
+    internal bool CleanupResolvedProgramGuideMissingDuplicates(Func<ProgramReservationCleanupRequest,ProgramReservationCleanupResult> execute)
+    {
+        var pairs=new List<(int Missing,int Resolved,int? Rule)>();
+        using(var con=db.Open())
+        using(var scan=con.CreateCommand())
         {
-            if (deletedReservationIds.Contains(target.MissingId)) continue;
-
-            Reservation? candidate = null;
-            using (var selectReservation = writeCon.CreateCommand())
+            scan.CommandText="SELECT m.id,m.source_rule_id,r.id " + ResolvedProgramGuideMissingDuplicateMatch
+                + " ORDER BY m.id, CASE WHEN r.source='manual' THEN 0 ELSE 1 END,r.id";
+            using var reader=scan.ExecuteReader();var seen=new HashSet<int>();
+            while(reader.Read())
             {
-                selectReservation.Transaction = tx;
-                selectReservation.CommandText = """
-                    SELECT id, network_id, transport_stream_id, service_id, event_id,
-                           title, start_time, end_time, status, source, created_at, updated_at,
-                           channel_argument, is_conflicted, is_enabled, tuner_name, actual_tuner_name,
-                           recording_started_at, recording_finished_at, service_name,
-                           scheduled_start_time, source_rule_id, source_rule_name,
-                           is_user_chain, user_chain_previous_id, user_chain_root_id,
-                           recording_recovery_chain_id, recovery_parent_reservation_id, data_version,
-                           reservation_intent, created_through, created_by_plugin_id
-                    FROM reservations
-                    WHERE id = $id
-                      AND source = 'program'
-                      AND event_id = 0
-                      AND status = 'scheduled'
-                      AND is_enabled = 1
-                      AND source_rule_id IS NOT NULL
-                      AND (recording_started_at IS NULL OR recording_started_at = '')
-                      AND (recording_finished_at IS NULL OR recording_finished_at = '')
-                      AND (title = 'ProgramGuideBlank' OR source_rule_name = 'ProgramGuideBlank' OR lower(source_rule_name) = 'programguidemissing');
-                    """;
-                selectReservation.Parameters.AddWithValue("$id", target.MissingId);
-                candidate = ReadReservations(selectReservation, projectRuntimeStatus: false).SingleOrDefault();
+                var id=reader.GetInt32(0);if(!seen.Add(id))continue;
+                pairs.Add((id,reader.GetInt32(2),reader.IsDBNull(1)?null:reader.GetInt32(1)));
             }
-            if (candidate is null) continue;
-
-            using (var delReservation = writeCon.CreateCommand())
-            {
-                delReservation.Transaction = tx;
-                delReservation.CommandText = """
-                    DELETE FROM reservations
-                    WHERE id = $id
-                      AND source = 'program'
-                      AND status = 'scheduled'
-                      AND data_version = $dataVersion;
-                    """;
-                delReservation.Parameters.AddWithValue("$id", candidate.Id);
-                delReservation.Parameters.AddWithValue("$dataVersion", candidate.DataVersion);
-                var affected = delReservation.ExecuteNonQuery();
-                if (affected <= 0) continue;
-            }
-
-            deletedReservationIds.Add(target.MissingId);
-            removedReservations.Add(candidate);
-
-            if (target.RuleId.HasValue && !deletedRuleIds.Contains(target.RuleId.Value))
-            {
-                var ruleId = target.RuleId.Value;
-                var deleteRule = false;
-                using (var checkRule = writeCon.CreateCommand())
-                {
-                    checkRule.Transaction = tx;
-                    checkRule.CommandText = """
-                        SELECT name
-                        FROM program_rules
-                        WHERE id = $ruleId;
-                        """;
-                    checkRule.Parameters.AddWithValue("$ruleId", ruleId);
-                    var ruleName = checkRule.ExecuteScalar() as string;
-                    deleteRule = ReservationOriginClassifier.IsProgramGuideMissingRuleName(ruleName);
-                }
-
-                if (deleteRule)
-                {
-                    using var checkRemaining = writeCon.CreateCommand();
-                    checkRemaining.Transaction = tx;
-                    checkRemaining.CommandText = """
-                        SELECT COUNT(1)
-                        FROM reservations
-                        WHERE source = 'program'
-                          AND source_rule_id = $ruleId;
-                        """;
-                    checkRemaining.Parameters.AddWithValue("$ruleId", ruleId);
-                    deleteRule = Convert.ToInt32(checkRemaining.ExecuteScalar()) == 0;
-                }
-
-                if (deleteRule)
-                {
-                    using var delRule = writeCon.CreateCommand();
-                    delRule.Transaction = tx;
-                    delRule.CommandText = "DELETE FROM program_rules WHERE id = $ruleId;";
-                    delRule.Parameters.AddWithValue("$ruleId", ruleId);
-                    if (delRule.ExecuteNonQuery() > 0)
-                        deletedRuleIds.Add(ruleId);
-                }
-            }
-
-            log.Add("PROGRAM_GUIDE_MISSING_DUPLICATE_CLEANUP", "AutoDelete",
-                $"result=DELETED missing=R{target.MissingId} resolved=R{target.ResolvedId} service={TrimForAudit(target.ServiceName)} start={TrimForAudit(target.StartText)} end={TrimForAudit(target.EndText)} origin=ProgramGuideMissingProgramRule identity=TimeIdentity resolvedSource={target.ResolvedSource} commonRoute=ALLOC_ROUTE/TUNER_ALLOC ui=none rule=release_contract");
         }
-
-        tx.Commit();
-        RecordProjectedReservationRemovals(removedReservations, "program_guide_missing_duplicate_resolved");
-
-        if (deletedReservationIds.Count > 0)
+        var complete=true;
+        foreach(var pair in pairs)
         {
-            allScheduled.RemoveAll(r => deletedReservationIds.Contains(r.Id));
-            scheduled.RemoveAll(r => deletedReservationIds.Contains(r.Id));
-            log.Add("PROGRAM_GUIDE_MISSING_DUPLICATE_CLEANUP", "Summary",
-                $"result=OK deletedReservations=[{string.Join(',', deletedReservationIds.OrderBy(x => x).Select(x => $"R{x}"))}] deletedRules=[{string.Join(',', deletedRuleIds.OrderBy(x => x))}] mode=db_same_service_exact_time_resolved_event_only ui=none commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
+            var request=new ProgramReservationCleanupRequest(
+                "id=$missing AND EXISTS(SELECT 1 " + ResolvedProgramGuideMissingDuplicateMatch
+                    + " AND m.id=reservations.id AND r.id=$resolved AND m.source_rule_id=$rule)",
+                command=>{command.Parameters.AddWithValue("$missing",pair.Missing);command.Parameters.AddWithValue("$resolved",pair.Resolved);command.Parameters.AddWithValue("$rule",pair.Rule!.Value);},
+                "program_guide_missing_duplicate_resolved", EmptyRuleId:pair.Rule, RequiredResolvedId:pair.Resolved);
+            var result=execute(request);complete &= result.Applied;
         }
-
-        return deletedReservationIds.Count;
+        return complete;
     }
 
     // ─── 予約 CRUD ───────────────────────────────────────────────
@@ -391,7 +286,13 @@ public sealed class ReservationStore
     public IReadOnlyList<Reservation> GetAll()
     {
         using var con = db.Open();
+        return ReadAllReservations(con, null);
+    }
+
+    private static IReadOnlyList<Reservation> ReadAllReservations(SqliteConnection con, SqliteTransaction? tx)
+    {
         using var cmd = con.CreateCommand();
+        cmd.Transaction = tx;
         cmd.CommandText = """
             SELECT id, network_id, transport_stream_id, service_id, event_id,
                    title, start_time, end_time, status, source, created_at, updated_at,
@@ -494,6 +395,229 @@ public sealed class ReservationStore
     }
 
 
+    internal IReadOnlyList<int> ListContinuousChainStopCandidateIds()
+    {
+        using var con = db.Open();
+        using var read = con.CreateCommand();
+        read.CommandText = "SELECT id FROM reservations WHERE status='stopping' AND chain_stop_receipt <> '' ORDER BY id";
+        using var rows = read.ExecuteReader();
+        var ids = new List<int>();
+        while (rows.Read()) ids.Add(rows.GetInt32(0));
+        return ids;
+    }
+
+    internal bool HasPendingContinuousChainStopReceipt()
+    {
+        using var con = db.Open();
+        using var read = con.CreateCommand();
+        read.CommandText = "SELECT EXISTS(SELECT 1 FROM reservations WHERE status='stopping' AND chain_stop_receipt <> '')";
+        return Convert.ToInt64(read.ExecuteScalar()) != 0;
+    }
+
+    // The caller has proved exact Worker exit. Keep logical recovery/receipt inputs until
+    // settled. A never-started planned row has no logical owner of this exited capture.
+    internal static bool IsControlRecoverySettled(Database database, int reservationId, bool ownerHostAlive)
+    {
+        using var con = database.Open();using var read = con.CreateCommand();
+        read.CommandText = "SELECT status,chain_stop_receipt,chain_finalization_receipt,recording_started_at FROM reservations WHERE id=$id";
+        read.Parameters.AddWithValue("$id", reservationId);using var row = read.ExecuteReader();
+        if (!row.Read()) return !ownerHostAlive;
+        if ((!row.IsDBNull(1) && !string.IsNullOrWhiteSpace(row.GetString(1)))
+            || (!row.IsDBNull(2) && !string.IsNullOrWhiteSpace(row.GetString(2)))) return false;
+        var status = row.GetString(0);
+        var neverStarted = row.IsDBNull(3) || string.IsNullOrWhiteSpace(row.GetString(3));
+        return (neverStarted && status is "scheduled" or "cancelled")
+            || (!ownerHostAlive && status == "failed");
+    }
+
+    internal IReadOnlyList<Reservation> ListContinuousChainFinalizationCandidates()
+    {
+        using var con = db.Open();
+        using var read = con.CreateCommand();
+        read.CommandText = """
+            SELECT id, network_id, transport_stream_id, service_id, event_id,
+                   title, start_time, end_time, status, source, created_at, updated_at,
+                   channel_argument, is_conflicted, is_enabled, tuner_name, actual_tuner_name,
+                   recording_started_at, recording_finished_at, service_name,
+                   scheduled_start_time, source_rule_id, source_rule_name,
+                   is_user_chain, user_chain_previous_id, user_chain_root_id,
+                   recording_recovery_chain_id, recovery_parent_reservation_id, data_version,
+                       reservation_intent, created_through, created_by_plugin_id
+            FROM reservations WHERE status IN ('completed','failed')
+                AND chain_finalization_receipt <> '' ORDER BY id;
+            """;
+        return ReadReservations(read, projectRuntimeStatus: false);
+    }
+
+    // Read-only provenance snapshot. The caller still needs runtime ownership and file binding.
+    internal ContinuousChainStopEvidence? ReadContinuousChainStopEvidence(int id, string runtimeDirectory)
+    {
+        using var con = db.Open();
+        using var tx = con.BeginTransaction(deferred: true);
+        string? json;
+        using (var read = con.CreateCommand())
+        {
+            read.Transaction = tx;
+            read.CommandText = "SELECT chain_stop_receipt FROM reservations WHERE id=$id";
+            read.Parameters.AddWithValue("$id", id);
+            json = read.ExecuteScalar() as string;
+        }
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        Reservation? reservation;
+        using (var read = con.CreateCommand())
+        {
+            read.Transaction = tx;
+            read.CommandText = """
+            SELECT id, network_id, transport_stream_id, service_id, event_id,
+                   title, start_time, end_time, status, source, created_at, updated_at,
+                   channel_argument, is_conflicted, is_enabled, tuner_name, actual_tuner_name,
+                   recording_started_at, recording_finished_at, service_name,
+                   scheduled_start_time, source_rule_id, source_rule_name,
+                   is_user_chain, user_chain_previous_id, user_chain_root_id,
+                   recording_recovery_chain_id, recovery_parent_reservation_id, data_version,
+                       reservation_intent, created_through, created_by_plugin_id
+            FROM reservations WHERE id = $id;
+            """;
+            read.Parameters.AddWithValue("$id", id);
+            reservation = ReadReservations(read, projectRuntimeStatus: false).FirstOrDefault();
+        }
+        if (reservation is null || reservation.Id <= 0 || reservation.DataVersion <= 0
+            || reservation.Source == ReservationSource.Epg || reservation.Status != ReservationStatus.Stopping
+            || reservation.RecordingFinishedAt is not null || reservation.ServiceId == 0
+            || reservation.EndTime <= reservation.StartTime || json.Length > 1024 * 1024) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var receipt = document.RootElement;
+            if (receipt.ValueKind != JsonValueKind.Object
+                || receipt.EnumerateObject().Select(p => p.Name).Distinct(StringComparer.Ordinal).Count()
+                    != receipt.EnumerateObject().Count()) return null;
+            DateTime? OptionalTime(string name) => receipt.GetProperty(name).ValueKind == JsonValueKind.Null
+                ? null : receipt.GetProperty(name).GetDateTime();
+            if (receipt.GetProperty("SchemaVersion").GetInt32() != 1
+                || receipt.GetProperty("ReservationId").GetInt32() != reservation.Id
+                || receipt.GetProperty("StoppingDataVersion").GetInt64() != reservation.DataVersion
+                || receipt.GetProperty("NetworkId").GetInt32() != reservation.NetworkId
+                || receipt.GetProperty("TransportStreamId").GetInt32() != reservation.TransportStreamId
+                || receipt.GetProperty("ServiceId").GetInt32() != reservation.ServiceId
+                || receipt.GetProperty("EventId").GetInt32() != reservation.EventId
+                || receipt.GetProperty("StartTime").GetDateTime() != reservation.StartTime
+                || receipt.GetProperty("EndTime").GetDateTime() != reservation.EndTime
+                || OptionalTime("ScheduledStartTime") != reservation.ScheduledStartTime
+                || OptionalTime("RecordingStartedAt") != reservation.RecordingStartedAt) return null;
+            if (!Path.IsPathFullyQualified(runtimeDirectory)) return null;
+            var root = Path.GetFullPath(runtimeDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+            string? AbsolutePath(string name)
+            {
+                var path = receipt.GetProperty(name).GetString();
+                return !string.IsNullOrWhiteSpace(path) && Path.IsPathFullyQualified(path)
+                    ? Path.GetFullPath(path) : null;
+            }
+            var output = AbsolutePath("OutputPath");
+            var result = AbsolutePath("ResultPath");
+            var stats = AbsolutePath("RuntimeStatsPath");
+            var job = AbsolutePath("JobPath");
+            var control = AbsolutePath("ControlPath");
+            var paths = new[] { output, result, stats, job, control };
+            if (paths.Any(p => p is null)
+                || paths.Distinct(StringComparer.OrdinalIgnoreCase).Count() != paths.Length
+                || new[] { result, stats, job, control }.Any(p => !p!.StartsWith(root, StringComparison.OrdinalIgnoreCase)))
+                return null;
+            return new(reservation, new ContinuousChainFinalizationArtifact(output!, result!, stats!)
+                { JobPath = job!, ControlPath = control! });
+        }
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException
+            or FormatException or OverflowException or ArgumentException or NotSupportedException)
+        {
+            return null;
+        }
+    }
+
+    // Snapshot validation only. A returned artifact is not a runtime owner or replay permit.
+    internal ContinuousChainFinalizationEvidence? ReadContinuousChainFinalizationEvidence(int id, string runtimeDirectory)
+    {
+        using var con = db.Open();
+        using var tx = con.BeginTransaction(deferred: true);
+        string? json;
+        using (var read = con.CreateCommand())
+        {
+            read.Transaction = tx;
+            read.CommandText = "SELECT chain_finalization_receipt FROM reservations WHERE id=$id";
+            read.Parameters.AddWithValue("$id", id);
+            json = read.ExecuteScalar() as string;
+        }
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        Reservation? reservation;
+        using (var read = con.CreateCommand())
+        {
+            read.Transaction = tx;
+            read.CommandText = """
+            SELECT id, network_id, transport_stream_id, service_id, event_id,
+                   title, start_time, end_time, status, source, created_at, updated_at,
+                   channel_argument, is_conflicted, is_enabled, tuner_name, actual_tuner_name,
+                   recording_started_at, recording_finished_at, service_name,
+                   scheduled_start_time, source_rule_id, source_rule_name,
+                   is_user_chain, user_chain_previous_id, user_chain_root_id,
+                   recording_recovery_chain_id, recovery_parent_reservation_id, data_version,
+                       reservation_intent, created_through, created_by_plugin_id
+            FROM reservations WHERE id = $id;
+            """;
+            read.Parameters.AddWithValue("$id", id);
+            reservation = ReadReservations(read, projectRuntimeStatus: false).FirstOrDefault();
+        }
+        if (reservation is null || reservation.Source == ReservationSource.Epg
+            || reservation.Status is not (ReservationStatus.Completed or ReservationStatus.Failed)
+            || reservation.ServiceId == 0 || reservation.EndTime <= reservation.StartTime) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var receipt = document.RootElement;
+            DateTime? OptionalTime(string name) => receipt.GetProperty(name).ValueKind == JsonValueKind.Null
+                ? null : receipt.GetProperty(name).GetDateTime();
+            if (receipt.GetProperty("SchemaVersion").GetInt32() != 1
+                || receipt.GetProperty("ReservationId").GetInt32() != reservation.Id
+                || receipt.GetProperty("TerminalDataVersion").GetInt64() != reservation.DataVersion
+                || receipt.GetProperty("TerminalStatus").GetString() != reservation.Status.ToString().ToLowerInvariant()
+                || receipt.GetProperty("NetworkId").GetInt32() != reservation.NetworkId
+                || receipt.GetProperty("TransportStreamId").GetInt32() != reservation.TransportStreamId
+                || receipt.GetProperty("ServiceId").GetInt32() != reservation.ServiceId
+                || receipt.GetProperty("EventId").GetInt32() != reservation.EventId
+                || receipt.GetProperty("StartTime").GetDateTime() != reservation.StartTime
+                || receipt.GetProperty("EndTime").GetDateTime() != reservation.EndTime
+                || OptionalTime("ScheduledStartTime") != reservation.ScheduledStartTime
+                || OptionalTime("RecordingStartedAt") != reservation.RecordingStartedAt
+                || OptionalTime("RecordingFinishedAt") != reservation.RecordingFinishedAt) return null;
+            var output = receipt.GetProperty("OutputPath").GetString();
+            var result = receipt.GetProperty("ResultPath").GetString();
+            var stats = receipt.GetProperty("RuntimeStatsPath").GetString();
+            if (!Path.IsPathFullyQualified(runtimeDirectory) || string.IsNullOrWhiteSpace(output)
+                || !Path.IsPathFullyQualified(output) || string.IsNullOrWhiteSpace(result)
+                || !Path.IsPathFullyQualified(result) || stats is null) return null;
+            var root = Path.GetFullPath(runtimeDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+            bool WithinRuntime(string path) => Path.IsPathFullyQualified(path)
+                && Path.GetFullPath(path).StartsWith(root, StringComparison.OrdinalIgnoreCase);
+            if (!WithinRuntime(result) || (!string.IsNullOrEmpty(stats) && !WithinRuntime(stats))) return null;
+            output = Path.GetFullPath(output); result = Path.GetFullPath(result);
+            stats = string.IsNullOrEmpty(stats) ? string.Empty : Path.GetFullPath(stats);
+            if (string.Equals(output, result, StringComparison.OrdinalIgnoreCase)
+                || (!string.IsNullOrEmpty(stats) && (string.Equals(output, stats, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(result, stats, StringComparison.OrdinalIgnoreCase)))) return null;
+            var artifact = new ContinuousChainFinalizationArtifact(output, result, stats)
+            {
+                JobPath = receipt.TryGetProperty("JobPath", out var job) ? job.GetString() ?? string.Empty : string.Empty,
+                ControlPath = receipt.TryGetProperty("ControlPath", out var control) ? control.GetString() ?? string.Empty : string.Empty
+            };
+            return new(reservation, artifact, receipt.GetProperty("FailureReason").GetString());
+        }
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException
+            or FormatException or OverflowException or ArgumentException or NotSupportedException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>同一番組の有効予約を取得する。競合予約をユーザー明示チェーンへ昇格する入口で使用する。</summary>
     public Reservation? GetActiveByEvent(ushort networkId, ushort tsId, ushort serviceId, ushort eventId)
     {
@@ -590,6 +714,11 @@ public sealed class ReservationStore
     /// 同一前番組への複数後続、既存後続の別前番組付替え、循環、壊れたrootを拒否する。
     /// </summary>
     public UserChainMutationResult AddOrPromoteUserChain(Reservation requested, int predecessorId, int rootId, bool featureEnabled)
+        => AddOrPromoteUserChain(requested, predecessorId, rootId, featureEnabled, null);
+
+    // The common route records the durable outcome before post-commit observers run.
+    internal UserChainMutationResult AddOrPromoteUserChain(Reservation requested, int predecessorId, int rootId,
+        bool featureEnabled, Action<UserChainMutationResult>? recordCommitted)
     {
         requested.Title = NormalizeReservationTitleForStorage(requested.Title, requested.ServiceName, requested.Id);
         using var con = db.Open();
@@ -679,6 +808,19 @@ public sealed class ReservationStore
         if (rootId != resolvedRootId)
             return new UserChainMutationResult(false, false, "chain_root_mismatch", predecessorId, predecessor);
 
+        // A single-row promotion cannot rebase a successor's existing downstream chain.
+        // Reject before writing so descendants never retain a different canonical root.
+        // Repeating an existing link with the same root remains valid.
+        if (existing is not null
+            && (existing.UserChainRootId ?? existing.Id) != resolvedRootId
+            && active.Any(x => x.IsUserChain
+                && x.UserChainPreviousId == existing.Id
+                && ReservationLifecycleContract.IsChainTopologyActive(x.Status)))
+        {
+            return new UserChainMutationResult(false, false,
+                "successor_has_external_descendant", existing.Id, existing);
+        }
+
         var now = DateTime.Now.ToString("O");
         int id;
         bool added;
@@ -750,7 +892,18 @@ public sealed class ReservationStore
             added = true;
         }
 
+        var membershipChanged = existing is null || !existing.IsUserChain
+            || existing.UserChainPreviousId != predecessorId || existing.UserChainRootId != resolvedRootId
+            || !existing.IsEnabled;
+        var membershipVersions = new List<ChainMembershipVersionChange>();
+        if (membershipChanged && !TryAdvanceScheduledChainMembershipVersions(
+            con, tx, active, new HashSet<int> { resolvedRootId }, new HashSet<int> { id },
+            null, now, out membershipVersions))
+            return new(false, false, "chain_membership_snapshot_changed", id, null);
+
         tx.Commit();
+        recordCommitted?.Invoke(new(true, added, "applied", id, null));
+        PublishChainMembershipVersionChanges(membershipVersions);
         var result = GetById(id);
         if (!added)
         {
@@ -787,6 +940,118 @@ public sealed class ReservationStore
     /// 優先順位・前後マージン・競合結果をここで変更せず、呼び出し元はcommit後に
     /// 既存の共通割当を1回だけ実行して最終競合を再評価する。
     /// </summary>
+    // Called only under the common allocation core's runtime edit admission.
+    // Re-plan from the transaction snapshot: never trust a previously displayed candidate.
+    internal UserChainSequenceMutationResult CommitAutomaticChain(int addedId, bool featureEnabled,
+        DateTime now, IReadOnlySet<int> protectedIds, Action<UserChainSequenceMutationResult> recordCommitted)
+    {
+        if (!featureEnabled) return new(false,"feature_disabled",0,0,0,Array.Empty<int>());
+        using var con = db.Open();
+        using var tx = con.BeginTransaction(System.Data.IsolationLevel.Serializable);
+        List<Reservation> active;
+        using (var read = con.CreateCommand())
+        {
+            read.Transaction = tx;
+            read.CommandText = """
+                SELECT id, network_id, transport_stream_id, service_id, event_id,
+                       title, start_time, end_time, status, source, created_at, updated_at,
+                       channel_argument, is_conflicted, is_enabled, tuner_name, actual_tuner_name,
+                       recording_started_at, recording_finished_at, service_name,
+                       scheduled_start_time, source_rule_id, source_rule_name,
+                       is_user_chain, user_chain_previous_id, user_chain_root_id,
+                       recording_recovery_chain_id, recovery_parent_reservation_id, data_version,
+                       reservation_intent, created_through, created_by_plugin_id
+                FROM reservations
+                WHERE status IN ('scheduled','starting','recording','stopping','completed','failed')
+                ORDER BY id;
+                """;
+            active = ReadReservations(read, projectRuntimeStatus: false).ToList();
+        }
+        var plan = AutomaticChainPlanner.PlanConvergence(active, addedId, now);
+        if (!plan.CanJoin) return new(false,plan.Reason,0,0,0,Array.Empty<int>());
+        var byId = active.ToDictionary(r=>r.Id);
+        var ordered = plan.OrderedReservationIds.Select(id=>byId[id]).ToArray();
+        // Existing running ancestors may remain unchanged. A pending runtime owner
+        // must not be rewritten or have its membership generation advanced.
+        if (ordered.Select((r,i)=>(Row:r,Index:i)).Any(x=>x.Row.Status==ReservationStatus.Scheduled
+            && (protectedIds.Contains(x.Row.Id)||HasOpenRecordingRuntime(x.Row))
+            && (ordered[0].Status==ReservationStatus.Scheduled || x.Index==0 || !x.Row.IsUserChain
+                || x.Row.UserChainPreviousId!=ordered[x.Index-1].Id || x.Row.UserChainRootId!=plan.RootReservationId)))
+            return new(false,"runtime_protected",0,0,0,Array.Empty<int>());
+        var changed = new List<(Reservation Before,Reservation After)>();
+        var stamp = DateTime.Now.ToString("O");
+        for (var i=1;i<ordered.Length;i++)
+        {
+            var row=ordered[i];var previous=ordered[i-1].Id;
+            if (row.IsUserChain && row.UserChainPreviousId==previous && row.UserChainRootId==plan.RootReservationId) continue;
+            if(row.Status!=ReservationStatus.Scheduled)
+                return new(false,"running_member_rebase_forbidden",0,0,0,Array.Empty<int>());
+            using var update=con.CreateCommand();update.Transaction=tx;
+            update.CommandText="""
+                UPDATE reservations SET is_user_chain=1,user_chain_previous_id=$previous,
+                    user_chain_root_id=$root,data_version=data_version+1,updated_at=$now
+                WHERE id=$id AND status='scheduled' AND is_enabled=1 AND data_version=$version;
+                """;
+            update.Parameters.AddWithValue("$previous",previous);
+            update.Parameters.AddWithValue("$root",plan.RootReservationId);
+            update.Parameters.AddWithValue("$id",row.Id);
+            update.Parameters.AddWithValue("$version",row.DataVersion);
+            update.Parameters.AddWithValue("$now",stamp);
+            if(update.ExecuteNonQuery()!=1)
+                return new(false,"automatic_compare_and_set_failed",0,0,0,Array.Empty<int>());
+            // Keep a detached notification snapshot, without a post-commit DB reread.
+            using var read=con.CreateCommand();read.Transaction=tx;
+            read.CommandText = """
+                SELECT id, network_id, transport_stream_id, service_id, event_id,
+                       title, start_time, end_time, status, source, created_at, updated_at,
+                       channel_argument, is_conflicted, is_enabled, tuner_name, actual_tuner_name,
+                       recording_started_at, recording_finished_at, service_name,
+                       scheduled_start_time, source_rule_id, source_rule_name,
+                       is_user_chain, user_chain_previous_id, user_chain_root_id,
+                       recording_recovery_chain_id, recovery_parent_reservation_id, data_version,
+                       reservation_intent, created_through, created_by_plugin_id
+                FROM reservations
+                WHERE id=$id
+                ORDER BY id;
+                """;
+            read.Parameters.AddWithValue("$id",row.Id);
+            var after=ReadReservations(read,projectRuntimeStatus:false).Single();
+            changed.Add((row,after));
+        }
+        var roots=ordered.Select(r=>r.UserChainRootId??r.Id).Append(plan.RootReservationId).ToHashSet();
+        if(!TryAdvanceScheduledChainMembershipVersions(con,tx,active,roots,
+            changed.Select(x=>x.Before.Id).ToHashSet(),protectedIds,stamp,out var membership))
+            return new(false,"automatic_membership_changed",0,0,0,Array.Empty<int>());
+        var newlyAttached=changed.Select(x=>x.Before.Id).ToHashSet();
+        var pendingChildren=active.Where(r=>r.Source==ReservationSource.Epg && r.Intent==ReservationIntent.SystemPreRecordEpg
+            && r.Status==ReservationStatus.Scheduled && r.SourceRuleId is int parent && newlyAttached.Contains(parent)).ToArray();
+        CancelScheduledPreRecordEpgChildrenForParents(con,tx,newlyAttached);
+        var childAfter=ReadTerminalDeletionRows(con,tx).Where(r=>pendingChildren.Any(before=>before.Id==r.Id)).ToDictionary(r=>r.Id);
+        var result=new UserChainSequenceMutationResult(true,"applied",ordered.Length-1,
+            changed.Count,ordered.Length-1-plan.AddedEdges.Count,
+            changed.Select(x=>x.Before.Id).Concat(membership.Select(x=>x.Before.Id)).ToArray());
+        tx.Commit();
+        // The core records receipt and releases admission before invoking observers.
+        recordCommitted(result);
+        Exception? notificationFailure=null;
+        PublishChainMembershipVersionChanges(membership);
+        foreach(var pair in changed)
+        {
+            try { mutationJournal.Record(ReservationMutationKind.Updated,pair.Before,pair.After,
+                nameof(Reservation.IsUserChain),nameof(Reservation.UserChainPreviousId),nameof(Reservation.UserChainRootId)); }
+            catch(Exception ex){notificationFailure??=ex;}
+        }
+        foreach(var child in pendingChildren)
+        {
+            if(!childAfter.TryGetValue(child.Id,out var after)||after.DataVersion==child.DataVersion)continue;
+            try{mutationJournal.Record(ReservationMutationKind.Updated,child.SnapshotForChainRequest(),after.SnapshotForChainRequest(),
+                nameof(Reservation.Status),nameof(Reservation.DataVersion));}
+            catch(Exception ex){notificationFailure??=ex;}
+        }
+        if(notificationFailure is not null) throw notificationFailure;
+        return result;
+    }
+
     public UserChainSequenceMutationResult PromoteExistingScheduledUserChainSequence(
         IReadOnlyList<int> reservationIds,
         bool featureEnabled)
@@ -927,7 +1192,15 @@ public sealed class ReservationStore
             }
         }
 
+        var membershipVersions = new List<ChainMembershipVersionChange>();
+        if (updates.Count > 0 && !TryAdvanceScheduledChainMembershipVersions(
+            con, tx, active, new HashSet<int> { canonicalRootId },
+            updates.Select(x => x.Before.Id).ToHashSet(), null, updatedAt, out membershipVersions))
+            return new(false, "chain_membership_snapshot_changed", reservationIds.Count - 1,
+                0, alreadyLinked, Array.Empty<int>());
+
         tx.Commit();
+        PublishChainMembershipVersionChanges(membershipVersions);
 
         var updatedIds = new List<int>(updates.Count);
         foreach (var updateRow in updates)
@@ -954,6 +1227,8 @@ public sealed class ReservationStore
                 $"result=APPLIED added=False root=R{updateRow.RootId} validation=atomic_existing_scheduled_sequence conflictAdmission=deferred_to_common_allocation rule=release_contract");
         }
 
+        updatedIds.AddRange(membershipVersions.Select(x => x.Before.Id));
+
         log.Add("CHAIN_SEQUENCE_MUTATION", $"R{sequence[0].Id}->R{sequence[^1].Id}",
             $"result=APPLIED members={sequence.Count} pairs={sequence.Count - 1} updated={updatedIds.Count} alreadyLinked={alreadyLinked} root=R{canonicalRootId} transaction=single conflictAdmission=final_common_allocation priorityMutation=none marginMutation=none rule=automatic_keyword_chain_assist_contract");
 
@@ -967,6 +1242,276 @@ public sealed class ReservationStore
     }
 
     /// <summary>
+    /// Explicitly joins whole existing chain components, independently of selection order.
+    /// Only future, enabled, Scheduled reservations of one adjacent service are accepted.
+    /// This is not the automatic keyword-chain promotion path. Callers must apply the common
+    /// allocation route after a successful commit; no runtime capture is edited here.
+    /// </summary>
+    public UserChainSequenceMutationResult JoinScheduledUserChainComponents(
+        IReadOnlyList<int> selectedReservationIds,
+        bool featureEnabled)
+        => JoinScheduledUserChainComponentsCore(selectedReservationIds, featureEnabled,
+            previewOnly: false, expectedSnapshotToken: null, out _);
+
+    /// <summary>Runs the same validation as commit, without any writes or mutation notifications.</summary>
+    public ScheduledChainJoinPreview PreviewScheduledUserChainJoin(
+        IReadOnlyList<int> selectedReservationIds, bool featureEnabled)
+    {
+        var result = JoinScheduledUserChainComponentsCore(selectedReservationIds, featureEnabled,
+            previewOnly: true, expectedSnapshotToken: null, out var preview);
+        return preview ?? new(false, result.Reason, "", Array.Empty<ScheduledChainPreviewMember>());
+    }
+
+    /// <summary>Revalidates and compares the preview inside the write transaction.</summary>
+    public UserChainSequenceMutationResult CommitScheduledUserChainJoin(
+        IReadOnlyList<int> selectedReservationIds, bool featureEnabled, string expectedSnapshotToken)
+    {
+        if (string.IsNullOrWhiteSpace(expectedSnapshotToken))
+            return new(false, "preview_required", 0, 0, 0, Array.Empty<int>());
+        return JoinScheduledUserChainComponentsCore(selectedReservationIds, featureEnabled,
+            previewOnly: false, expectedSnapshotToken, out _);
+    }
+
+    /// <summary>
+    /// Checks an externally synchronized runtime observation against every expanded member.
+    /// This method does not synchronize the observation with worker publication. The caller
+    /// must keep that synchronization through commit; an empty set alone is not edit permission.
+    /// </summary>
+    public UserChainSequenceMutationResult CommitScheduledUserChainJoinWithRuntimeProtection(
+        IReadOnlyList<int> selectedReservationIds, bool featureEnabled, string expectedSnapshotToken,
+        IReadOnlySet<int> runtimeProtectedReservationIds)
+    {
+        if (runtimeProtectedReservationIds is null)
+            return new(false, "runtime_protection_required", 0, 0, 0, Array.Empty<int>());
+        if (string.IsNullOrWhiteSpace(expectedSnapshotToken))
+            return new(false, "preview_required", 0, 0, 0, Array.Empty<int>());
+        var protectedIds = runtimeProtectedReservationIds.ToHashSet();
+        return JoinScheduledUserChainComponentsCore(selectedReservationIds, featureEnabled,
+            previewOnly: false, expectedSnapshotToken, out _, protectedIds);
+    }
+
+    private UserChainSequenceMutationResult JoinScheduledUserChainComponentsCore(
+        IReadOnlyList<int> selectedReservationIds, bool featureEnabled,
+        bool previewOnly, string? expectedSnapshotToken, out ScheduledChainJoinPreview? preview,
+        IReadOnlySet<int>? runtimeProtectedReservationIds = null)
+    {
+        preview = null;
+        UserChainSequenceMutationResult Reject(string reason, int pairs = 0)
+            => new(false, reason, pairs, 0, 0, Array.Empty<int>());
+        if (!featureEnabled) return Reject("feature_disabled");
+        if (selectedReservationIds is null || selectedReservationIds.Count < 2)
+            return Reject("sequence_too_short");
+        if (selectedReservationIds.Distinct().Count() != selectedReservationIds.Count)
+            return Reject("sequence_duplicate_reservation");
+
+        using var con = db.Open();
+        using var tx = con.BeginTransaction(System.Data.IsolationLevel.Serializable);
+        List<Reservation> all;
+        using (var read = con.CreateCommand())
+        {
+            read.Transaction = tx;
+            read.CommandText = """
+                SELECT id, network_id, transport_stream_id, service_id, event_id,
+                       title, start_time, end_time, status, source, created_at, updated_at,
+                       channel_argument, is_conflicted, is_enabled, tuner_name, actual_tuner_name,
+                       recording_started_at, recording_finished_at, service_name,
+                       scheduled_start_time, source_rule_id, source_rule_name,
+                       is_user_chain, user_chain_previous_id, user_chain_root_id,
+                       recording_recovery_chain_id, recovery_parent_reservation_id, data_version,
+                       reservation_intent, created_through, created_by_plugin_id
+                FROM reservations
+                ORDER BY id;
+                """;
+            all = ReadReservations(read, projectRuntimeStatus: false).ToList();
+        }
+        var byId = all.ToDictionary(r => r.Id);
+        var active = all.Where(r => ReservationLifecycleContract.IsChainTopologyActive(r.Status)).ToList();
+        var children = active.Where(r => r.IsUserChain && r.UserChainPreviousId.HasValue)
+            .GroupBy(r => r.UserChainPreviousId!.Value)
+            .ToDictionary(g => g.Key, g => g.ToList());
+        var componentIds = new HashSet<int>();
+        foreach (var selectedId in selectedReservationIds)
+        {
+            if (!byId.TryGetValue(selectedId, out var selected))
+                return Reject("reservation_missing");
+            if (selected.Status != ReservationStatus.Scheduled)
+                return Reject("reservation_not_scheduled");
+            var cursor = selected;
+            var upstream = new HashSet<int>();
+            while (cursor.UserChainPreviousId.HasValue)
+            {
+                if (!cursor.IsUserChain || !upstream.Add(cursor.Id))
+                    return Reject("chain_cycle_or_invalid_predecessor");
+                if (!byId.TryGetValue(cursor.UserChainPreviousId.Value, out var previous))
+                    return Reject("chain_broken_predecessor");
+                cursor = previous;
+            }
+            if (!upstream.Add(cursor.Id)) return Reject("chain_cycle_detected");
+            var componentRoot = cursor.Id;
+            if ((cursor.UserChainRootId ?? componentRoot) != componentRoot)
+                return Reject("chain_root_mismatch");
+            var lineage = new HashSet<int>();
+            while (true)
+            {
+                if (!lineage.Add(cursor.Id)) return Reject("chain_cycle_detected");
+                componentIds.Add(cursor.Id);
+                if (cursor.Id != componentRoot
+                    && (!cursor.IsUserChain || cursor.UserChainRootId != componentRoot))
+                    return Reject("chain_root_mismatch");
+                if (!children.TryGetValue(cursor.Id, out var next)) break;
+                if (next.Count != 1) return Reject("chain_branch_detected");
+                cursor = next[0];
+            }
+            // A disconnected row claiming this root must not be left behind by rebasing.
+            if (active.Any(r => r.UserChainRootId == componentRoot && !lineage.Contains(r.Id)))
+                return Reject("chain_disconnected_root_member");
+        }
+        if (active.Any(r => r.UserChainPreviousId.HasValue
+            && componentIds.Contains(r.UserChainPreviousId.Value)
+            && !componentIds.Contains(r.Id)))
+            return Reject("chain_untracked_descendant");
+        var sequence = componentIds.Select(id => byId[id])
+            .OrderBy(r => r.StartTime).ThenBy(r => r.EndTime).ThenBy(r => r.Id).ToList();
+        var pairCount = sequence.Count - 1;
+        // Compare the expanded component, not just the rows selected by the caller.
+        if (runtimeProtectedReservationIds is not null
+            && sequence.Any(r => runtimeProtectedReservationIds.Contains(r.Id)))
+            return Reject("runtime_member_protected", pairCount);
+        var now = DateTime.Now;
+        foreach (var reservation in sequence)
+        {
+            if (reservation.Status != ReservationStatus.Scheduled || HasOpenRecordingRuntime(reservation))
+                return Reject("reservation_not_scheduled", pairCount);
+            if (!reservation.IsEnabled) return Reject("reservation_disabled", pairCount);
+            if (reservation.Source == ReservationSource.Epg)
+                return Reject("system_epg_not_chainable", pairCount);
+            if (reservation.StartTime <= now || reservation.EndTime <= reservation.StartTime)
+                return Reject("reservation_not_future", pairCount);
+        }
+        for (var i = 1; i < sequence.Count; i++)
+        {
+            var before = sequence[i - 1];
+            var after = sequence[i];
+            var eligibility = ChainReservationEligibilityContract.EvaluateTopologyPair(
+                before, after.NetworkId, after.TransportStreamId, after.ServiceId,
+                after.StartTime, featureEnabled);
+            if (!eligibility.IsEligible) return Reject(eligibility.ReasonToken, pairCount);
+        }
+        // Existing edges must retain their neighbours. Joining cannot silently split or reorder
+        // an already connected component, even when timestamps are overlapping or malformed.
+        for (var i = 0; i < sequence.Count; i++)
+        {
+            var row = sequence[i];
+            if (row.UserChainPreviousId.HasValue
+                && (i == 0 || row.UserChainPreviousId.Value != sequence[i - 1].Id))
+                return Reject("existing_chain_order_mismatch", pairCount);
+        }
+        // Include the full component and displayed values. Order of clicks is irrelevant.
+        // Recomputed after validation under this transaction, so a new descendant, time-follow,
+        // edit or allocation change cannot silently confirm a stale preview.
+        var members = sequence.Select(r => new ScheduledChainPreviewMember(
+            r.Id, r.Title, r.StartTime, r.EndTime, r.DataVersion,
+            r.IsUserChain, r.UserChainPreviousId, r.UserChainRootId)).ToArray();
+        var tokenPayload = JsonSerializer.Serialize(new {
+            Selected = selectedReservationIds.OrderBy(id => id).ToArray(),
+            Members = members,
+            Services = sequence.Select(r => new { r.NetworkId, r.TransportStreamId, r.ServiceId }).ToArray()
+        });
+        var token = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(tokenPayload)));
+        if (expectedSnapshotToken is not null
+            && !string.Equals(expectedSnapshotToken, token, StringComparison.Ordinal))
+            return Reject("preview_stale", pairCount);
+        preview = new(true, "eligible", token, Array.AsReadOnly(members));
+        if (previewOnly)
+            return new(true, "preview", pairCount, 0, 0, Array.Empty<int>());
+
+        var rootId = sequence[0].Id;
+        var topologyChangedIds = sequence.Skip(1).Where((row, index) =>
+            !row.IsUserChain || row.UserChainPreviousId != sequence[index].Id
+                || row.UserChainRootId != rootId).Select(row => row.Id).ToHashSet();
+        var alreadyLinked = pairCount - topologyChangedIds.Count;
+        if (topologyChangedIds.Count == 0)
+            return new(true, "already_linked", pairCount, 0, alreadyLinked, Array.Empty<int>());
+
+        // Component membership is part of every participant's concurrency identity.
+        // Advance even the unchanged root/left-hand members so old start, cancellation and
+        // time-follow snapshots cannot operate on the pre-join component after this commit.
+        var updates = new List<Reservation>();
+        var updatedAt = now.ToString("O");
+        for (var i = 0; i < sequence.Count; i++)
+        {
+            var row = sequence[i];
+            var topologyChanged = topologyChangedIds.Contains(row.Id);
+            using var update = con.CreateCommand();
+            update.Transaction = tx;
+            update.CommandText = """
+                UPDATE reservations
+                SET is_user_chain = $isChain,
+                    user_chain_previous_id = $previous,
+                    user_chain_root_id = $root,
+                    data_version = data_version + 1,
+                    updated_at = $updated
+                WHERE id = $id AND data_version = $version
+                  AND status = 'scheduled' AND is_enabled = 1;
+                """;
+            update.Parameters.AddWithValue("$isChain", topologyChanged || row.IsUserChain ? 1 : 0);
+            update.Parameters.AddWithValue("$previous", topologyChanged
+                ? sequence[i - 1].Id : (object?)row.UserChainPreviousId ?? DBNull.Value);
+            update.Parameters.AddWithValue("$root", topologyChanged
+                ? rootId : (object?)row.UserChainRootId ?? DBNull.Value);
+            update.Parameters.AddWithValue("$updated", updatedAt);
+            update.Parameters.AddWithValue("$id", row.Id);
+            update.Parameters.AddWithValue("$version", row.DataVersion);
+            if (update.ExecuteNonQuery() != 1)
+            {
+                tx.Rollback();
+                return Reject("compare_and_set_failed", pairCount);
+            }
+            updates.Add(row);
+        }
+        // Capture exactly this transaction's committed values, not a later concurrent reread.
+        using var committedRead = con.CreateCommand();
+        committedRead.Transaction = tx;
+        committedRead.CommandText = "SELECT " + """
+            id, network_id, transport_stream_id, service_id, event_id,
+            title, start_time, end_time, status, source, created_at, updated_at,
+            channel_argument, is_conflicted, is_enabled, tuner_name, actual_tuner_name,
+            recording_started_at, recording_finished_at, service_name,
+            scheduled_start_time, source_rule_id, source_rule_name,
+            is_user_chain, user_chain_previous_id, user_chain_root_id,
+            recording_recovery_chain_id, recovery_parent_reservation_id, data_version,
+            reservation_intent, created_through, created_by_plugin_id
+            FROM reservations ORDER BY id;
+            """;
+        var committedRows = ReadReservations(committedRead, projectRuntimeStatus: false).ToDictionary(r => r.Id);
+        tx.Commit();
+        var updatedIds = updates.Select(r => r.Id).ToArray();
+        var notificationIncomplete = false;
+        foreach (var before in updates)
+        {
+            try
+            {
+                var changedFields = topologyChangedIds.Contains(before.Id)
+                    ? new[] { nameof(Reservation.IsUserChain), nameof(Reservation.UserChainPreviousId),
+                        nameof(Reservation.UserChainRootId), nameof(Reservation.DataVersion) }
+                    : new[] { nameof(Reservation.DataVersion) };
+                mutationJournal.Record(ReservationMutationKind.Updated, before, committedRows[before.Id], changedFields);
+            }
+            catch (Exception ex)
+            {
+                // The transaction is already committed. Do not report failure to persist or
+                // skip the remaining committed rows because one projection subscriber failed.
+                notificationIncomplete = true;
+                log.Add("CHAIN_JOIN", before.Title,
+                    $"result=NOTIFICATION_INCOMPLETE reservationId={before.Id} committed=True errorType={ex.GetType().Name}");
+            }
+        }
+        return new UserChainSequenceMutationResult(true,
+            updates.Count == 0 ? "already_linked" : "applied", pairCount,
+            topologyChangedIds.Count, alreadyLinked, Array.AsReadOnly(updatedIds), notificationIncomplete);
+    }
+
+    /// <summary>
     /// CHAIN_FEATURE_DISABLE_DETACH_SINGLE_SOURCE_INVARIANT:
     /// チェーン機能の有効→無効遷移では、まだ実行へ入っていないScheduledの保存トポロジーだけを
     /// 同一Transactionで通常予約へdetachする。予約そのもの、ActualTunerName、録画実績は変更しない。
@@ -975,7 +1520,8 @@ public sealed class ReservationStore
     /// </summary>
     public UserChainFeatureDisableDetachResult DetachScheduledUserChainsForFeatureDisable(
         string source,
-        IReadOnlySet<int>? runtimeAttachedReservationIds = null)
+        IReadOnlySet<int>? runtimeAttachedReservationIds = null,
+        Action<UserChainFeatureDisableDetachResult>? recordCommitted = null)
     {
         using var con = db.Open();
         using var tx = con.BeginTransaction(System.Data.IsolationLevel.Serializable);
@@ -996,21 +1542,23 @@ public sealed class ReservationStore
                 FROM reservations
                 WHERE status = 'scheduled'
                   AND source <> 'epg'
-                  AND (is_user_chain = 1 OR user_chain_previous_id IS NOT NULL OR user_chain_root_id IS NOT NULL)
                 ORDER BY start_time, id;
                 """;
             before = ReadReservations(read, projectRuntimeStatus: false).ToList();
         }
 
+        var allScheduled = before;
         var protectedIds = runtimeAttachedReservationIds ?? new HashSet<int>();
-        before = before.Where(x => !protectedIds.Contains(x.Id)).ToList();
+        before = allScheduled.Where(x => !protectedIds.Contains(x.Id) && !HasOpenRecordingRuntime(x)
+            && (x.IsUserChain || x.UserChainPreviousId.HasValue || x.UserChainRootId.HasValue)).ToList();
 
         if (before.Count == 0)
         {
             tx.Commit();
             log.Add("CHAIN_FEATURE_DISABLE_DETACH", "Settings",
                 $"result=NOOP source={source} scheduledChainRows=0 protectedRuntimeSegments={protectedIds.Count} action=none activeRuntimeSegmentsPreserved=True rule=chain_lifecycle_single_source");
-            return new UserChainFeatureDisableDetachResult(true, "no_scheduled_chain_rows", Array.Empty<Reservation>());
+            var empty=new UserChainFeatureDisableDetachResult(true, "no_scheduled_chain_rows", Array.Empty<Reservation>());
+            recordCommitted?.Invoke(empty);return empty;
         }
 
         var nowText = DateTime.Now.ToString("O");
@@ -1043,27 +1591,114 @@ public sealed class ReservationStore
             }
         }
 
-        tx.Commit();
-        var after = before
-            .Select(x => GetById(x.Id))
-            .Where(x => x is not null)
-            .Cast<Reservation>()
-            .OrderBy(x => x.StartTime)
-            .ThenBy(x => x.Id)
-            .ToList();
+        if (!TryAdvanceScheduledChainMembershipVersions(con, tx, allScheduled,
+            before.Select(x => x.UserChainRootId ?? x.Id).ToHashSet(),
+            before.Select(x => x.Id).ToHashSet(), protectedIds, nowText, out var membershipVersions))
+            return new(false, "chain_membership_snapshot_changed", Array.Empty<Reservation>());
 
+        List<Reservation> after;
+        using(var read=con.CreateCommand())
+        {
+            read.Transaction=tx;
+            read.CommandText = """
+                SELECT id, network_id, transport_stream_id, service_id, event_id,
+                       title, start_time, end_time, status, source, created_at, updated_at,
+                       channel_argument, is_conflicted, is_enabled, tuner_name, actual_tuner_name,
+                       recording_started_at, recording_finished_at, service_name,
+                       scheduled_start_time, source_rule_id, source_rule_name,
+                       is_user_chain, user_chain_previous_id, user_chain_root_id,
+                       recording_recovery_chain_id, recovery_parent_reservation_id, data_version,
+                       reservation_intent, created_through, created_by_plugin_id
+                FROM reservations
+                WHERE status = 'scheduled'
+                  AND source <> 'epg'
+                ORDER BY start_time, id;
+                """;
+            var ids=before.Select(r=>r.Id).ToHashSet();
+            after=ReadReservations(read,projectRuntimeStatus:false).Where(r=>ids.Contains(r.Id)).ToList();
+        }
+        var committed=new UserChainFeatureDisableDetachResult(true,"applied",after);
+        tx.Commit();recordCommitted?.Invoke(committed);
+        PublishChainMembershipVersionChanges(membershipVersions);
+        Exception? notificationFailure=null;
         foreach (var beforeRow in before)
         {
             var afterRow = after.FirstOrDefault(x => x.Id == beforeRow.Id);
             if (afterRow is null) continue;
-            mutationJournal.Record(ReservationMutationKind.Updated, beforeRow, afterRow,
+            try { mutationJournal.Record(ReservationMutationKind.Updated, beforeRow, afterRow,
                 nameof(Reservation.IsUserChain), nameof(Reservation.UserChainPreviousId), nameof(Reservation.UserChainRootId),
-                nameof(Reservation.TunerName), nameof(Reservation.DataVersion));
+                nameof(Reservation.TunerName), nameof(Reservation.DataVersion)); }
+            catch(Exception ex){notificationFailure??=ex;}
         }
 
         log.Add("CHAIN_FEATURE_DISABLE_DETACH", "Settings",
             $"result=APPLIED source={source} detached={after.Count} targets=[{string.Join(',', after.Select(x => $"R{x.Id}"))}] protectedRuntimeSegments={protectedIds.Count} reservationDelete=False actualTunerMutation=False tunerPlanReset=True conflictDecision=user_reservation_list_after_common_allocation activeRuntimeSegmentsPreserved=True rule=chain_lifecycle_single_source");
-        return new UserChainFeatureDisableDetachResult(true, "applied", after);
+        if(notificationFailure is not null) throw notificationFailure;
+        return committed;
+    }
+
+    private sealed record ChainMembershipVersionChange(Reservation Before, Reservation After);
+
+    // Only the concurrency fence is shared. Each caller keeps its own topology admission,
+    // runtime policy and result semantics. Never advance a running/protected owner's version.
+    private static bool TryAdvanceScheduledChainMembershipVersions(
+        SqliteConnection con, SqliteTransaction tx, IEnumerable<Reservation> snapshots,
+        IReadOnlySet<int> affectedRootIds, IReadOnlySet<int> alreadyUpdatedIds,
+        IReadOnlySet<int>? protectedIds, string updatedAt, out List<ChainMembershipVersionChange> advanced)
+    {
+        advanced = new List<ChainMembershipVersionChange>();
+        foreach (var row in snapshots.Where(x => x.Status == ReservationStatus.Scheduled && !HasOpenRecordingRuntime(x)
+            && !alreadyUpdatedIds.Contains(x.Id) && !(protectedIds?.Contains(x.Id) ?? false)
+            && (affectedRootIds.Contains(x.Id)
+                || (x.UserChainRootId.HasValue && affectedRootIds.Contains(x.UserChainRootId.Value)))))
+        {
+            using var update = con.CreateCommand();
+            update.Transaction = tx;
+            update.CommandText = """
+                UPDATE reservations SET data_version = data_version + 1, updated_at = $now
+                WHERE id = $id AND status = 'scheduled' AND data_version = $version;
+                """;
+            update.Parameters.AddWithValue("$id", row.Id);
+            update.Parameters.AddWithValue("$version", row.DataVersion);
+            update.Parameters.AddWithValue("$now", updatedAt);
+            if (update.ExecuteNonQuery() != 1) return false;
+            using var read = con.CreateCommand();
+            read.Transaction = tx;
+            read.CommandText = """
+                SELECT id, network_id, transport_stream_id, service_id, event_id,
+                       title, start_time, end_time, status, source, created_at, updated_at,
+                       channel_argument, is_conflicted, is_enabled, tuner_name, actual_tuner_name,
+                       recording_started_at, recording_finished_at, service_name,
+                       scheduled_start_time, source_rule_id, source_rule_name,
+                       is_user_chain, user_chain_previous_id, user_chain_root_id,
+                       recording_recovery_chain_id, recovery_parent_reservation_id, data_version,
+                       reservation_intent, created_through, created_by_plugin_id
+                FROM reservations WHERE id = $id;
+                """;
+            read.Parameters.AddWithValue("$id", row.Id);
+            advanced.Add(new(row, ReadReservations(read, projectRuntimeStatus: false).Single()));
+        }
+        return true;
+    }
+
+    private void PublishChainMembershipVersionChanges(IEnumerable<ChainMembershipVersionChange> changes)
+    {
+        foreach (var change in changes)
+        {
+            var before = change.Before;
+            try
+            {
+                mutationJournal.Record(ReservationMutationKind.Updated, before, change.After,
+                    nameof(Reservation.DataVersion));
+            }
+            catch (Exception ex)
+            {
+                // This supplementary notification must not prevent the caller from publishing
+                // its original committed add/promote/detach notifications.
+                log.Add("CHAIN_MEMBERSHIP_VERSION", before.Title,
+                    $"result=NOTIFICATION_INCOMPLETE committed=True reservationId={before.Id} errorType={ex.GetType().Name}");
+            }
+        }
     }
 
     private void LogStartingDataVersionMutation(
@@ -1737,6 +2372,13 @@ public sealed class ReservationStore
         long expectedDataVersion,
         ReservationStatus nextStatus,
         bool requireEnabled = false)
+        => TryTransitionLifecycleCore(id, expectedStatus, expectedDataVersion, nextStatus, requireEnabled, null, null);
+
+    private ReservationLifecycleTransitionResult TryTransitionLifecycleCore(
+        int id, ReservationStatus expectedStatus, long expectedDataVersion,
+        ReservationStatus nextStatus, bool requireEnabled,
+        ContinuousChainFinalizationArtifact? stopArtifact,
+        Action<ReservationLifecycleTransitionResult>? recordCommitted)
     {
         using var con = db.Open();
         using var tx = con.BeginTransaction();
@@ -1785,14 +2427,34 @@ public sealed class ReservationStore
             return new(false, "disabled", id, before.Status, before.Status, before.DataVersion, before.DataVersion, before);
         }
 
+        if (stopArtifact is not null && (expectedStatus != ReservationStatus.Recording
+            || nextStatus != ReservationStatus.Stopping
+            || !Path.IsPathFullyQualified(stopArtifact.OutputPath)
+            || !Path.IsPathFullyQualified(stopArtifact.ResultPath)
+            || !Path.IsPathFullyQualified(stopArtifact.RuntimeStatsPath)
+            || !Path.IsPathFullyQualified(stopArtifact.JobPath)
+            || !Path.IsPathFullyQualified(stopArtifact.ControlPath)))
+            return new(false, "invalid_chain_stop_artifact", id, before.Status, before.Status, before.DataVersion, before.DataVersion, before);
+
         var now = DateTime.Now;
+        // Persist only the provenance of this existing Recording -> Stopping CAS.
+        // This does not authorize adopting another stop, restarting a worker or finalizing.
+        var stopReceipt = stopArtifact is null ? null : JsonSerializer.Serialize(new
+        {
+            SchemaVersion = 1, ReservationId = id, StoppingDataVersion = expectedDataVersion + 1,
+            before.NetworkId, before.TransportStreamId, before.ServiceId, before.EventId,
+            before.StartTime, before.EndTime, before.ScheduledStartTime, before.RecordingStartedAt,
+            stopArtifact.OutputPath, stopArtifact.ResultPath, stopArtifact.RuntimeStatsPath,
+            stopArtifact.JobPath, stopArtifact.ControlPath
+        });
         using (var update = con.CreateCommand())
         {
             update.Transaction = tx;
             update.CommandText = requireEnabled
                 ? """
                   UPDATE reservations
-                  SET status = $next, data_version = data_version + 1, updated_at = $now
+                  SET status = $next, data_version = data_version + 1, updated_at = $now,
+                      chain_stop_receipt = CASE WHEN $stopReceipt IS NULL THEN chain_stop_receipt ELSE $stopReceipt END
                   WHERE id = $id
                     AND status = $expected
                     AND data_version = $version
@@ -1800,11 +2462,13 @@ public sealed class ReservationStore
                   """
                 : """
                   UPDATE reservations
-                  SET status = $next, data_version = data_version + 1, updated_at = $now
+                  SET status = $next, data_version = data_version + 1, updated_at = $now,
+                      chain_stop_receipt = CASE WHEN $stopReceipt IS NULL THEN chain_stop_receipt ELSE $stopReceipt END
                   WHERE id = $id
                     AND status = $expected
                     AND data_version = $version;
                   """;
+            update.Parameters.AddWithValue("$stopReceipt", (object?)stopReceipt ?? DBNull.Value);
             update.Parameters.AddWithValue("$next", nextStatus.ToString().ToLowerInvariant());
             update.Parameters.AddWithValue("$expected", expectedStatus.ToString().ToLowerInvariant());
             update.Parameters.AddWithValue("$version", expectedDataVersion);
@@ -1820,6 +2484,9 @@ public sealed class ReservationStore
 
         tx.Commit();
         var after = GetByIdPersisted(id);
+        var committed = new ReservationLifecycleTransitionResult(true, "applied", id, expectedStatus,
+            after?.Status ?? nextStatus, expectedDataVersion, after?.DataVersion ?? expectedDataVersion + 1, after);
+        recordCommitted?.Invoke(committed);
         LogStartingDataVersionMutation(
             $"TryTransitionLifecycle:{expectedStatus}->{nextStatus}",
             before,
@@ -1828,7 +2495,7 @@ public sealed class ReservationStore
             nameof(Reservation.DataVersion));
         log.Add("RESERVATION_LIFECYCLE_CAS", $"R{id}",
             $"result=APPLIED from={expectedStatus} to={nextStatus} dataVersion={expectedDataVersion}->{after?.DataVersion ?? expectedDataVersion + 1} enabledRequired={requireEnabled} rule=release_contract");
-        return new(true, "applied", id, expectedStatus, after?.Status ?? nextStatus, expectedDataVersion, after?.DataVersion ?? expectedDataVersion + 1, after);
+        return committed;
     }
 
     /// <summary>
@@ -1983,6 +2650,16 @@ WHERE id = $id
     public ReservationLifecycleTransitionResult TryBeginRecordingStop(int id, long expectedDataVersion)
         => TryTransitionLifecycle(id, ReservationStatus.Recording, expectedDataVersion, ReservationStatus.Stopping);
 
+    internal ReservationLifecycleTransitionResult TryBeginContinuousChainRecordingStop(
+        int id, long expectedDataVersion, ContinuousChainFinalizationArtifact artifact,
+        Action<ReservationLifecycleTransitionResult> recordCommitted)
+    {
+        ArgumentNullException.ThrowIfNull(artifact);
+        ArgumentNullException.ThrowIfNull(recordCommitted);
+        return TryTransitionLifecycleCore(id, ReservationStatus.Recording, expectedDataVersion,
+            ReservationStatus.Stopping, false, artifact, recordCommitted);
+    }
+
     /// <summary>
     /// 停止処理を完了したStopping予約を、終了時刻と同じTransactionで終端状態へ確定する。
     /// </summary>
@@ -1991,6 +2668,16 @@ WHERE id = $id
         long expectedDataVersion,
         ReservationStatus finalStatus,
         string? failureReason = null)
+        => TryCompleteRecordingStopCore(id, expectedDataVersion, finalStatus, failureReason, null, null);
+
+    internal ReservationLifecycleTransitionResult TryCompleteRecordingStopWithReceipt(
+        int id, long expectedDataVersion, ReservationStatus finalStatus, string? failureReason,
+        Action<ReservationLifecycleTransitionResult> recordCommitted, ContinuousChainFinalizationArtifact? artifact = null)
+        => TryCompleteRecordingStopCore(id, expectedDataVersion, finalStatus, failureReason, recordCommitted, artifact);
+
+    private ReservationLifecycleTransitionResult TryCompleteRecordingStopCore(
+        int id, long expectedDataVersion, ReservationStatus finalStatus, string? failureReason,
+        Action<ReservationLifecycleTransitionResult>? recordCommitted, ContinuousChainFinalizationArtifact? artifact)
     {
         if (finalStatus is not (ReservationStatus.Completed or ReservationStatus.Failed or ReservationStatus.Cancelled))
             return new(false, "invalid_final_status", id, ReservationStatus.Stopping, null, expectedDataVersion, expectedDataVersion, GetByIdPersisted(id));
@@ -2036,7 +2723,22 @@ WHERE id = $id
             return new(false, "data_version_mismatch", id, before.Status, before.Status, before.DataVersion, before.DataVersion, before);
         }
 
+        if (artifact is not null && (finalStatus is not (ReservationStatus.Completed or ReservationStatus.Failed)
+            || !Path.IsPathFullyQualified(artifact.OutputPath) || !Path.IsPathFullyQualified(artifact.ResultPath)
+            || (!string.IsNullOrEmpty(artifact.RuntimeStatsPath) && !Path.IsPathFullyQualified(artifact.RuntimeStatsPath))))
+            return new(false, "invalid_finalization_artifact", id, before.Status, before.Status, before.DataVersion, before.DataVersion, before);
+
         var now = DateTime.Now;
+        // Immutable evidence for this exact terminal occurrence, committed with its lifecycle CAS.
+        // It is not a new allocation request and does not itself authorize later replay.
+        var receiptJson = artifact is null ? null : JsonSerializer.Serialize(new
+        {
+            SchemaVersion = 1, ReservationId = id, TerminalDataVersion = expectedDataVersion + 1,
+            TerminalStatus = finalStatus.ToString().ToLowerInvariant(), FailureReason = failureReason,
+            before.NetworkId, before.TransportStreamId, before.ServiceId, before.EventId,
+            before.StartTime, before.EndTime, before.ScheduledStartTime, before.RecordingStartedAt,
+            RecordingFinishedAt = now, artifact.OutputPath, artifact.ResultPath, artifact.RuntimeStatsPath, artifact.JobPath, artifact.ControlPath
+        });
         using (var update = con.CreateCommand())
         {
             update.Transaction = tx;
@@ -2044,6 +2746,7 @@ WHERE id = $id
                 UPDATE reservations
                 SET status = $status,
                     recording_finished_at = $finished,
+                    chain_finalization_receipt = CASE WHEN $receipt IS NULL THEN chain_finalization_receipt ELSE $receipt END,
                     data_version = data_version + 1,
                     updated_at = $now
                 WHERE id = $id
@@ -2052,6 +2755,7 @@ WHERE id = $id
                 """;
             update.Parameters.AddWithValue("$status", finalStatus.ToString().ToLowerInvariant());
             update.Parameters.AddWithValue("$finished", now.ToString("O"));
+            update.Parameters.AddWithValue("$receipt", (object?)receiptJson ?? DBNull.Value);
             update.Parameters.AddWithValue("$now", now.ToString("O"));
             update.Parameters.AddWithValue("$id", id);
             update.Parameters.AddWithValue("$version", expectedDataVersion);
@@ -2065,6 +2769,10 @@ WHERE id = $id
 
         tx.Commit();
         var after = GetByIdPersisted(id);
+        var committed = new ReservationLifecycleTransitionResult(true, "applied", id, ReservationStatus.Stopping,
+            after?.Status ?? finalStatus, expectedDataVersion, after?.DataVersion ?? expectedDataVersion + 1, after);
+        // A boundary can resume result projection even if a post-commit observer throws.
+        recordCommitted?.Invoke(committed);
         log.Add("RESERVATION_LIFECYCLE_CAS", $"R{id}",
             $"result=APPLIED from=Stopping to={finalStatus} dataVersion={expectedDataVersion}->{after?.DataVersion ?? expectedDataVersion + 1} finishedAt={now:O} rule=release_contract");
 
@@ -2091,7 +2799,7 @@ WHERE id = $id
             nameof(Reservation.RecordingFinishedAt),
             nameof(Reservation.DataVersion));
 
-        return new(true, "applied", id, ReservationStatus.Stopping, after?.Status ?? finalStatus, expectedDataVersion, after?.DataVersion ?? expectedDataVersion + 1, after);
+        return committed;
     }
 
     /// <summary>
@@ -2456,14 +3164,20 @@ WHERE id = $id
     /// Recording のまま予約一覧へ残さず、既存部分ファイルを保護したうえで失敗終端へ落とす。
     /// </summary>
     public bool FinalizeInterruptedRecording(Reservation snapshot, DateTime finishedAt, string reason, string? fileEvidence = null, string trigger = "InterruptedRecordingRecovery")
+        => FinalizeInterruptedRecording(snapshot, finishedAt, reason, fileEvidence, trigger, null);
+
+    internal bool FinalizeInterruptedRecording(Reservation snapshot, DateTime finishedAt, string reason,
+        string? fileEvidence, string trigger, Action? recordCommitted)
     {
         // INTERRUPTED_RECORDING_RECOVERY_FINALIZE_CAS_INVARIANT:
         // 判定時に読んだRecordingスナップショットだけを終端化する。
         // 判定後に再接続・状態遷移・予約編集が入った場合、古い中断判定でFailedへ上書きしてはならない。
         // status=Recording / DataVersion一致を同じUPDATEで検証し、CAS失敗時は復旧予約の追加へ進まない。
-        var before = snapshot;
+        var before = snapshot.SnapshotForChainRequest();
         using var con = db.Open();
+        using var tx = con.BeginTransaction();
         using var cmd = con.CreateCommand();
+        cmd.Transaction = tx;
         cmd.CommandText = """
             UPDATE reservations
             SET status = 'failed',
@@ -2480,16 +3194,16 @@ WHERE id = $id
         cmd.Parameters.AddWithValue("$now", DateTime.Now.ToString("O"));
         cmd.Parameters.AddWithValue("$dataVersion", snapshot.DataVersion);
         var affected = cmd.ExecuteNonQuery();
+        if (affected != 1) return false;
+        var after = ReadAllReservations(con, tx).Single(r => r.Id == snapshot.Id);
+        tx.Commit();
+        recordCommitted?.Invoke();
         log.Add("RESERVATION_AUDIT", "INTERRUPTED_RECORDING_FINALIZE",
             $"service={TrimForAudit(before.ServiceName)} title={TrimTitleForAudit(before.Title)} rawTitleBlank={RawTitleBlankForAudit(before.Title)} id=R{snapshot.Id} affected={affected} from={before.Status} to=Failed reason={reason} started={(before.RecordingStartedAt.HasValue ? before.RecordingStartedAt.Value.ToString("MM/dd HH:mm:ss") : "-")} finished={finishedAt:MM/dd HH:mm:ss} end={before.EndTime:MM/dd HH:mm:ss} tuner={SafeTuner(EffectiveTunerName(before))} expectedDataVersion={snapshot.DataVersion} rule=release_contract");
-        if (affected != 1)
-            return false;
-
-        var after = GetById(snapshot.Id);
         mutationJournal.Record(
             ReservationMutationKind.RecordingFailed,
-            before,
-            after,
+            before.SnapshotForChainRequest(),
+            after.SnapshotForChainRequest(),
             new Dictionary<string, string?>
             {
                 ["userEvent"] = "recording_interrupted",
@@ -2507,13 +3221,16 @@ WHERE id = $id
     /// 既存部分ファイルを上書きしないため、録画ファイル名は録画開始時の一意化で (1)/(2) 側へ逃がす。
     /// </summary>
     public int FinalizeAndAddInterruptedRecordingRecoveryReservation(Reservation original, DateTime now, string reason, string? fileEvidence = null, string trigger = "InterruptedRecordingRecovery")
-    {
-        var chainBefore = GetAll()
-            .Where(r => r.IsUserChain && (r.Id == original.Id || r.UserChainPreviousId == original.Id || (original.UserChainRootId.HasValue && r.UserChainRootId == original.UserChainRootId)))
-            .ToDictionary(r => r.Id);
+        => FinalizeAndAddInterruptedRecordingRecoveryReservation(original, now, reason, fileEvidence, trigger, null);
 
+    internal int FinalizeAndAddInterruptedRecordingRecoveryReservation(Reservation original, DateTime now,
+        string reason, string? fileEvidence, string trigger, Action<int>? recordCommitted)
+    {
         using var con = db.Open();
         using var tx = con.BeginTransaction();
+        var chainBefore = ReadAllReservations(con, tx)
+            .Where(r => r.IsUserChain && (r.Id == original.Id || r.UserChainPreviousId == original.Id || (original.UserChainRootId.HasValue && r.UserChainRootId == original.UserChainRootId)))
+            .ToDictionary(r => r.Id);
 
         var recoveryChainId = string.IsNullOrWhiteSpace(original.RecordingRecoveryChainId)
             ? Guid.NewGuid().ToString("N")
@@ -2636,40 +3353,44 @@ WHERE id = $id
                 throw new InvalidOperationException($"Recovery chain member changed before reparent commit: R{member.Id}");
         }
 
+        // Capture the exact committed projection before any observer can mutate the database.
+        var committedRows = ReadAllReservations(con, tx).ToDictionary(r => r.Id);
+        var sourceAfter = committedRows[original.Id];
+        var recovery = committedRows[newId];
+        var changedMembers = chainBefore.Values.Where(x => x.Id != original.Id)
+            .Where(x => committedRows.TryGetValue(x.Id, out var after)
+                && (x.UserChainPreviousId != after.UserChainPreviousId
+                    || x.UserChainRootId != after.UserChainRootId || x.DataVersion != after.DataVersion))
+            .Select(x => (Before: x, After: committedRows[x.Id])).ToArray();
         tx.Commit();
+        recordCommitted?.Invoke(newId);
 
-        var sourceAfter = GetById(original.Id);
+        Exception? notificationFailure = null;
+        void Notify(Action action)
+        {
+            try { action(); }
+            catch (Exception ex) { notificationFailure ??= ex; }
+        }
+        Notify(() => mutationJournal.Record(
+            ReservationMutationKind.RecordingFailed,
+            original.SnapshotForChainRequest(), sourceAfter.SnapshotForChainRequest(),
+            new Dictionary<string, string?>
+            {
+                ["userEvent"] = "recording_interrupted", ["reason"] = reason,
+                ["fileEvidence"] = fileEvidence, ["finishedAt"] = now.ToString("O"),
+                ["trigger"] = trigger, ["recoveryReservationId"] = newId.ToString()
+            },
+            nameof(Reservation.Status), nameof(Reservation.RecordingFinishedAt),
+            nameof(Reservation.RecordingRecoveryChainId), nameof(Reservation.DataVersion)));
+        Notify(() => mutationJournal.Record(ReservationMutationKind.Added, null, recovery.SnapshotForChainRequest()));
+        foreach (var change in changedMembers)
+            Notify(() => mutationJournal.Record(ReservationMutationKind.Updated,
+                change.Before.SnapshotForChainRequest(), change.After.SnapshotForChainRequest(),
+                nameof(Reservation.UserChainPreviousId), nameof(Reservation.UserChainRootId), nameof(Reservation.DataVersion)));
         log.Add("RESERVATION_AUDIT", "INTERRUPTED_RECORDING_RECOVERY_ADD",
             $"source=R{original.Id} recovery=R{newId} recoveryChainId={recoveryChainId} service={TrimForAudit(original.ServiceName)} title={TrimTitleForAudit(original.Title)} rawTitleBlank={RawTitleBlankForAudit(original.Title)} start={original.StartTime:MM/dd HH:mm:ss} end={original.EndTime:MM/dd HH:mm:ss} tuner={SafeTuner(!string.IsNullOrWhiteSpace(original.ActualTunerName) ? original.ActualTunerName : original.TunerName)} userChainCopied={original.IsUserChain} chainPrev={(original.UserChainPreviousId.HasValue ? $"R{original.UserChainPreviousId.Value}" : "-")} chainRoot={(original.UserChainRootId.HasValue ? $"R{original.UserChainRootId.Value}" : "-")} reason=interrupted_recording_recovery rule=release_contract");
-        if (sourceAfter is not null)
-        {
-            mutationJournal.Record(
-                ReservationMutationKind.RecordingFailed,
-                original,
-                sourceAfter,
-                new Dictionary<string, string?>
-                {
-                    ["userEvent"] = "recording_interrupted",
-                    ["reason"] = reason,
-                    ["fileEvidence"] = fileEvidence,
-                    ["finishedAt"] = now.ToString("O"),
-                    ["trigger"] = trigger,
-                    ["recoveryReservationId"] = newId.ToString()
-                },
-                nameof(Reservation.Status), nameof(Reservation.RecordingFinishedAt),
-                nameof(Reservation.RecordingRecoveryChainId), nameof(Reservation.DataVersion));
-        }
-        var recovery = GetById(newId);
-        if (recovery is not null) mutationJournal.Record(ReservationMutationKind.Added, null, recovery);
-        foreach (var before in chainBefore.Values.Where(x => x.Id != original.Id))
-        {
-            var after = GetById(before.Id);
-            if (after is null) continue;
-            if (before.UserChainPreviousId == after.UserChainPreviousId && before.UserChainRootId == after.UserChainRootId && before.DataVersion == after.DataVersion)
-                continue;
-            mutationJournal.Record(ReservationMutationKind.Updated, before, after,
-                nameof(Reservation.UserChainPreviousId), nameof(Reservation.UserChainRootId), nameof(Reservation.DataVersion));
-        }
+        if (notificationFailure is not null)
+            throw new InvalidOperationException("Interrupted recording recovery committed, but notification delivery failed.", notificationFailure);
         return newId;
     }
 
@@ -2965,105 +3686,291 @@ WHERE id = $id
     // 投影元の再結合とDBイベント昇格は、予約identityと実行時刻を同時に書き換える。
     // 判定に使用したDataVersionをそのままCAS条件にし、同じUPDATEで世代を進めること。
     // UI／プラグイン／EPGの並行編集を古い投影結果で上書きする無条件UPDATEへ戻してはならない。
-    public bool RebindProjectionToExternalEvent(int id, ExternalEpgEvent externalEvent)
+
+
+    // Only breaks invalid existing edges. New joins remain owned by the common automatic phase.
+    private static bool TrySplitScheduledAutomaticProjectionComponent(IReadOnlyDictionary<int,Reservation> initial,
+        Dictionary<int,Reservation> working,HashSet<int> component,out bool topologyChanged)
     {
-        var before = GetById(id);
-        if (before is null || before.Status != ReservationStatus.Scheduled) return false;
-
-        var safeTitle = NormalizeReservationTitleForStorage(externalEvent.Title, externalEvent.ServiceName, id);
-        var serviceName = externalEvent.ServiceName ?? string.Empty;
-        var changed = before.NetworkId != externalEvent.NetworkId
-            || before.TransportStreamId != externalEvent.TransportStreamId
-            || before.ServiceId != externalEvent.ServiceId
-            || before.EventId != externalEvent.EventId
-            || before.StartTime != externalEvent.Start
-            || before.EndTime != externalEvent.End
-            || (!string.IsNullOrWhiteSpace(safeTitle) && !string.Equals(before.Title, safeTitle, StringComparison.Ordinal))
-            || (!string.IsNullOrWhiteSpace(serviceName) && !string.Equals(before.ServiceName, serviceName, StringComparison.Ordinal));
-        if (!changed) return false;
-
-        using var con = db.Open();
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = """
-            UPDATE reservations
-            SET network_id = $networkId,
-                transport_stream_id = $transportStreamId,
-                service_id = $serviceId,
-                event_id = $eventId,
-                title = CASE WHEN $title <> '' THEN $title ELSE title END,
-                service_name = CASE WHEN $serviceName <> '' THEN $serviceName ELSE service_name END,
-                start_time = $start,
-                end_time = $end,
-                data_version = data_version + 1,
-                updated_at = $now
-            WHERE id = $id
-              AND status = 'scheduled'
-              AND data_version = $dataVersion;
-            """;
-        cmd.Parameters.AddWithValue("$id", id);
-        cmd.Parameters.AddWithValue("$networkId", externalEvent.NetworkId);
-        cmd.Parameters.AddWithValue("$transportStreamId", externalEvent.TransportStreamId);
-        cmd.Parameters.AddWithValue("$serviceId", externalEvent.ServiceId);
-        cmd.Parameters.AddWithValue("$eventId", externalEvent.EventId);
-        cmd.Parameters.AddWithValue("$title", safeTitle);
-        cmd.Parameters.AddWithValue("$serviceName", serviceName);
-        cmd.Parameters.AddWithValue("$start", externalEvent.Start.ToString("O"));
-        cmd.Parameters.AddWithValue("$end", externalEvent.End.ToString("O"));
-        cmd.Parameters.AddWithValue("$now", DateTime.Now.ToString("O"));
-        cmd.Parameters.AddWithValue("$dataVersion", before.DataVersion);
-        var affected = cmd.ExecuteNonQuery();
-        if (affected > 0)
+        topologyChanged=false;
+        if(component.Any(id=>!working.TryGetValue(id,out var r)||r.Status!=ReservationStatus.Scheduled
+            ||r.Source==ReservationSource.Epg||HasOpenRecordingRuntime(r)))return false;
+        var original=component.Select(id=>initial[id]).ToArray();
+        if(original.Where(r=>r.UserChainPreviousId.HasValue).GroupBy(r=>r.UserChainPreviousId!.Value).Any(g=>g.Count()>1))return false;
+        foreach(var row in original)
         {
-            log.Add("RESERVATION_PROJECTION_REBIND", $"R{id}",
-                $"result=UPDATED reservation=R{id} sourcePluginId={externalEvent.SourcePluginId} nid={externalEvent.NetworkId} tsid={externalEvent.TransportStreamId} sid={externalEvent.ServiceId} eventId={externalEvent.EventId} title={TrimTitleForAudit(safeTitle)} start={externalEvent.Start:MM/dd HH:mm:ss} end={externalEvent.End:MM/dd HH:mm:ss} scheduledStartPreserved=True rule=release_contract");
-            mutationJournal.Record(ReservationMutationKind.Updated, before, GetById(id), nameof(Reservation.Title), nameof(Reservation.ServiceName), nameof(Reservation.StartTime), nameof(Reservation.EndTime), nameof(Reservation.NetworkId), nameof(Reservation.TransportStreamId), nameof(Reservation.ServiceId), nameof(Reservation.EventId), nameof(Reservation.DataVersion));
+            var path=new HashSet<int>();var root=row;
+            while(root.UserChainPreviousId is int previous)
+            {
+                if(!path.Add(root.Id)||!initial.TryGetValue(previous,out var parent))return false;
+                root=parent;
+            }
+            if(root.UserChainRootId is int rootId && rootId!=root.Id)return false;
+            if(row.Id!=root.Id && (!row.IsUserChain||row.UserChainRootId!=root.Id))return false;
         }
-        return affected > 0;
+        var rows=component.ToDictionary(id=>id,id=>working[id].SnapshotForChainRequest());
+        foreach(var row in rows.Values)
+        {
+            if(row.UserChainPreviousId is not int prev)continue;
+            if(!rows.TryGetValue(prev,out var parent))return false;
+            if(parent.EndTime!=row.StartTime||parent.NetworkId!=row.NetworkId
+                ||parent.TransportStreamId!=row.TransportStreamId||parent.ServiceId!=row.ServiceId)
+                row.UserChainPreviousId=null;
+        }
+        var next=rows.Values.Where(r=>r.UserChainPreviousId.HasValue).ToDictionary(r=>r.UserChainPreviousId!.Value);
+        var visited=new HashSet<int>();
+        foreach(var head in rows.Values.Where(r=>r.UserChainPreviousId is null).ToArray())
+        {
+            var segment=new List<Reservation>();var current=head;
+            while(true){if(!visited.Add(current.Id))return false;segment.Add(current);if(!next.TryGetValue(current.Id,out var child))break;current=child;}
+            foreach(var row in segment)
+            {
+                if(segment.Count==1){row.IsUserChain=false;row.UserChainRootId=null;}
+                else if(row.Id==head.Id && initial[head.Id].UserChainPreviousId is null)
+                {row.IsUserChain=initial[head.Id].IsUserChain;row.UserChainRootId=initial[head.Id].UserChainRootId;}
+                else{row.IsUserChain=true;row.UserChainRootId=head.Id;}
+            }
+        }
+        if(visited.Count!=component.Count)return false;
+        topologyChanged=rows.Values.Any(r=>r.IsUserChain!=initial[r.Id].IsUserChain
+            ||r.UserChainPreviousId!=initial[r.Id].UserChainPreviousId||r.UserChainRootId!=initial[r.Id].UserChainRootId);
+        foreach(var row in rows.Values)
+        {
+            if(topologyChanged){row.DataVersion=initial[row.Id].DataVersion+1;row.UpdatedAt=DateTime.Now;}
+            working[row.Id]=row;
+        }
+        return true;
     }
 
-    public bool PromoteProjectionToDbEvent(int id, ProjectedProgramEvent dbEvent)
+    private static void PersistProjectionReservationChanges(SqliteConnection con,SqliteTransaction tx,
+        IReadOnlyDictionary<int,Reservation> initial,IReadOnlyDictionary<int,Reservation> working)
     {
-        var before = GetById(id);
-        if (before is null || before.Status != ReservationStatus.Scheduled) return false;
-
-        var safeTitle = NormalizeReservationTitleForStorage(dbEvent.Title, dbEvent.ServiceName, id);
-        using var con = db.Open();
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = """
-            UPDATE reservations
-            SET network_id = $networkId,
-                transport_stream_id = $transportStreamId,
-                service_id = $serviceId,
-                event_id = $eventId,
-                title = CASE WHEN $title <> '' THEN $title ELSE title END,
-                service_name = CASE WHEN $serviceName <> '' THEN $serviceName ELSE service_name END,
-                start_time = $start,
-                end_time = $end,
-                data_version = data_version + 1,
-                updated_at = $now
-            WHERE id = $id
-              AND status = 'scheduled'
-              AND data_version = $dataVersion;
-            """;
-        cmd.Parameters.AddWithValue("$id", id);
-        cmd.Parameters.AddWithValue("$networkId", dbEvent.NetworkId);
-        cmd.Parameters.AddWithValue("$transportStreamId", dbEvent.TransportStreamId);
-        cmd.Parameters.AddWithValue("$serviceId", dbEvent.ServiceId);
-        cmd.Parameters.AddWithValue("$eventId", dbEvent.EventId);
-        cmd.Parameters.AddWithValue("$title", safeTitle);
-        cmd.Parameters.AddWithValue("$serviceName", dbEvent.ServiceName ?? string.Empty);
-        cmd.Parameters.AddWithValue("$start", dbEvent.Start.ToString("O"));
-        cmd.Parameters.AddWithValue("$end", dbEvent.End.ToString("O"));
-        cmd.Parameters.AddWithValue("$now", DateTime.Now.ToString("O"));
-        cmd.Parameters.AddWithValue("$dataVersion", before.DataVersion);
-        var affected = cmd.ExecuteNonQuery();
-        if (affected > 0)
+        foreach(var after in working.Values.Where(r=>r.DataVersion!=initial[r.Id].DataVersion))
         {
-            log.Add("RESERVATION_PROJECTION_PROMOTE", $"R{id}",
-                $"result=UPDATED reservation=R{id} nid={dbEvent.NetworkId} tsid={dbEvent.TransportStreamId} sid={dbEvent.ServiceId} eventId={dbEvent.EventId} title={TrimTitleForAudit(safeTitle)} start={dbEvent.Start:MM/dd HH:mm:ss} end={dbEvent.End:MM/dd HH:mm:ss} source=db_event_detected rule=release_contract");
-            mutationJournal.Record(ReservationMutationKind.Updated, before, GetById(id), nameof(Reservation.Title), nameof(Reservation.ServiceName), nameof(Reservation.StartTime), nameof(Reservation.EndTime), nameof(Reservation.NetworkId), nameof(Reservation.TransportStreamId), nameof(Reservation.ServiceId), nameof(Reservation.EventId), nameof(Reservation.DataVersion));
+            var id=after.Id;var before=initial[id];
+            {
+                using var update=con.CreateCommand();update.Transaction=tx;
+                update.CommandText="""
+                    UPDATE reservations SET network_id=$nid,transport_stream_id=$tsid,service_id=$sid,event_id=$eid,
+                        title=$title,service_name=$name,start_time=$start,end_time=$end,
+                        is_user_chain=$chain,user_chain_previous_id=$prev,user_chain_root_id=$root,
+                        data_version=data_version+1,updated_at=$now
+                    WHERE id=$id AND status='scheduled' AND data_version=$version;
+                    """;
+                update.Parameters.AddWithValue("$nid",after.NetworkId);update.Parameters.AddWithValue("$tsid",after.TransportStreamId);
+                update.Parameters.AddWithValue("$sid",after.ServiceId);update.Parameters.AddWithValue("$eid",after.EventId);
+                update.Parameters.AddWithValue("$title",after.Title);update.Parameters.AddWithValue("$name",after.ServiceName??"");
+                update.Parameters.AddWithValue("$start",after.StartTime.ToString("O"));update.Parameters.AddWithValue("$end",after.EndTime.ToString("O"));
+                update.Parameters.AddWithValue("$chain",after.IsUserChain?1:0);
+                update.Parameters.AddWithValue("$prev",(object?)after.UserChainPreviousId??DBNull.Value);
+                update.Parameters.AddWithValue("$root",(object?)after.UserChainRootId??DBNull.Value);
+                update.Parameters.AddWithValue("$now",after.UpdatedAt.ToString("O"));update.Parameters.AddWithValue("$id",id);update.Parameters.AddWithValue("$version",before.DataVersion);
+                if(update.ExecuteNonQuery()!=1)throw new InvalidOperationException("Projection reservation CAS failed.");
+            }
         }
-        return affected > 0;
+    }
+
+    private void CancelPreRecordForProjectionChanges(SqliteConnection con,SqliteTransaction tx,
+        IReadOnlyDictionary<int,Reservation> initial,IReadOnlyDictionary<int,Reservation> working)
+    {
+        var changed=working.Values.Where(r=>r.StartTime!=initial[r.Id].StartTime||r.EndTime!=initial[r.Id].EndTime
+            ||r.IsUserChain!=initial[r.Id].IsUserChain||r.UserChainPreviousId!=initial[r.Id].UserChainPreviousId
+            ||r.UserChainRootId!=initial[r.Id].UserChainRootId).Select(r=>r.Id).ToArray();
+        CancelScheduledPreRecordEpgChildrenForParents(con,tx,changed);
+    }
+
+    internal ExternalProjectionCommitResult CommitExternalProjectionRebind(ReservationProjectionMetadataStore metadata,
+        ExternalEpgSourceStore sourceStore,string source,IReadOnlySet<int> protectedIds,bool automatic,Action<ExternalProjectionCommitResult> receipt)
+    {
+        if(!metadata.UsesDatabase(db))throw new InvalidOperationException("External projection metadata owner differs.");
+        Dictionary<int,Reservation> initial=new(),afterCommit=new();
+        var outcome=sourceStore.WithSourceSnapshot(source,events=>
+        {
+            using var con=db.Open();using var tx=con.BeginTransaction(System.Data.IsolationLevel.Serializable);
+            initial=ReadTerminalDeletionRows(con,tx).ToDictionary(r=>r.Id);
+            var candidates=ReservationProjectionMetadataStore.GetPendingPromotionCandidates(con,tx)
+                .Where(m=>string.Equals(m.ProjectionSourcePluginId,source,StringComparison.OrdinalIgnoreCase)).ToArray();
+            var byIdentity=events.GroupBy(e=>(e.NetworkId,e.TransportStreamId,e.ServiceId,e.EventId)).ToDictionary(g=>g.Key,g=>g.ToArray());
+            var runtime=protectedIds.Concat(initial.Values.Where(r=>r.Status is ReservationStatus.Starting or ReservationStatus.Recording or ReservationStatus.Stopping
+                || HasOpenRecordingRuntime(r)).Select(r=>r.Id)).ToHashSet();
+            foreach(var child in initial.Values.Where(r=>r.Source==ReservationSource.Epg&&r.Intent==ReservationIntent.SystemPreRecordEpg
+                &&r.SourceRuleId.HasValue&&runtime.Contains(r.Id)))runtime.Add(child.SourceRuleId!.Value);
+            var blocked=ConnectedChainIds(initial,runtime);
+            var working=new Dictionary<int,Reservation>(initial);
+            var planned=new Dictionary<int,(ReservationProjectionMetadata Metadata,ExternalEpgEvent? Event)>();
+            var retry=false;var ambiguous=0;
+            foreach(var m in candidates)
+            {
+                if(!initial.TryGetValue(m.ReservationId,out var before)||before.Status!=ReservationStatus.Scheduled)continue;
+                if(blocked.Contains(before.Id)){retry=true;continue;}
+                if(!byIdentity.TryGetValue((m.OverlayNetworkId,m.OverlayTransportStreamId,m.OverlayServiceId,m.OverlayEventId),out var matches))
+                {
+                    if(m.ProjectionState!="SourceMissing")planned[before.Id]=(m,null);
+                    continue;
+                }
+                if(matches.Length!=1){ambiguous++;continue;}
+                var ev=matches[0];var after=before.SnapshotForChainRequest();
+                var title=NormalizeReservationTitleForStorage(ev.Title,ev.ServiceName,before.Id);
+                if(!string.IsNullOrWhiteSpace(title))after.Title=title;
+                if(!string.IsNullOrWhiteSpace(ev.ServiceName))after.ServiceName=ev.ServiceName;
+                after.NetworkId=ev.NetworkId;after.TransportStreamId=ev.TransportStreamId;after.ServiceId=ev.ServiceId;after.EventId=ev.EventId;
+                after.StartTime=ev.Start;after.EndTime=ev.End;
+                var bodyChanged=after.NetworkId!=before.NetworkId||after.TransportStreamId!=before.TransportStreamId||after.ServiceId!=before.ServiceId
+                    ||after.EventId!=before.EventId||after.Title!=before.Title||after.ServiceName!=before.ServiceName
+                    ||after.StartTime!=before.StartTime||after.EndTime!=before.EndTime;
+                var metaChanged=m.ProjectionState!="OverlayOnly"||m.SourceMissingAt.HasValue||m.ProjectionSourceEventKey!=ev.SourceEventKey
+                    ||m.OverlayStartTime!=ev.Start||m.OverlayEndTime!=ev.End||m.OverlayTitle!=ev.Title;
+                if(!bodyChanged&&!metaChanged)continue;
+                if(bodyChanged){after.DataVersion++;after.UpdatedAt=DateTime.Now;working[before.Id]=after;}
+                planned[before.Id]=(m,ev);
+            }
+            // Paired updates are evaluated together before persisting any time or edge.
+            var topologyChanged=false;var evaluated=new HashSet<int>();
+            foreach(var id in planned.Keys.ToArray())
+            {
+                if(!planned.ContainsKey(id))continue;
+                if(evaluated.Contains(id))continue;
+                var component=ConnectedChainIds(initial,new[]{id});evaluated.UnionWith(component);
+                if(automatic && TrySplitScheduledAutomaticProjectionComponent(initial,working,component,out var changed))
+                {topologyChanged |= changed;continue;}
+                var invalid=automatic || component.Any(key=>!working.ContainsKey(key))||component.Where(working.ContainsKey).Select(key=>working[key])
+                    .Any(r=>r.UserChainPreviousId is int prev&&(!working.TryGetValue(prev,out var parent)
+                        ||parent.NetworkId!=r.NetworkId||parent.TransportStreamId!=r.TransportStreamId||parent.ServiceId!=r.ServiceId
+                        ||parent.EndTime-r.StartTime!=initial[prev].EndTime-initial[r.Id].StartTime));
+                if(!invalid)continue;
+                retry=true;
+                foreach(var key in component.Where(planned.ContainsKey).ToArray()){planned.Remove(key);working[key]=initial[key];}
+            }
+            var rebound=0;var missing=0;
+            PersistProjectionReservationChanges(con,tx,initial,working);
+            foreach(var pair in planned)
+            {
+                var id=pair.Key;
+                var count=pair.Value.Event is { } ev
+                    ? ReservationProjectionMetadataStore.RebindExternalSource(con,tx,id,ev)
+                    : ReservationProjectionMetadataStore.MarkSourceMissing(con,tx,id,DateTime.Now);
+                if(count!=1)throw new InvalidOperationException("External projection metadata CAS failed.");
+                if(pair.Value.Event is null)missing++;else rebound++;
+            }
+            CancelPreRecordForProjectionChanges(con,tx,initial,working);
+            afterCommit=ReadTerminalDeletionRows(con,tx).ToDictionary(r=>r.Id);
+            var result=new ExternalProjectionCommitResult(new(candidates.Length,rebound,missing,ambiguous,
+                candidates.Length-rebound-missing-ambiguous),retry,topologyChanged);
+            tx.Commit();return result;
+        });
+        // Both source and SQLite ownership are released before publishing observers.
+        receipt(outcome);
+        var failures=new List<Exception>();
+        foreach(var row in ChangedTerminalDeletionRows(initial,afterCommit))
+        {
+            try{mutationJournal.Record(ReservationMutationKind.Updated,initial[row.Id].SnapshotForChainRequest(),row.SnapshotForChainRequest(),
+                nameof(Reservation.Title),nameof(Reservation.ServiceName),nameof(Reservation.StartTime),nameof(Reservation.EndTime),
+                nameof(Reservation.NetworkId),nameof(Reservation.TransportStreamId),nameof(Reservation.ServiceId),nameof(Reservation.EventId),nameof(Reservation.DataVersion),
+                nameof(Reservation.IsUserChain),nameof(Reservation.UserChainPreviousId),nameof(Reservation.UserChainRootId),nameof(Reservation.Status));}
+            catch(Exception ex){failures.Add(ex);}
+        }
+        if(failures.Count>0)throw new AggregateException(failures);
+        return outcome;
+    }
+
+    internal ProjectionPromotionResult PromoteProjectionReservationsAtomic(
+        IReadOnlyList<ProjectionPromotionCandidate> candidates, ReservationProjectionMetadataStore metadataStore,
+        IReadOnlySet<int> protectedIds, Action<ProjectionPromotionResult> recordCommitted,bool automatic=false)
+    {
+        if (!metadataStore.UsesDatabase(db)) throw new InvalidOperationException("Projection metadata has a different database owner.");
+        using var con = db.Open();
+        using var tx = con.BeginTransaction(System.Data.IsolationLevel.Serializable);
+        var initial = ReadTerminalDeletionRows(con, tx).ToDictionary(r => r.Id);
+        HashSet<int> Connected(IEnumerable<int> seeds)=>ConnectedChainIds(initial,seeds);
+        var runtime = protectedIds.Concat(initial.Values.Where(r => r.Status is ReservationStatus.Starting or ReservationStatus.Recording or ReservationStatus.Stopping
+            || HasOpenRecordingRuntime(r)).Select(r => r.Id)).ToHashSet();
+        foreach (var child in initial.Values.Where(r => r.Source == ReservationSource.Epg
+            && r.Intent == ReservationIntent.SystemPreRecordEpg && r.SourceRuleId.HasValue && runtime.Contains(r.Id)))
+            runtime.Add(child.SourceRuleId!.Value);
+        var blocked = Connected(runtime);
+        var retryRequired=false;
+        var working = new Dictionary<int, Reservation>(initial);
+        var planned = new Dictionary<int, ProjectionPromotionCandidate>();
+        foreach (var candidate in candidates)
+        {
+            var expected = candidate.Metadata; var projected = candidate.Event; var raw = projected.DbEvent;
+            if(initial.TryGetValue(expected.ReservationId,out var pending) && pending.Status==ReservationStatus.Scheduled
+                && blocked.Contains(pending.Id)) retryRequired=true;
+            if (raw is null || !initial.TryGetValue(expected.ReservationId, out var before)
+                || before.Status != ReservationStatus.Scheduled || blocked.Contains(before.Id)
+                || ReservationProjectionMetadataStore.Get(con, tx, before.Id) != expected
+                || expected.PromotedAt.HasValue || expected.ProjectionSourceKind != "ExternalEpg"
+                || expected.ProjectionState is not ("OverlayOnly" or "DbWithOverlay" or "SourceMissing")
+                || expected.OverlayNetworkId == 0 || expected.OverlayTransportStreamId == 0
+                || expected.OverlayServiceId == 0 || expected.OverlayEventId == 0
+                || projected.NetworkId != expected.OverlayNetworkId || projected.TransportStreamId != expected.OverlayTransportStreamId
+                || projected.ServiceId != expected.OverlayServiceId || projected.EventId != expected.OverlayEventId) continue;
+            var current = EpgStore.ReadPromotionEvent(con, tx, raw.NetworkId, raw.TransportStreamId, raw.ServiceId, raw.EventId);
+            if (current is null || current.Start != raw.Start || current.End != raw.End
+                || current.Title != raw.Title || current.ServiceName != raw.ServiceName
+                || raw.NetworkId != projected.NetworkId || raw.TransportStreamId != projected.TransportStreamId
+                || raw.ServiceId != projected.ServiceId || raw.EventId != projected.EventId) continue;
+            var after = before.SnapshotForChainRequest();
+            after.NetworkId = projected.NetworkId; after.TransportStreamId = projected.TransportStreamId;
+            after.ServiceId = projected.ServiceId; after.EventId = projected.EventId;
+            var title = NormalizeReservationTitleForStorage(projected.Title, projected.ServiceName, before.Id);
+            if (title.Length > 0) after.Title = title;
+            if (!string.IsNullOrEmpty(projected.ServiceName)) after.ServiceName = projected.ServiceName;
+            after.StartTime = projected.Start; after.EndTime = projected.End;
+            after.DataVersion++; after.UpdatedAt = DateTime.Now;
+            working[after.Id] = after; planned[after.Id] = candidate;
+        }
+        // Re-evaluate the entire affected chain after all paired promotions. Never
+        // leave a formerly valid manual edge with a new gap or different service.
+        var topologyChanged=false;var evaluated=new HashSet<int>();
+        foreach (var id in planned.Keys.ToArray())
+        {
+            if (!planned.ContainsKey(id)) continue;
+            if(evaluated.Contains(id))continue;
+            var component = Connected(new[] { id });evaluated.UnionWith(component);
+            if(automatic && TrySplitScheduledAutomaticProjectionComponent(initial,working,component,out var changed))
+            {topologyChanged |= changed;continue;}
+            if(automatic)retryRequired=true;
+            var invalid = automatic || component.Any(key => !working.ContainsKey(key)) || component.Where(working.ContainsKey)
+                .Select(key => working[key]).Any(r => r.UserChainPreviousId is int prev
+                    && (!working.TryGetValue(prev, out var p) || p.EndTime != r.StartTime
+                        || p.NetworkId != r.NetworkId || p.TransportStreamId != r.TransportStreamId || p.ServiceId != r.ServiceId));
+            if (!invalid) continue;
+            foreach (var key in component.Where(planned.ContainsKey).ToArray())
+            { planned.Remove(key); working[key] = initial[key]; }
+        }
+        PersistProjectionReservationChanges(con,tx,initial,working);
+        foreach(var id in planned.Keys)
+        {
+            var after=working[id];
+            if(ReservationProjectionMetadataStore.MarkPromoted(con,tx,id,after.NetworkId,after.TransportStreamId,
+                after.ServiceId,after.EventId,after.UpdatedAt)!=1)throw new InvalidOperationException("Projection promotion metadata disappeared.");
+        }
+        CancelPreRecordForProjectionChanges(con,tx,initial,working);
+        var afterCommit=ReadTerminalDeletionRows(con,tx).ToDictionary(r=>r.Id);
+        var result = new ProjectionPromotionResult(Array.AsReadOnly(planned.Keys.OrderBy(id => id).ToArray()),
+            candidates.Count - planned.Count) { RetryRequired=retryRequired,TopologyChanged=topologyChanged };
+        tx.Commit();
+        recordCommitted(result);
+        var failures = new List<Exception>();
+        foreach (var id in result.PromotedIds)
+        {
+            var after = working[id];
+            try { log.Add("RESERVATION_PROJECTION_PROMOTE", $"R{id}",
+                $"result=UPDATED reservation=R{id} nid={after.NetworkId} tsid={after.TransportStreamId} sid={after.ServiceId} eventId={after.EventId} title={TrimTitleForAudit(after.Title)} start={after.StartTime:MM/dd HH:mm:ss} end={after.EndTime:MM/dd HH:mm:ss} source=db_event_detected rule=release_contract"); }
+            catch (Exception ex) { failures.Add(ex); }
+        }
+        foreach(var after in ChangedTerminalDeletionRows(initial,afterCommit))
+        {
+            try{mutationJournal.Record(ReservationMutationKind.Updated,initial[after.Id].SnapshotForChainRequest(),after.SnapshotForChainRequest(),
+                nameof(Reservation.Title),nameof(Reservation.ServiceName),nameof(Reservation.StartTime),nameof(Reservation.EndTime),
+                nameof(Reservation.NetworkId),nameof(Reservation.TransportStreamId),nameof(Reservation.ServiceId),nameof(Reservation.EventId),
+                nameof(Reservation.DataVersion),nameof(Reservation.IsUserChain),nameof(Reservation.UserChainPreviousId),
+                nameof(Reservation.UserChainRootId),nameof(Reservation.Status));}
+            catch(Exception ex){failures.Add(ex);}
+        }
+        if (failures.Count > 0) throw new AggregateException(failures);
+        return result;
     }
 
     /// <summary>
@@ -3075,41 +3982,63 @@ WHERE id = $id
     /// - 部分的な再接続・root再構成・物理削除を公開しない。
     /// </summary>
     public bool TryDeleteTerminalReservationAtomicCas(Reservation expected, out IReadOnlyList<Reservation> repairedReservations)
+        => TryDeleteTerminalReservationAtomicCas(expected, out repairedReservations, null);
+
+    internal bool TryDeleteTerminalReservationAtomicCas(Reservation expected,
+        out IReadOnlyList<Reservation> repairedReservations, Action? recordCommitted)
     {
         repairedReservations = Array.Empty<Reservation>();
+        using var con = db.Open();
+        using var tx = con.BeginTransaction(System.Data.IsolationLevel.Serializable);
+        var initial = ReadTerminalDeletionRows(con, tx).ToDictionary(r => r.Id);
+        var working = new Dictionary<int, Reservation>(initial);
+        if (!TryDeleteTerminalReservationInTransaction(expected, working, BuildTerminalDeletionChildren(working), con, tx)) return false;
+        tx.Commit();
+        recordCommitted?.Invoke();
+        var removedIds = new[] { expected.Id };
+        repairedReservations = ChangedTerminalDeletionRows(initial, working);
+        PublishTerminalDeletionChanges(initial, working, removedIds);
+        return true;
+    }
+
+    private IReadOnlyList<Reservation> ReadTerminalDeletionRows(SqliteConnection con, SqliteTransaction tx)
+    {
+        using var cmd = con.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = """
+            SELECT id, network_id, transport_stream_id, service_id, event_id,
+                   title, start_time, end_time, status, source, created_at, updated_at,
+                   channel_argument, is_conflicted, is_enabled, tuner_name, actual_tuner_name,
+                   recording_started_at, recording_finished_at, service_name,
+                   scheduled_start_time, source_rule_id, source_rule_name,
+                   is_user_chain, user_chain_previous_id, user_chain_root_id,
+                   recording_recovery_chain_id, recovery_parent_reservation_id, data_version,
+                       reservation_intent, created_through, created_by_plugin_id
+            FROM reservations
+            ORDER BY start_time;
+            """;
+        return ReadReservations(cmd, projectRuntimeStatus: false);
+    }
+
+    // One transaction-local snapshot evolves only after its corresponding SQL CAS succeeds.
+    // Both individual deletion and bulk deletion use these exact repair rules.
+    private bool TryDeleteTerminalReservationInTransaction(Reservation expected,
+        Dictionary<int, Reservation> working, Dictionary<int, List<int>> children,
+        SqliteConnection con, SqliteTransaction tx)
+    {
         if (expected is null) return false;
         if (expected.Status is not (ReservationStatus.Completed or ReservationStatus.Failed or ReservationStatus.Cancelled))
             return false;
 
-        var all = GetAll();
-        var before = all.FirstOrDefault(r => r.Id == expected.Id);
-        if (before is null
-            || before.Status != expected.Status
-            || before.DataVersion != expected.DataVersion)
-            return false;
-
-        var chainBefore = all
-            .Where(r => r.Id == expected.Id
-                || r.UserChainPreviousId == expected.Id
-                || (before.UserChainRootId.HasValue && r.UserChainRootId == before.UserChainRootId))
-            .ToDictionary(r => r.Id);
-
-        var directChildren = all
-            .Where(r => r.UserChainPreviousId == expected.Id)
-            .OrderBy(r => r.StartTime)
-            .ThenBy(r => r.Id)
-            .ToList();
-        var byPrevious = all
-            .Where(r => r.UserChainPreviousId.HasValue)
-            .GroupBy(r => r.UserChainPreviousId!.Value)
-            .ToDictionary(g => g.Key, g => g.OrderBy(x => x.StartTime).ThenBy(x => x.Id).ToList());
-
+        if (!working.TryGetValue(expected.Id, out var before)
+            || before.Status != expected.Status || before.DataVersion != expected.DataVersion) return false;
+        var directChildren = children.TryGetValue(expected.Id, out var directIds)
+            ? directIds.Select(id => working[id]).OrderBy(r => r.StartTime).ThenBy(r => r.Id).ToList()
+            : new List<Reservation>();
         var previousId = before.UserChainPreviousId;
-        var previousExists = previousId.HasValue && all.Any(r => r.Id == previousId.Value && r.Id != expected.Id);
+        var previousExists = previousId.HasValue && previousId.Value != expected.Id && working.ContainsKey(previousId.Value);
         var nowText = DateTime.Now.ToString("O");
 
-        using var con = db.Open();
-        using var tx = con.BeginTransaction();
 
         bool ExecuteTopologyCas(
             Reservation snapshot,
@@ -3117,6 +4046,9 @@ WHERE id = $id
             int? newPreviousId,
             int? newRootId)
         {
+            // Preserve the prior projected-status CAS refusal for an open recording
+            // whose durable status has not caught up. Never normalize it during deletion.
+            if (ProjectRuntimeStatus(snapshot) != snapshot.Status) return false;
             using var update = con.CreateCommand();
             update.Transaction = tx;
             update.CommandText = """
@@ -3143,7 +4075,24 @@ WHERE id = $id
             update.Parameters.AddWithValue("$oldIsUserChain", snapshot.IsUserChain ? 1 : 0);
             update.Parameters.AddWithValue("$oldPreviousId", (object?)snapshot.UserChainPreviousId ?? DBNull.Value);
             update.Parameters.AddWithValue("$oldRootId", (object?)snapshot.UserChainRootId ?? DBNull.Value);
-            return update.ExecuteNonQuery() == 1;
+            if (update.ExecuteNonQuery() != 1) return false;
+            var changed = snapshot.SnapshotForChainRequest();
+            changed.IsUserChain = isUserChain;
+            changed.UserChainPreviousId = newPreviousId;
+            changed.UserChainRootId = newRootId;
+            changed.DataVersion++;
+            changed.UpdatedAt = DateTime.Parse(nowText, null, System.Globalization.DateTimeStyles.RoundtripKind);
+            working[changed.Id] = changed;
+            if (snapshot.UserChainPreviousId != newPreviousId)
+            {
+                if (snapshot.UserChainPreviousId is int oldPrevious && children.TryGetValue(oldPrevious, out var oldIds)) oldIds.Remove(changed.Id);
+                if (newPreviousId is int newPrevious)
+                {
+                    if (!children.TryGetValue(newPrevious, out var newIds)) children[newPrevious] = newIds = new();
+                    newIds.Add(changed.Id);
+                }
+            }
+            return true;
         }
 
         foreach (var directChild in directChildren)
@@ -3157,10 +4106,10 @@ WHERE id = $id
                 var current = queue.Dequeue();
                 if (!visited.Add(current.Id)) continue;
                 subtree.Add(current);
-                if (byPrevious.TryGetValue(current.Id, out var nextChildren))
+                if (children.TryGetValue(current.Id, out var nextIds))
                 {
-                    foreach (var child in nextChildren)
-                        queue.Enqueue(child);
+                    foreach (var nextId in nextIds)
+                        queue.Enqueue(working[nextId]);
                 }
             }
 
@@ -3169,7 +4118,6 @@ WHERE id = $id
             {
                 if (!ExecuteTopologyCas(directChild, directChild.IsUserChain, previousId, directChild.UserChainRootId))
                 {
-                    tx.Rollback();
                     return false;
                 }
                 continue;
@@ -3179,7 +4127,6 @@ WHERE id = $id
             {
                 if (!ExecuteTopologyCas(directChild, false, null, null))
                 {
-                    tx.Rollback();
                     return false;
                 }
                 continue;
@@ -3187,7 +4134,6 @@ WHERE id = $id
 
             if (!ExecuteTopologyCas(directChild, true, null, directChild.Id))
             {
-                tx.Rollback();
                 return false;
             }
 
@@ -3195,7 +4141,6 @@ WHERE id = $id
             {
                 if (!ExecuteTopologyCas(descendant, descendant.IsUserChain, descendant.UserChainPreviousId, directChild.Id))
                 {
-                    tx.Rollback();
                     return false;
                 }
             }
@@ -3215,47 +4160,109 @@ WHERE id = $id
             delete.Parameters.AddWithValue("$dataVersion", expected.DataVersion);
             if (delete.ExecuteNonQuery() != 1)
             {
-                tx.Rollback();
                 return false;
             }
         }
 
-        tx.Commit();
-
-        var repaired = new List<Reservation>();
-        foreach (var oldState in chainBefore.Values.Where(x => x.Id != expected.Id))
-        {
-            var after = GetById(oldState.Id);
-            if (after is null) continue;
-            if (oldState.IsUserChain == after.IsUserChain
-                && oldState.UserChainPreviousId == after.UserChainPreviousId
-                && oldState.UserChainRootId == after.UserChainRootId
-                && oldState.DataVersion == after.DataVersion)
-                continue;
-
-            repaired.Add(after);
-            mutationJournal.Record(ReservationMutationKind.Updated, oldState, after,
-                nameof(Reservation.IsUserChain), nameof(Reservation.UserChainPreviousId),
-                nameof(Reservation.UserChainRootId), nameof(Reservation.DataVersion));
-        }
-
-        repairedReservations = repaired;
-        mutationJournal.Record(ReservationMutationKind.Removed, before, null);
-        log.Add("RESERVATION_AUDIT", "DELETE",
-            $"service={TrimForAudit(before.ServiceName)} title={TrimTitleForAudit(before.Title)} rawTitleBlank={RawTitleBlankForAudit(before.Title)} id=R{expected.Id} affected=1 status={before.Status} source={before.Source} enabled={before.IsEnabled} start={before.StartTime:MM/dd HH:mm:ss} end={before.EndTime:MM/dd HH:mm:ss} userChain={before.IsUserChain} chainPrev={(before.UserChainPreviousId.HasValue ? $"R{before.UserChainPreviousId.Value}" : "-")} repairedChildren={directChildren.Count} topologyCas=True tunerEvidencePreserved=True rule=release_contract");
+        working.Remove(expected.Id);
+        if (before.UserChainPreviousId is int oldParent && children.TryGetValue(oldParent, out var siblings)) siblings.Remove(expected.Id);
+        children.Remove(expected.Id);
         return true;
     }
 
-    public int DeleteLogEntries()
+    private static Dictionary<int, List<int>> BuildTerminalDeletionChildren(IReadOnlyDictionary<int, Reservation> rows)
+        => rows.Values.Where(r => r.UserChainPreviousId.HasValue)
+            .GroupBy(r => r.UserChainPreviousId!.Value).ToDictionary(g => g.Key, g => g.Select(r => r.Id).ToList());
+
+    private static IReadOnlyList<Reservation> ChangedTerminalDeletionRows(
+        IReadOnlyDictionary<int, Reservation> initial, IReadOnlyDictionary<int, Reservation> working)
+        => working.Values.Where(r => initial.TryGetValue(r.Id, out var before)
+            && (before.DataVersion != r.DataVersion || before.IsUserChain != r.IsUserChain
+                || before.UserChainPreviousId != r.UserChainPreviousId || before.UserChainRootId != r.UserChainRootId))
+            .OrderBy(r => r.Id).ToArray();
+
+    private void PublishTerminalDeletionChanges(IReadOnlyDictionary<int, Reservation> initial,
+        IReadOnlyDictionary<int, Reservation> working, IReadOnlyList<int> removedIds, bool suppressUserEvents = false)
+    {
+        IReadOnlyDictionary<string, string?>? metadata = suppressUserEvents
+            ? new Dictionary<string, string?> { ["suppressUserEvent"] = "history_retention" } : null;
+        var failures = new List<Exception>();
+        foreach (var after in ChangedTerminalDeletionRows(initial, working))
+        {
+            try { mutationJournal.Record(ReservationMutationKind.Updated, initial[after.Id], after, metadata,
+                nameof(Reservation.IsUserChain), nameof(Reservation.UserChainPreviousId),
+                nameof(Reservation.UserChainRootId), nameof(Reservation.DataVersion)); }
+            catch (Exception ex) { failures.Add(ex); }
+        }
+        foreach (var id in removedIds)
+        {
+            var before = initial[id];
+            log.Add("RESERVATION_AUDIT", "DELETE",
+                $"service={TrimForAudit(before.ServiceName)} title={TrimTitleForAudit(before.Title)} id=R{id} affected=1 status={before.Status} topologyCas=True rule=release_contract");
+            try { mutationJournal.Record(ReservationMutationKind.Removed, before, null, metadata); }
+            catch (Exception ex) { failures.Add(ex); }
+        }
+        if (failures.Count == 1) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failures[0]).Throw();
+        if (failures.Count > 1) throw new AggregateException(failures);
+    }
+
+    internal TerminalLogDeletionResult DeleteTerminalLogEntriesAtomic(Action<TerminalLogDeletionResult> recordCommitted)
+        => DeleteTerminalLogEntriesAtomicCore(recordCommitted, null, null);
+
+    internal TerminalLogDeletionResult DeleteExpiredTerminalLogEntriesAtomic(DateTime cutoff,
+        IReadOnlySet<int> protectedIds, Action<TerminalLogDeletionResult> recordCommitted)
+        => DeleteTerminalLogEntriesAtomicCore(recordCommitted, cutoff, protectedIds);
+
+    private TerminalLogDeletionResult DeleteTerminalLogEntriesAtomicCore(
+        Action<TerminalLogDeletionResult> recordCommitted, DateTime? cutoff, IReadOnlySet<int>? protectedIds)
     {
         using var con = db.Open();
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = @"DELETE FROM reservations
-WHERE source <> 'Epg'
-  AND status IN ('completed', 'cancelled', 'failed');";
-        var affected = cmd.ExecuteNonQuery();
-        log.Add("RESERVATION_AUDIT", "DELETE_LOGS", $"affected={affected} source=non_epg status=completed,cancelled,failed");
-        return affected;
+        using var tx = con.BeginTransaction(System.Data.IsolationLevel.Serializable);
+        var initial = ReadTerminalDeletionRows(con, tx).ToDictionary(r => r.Id);
+        HashSet<int>? eligible = null;
+        if (cutoff.HasValue)
+        {
+            using var select = con.CreateCommand();
+            select.Transaction = tx;
+            select.CommandText = "SELECT id FROM reservations WHERE status IN ('completed','failed','cancelled') AND updated_at <> '' AND updated_at < $cutoff";
+            select.Parameters.AddWithValue("$cutoff", cutoff.Value.ToString("O"));
+            eligible = new HashSet<int>();
+            using (var reader = select.ExecuteReader()) while (reader.Read()) eligible.Add(reader.GetInt32(0));
+            var blocked = new HashSet<int>(protectedIds ?? new HashSet<int>());
+            foreach (var row in initial.Values)
+                if (row.Status is ReservationStatus.Starting or ReservationStatus.Recording || HasOpenRecordingRuntime(row))
+                    blocked.Add(row.Id);
+            bool changed;
+            do
+            {
+                changed = false;
+                foreach (var row in initial.Values)
+                {
+                    if (!blocked.Contains(row.Id)
+                        && !(row.UserChainPreviousId is int prev && blocked.Contains(prev))
+                        && !(row.UserChainRootId is int root && blocked.Contains(root))) continue;
+                    changed |= blocked.Add(row.Id);
+                    if (row.UserChainPreviousId is int p) changed |= blocked.Add(p);
+                    if (row.UserChainRootId is int r) changed |= blocked.Add(r);
+                }
+            } while (changed);
+            eligible.ExceptWith(blocked);
+        }
+        var targets = initial.Values.Where(r => (eligible is not null ? eligible.Contains(r.Id) : r.Source != ReservationSource.Epg)
+            && r.Status is ReservationStatus.Completed or ReservationStatus.Cancelled or ReservationStatus.Failed)
+            .OrderBy(r => r.StartTime).ThenBy(r => r.Id).Select(r => r.Id).ToArray();
+        var working = new Dictionary<int, Reservation>(initial);
+        var children = BuildTerminalDeletionChildren(working);
+        foreach (var id in targets.Reverse())
+        {
+            if (!TryDeleteTerminalReservationInTransaction(working[id], working, children, con, tx))
+                return new(false, "terminal_log_delete_cas_rejected", Array.Empty<int>());
+        }
+        tx.Commit();
+        var result = new TerminalLogDeletionResult(true, "applied", Array.AsReadOnly(targets));
+        recordCommitted(result);
+        PublishTerminalDeletionChanges(initial, working, result.RemovedIds, suppressUserEvents: cutoff.HasValue);
+        return result;
     }
 
     /// <summary>
@@ -3265,6 +4272,12 @@ WHERE source <> 'Epg'
     /// Scheduled / Starting / Recording を同じチェーントポロジーとして読み、開始境界で後続探索を切らない。
     /// Recording を含む範囲の拒否判断はAPI入口が所有し、探索側で黙って範囲を縮めない。
     /// </summary>
+    internal IReadOnlyList<Reservation> GetReservationCancellationTargets(int id, bool automaticSingle)
+    {
+        using var con = db.Open();
+        return GetUserChainCancelTargets(con, null, id, automaticSingle);
+    }
+
     public IReadOnlyList<Reservation> GetUserChainCancelTargets(int id)
     {
         // CHAIN_CANCEL_TOPOLOGY_SINGLE_SOURCE_INVARIANT:
@@ -3273,7 +4286,13 @@ WHERE source <> 'Epg'
         // 末尾=単体、途中=その地点以降、先頭=全体を決定する。
         // 競合中・Starting中でもトポロジー探索を縮めない。Recordingを含む場合の拒否はAPI入口が所有する。
         using var con = db.Open();
+        return GetUserChainCancelTargets(con, null, id);
+    }
+
+    private IReadOnlyList<Reservation> GetUserChainCancelTargets(SqliteConnection con, SqliteTransaction? tx, int id, bool automaticSingle = false)
+    {
         using var cmd = con.CreateCommand();
+        cmd.Transaction = tx;
         cmd.CommandText = """
             SELECT id, network_id, transport_stream_id, service_id, event_id,
                    title, start_time, end_time, status, source, created_at, updated_at,
@@ -3291,6 +4310,7 @@ WHERE source <> 'Epg'
 
         var start = active.FirstOrDefault(r => r.Id == id);
         if (start is null) return Array.Empty<Reservation>();
+        if (automaticSingle) return new[] { start };
 
         // 先頭予約は通常の予約入口で作成されるため IsUserChain=false / root=null のままになり得る。
         // 自身の属性だけで単体予約と判定せず、SQLite正本上で後続から previous/root 参照されていれば
@@ -3346,12 +4366,75 @@ WHERE source <> 'Epg'
     public bool TryDetachUserChainSuccessorsForManualStopAtomicCas(
         int predecessorId,
         out IReadOnlyList<Reservation> detachedSuccessors)
+        => TryDetachUserChainSuccessorsForManualStopAtomicCas(predecessorId, out detachedSuccessors, null);
+
+    internal bool TryDetachUserChainSuccessorsForManualStopAtomicCas(
+        int predecessorId,
+        out IReadOnlyList<Reservation> detachedSuccessors,
+        Action<ManualStopChainDetachResult>? recordOutcome)
+        => TryPrepareManualStopCore(predecessorId, null, 0, out detachedSuccessors, recordOutcome);
+
+    internal bool TryPrepareManualStopAtomicCas(int predecessorId, Reservation expected,
+        int postEndMarginSeconds, out IReadOnlyList<Reservation> detachedSuccessors,
+        Action<ManualStopChainDetachResult> recordOutcome)
+        => TryPrepareManualStopCore(predecessorId, expected ?? throw new ArgumentNullException(nameof(expected)),
+            postEndMarginSeconds, out detachedSuccessors, recordOutcome);
+
+    private bool TryPrepareManualStopCore(int predecessorId, Reservation? expected,
+        int postEndMarginSeconds, out IReadOnlyList<Reservation> detachedSuccessors,
+        Action<ManualStopChainDetachResult>? recordOutcome)
     {
         detachedSuccessors = Array.Empty<Reservation>();
-
-        var all = GetAll()
-            .Where(r => r.Status == ReservationStatus.Scheduled || r.Status == ReservationStatus.Recording)
-            .ToList();
+        using var con = db.Open();
+        using var tx = con.BeginTransaction(System.Data.IsolationLevel.Serializable);
+        var observed = ReadAllReservations(con, tx).ToList();
+        var predecessor = observed.FirstOrDefault(r => r.Id == predecessorId);
+        var now = DateTime.Now;
+        var nowText = now.ToString("O");
+        var siblingChanges = new List<(Reservation Before, Reservation After)>();
+        DateTime suppressUntil = default;
+        if (expected is not null)
+        {
+            if (predecessor is null || predecessor.Id != expected.Id
+                || predecessor.Status is not (ReservationStatus.Scheduled or ReservationStatus.Starting or ReservationStatus.Recording)
+                || predecessor.Status != expected.Status || predecessor.DataVersion != expected.DataVersion
+                || predecessor.NetworkId != expected.NetworkId || predecessor.TransportStreamId != expected.TransportStreamId
+                || predecessor.ServiceId != expected.ServiceId || predecessor.EventId != expected.EventId
+                || predecessor.StartTime != expected.StartTime || predecessor.EndTime != expected.EndTime
+                || predecessor.Title != expected.Title || predecessor.Source != expected.Source
+                || predecessor.SourceRuleId != expected.SourceRuleId)
+            {
+                recordOutcome?.Invoke(new(false, "stop_policy_snapshot_changed", predecessorId, detachedSuccessors));
+                return false;
+            }
+            suppressUntil = predecessor.EndTime.AddSeconds(Math.Max(0, postEndMarginSeconds));
+            if (suppressUntil < now) suppressUntil = predecessor.EndTime;
+            AddManualStoppedOccurrence(con, tx, predecessor, suppressUntil, "recording_stop", false);
+            foreach (var sibling in observed.Where(r => r.Id != predecessorId && r.Status == ReservationStatus.Scheduled
+                && ManualStopOccurrencePolicy.IsSameOccurrence(predecessor, r)).ToArray())
+            {
+                using var cancel = con.CreateCommand();
+                cancel.Transaction = tx;
+                cancel.CommandText = "UPDATE reservations SET status='cancelled', data_version=data_version+1, updated_at=$now WHERE id=$id AND status='scheduled' AND data_version=$version";
+                cancel.Parameters.AddWithValue("$id", sibling.Id);
+                cancel.Parameters.AddWithValue("$version", sibling.DataVersion);
+                cancel.Parameters.AddWithValue("$now", nowText);
+                if (cancel.ExecuteNonQuery() != 1)
+                {
+                    tx.Rollback();
+                    recordOutcome?.Invoke(new(false, "stop_sibling_cas_rejected", predecessorId, detachedSuccessors));
+                    return false;
+                }
+                var after = sibling.SnapshotForChainRequest();
+                after.Status = ReservationStatus.Cancelled;
+                after.DataVersion++;
+                after.UpdatedAt = now;
+                siblingChanges.Add((sibling, after));
+            }
+        }
+        var cancelledIds = siblingChanges.Select(x => x.Before.Id).ToHashSet();
+        var all = observed.Where(r => !cancelledIds.Contains(r.Id)
+            && (r.Status == ReservationStatus.Scheduled || r.Status == ReservationStatus.Recording)).ToList();
 
         var directChildren = all
             .Where(r => r.Status == ReservationStatus.Scheduled
@@ -3361,17 +4444,9 @@ WHERE source <> 'Epg'
             .ThenBy(r => r.Id)
             .ToList();
 
-        var predecessor = all.FirstOrDefault(r => r.Id == predecessorId) ?? GetById(predecessorId);
         var predecessorService = TrimForAudit(predecessor?.ServiceName);
         var predecessorTitle = TrimTitleForAudit(predecessor?.Title);
         var predecessorRawTitleBlank = RawTitleBlankForAudit(predecessor?.Title);
-
-        if (directChildren.Count == 0)
-        {
-            log.Add("CHAIN_STOP_POLICY", $"R{predecessorId}",
-                $"operation=ManualStop service={predecessorService} title={predecessorTitle} rawTitleBlank={predecessorRawTitleBlank} result=NO_SUCCESSOR_TO_DETACH cancelledSuccessors=0 detachedSuccessors=0 rule=release_contract");
-            return true;
-        }
 
         var byPrevious = all
             .Where(r => r.Status == ReservationStatus.Scheduled
@@ -3401,10 +4476,6 @@ WHERE source <> 'Epg'
                 }
             }
         }
-
-        using var con = db.Open();
-        using var tx = con.BeginTransaction();
-        var nowText = DateTime.Now.ToString("O");
 
         foreach (var target in targets.Values.OrderBy(x => x.Id))
         {
@@ -3479,35 +4550,71 @@ WHERE source <> 'Epg'
             if (cmd.ExecuteNonQuery() != 1)
             {
                 tx.Rollback();
+                recordOutcome?.Invoke(new(false, "detach_cas_rejected", predecessorId, detachedSuccessors));
                 log.Add("CHAIN_STOP_POLICY", $"R{predecessorId}",
                     $"operation=ManualStop result=DETACH_CAS_REJECTED target=R{target.Id} expectedStatus={target.Status} expectedDataVersion={target.DataVersion} expectedPrevious={target.UserChainPreviousId} expectedRoot={target.UserChainRootId} action=keep_latest_chain_without_partial_detach rule=recording_lifecycle_cas_contract");
                 return false;
             }
         }
 
+        // The receipt describes this commit, not a later read that can already include
+        // another writer's changes. Keep it before observers so physical stop can continue
+        // after a notification failure without repeating a committed topology mutation.
+        var changedAfter = targets.Values.OrderBy(x => x.StartTime).ThenBy(x => x.Id).Select(before =>
+        {
+            var after = before.SnapshotForChainRequest();
+            var root = directRootByReservationId[before.Id];
+            var direct = directRootIds.Contains(before.Id);
+            var hasDownstream = targets.Values.Any(x => x.UserChainPreviousId == root);
+            after.IsUserChain = !direct || hasDownstream;
+            after.UserChainPreviousId = direct ? null : before.UserChainPreviousId;
+            after.UserChainRootId = direct && !hasDownstream ? null : root;
+            after.TunerName = string.Empty;
+            after.DataVersion++;
+            after.UpdatedAt = DateTime.Parse(nowText);
+            return after;
+        }).ToArray();
+
         tx.Commit();
+        detachedSuccessors = Array.AsReadOnly(changedAfter);
+        recordOutcome?.Invoke(new(true, directChildren.Count == 0 ? "no_scheduled_successor" : "detached",
+            predecessorId, detachedSuccessors)
+        { CancelledSiblings = Array.AsReadOnly(siblingChanges.Select(x => x.After.SnapshotForChainRequest()).ToArray()) });
 
-        var changedAfter = targets.Keys
-            .Select(GetById)
-            .Where(x => x is not null)
-            .Cast<Reservation>()
-            .OrderBy(x => x.StartTime)
-            .ThenBy(x => x.Id)
-            .ToList();
-
+        Exception? notificationFailure = null;
+        foreach (var change in siblingChanges)
+        {
+            try
+            {
+                mutationJournal.Record(ReservationMutationKind.Updated,
+                    change.Before.SnapshotForChainRequest(), change.After.SnapshotForChainRequest(),
+                    new Dictionary<string, string?> { ["source"] = "same_occurrence_manual_stop", ["terminalCas"] = "true" },
+                    nameof(Reservation.Status), nameof(Reservation.DataVersion));
+            }
+            catch (Exception ex) { notificationFailure ??= ex; }
+        }
+        if (expected is not null && predecessor?.Source != ReservationSource.Epg)
+            LogManualStoppedOccurrence(predecessor!, suppressUntil, "recording_stop");
         foreach (var before in targets.Values.OrderBy(x => x.StartTime).ThenBy(x => x.Id))
         {
-            var after = changedAfter.FirstOrDefault(x => x.Id == before.Id);
-            if (after is null) continue;
-            mutationJournal.Record(ReservationMutationKind.Updated, before, after,
-                nameof(Reservation.IsUserChain), nameof(Reservation.UserChainPreviousId), nameof(Reservation.UserChainRootId),
-                nameof(Reservation.TunerName), nameof(Reservation.DataVersion));
+            var after = changedAfter.First(x => x.Id == before.Id);
+            try
+            {
+                mutationJournal.Record(ReservationMutationKind.Updated, before.SnapshotForChainRequest(), after.SnapshotForChainRequest(),
+                    nameof(Reservation.IsUserChain), nameof(Reservation.UserChainPreviousId), nameof(Reservation.UserChainRootId),
+                    nameof(Reservation.TunerName), nameof(Reservation.DataVersion));
+            }
+            catch (Exception ex)
+            {
+                notificationFailure ??= ex;
+            }
         }
 
-        detachedSuccessors = changedAfter;
         var targetText = string.Join(",", changedAfter.Select(x => $"R{x.Id}:{TrimForAudit(x.ServiceName)}:{TrimTitleForAudit(x.Title)}:rawTitleBlank={RawTitleBlankForAudit(x.Title)}"));
         log.Add("CHAIN_STOP_POLICY", $"R{predecessorId}",
-            $"operation=ManualStop service={predecessorService} title={predecessorTitle} rawTitleBlank={predecessorRawTitleBlank} result=REBASE_SUCCESSOR_CHAIN cancelledSuccessors=0 changedReservations={changedAfter.Count} action=detach_only_predecessor_edge_and_preserve_downstream_chain targets=[{targetText}] actualTunerEvidencePreserved=True rule=recording_lifecycle_cas_contract");
+            $"operation=ManualStop service={predecessorService} title={predecessorTitle} rawTitleBlank={predecessorRawTitleBlank} result=REBASE_SUCCESSOR_CHAIN cancelledSuccessors=0 changedReservations={changedAfter.Length} action=detach_only_predecessor_edge_and_preserve_downstream_chain targets=[{targetText}] actualTunerEvidencePreserved=True rule=recording_lifecycle_cas_contract");
+        if (notificationFailure is not null)
+            throw new InvalidOperationException("Manual-stop topology committed, but notification delivery failed.", notificationFailure);
         return true;
     }
 
@@ -3521,6 +4628,134 @@ WHERE source <> 'Epg'
         IReadOnlyCollection<Reservation> snapshots,
         IReadOnlyDictionary<string, string?>? mutationMetadata,
         out IReadOnlyList<Reservation> cancelled)
+        => TryCancelReservationsAtomicCasCore(snapshots, mutationMetadata, out cancelled, null, null);
+
+    internal bool TryCancelReservationsAtomicCas(IReadOnlyCollection<Reservation> snapshots,
+        IReadOnlyDictionary<string, string?>? mutationMetadata, out IReadOnlyList<Reservation> cancelled,
+        int requestedId, Action<ReservationCancellationResult> recordCommitted,
+        bool automaticSingle = false, IReadOnlySet<int>? protectedIds = null,
+        Action<SqliteConnection,SqliteTransaction>? labDecision = null, IReadOnlySet<int>? labExpectedAffectedIds = null, string? labOperation = null)
+        => TryCancelReservationsAtomicCasCore(snapshots, mutationMetadata, out cancelled, requestedId, recordCommitted,
+            automaticSingle, protectedIds, labDecision, labExpectedAffectedIds, labOperation);
+
+    private bool TryPrepareAutomaticCancellationRepair(SqliteConnection con, SqliteTransaction tx,
+        int? requestedId, IReadOnlyList<Reservation> targets, IReadOnlySet<int>? protectedIds,
+        out IReadOnlyDictionary<int,Reservation>? repairInitial, out IReadOnlyList<Reservation> repaired,
+        bool persist = true)
+    {
+        repairInitial = null;
+        repaired = Array.Empty<Reservation>();
+            if (!requestedId.HasValue || targets.Count != 1 || protectedIds is null
+                || protectedIds.Contains(targets[0].Id)) return false;
+            var allRows = ReadTerminalDeletionRows(con, tx);
+            var active = allRows.Where(r => r.Status is ReservationStatus.Scheduled or ReservationStatus.Starting
+                or ReservationStatus.Recording or ReservationStatus.Stopping).ToArray();
+            var anchors = active.SelectMany(r => new[] { r.UserChainPreviousId, r.UserChainRootId })
+                .Where(id => id.HasValue).Select(id => id!.Value).ToHashSet();
+            var activeIds = active.Select(r => r.Id).ToHashSet();
+            var initial = allRows.Where(r => activeIds.Contains(r.Id) || anchors.Contains(r.Id)).ToDictionary(r => r.Id);
+            var removedIds = targets.Select(r => r.Id).ToHashSet();
+            var affected = ConnectedChainIds(initial, removedIds);
+            if (affected.Any(id => !initial.ContainsKey(id))) return false;
+            var working = new Dictionary<int, Reservation>(initial);
+            foreach (var id in removedIds) working.Remove(id);
+            if (SplitTopologyAfterScheduledRemoval(con, tx, initial, working, affected, removedIds,
+                preserveNonScheduled: true, persist: persist) is not null) return false;
+            repaired = ChangedTerminalDeletionRows(initial, working);
+            if (repaired.Any(r => protectedIds.Contains(r.Id) || r.Status != ReservationStatus.Scheduled
+                || HasOpenRecordingRuntime(r))) return false;
+            repairInitial = initial;
+        return true;
+    }
+
+    // Isolated Host planning seam. Reads the canonical DB; does not write candidate repairs.
+    public IReadOnlyList<Reservation>? LabPlanAutomaticWithdrawal(Reservation expected)
+    {
+        using var con = db.Open();
+        using var tx = con.BeginTransaction(System.Data.IsolationLevel.Serializable);
+        var plan = LabPlanAutomaticWithdrawalCore(con, tx, expected);
+        tx.Rollback();
+        return plan;
+    }
+    private IReadOnlyList<Reservation>? LabPlanAutomaticWithdrawalCore(SqliteConnection con, SqliteTransaction tx, Reservation expected)
+    {
+        var current = ReadTerminalDeletionRows(con, tx).SingleOrDefault(r => r.Id == expected.Id);
+        if (current is null || current.Status != ReservationStatus.Scheduled || current.DataVersion != expected.DataVersion
+            || current.StartTime != expected.StartTime || current.EndTime != expected.EndTime
+            || current.IsUserChain != expected.IsUserChain || current.UserChainPreviousId != expected.UserChainPreviousId
+            || current.UserChainRootId != expected.UserChainRootId || HasOpenRecordingRuntime(current)) return null;
+        if (!TryPrepareAutomaticCancellationRepair(con, tx, current.Id, new[] { current }, new HashSet<int>(),
+            out var before, out var after, persist: false)) return null;
+        var ids = after.Select(r => r.Id).Append(current.Id).Distinct().OrderBy(id => id);
+        var result = ids.Select(id => (id == current.Id ? current : before![id]).SnapshotForChainRequest()).ToArray();
+        return Array.AsReadOnly(result);
+    }
+
+    public LabCanonicalWithdrawalAccepted? LabRegisterCanonicalWithdrawal(Reservation expected,string operation,int owner,string session,string token,LabWithdrawalOwnerIdentity? ownerBinding=null)
+    {
+        if(owner<=0||string.IsNullOrWhiteSpace(session)||string.IsNullOrWhiteSpace(token))return null;
+        if(ownerBinding is not null && (!ownerBinding.IsValid||ownerBinding.OwnerReservationId!=owner))return null;
+        using var con=db.Open();
+        using var tx=con.BeginTransaction(System.Data.IsolationLevel.Serializable);
+        var accepted=LabRegisterCanonicalWithdrawalCore(con,tx,expected,operation,owner,session,token,ownerBinding);
+        if(accepted is null)return null;
+        tx.Commit();return accepted;
+    }
+    private LabCanonicalWithdrawalAccepted? LabRegisterCanonicalWithdrawalCore(SqliteConnection con,SqliteTransaction tx,
+        Reservation expected,string operation,int owner,string session,string token,LabWithdrawalOwnerIdentity? ownerBinding=null)
+    {
+        var plan=LabPlanAutomaticWithdrawalCore(con,tx,expected);
+        if(plan is null)return null;
+        var payload=System.Text.Json.JsonSerializer.Serialize(new{operation,selected=expected.Id,owner,session,token,snapshots=plan,ownerBinding});
+        if(!LabWithdrawalJournal.RegisterCore(con,tx,operation,expected.Id,payload,plan.Select(r=>r.Id)))return null;
+        return new LabCanonicalWithdrawalAccepted(payload,plan,OwnerBinding:ownerBinding);
+    }
+
+    // Same request identity reuses the durable result BEFORE looking at changed reservation state.
+    public LabCanonicalWithdrawalAccepted? LabAcceptOrReadCanonicalWithdrawal(Reservation expected,string operation,int owner,string session,string token,LabWithdrawalOwnerIdentity? ownerBinding=null)
+    {
+        if(expected.Id<=0||owner<=0||string.IsNullOrWhiteSpace(operation)||string.IsNullOrWhiteSpace(session)||string.IsNullOrWhiteSpace(token))return null;
+        if(ownerBinding is not null && (!ownerBinding.IsValid||ownerBinding.OwnerReservationId!=owner))return null;
+        using var con=db.Open();using var tx=con.BeginTransaction(System.Data.IsolationLevel.Serializable);
+        LabWithdrawalJournal.EnsureSchema(con,tx);
+        string? stored=null,state=null,targets=null;int selected=0;
+        using(var cmd=con.CreateCommand())
+        {
+            cmd.Transaction=tx;cmd.CommandText="SELECT selected,payload,targets,state FROM lab_withdrawal_operations WHERE operation=$op";cmd.Parameters.AddWithValue("$op",operation);
+            using var reader=cmd.ExecuteReader();if(reader.Read()){selected=reader.GetInt32(0);stored=reader.GetString(1);targets=reader.GetString(2);state=reader.GetString(3);}
+        }
+        if(stored is not null)
+        {
+            try
+            {
+                using var doc=System.Text.Json.JsonDocument.Parse(stored);var p=doc.RootElement;
+                if(selected!=expected.Id||p.GetProperty("operation").GetString()!=operation||p.GetProperty("selected").GetInt32()!=selected
+                    ||p.GetProperty("owner").GetInt32()!=owner||p.GetProperty("session").GetString()!=session||p.GetProperty("token").GetString()!=token
+                    ||state is not ("pending" or "committed" or "aborted"))return null;
+                LabWithdrawalOwnerIdentity? savedBinding=p.TryGetProperty("ownerBinding",out var savedOwner)&&savedOwner.ValueKind!=System.Text.Json.JsonValueKind.Null
+                    ?System.Text.Json.JsonSerializer.Deserialize<LabWithdrawalOwnerIdentity>(savedOwner.GetRawText()):null;
+                if((ownerBinding is null)!=(savedBinding is null)||ownerBinding is not null&&!ownerBinding.SameOwner(savedBinding))return null;
+                var snapshots=System.Text.Json.JsonSerializer.Deserialize<Reservation[]>(p.GetProperty("snapshots").GetRawText());
+                var ids=System.Text.Json.JsonSerializer.Deserialize<int[]>(targets!);
+                if(snapshots is null||ids is null||snapshots.Length==0||snapshots.Any(r=>r is null)||!snapshots.Any(r=>r.Id==selected)
+                    ||snapshots.Any(r=>r.Id<=0||r.Status!=ReservationStatus.Scheduled)
+                    ||snapshots.Select(r=>r.Id).Distinct().Count()!=snapshots.Length
+                    ||!snapshots.Select(r=>r.Id).OrderBy(id=>id).SequenceEqual(ids))return null;
+                tx.Commit();return new LabCanonicalWithdrawalAccepted(stored,Array.AsReadOnly(snapshots),state!,Reused:true,OwnerBinding:savedBinding);
+            }
+            catch(Exception ex) when(ex is System.Text.Json.JsonException or InvalidOperationException or KeyNotFoundException or FormatException){return null;}
+        }
+        var accepted=LabRegisterCanonicalWithdrawalCore(con,tx,expected,operation,owner,session,token,ownerBinding);
+        if(accepted is null)return null;
+        tx.Commit();return accepted;
+    }
+
+
+    private bool TryCancelReservationsAtomicCasCore(IReadOnlyCollection<Reservation> snapshots,
+        IReadOnlyDictionary<string, string?>? mutationMetadata, out IReadOnlyList<Reservation> cancelled,
+        int? requestedId, Action<ReservationCancellationResult>? recordCommitted,
+        bool automaticSingle = false, IReadOnlySet<int>? protectedIds = null,
+        Action<SqliteConnection, SqliteTransaction>? labBeforeCommit = null, IReadOnlySet<int>? labExpectedAffectedIds = null, string? labOperation = null)
     {
         cancelled = Array.Empty<Reservation>();
         var targets = snapshots
@@ -3538,7 +4773,22 @@ WHERE source <> 'Epg'
         }
 
         using var con = db.Open();
-        using var tx = con.BeginTransaction();
+        using var tx = con.BeginTransaction(System.Data.IsolationLevel.Serializable);
+        if (requestedId.HasValue)
+        {
+            var currentScope = GetUserChainCancelTargets(con, tx, requestedId.Value, automaticSingle).OrderBy(r => r.Id).ToArray();
+            if (currentScope.Length != targets.Count || currentScope.Where((r, i) =>
+                r.Id != targets[i].Id || r.DataVersion != targets[i].DataVersion || r.Status != targets[i].Status
+                || r.IsUserChain != targets[i].IsUserChain || r.UserChainPreviousId != targets[i].UserChainPreviousId
+                || r.UserChainRootId != targets[i].UserChainRootId || HasOpenRecordingRuntime(r)).Any()) return false;
+            targets = currentScope.ToList();
+        }
+        IReadOnlyDictionary<int, Reservation>? repairInitial = null;
+        IReadOnlyList<Reservation> repaired = Array.Empty<Reservation>();
+        if (automaticSingle && !TryPrepareAutomaticCancellationRepair(con, tx, requestedId, targets, protectedIds,
+            out repairInitial, out repaired)) return false;
+        if (labExpectedAffectedIds is not null && (!automaticSingle
+            || !labExpectedAffectedIds.SetEquals(targets.Select(r=>r.Id).Concat(repaired.Select(r=>r.Id))))) return false;
         var nowText = DateTime.Now.ToString("O");
 
         foreach (var target in targets)
@@ -3569,20 +4819,45 @@ WHERE source <> 'Epg'
             }
         }
 
-        tx.Commit();
-        var afterList = targets
-            .Select(x => GetById(x.Id))
-            .Where(x => x is not null)
-            .Cast<Reservation>()
-            .OrderBy(x => x.Id)
-            .ToList();
-
-        if (afterList.Count != targets.Count || afterList.Any(x => x.Status != ReservationStatus.Cancelled))
+        var childCount = 0;
+        if (requestedId.HasValue)
         {
-            log.Add("RESERVATION_CANCEL_BATCH_CAS", "Batch",
-                $"result=COMMITTED_WITH_READBACK_MISMATCH expected={targets.Count} actual={afterList.Count} rule=release_contract");
+            foreach (var target in targets.Where(r => r.Source == ReservationSource.Keyword && r.Status == ReservationStatus.Scheduled))
+                AddKeywordSuppression(con, tx, target, "reservation_cancel_once", emitLog: false);
+            childCount = CancelScheduledPreRecordEpgChildrenForParents(con, tx, targets.Select(r => r.Id));
         }
+        var afterList = targets.Select(r =>
+        {
+            var after = r.SnapshotForChainRequest();
+            after.Status = ReservationStatus.Cancelled;
+            after.IsConflicted = false;
+            after.DataVersion++;
+            after.UpdatedAt = DateTime.Parse(nowText, null, System.Globalization.DateTimeStyles.RoundtripKind);
+            return after;
+        }).ToList();
+        if(labOperation is not null){
+            if(!requestedId.HasValue)throw new InvalidOperationException("Missing durable result target.");
+            LabWithdrawalJournal.SaveOutcome(con,tx,labOperation,new(true,"applied",requestedId.Value,Array.AsReadOnly(afterList.ToArray()),
+                targets.Count>1||repaired.Count>0||targets.Any(r=>r.IsUserChain||r.UserChainPreviousId.HasValue||r.UserChainRootId.HasValue),childCount));
+        }
+        labBeforeCommit?.Invoke(con, tx); // Isolated combined lab only.
+        tx.Commit();
+        cancelled = afterList;
+        if (requestedId.HasValue)
+            recordCommitted?.Invoke(new(true, "applied", requestedId.Value, Array.AsReadOnly(afterList.ToArray()),
+                targets.Count > 1 || repaired.Count > 0 || targets.Any(r => r.IsUserChain || r.UserChainPreviousId.HasValue || r.UserChainRootId.HasValue), childCount));
 
+        Exception? notificationFailure = null;
+        foreach (var after in repaired)
+        {
+            try
+            {
+                mutationJournal.Record(ReservationMutationKind.Updated, repairInitial![after.Id].SnapshotForChainRequest(),
+                    after.SnapshotForChainRequest(), mutationMetadata, nameof(Reservation.IsUserChain),
+                    nameof(Reservation.UserChainPreviousId), nameof(Reservation.UserChainRootId), nameof(Reservation.DataVersion));
+            }
+            catch (Exception ex) { notificationFailure ??= ex; }
+        }
         foreach (var before in targets)
         {
             var after = afterList.FirstOrDefault(x => x.Id == before.Id);
@@ -3594,19 +4869,23 @@ WHERE source <> 'Epg'
                 nameof(Reservation.Status),
                 nameof(Reservation.IsConflicted),
                 nameof(Reservation.DataVersion));
-            mutationJournal.Record(
-                ReservationMutationKind.Updated,
-                before,
-                after,
-                mutationMetadata,
-                nameof(Reservation.Status),
-                nameof(Reservation.IsConflicted),
-                nameof(Reservation.DataVersion));
+            try
+            {
+                mutationJournal.Record(ReservationMutationKind.Updated, before, after, mutationMetadata,
+                    nameof(Reservation.Status), nameof(Reservation.IsConflicted), nameof(Reservation.DataVersion));
+            }
+            catch (Exception ex)
+            {
+                if (!automaticSingle) throw;
+                notificationFailure ??= ex;
+            }
         }
 
         cancelled = afterList;
         log.Add("RESERVATION_CANCEL_BATCH_CAS", "Batch",
             $"result=APPLIED count={afterList.Count} targets=[{string.Join(",", afterList.Select(x => $"R{x.Id}:v{x.DataVersion}"))}] rule=release_contract");
+        if (notificationFailure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(notificationFailure).Throw();
         return true;
     }
 
@@ -3909,6 +5188,11 @@ WHERE source <> 'Epg'
         int id,
         long expectedDataVersion,
         DateTime finishedAt)
+        => TryFinalizePastEndedRecordingAsCompleted(id, expectedDataVersion, finishedAt, null);
+
+    internal ReservationLifecycleTransitionResult TryFinalizePastEndedRecordingAsCompleted(
+        int id, long expectedDataVersion, DateTime finishedAt,
+        Action<ReservationLifecycleTransitionResult>? recordCommitted)
     {
         // INTERRUPTED_RECOVERY_COMPLETED_FINALIZE_ATOMIC_CAS_INVARIANT:
         // 終了実績の記録とCompleted遷移を別UPDATEに分けない。
@@ -3986,14 +5270,22 @@ WHERE source <> 'Epg'
             }
         }
 
+        var after = before.SnapshotForChainRequest();
+        after.Status = ReservationStatus.Completed;
+        after.IsConflicted = false;
+        after.RecordingFinishedAt = finishedAt;
+        after.DataVersion++;
+        after.UpdatedAt = now;
+        var outcome = new ReservationLifecycleTransitionResult(true, "applied", id,
+            ReservationStatus.Recording, ReservationStatus.Completed, expectedDataVersion, after.DataVersion, after);
         tx.Commit();
-        var after = GetByIdPersisted(id);
+        recordCommitted?.Invoke(outcome with { Reservation = after.SnapshotForChainRequest() });
         log.Add("RESERVATION_LIFECYCLE_CAS", $"R{id}",
-            $"result=APPLIED from=Recording to=Completed dataVersion={expectedDataVersion}->{after?.DataVersion ?? expectedDataVersion + 1} finishedAt={finishedAt:O} source=StartupPastEndedEvidence atomicFinishEvidence=True rule=release_contract");
-        mutationJournal.Record(ReservationMutationKind.RecordingCompleted, before, after,
+            $"result=APPLIED from=Recording to=Completed dataVersion={expectedDataVersion}->{after.DataVersion} finishedAt={finishedAt:O} source=StartupPastEndedEvidence atomicFinishEvidence=True rule=release_contract");
+        mutationJournal.Record(ReservationMutationKind.RecordingCompleted, before.SnapshotForChainRequest(), after.SnapshotForChainRequest(),
             nameof(Reservation.Status), nameof(Reservation.IsConflicted),
             nameof(Reservation.RecordingFinishedAt), nameof(Reservation.DataVersion));
-        return new(true, "applied", id, ReservationStatus.Recording, after?.Status ?? ReservationStatus.Completed, expectedDataVersion, after?.DataVersion ?? expectedDataVersion + 1, after);
+        return outcome;
     }
 
     /// <summary>
@@ -4321,24 +5613,6 @@ WHERE source <> 'Epg'
             parents);
     }
 
-    /// <summary>
-    /// 完了・失敗・キャンセルから7日以上経過した予約レコードを削除する。
-    /// 起動時に1回実行することを想定。
-    /// </summary>
-    public int PurgeOldLogEntries()
-    {
-        var cutoff = DateTime.Now.AddDays(-7).ToString("O");
-        using var con = db.Open();
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = $"""
-            DELETE FROM reservations
-            WHERE status IN ('completed', 'failed', 'cancelled')
-              AND updated_at <> '' AND updated_at < $cutoff;
-            """;
-        cmd.Parameters.AddWithValue("$cutoff", cutoff);
-        return cmd.ExecuteNonQuery();
-    }
-
     private static bool IsExactContinuousPair(Reservation predecessor, Reservation successor)
     {
         // CHAIN_ELIGIBILITY_SINGLE_SOURCE_INVARIANT: 新規チェーン成立条件は
@@ -4353,7 +5627,17 @@ WHERE source <> 'Epg'
     /// TunerはFinalConflictPlanまたはactive ActualTuner/leaseの別正本であり、このtopology読取条件には含めない。
     /// key=後続ID, value=前番組ID
     /// </summary>
-    public Dictionary<int, int> GetChainPredecessors()
+    public Dictionary<int, int> GetChainPredecessors() => GetChainPredecessors(includeTerminal: false);
+
+    public Dictionary<int, int> GetChainPredecessors(bool includeTerminal)
+        => ReadChainPredecessors(includeTerminal, includeDisabled: false);
+
+    // Display membership follows persisted links, including disabled reservations.
+    // Runtime callers retain their enabled-successor filter through GetChainPredecessors.
+    public Dictionary<int, int> GetChainPredecessorsForPresentation()
+        => ReadChainPredecessors(includeTerminal: true, includeDisabled: true);
+
+    private Dictionary<int, int> ReadChainPredecessors(bool includeTerminal, bool includeDisabled)
     {
         // CHAIN_TOPOLOGY_SINGLE_SOURCE_INVARIANT:
         // チェーン構造は、チェーンボタンで保存された
@@ -4380,13 +5664,19 @@ WHERE source <> 'Epg'
                     ON predecessor.id = successor.user_chain_previous_id
                    AND predecessor.source <> 'epg'
             WHERE successor.source <> 'epg'
-              AND successor.is_enabled = 1
+              AND ($includeDisabled = 1 OR successor.is_enabled = 1)
               AND successor.is_user_chain = 1
               AND successor.user_chain_previous_id IS NOT NULL
-              AND successor.status NOT IN ('completed','cancelled','failed')
+              AND successor.status <> 'cancelled'
+              AND ($includeTerminal = 1 OR successor.status NOT IN ('completed','failed'))
+              AND ($includeTerminal = 0 OR predecessor.status <> 'cancelled')
             ORDER BY successor.start_time;
             """;
 
+        // Presentation can include completed history through this same persisted-link reader.
+        // The runtime default retains its original active-successor scope.
+        cmd.Parameters.AddWithValue("$includeTerminal", includeTerminal ? 1 : 0);
+        cmd.Parameters.AddWithValue("$includeDisabled", includeDisabled ? 1 : 0);
         using var reader = cmd.ExecuteReader();
         var result = new Dictionary<int, int>();
         while (reader.Read())
@@ -5189,7 +6479,7 @@ WHERE source <> 'Epg'
 
         // release_contract: 空欄ProgramRuleと同一局・同一時刻の正規イベント予約が存在する場合のみ、空欄側を自動削除する。
         // UI説明は増やさない。削除判定と実処理は共通割り当てルート内に閉じる。
-        AutoDeleteResolvedProgramGuideMissingDuplicates(allScheduled, scheduled);
+        // Resolved blank-slot cleanup runs in the common core before allocation, under scheduler admission.
 
         // 録画中の前番組もチェーン継続元として扱う。
         // ここを scheduled だけで見ると、前番組が Recording に移行した瞬間に
@@ -6799,7 +8089,7 @@ WHERE source <> 'Epg'
         }
 
         // 空欄枠から作成されたプログラム予約のうち、完全一致の正規イベント予約が存在するものは
-        // 事前のAutoDeleteResolvedProgramGuideMissingDuplicatesで削除済み。
+        // 共通coreの空白予約重複整理で削除する。
         // ここでは、時刻差・非削除条件などで残った空欄Programだけを競合へ落とす。
         // UI説明は追加せず、競合ラベルの色分けに必要な内部状態だけを維持する。
         var activeForDuplicate = scheduled
@@ -7401,11 +8691,19 @@ WHERE source <> 'Epg'
     /// </summary>
     public void AddManualStoppedOccurrence(Reservation r, DateTime expiresAt, string reason)
     {
+        if (r.Source == ReservationSource.Epg) return;
+        using var con = db.Open();
+        AddManualStoppedOccurrence(con, null, r, expiresAt, reason, true);
+    }
+
+    private void AddManualStoppedOccurrence(SqliteConnection con, SqliteTransaction? tx,
+        Reservation r, DateTime expiresAt, string reason, bool emitLog)
+    {
         if (r.Source == ReservationSource.Epg)
             return;
 
-        using var con = db.Open();
         using var cmd = con.CreateCommand();
+        cmd.Transaction = tx;
         cmd.CommandText = """
             INSERT OR REPLACE INTO manual_stopped_occurrences
               (network_id, transport_stream_id, service_id, event_id, start_time, end_time, title_hash,
@@ -7428,6 +8726,11 @@ WHERE source <> 'Epg'
         cmd.Parameters.AddWithValue("$created", DateTime.Now.ToString("O"));
         cmd.ExecuteNonQuery();
 
+        if (emitLog) LogManualStoppedOccurrence(r, expiresAt, reason);
+    }
+
+    private void LogManualStoppedOccurrence(Reservation r, DateTime expiresAt, string reason)
+    {
         log.Add("MANUAL_STOP_OCCURRENCE", $"R{r.Id}",
             $"result=REGISTER reason={reason} service={TrimForAudit(r.ServiceName)} title={TrimTitleForAudit(r.Title)} rawTitleBlank={RawTitleBlankForAudit(r.Title)} source={r.Source} ruleId={(r.SourceRuleId?.ToString() ?? "-")} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eventId={r.EventId} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} expires={expiresAt:MM/dd HH:mm:ss} scope=automatic_sources_only explicitSources=Manual,Immediate,KeywordSearch rule=release_contract");
     }
@@ -7538,7 +8841,15 @@ WHERE source <> 'Epg'
             return;
 
         using var con = db.Open();
+        AddKeywordSuppression(con, null, r, reason, emitLog);
+    }
+
+    private void AddKeywordSuppression(SqliteConnection con, SqliteTransaction? tx,
+        Reservation r, string reason, bool emitLog)
+    {
+        if (r.Source != ReservationSource.Keyword || !r.SourceRuleId.HasValue) return;
         using var cmd = con.CreateCommand();
+        cmd.Transaction = tx;
         cmd.CommandText = """
             INSERT OR IGNORE INTO keyword_cancel_once
               (rule_id, network_id, transport_stream_id, service_id,
@@ -7635,7 +8946,14 @@ WHERE source <> 'Epg'
     public int SyncScheduledKeywordReservationRecordingOptions(int ruleId, ReservationRecordingOptions options)
     {
         using var con = db.Open();
+        return SyncScheduledKeywordReservationRecordingOptions(con, null, ruleId, options);
+    }
+
+    private int SyncScheduledKeywordReservationRecordingOptions(SqliteConnection con, SqliteTransaction? tx,
+        int ruleId, ReservationRecordingOptions options)
+    {
         using var cmd = con.CreateCommand();
+        cmd.Transaction = tx;
         cmd.CommandText = """
             INSERT INTO reservation_recording_options
                 (reservation_id, current_service_only, save_subtitles, created_at)
@@ -7664,7 +8982,9 @@ WHERE source <> 'Epg'
     public int SyncScheduledKeywordReservationRecordingOptionsFromRules()
     {
         using var con = db.Open();
+        using var tx = con.BeginTransaction();
         using var cmd = con.CreateCommand();
+        cmd.Transaction = tx;
         cmd.CommandText = """
             INSERT INTO reservation_recording_options
                 (reservation_id, current_service_only, save_subtitles, created_at)
@@ -7680,20 +9000,51 @@ WHERE source <> 'Epg'
                OR reservation_recording_options.save_subtitles <> excluded.save_subtitles;
             """;
         cmd.Parameters.AddWithValue("$now", DateTime.Now.ToString("O"));
-        return cmd.ExecuteNonQuery();
+        var options = cmd.ExecuteNonQuery();
+        var bindings = KeywordReservationBindingProjection.SynchronizeScheduled(con, tx).Count;
+        tx.Commit();
+        return options + bindings;
     }
 
     // ─── キーワードルール CRUD ────────────────────────────────────
 
-    public IReadOnlyList<KeywordRule> GetKeywordRules()
+    /// <summary>Read the saved binding. Only unstarted rule-owned reservations follow rule edits.</summary>
+    public IReadOnlyList<TvAirPluginSelectionBindingDto> GetReservationPluginBindings(int reservationId)
     {
         using var con = db.Open();
         using var cmd = con.CreateCommand();
+        cmd.CommandText = "SELECT plugin_binding_json FROM reservations WHERE id=$id";
+        cmd.Parameters.AddWithValue("$id", reservationId);
+        return DecodePluginBindings(cmd.ExecuteScalar() as string);
+    }
+
+    internal static IReadOnlyList<TvAirPluginSelectionBindingDto> DecodePluginBindings(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return Array.Empty<TvAirPluginSelectionBindingDto>();
+        try
+        {
+            return System.Text.Json.JsonSerializer.Deserialize<TvAirPluginSelectionBindingDto[]>(json,
+                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                ?? Array.Empty<TvAirPluginSelectionBindingDto>();
+        }
+        catch (System.Text.Json.JsonException) { return Array.Empty<TvAirPluginSelectionBindingDto>(); }
+    }
+
+    public IReadOnlyList<KeywordRule> GetKeywordRules()
+    {
+        using var con = db.Open();
+        return GetKeywordRules(con, null);
+    }
+
+    private IReadOnlyList<KeywordRule> GetKeywordRules(SqliteConnection con, SqliteTransaction? tx)
+    {
+        using var cmd = con.CreateCommand();
+        cmd.Transaction = tx;
         cmd.CommandText = """
             SELECT id, name, pattern, exclude_pattern, use_regex,
                    search_title, search_outline, search_detail, search_cast,
                    use_all_channels, target_services, target_genres, target_days, use_time_range, start_time, end_time, sort_order,
-                   expires_on, record_current_service_only, record_subtitles, auto_chain_reservations, enabled, created_at, updated_at
+                   expires_on, record_current_service_only, record_subtitles, auto_chain_reservations, enabled, created_at, updated_at, plugin_binding_json
             FROM keyword_rules ORDER BY sort_order, id;
             """;
         return ReadKeywordRules(cmd);
@@ -7709,13 +9060,13 @@ WHERE source <> 'Epg'
               (name, pattern, exclude_pattern, use_regex,
                search_title, search_outline, search_detail, search_cast,
                use_all_channels, target_services, target_genres, target_days, use_time_range, start_time, end_time, sort_order,
-               expires_on, record_current_service_only, record_subtitles, auto_chain_reservations, enabled, created_at, updated_at)
+               expires_on, record_current_service_only, record_subtitles, auto_chain_reservations, enabled, created_at, updated_at, plugin_binding_json)
             VALUES
               ($name, $pat, $exc, $regex,
                $stitle, $soutline, $sdetail, $scast,
                $useAllChannels, $svc, $genres, $days, $useTime, $startTime, $endTime,
                COALESCE((SELECT MAX(sort_order) + 1 FROM keyword_rules), 1),
-               $exp, $recordCurrentServiceOnly, $recordSubtitles, $autoChainReservations, $en, $now, $now);
+               $exp, $recordCurrentServiceOnly, $recordSubtitles, $autoChainReservations, $en, $now, $now, $binding);
             SELECT last_insert_rowid();
             """;
         BindKeywordRule(cmd, r, now);
@@ -7726,7 +9077,16 @@ WHERE source <> 'Epg'
     {
         var now = DateTime.Now.ToString("O");
         using var con = db.Open();
+        using var tx = con.BeginTransaction();
+        UpdateKeywordRule(con, tx, r, now);
+        KeywordReservationBindingProjection.SynchronizeScheduled(con, tx, r.Id);
+        tx.Commit();
+    }
+
+    private int UpdateKeywordRule(SqliteConnection con, SqliteTransaction? tx, KeywordRule r, string now)
+    {
         using var cmd = con.CreateCommand();
+        cmd.Transaction = tx;
         cmd.CommandText = $"""
             UPDATE keyword_rules SET
               name=$name, pattern=$pat, exclude_pattern=$exc, use_regex=$regex,
@@ -7736,12 +9096,404 @@ WHERE source <> 'Epg'
               target_services=$svc, target_genres=$genres, target_days=$days,
               use_time_range=$useTime, start_time=$startTime, end_time=$endTime,
               expires_on=$exp, record_current_service_only=$recordCurrentServiceOnly, record_subtitles=$recordSubtitles,
-              auto_chain_reservations=$autoChainReservations, enabled=$en, updated_at=$now
+              auto_chain_reservations=$autoChainReservations, enabled=$en, updated_at=$now, plugin_binding_json=$binding
             WHERE id=$id;
             """;
         BindKeywordRule(cmd, r, now);
         cmd.Parameters.AddWithValue("$id", r.Id);
-        cmd.ExecuteNonQuery();
+        return cmd.ExecuteNonQuery();
+    }
+
+    // Scheduled deletion splits future chains at the removed interval. It must never use
+    // terminal-history repair, which may bridge over a removed historical row.
+    internal KeywordRuleMutationResult DeleteKeywordRuleAtomic(int ruleId, IReadOnlySet<int> protectedIds,
+        Action<KeywordRuleMutationResult> recordCommitted)
+        => MutateKeywordRuleAtomic(ruleId, protectedIds, recordCommitted, null, null);
+
+    internal KeywordRuleMutationResult UpdateKeywordRuleAtomic(KeywordRule rule, KeywordRuleReconcilePlan plan,
+        IReadOnlySet<int> protectedIds, Action<KeywordRuleMutationResult> recordCommitted)
+        => MutateKeywordRuleAtomic(rule.Id, protectedIds, recordCommitted, rule, plan);
+
+    private sealed record KeywordRuleMutation(KeywordRule? Replacement, KeywordRuleReconcilePlan? Plan, bool KeepRule = false);
+
+    private KeywordRuleMutationResult MutateKeywordRuleAtomic(int ruleId, IReadOnlySet<int> protectedIds,
+        Action<KeywordRuleMutationResult> recordCommitted, KeywordRule? replacement, KeywordRuleReconcilePlan? plan)
+        => MutateKeywordRulesAtomic(new Dictionary<int, KeywordRuleMutation> { [ruleId] = new(replacement, plan) },
+            protectedIds, recordCommitted);
+
+    internal KeywordRuleMutationResult ImportKeywordRulesAtomic(IReadOnlyList<KeywordRule> imported,
+        IReadOnlyList<KeywordRule> expectedRules, IReadOnlyDictionary<int, KeywordRuleReconcilePlan> plans,
+        IReadOnlySet<int> protectedIds, Action<KeywordRuleMutationResult> recordCommitted)
+    {
+        if (imported.Any(r => r.Id <= 0) || imported.Select(r => r.Id).Distinct().Count() != imported.Count
+            || plans.Count != imported.Count || imported.Any(r => !plans.ContainsKey(r.Id)))
+            return new(false, "invalid_import_plan", 0, 0, Array.Empty<int>());
+        var operations = imported.ToDictionary(r => r.Id, r => new KeywordRuleMutation(r, plans[r.Id]));
+        foreach (var old in expectedRules.Where(r => !operations.ContainsKey(r.Id))) operations[old.Id] = new(null, null);
+        return MutateKeywordRulesAtomic(operations, protectedIds, recordCommitted, imported, expectedRules);
+    }
+
+    internal KeywordRuleMutationResult DeleteExpiredKeywordRulesAtomic(DateOnly today,
+        IReadOnlySet<int> protectedIds, Action<KeywordRuleMutationResult> recordCommitted)
+        => MutateKeywordRulesAtomic(new Dictionary<int, KeywordRuleMutation>(), protectedIds, recordCommitted,
+            expiredBefore: today.ToString("yyyy-MM-dd"));
+
+    internal KeywordRuleMutationResult DeleteInactiveKeywordReservationsAtomic(ChannelServiceAccessSnapshot channels,
+        IReadOnlyList<TunerProfileDto> tuners, IReadOnlySet<int> protectedIds, Action<KeywordRuleMutationResult> recordCommitted)
+        => MutateKeywordRulesAtomic(new Dictionary<int, KeywordRuleMutation>(), protectedIds, recordCommitted,
+            inactiveChannels: channels, inactiveTuners: tuners);
+
+    // Storage composition only. The allocation route must own runtime admission and
+    // the capture lane before calling this; this method does not allocate or queue.
+    internal EpgReservationCommitResult CommitEpgCaptureAtomic(EpgStore epg,
+        IEnumerable<EpgEvent> upsertEvents, IEnumerable<EpgEvent>? retireEvents,
+        IEnumerable<EpgEvent>? preserveEvents, IReadOnlySet<int> protectedIds,
+        Action<EpgReservationCommitResult> recordCommitted, IReadOnlyList<EpgEvent>? otherSupplementCandidates = null)
+    {
+        if (!epg.UsesDatabase(db)) throw new InvalidOperationException("EPG and reservations must share the database owner.");
+        using var con = db.Open();
+        using var tx = con.BeginTransaction(System.Data.IsolationLevel.Serializable);
+        var capture = EpgStore.PrepareCapture(con, tx, upsertEvents, retireEvents, preserveEvents, otherSupplementCandidates);
+        var prepared = PrepareKeywordMutation(con, tx, new Dictionary<int, KeywordRuleMutation>(), protectedIds,
+            retiredEvents: capture.StaleRetire.RetiredEvents);
+        if (!prepared.Result.Applied)
+            return new(false, prepared.Result.Reason, null, Array.Empty<int>());
+        var result = new EpgReservationCommitResult(true, "applied", capture, prepared.Result.RemovedIds);
+        tx.Commit();
+        epg.PublishCapture(capture);
+        recordCommitted(result);
+        PublishKeywordMutation(prepared);
+        return result;
+    }
+
+    private sealed record PreparedKeywordMutation(KeywordRuleMutationResult Result,
+        IReadOnlyDictionary<int, Reservation>? Initial = null,
+        IReadOnlyDictionary<int, Reservation>? Working = null,
+        IReadOnlyDictionary<string, string?>? Metadata = null);
+
+    private KeywordRuleMutationResult MutateKeywordRulesAtomic(IReadOnlyDictionary<int, KeywordRuleMutation> operations,
+        IReadOnlySet<int> protectedIds, Action<KeywordRuleMutationResult> recordCommitted,
+        IReadOnlyList<KeywordRule>? imported = null, IReadOnlyList<KeywordRule>? expectedRules = null,
+        string? expiredBefore = null, ChannelServiceAccessSnapshot? inactiveChannels = null,
+        IReadOnlyList<TunerProfileDto>? inactiveTuners = null)
+    {
+        using var con = db.Open();
+        using var tx = con.BeginTransaction(System.Data.IsolationLevel.Serializable);
+        var prepared = PrepareKeywordMutation(con, tx, operations, protectedIds,
+            imported, expectedRules, expiredBefore, inactiveChannels, inactiveTuners);
+        if (!prepared.Result.Applied) return prepared.Result;
+        tx.Commit();
+        recordCommitted(prepared.Result);
+        PublishKeywordMutation(prepared);
+        return prepared.Result;
+    }
+
+    // SQL only: the transaction owner must roll back a rejected preparation too.
+    // No receipt, journal notification or projection publication may run before commit.
+    private static HashSet<int> ConnectedChainIds(IReadOnlyDictionary<int,Reservation> initial,IEnumerable<int> seeds)
+    {
+            var connected = seeds.ToHashSet();
+            bool added;
+            do
+            {
+                added = false;
+                foreach (var row in initial.Values)
+                {
+                    if (!connected.Contains(row.Id)
+                        && !(row.UserChainPreviousId is int p && connected.Contains(p))
+                        && !(row.UserChainRootId is int r && connected.Contains(r))) continue;
+                    added |= connected.Add(row.Id);
+                    if (row.UserChainPreviousId is int previous) added |= connected.Add(previous);
+                    if (row.UserChainRootId is int root) added |= connected.Add(root);
+                }
+            } while (added);
+            return connected;
+    }
+
+    private static string? SplitTopologyAfterScheduledRemoval(SqliteConnection con,SqliteTransaction tx,
+        IReadOnlyDictionary<int,Reservation> initial,Dictionary<int,Reservation> working,
+        HashSet<int> affected,HashSet<int> targets,bool preserveNonScheduled = false,bool persist = true)
+    {
+        var survivors = affected.Except(targets).Select(id => initial[id]).ToArray();
+        var next = survivors.Where(r => r.UserChainPreviousId is int p && working.ContainsKey(p))
+            .GroupBy(r => r.UserChainPreviousId!.Value).ToDictionary(g => g.Key, g => g.ToArray());
+        if (next.Values.Any(rows => rows.Length != 1)) return "chain_branch_ambiguous";
+        var visited = new HashSet<int>();
+        foreach (var head in survivors.Where(r => r.UserChainPreviousId is not int p || !working.ContainsKey(p)))
+        {
+            var segment = new List<Reservation>(); var current = head;
+            while (true)
+            {
+                if (!visited.Add(current.Id)) return "chain_cycle";
+                segment.Add(current);
+                if (!next.TryGetValue(current.Id, out var tail)) break;
+                current = tail[0];
+            }
+            foreach (var row in segment)
+            {
+                if (preserveNonScheduled && row.Status != ReservationStatus.Scheduled) continue;
+                var isChain = segment.Count > 1;
+                var prev = row.Id == head.Id ? (int?)null : row.UserChainPreviousId;
+                var root = isChain ? (int?)head.Id : null;
+                // An existing prefix root may be an ordinary reservation. Preserve that
+                // established representation; only a newly detached suffix needs rebasing.
+                if (isChain && row.Id == head.Id && head.UserChainPreviousId is null)
+                {
+                    isChain = head.IsUserChain;
+                    root = head.UserChainRootId;
+                }
+                if (row.IsUserChain == isChain && row.UserChainPreviousId == prev && row.UserChainRootId == root) continue;
+                var after = row.SnapshotForChainRequest();
+                after.IsUserChain = isChain; after.UserChainPreviousId = prev; after.UserChainRootId = root;
+                after.DataVersion++; after.UpdatedAt = DateTime.Now;
+                if (persist)
+                {
+                    using var update = con.CreateCommand(); update.Transaction = tx;
+                    update.CommandText = """
+                        UPDATE reservations SET is_user_chain=$chain,user_chain_previous_id=$prev,user_chain_root_id=$root,
+                            data_version=data_version+1,updated_at=$now
+                        WHERE id=$id AND status=$status AND data_version=$version
+                          AND is_user_chain=$oldChain AND user_chain_previous_id IS $oldPrev AND user_chain_root_id IS $oldRoot
+                        """;
+                    update.Parameters.AddWithValue("$chain", isChain ? 1 : 0);
+                    update.Parameters.AddWithValue("$prev", (object?)prev ?? DBNull.Value);
+                    update.Parameters.AddWithValue("$root", (object?)root ?? DBNull.Value);
+                    update.Parameters.AddWithValue("$now", after.UpdatedAt.ToString("O"));
+                    update.Parameters.AddWithValue("$id", row.Id);
+                    update.Parameters.AddWithValue("$status", row.Status.ToString().ToLowerInvariant());
+                    update.Parameters.AddWithValue("$version", row.DataVersion);
+                    update.Parameters.AddWithValue("$oldChain", row.IsUserChain ? 1 : 0);
+                    update.Parameters.AddWithValue("$oldPrev", (object?)row.UserChainPreviousId ?? DBNull.Value);
+                    update.Parameters.AddWithValue("$oldRoot", (object?)row.UserChainRootId ?? DBNull.Value);
+                    if (update.ExecuteNonQuery() != 1) return "chain_cas_rejected";
+                }
+                working[row.Id] = after;
+            }
+        }
+        if (visited.Count != survivors.Length) return "chain_cycle";
+        return null;
+    }
+
+    private PreparedKeywordMutation PrepareKeywordMutation(SqliteConnection con, SqliteTransaction tx,
+        IReadOnlyDictionary<int, KeywordRuleMutation> operations, IReadOnlySet<int> protectedIds,
+        IReadOnlyList<KeywordRule>? imported = null, IReadOnlyList<KeywordRule>? expectedRules = null,
+        string? expiredBefore = null, ChannelServiceAccessSnapshot? inactiveChannels = null,
+        IReadOnlyList<TunerProfileDto>? inactiveTuners = null,
+        IReadOnlyList<EpgRetiredEventIdentity>? retiredEvents = null)
+    {
+        if (!ReferenceEquals(tx.Connection, con)) throw new ArgumentException("Transaction connection mismatch.", nameof(tx));
+        int RuleCount()
+        {
+            using var count = con.CreateCommand(); count.Transaction = tx;
+            count.CommandText = "SELECT COUNT(*) FROM keyword_rules";
+            return Convert.ToInt32(count.ExecuteScalar());
+        }
+        var beforeCount = RuleCount();
+        var initial = ReadTerminalDeletionRows(con, tx).ToDictionary(r => r.Id);
+        HashSet<int> Connected(IEnumerable<int> seeds)=>ConnectedChainIds(initial,seeds);
+        var protectedRuleCount = 0;
+        if (expiredBefore is not null)
+        {
+            using var expired = con.CreateCommand(); expired.Transaction = tx;
+            expired.CommandText = "SELECT id FROM keyword_rules WHERE expires_on <> '' AND expires_on < $today";
+            expired.Parameters.AddWithValue("$today", expiredBefore);
+            var expiredIds = new List<int>();
+            using (var reader = expired.ExecuteReader()) while (reader.Read()) expiredIds.Add(reader.GetInt32(0));
+            var runtimeProtected = protectedIds.Concat(initial.Values
+                .Where(r => r.Status is ReservationStatus.Starting or ReservationStatus.Recording || HasOpenRecordingRuntime(r))
+                .Select(r => r.Id)).ToHashSet();
+            foreach (var child in initial.Values.Where(r => r.Source == ReservationSource.Epg
+                && r.Intent == ReservationIntent.SystemPreRecordEpg && r.SourceRuleId.HasValue
+                && runtimeProtected.Contains(r.Id))) runtimeProtected.Add(child.SourceRuleId!.Value);
+            var blocked = Connected(runtimeProtected);
+            var retainedRules = initial.Values.Where(r => r.Source == ReservationSource.Keyword
+                && r.Status == ReservationStatus.Scheduled && r.SourceRuleId.HasValue && blocked.Contains(r.Id))
+                .Select(r => r.SourceRuleId!.Value).ToHashSet();
+            protectedRuleCount = expiredIds.Count(retainedRules.Contains);
+            operations = expiredIds.Where(id => !retainedRules.Contains(id))
+                .ToDictionary(id => id, _ => new KeywordRuleMutation(null, null));
+        }
+        var inactiveProtectedCount = 0;
+        if (inactiveChannels is not null)
+        {
+            var tuners = inactiveTuners ?? throw new InvalidOperationException("Inactive cleanup has no tuner snapshot.");
+            var candidates = initial.Values.Where(r => r.Source == ReservationSource.Keyword
+                && r.Status == ReservationStatus.Scheduled && r.SourceRuleId.HasValue
+                && !inactiveChannels.IsEnabledForConfiguredRecordingTuners(r.NetworkId, r.TransportStreamId, r.ServiceId, tuners)).ToArray();
+            var runtimeProtected = protectedIds.Concat(initial.Values
+                .Where(r => r.Status is ReservationStatus.Starting or ReservationStatus.Recording || HasOpenRecordingRuntime(r))
+                .Select(r => r.Id)).ToHashSet();
+            foreach (var child in initial.Values.Where(r => r.Source == ReservationSource.Epg
+                && r.Intent == ReservationIntent.SystemPreRecordEpg && r.SourceRuleId.HasValue
+                && runtimeProtected.Contains(r.Id))) runtimeProtected.Add(child.SourceRuleId!.Value);
+            var blocked = Connected(runtimeProtected);
+            inactiveProtectedCount = candidates.Count(r => blocked.Contains(r.Id));
+            operations = candidates.Where(r => !blocked.Contains(r.Id)).GroupBy(r => r.SourceRuleId!.Value)
+                .ToDictionary(group => group.Key, group => new KeywordRuleMutation(null,
+                    new KeywordRuleReconcilePlan(Array.AsReadOnly(initial.Values.Where(r => r.Source == ReservationSource.Keyword
+                        && r.Status == ReservationStatus.Scheduled && r.SourceRuleId == group.Key)
+                        .Select(r => r.SnapshotForChainRequest()).ToArray()),
+                        Array.AsReadOnly(group.Select(r => r.Id).ToArray()), 0, 0, string.Empty), KeepRule: true));
+        }
+        if (retiredEvents is not null)
+        {
+            // A running PreRec protects its parent even when that parent survives
+            // the retirement but belongs to the same chain as a removed segment.
+            protectedIds = protectedIds.Concat(initial.Values.Where(r => r.Source == ReservationSource.Epg
+                && r.Intent == ReservationIntent.SystemPreRecordEpg && r.SourceRuleId.HasValue
+                && (protectedIds.Contains(r.Id) || r.Status is ReservationStatus.Starting or ReservationStatus.Recording
+                    || HasOpenRecordingRuntime(r))).Select(r => r.SourceRuleId!.Value)).ToHashSet();
+            var retired = retiredEvents.Select(e => (e.NetworkId, e.TransportStreamId, e.ServiceId,
+                e.EventId, e.Start, e.End)).ToHashSet();
+            var candidates = initial.Values.Where(r => r.Source == ReservationSource.Keyword
+                && r.Status == ReservationStatus.Scheduled && r.SourceRuleId.HasValue
+                && retired.Contains((r.NetworkId, r.TransportStreamId, r.ServiceId,
+                    r.EventId, r.StartTime, r.EndTime)));
+            operations = candidates.GroupBy(r => r.SourceRuleId!.Value)
+                .ToDictionary(group => group.Key, group => new KeywordRuleMutation(null,
+                    new KeywordRuleReconcilePlan(Array.AsReadOnly(initial.Values.Where(r => r.Source == ReservationSource.Keyword
+                        && r.Status == ReservationStatus.Scheduled && r.SourceRuleId == group.Key)
+                        .Select(r => r.SnapshotForChainRequest()).ToArray()),
+                        Array.AsReadOnly(group.Select(r => r.Id).ToArray()), 0, 0, string.Empty), KeepRule: true));
+        }
+        PreparedKeywordMutation Reject(string reason) => new(new(false, reason, beforeCount, beforeCount, Array.Empty<int>()));
+        if (expectedRules is not null
+            && JsonSerializer.Serialize(GetKeywordRules(con, tx)) != JsonSerializer.Serialize(expectedRules))
+            return Reject("import_rules_changed");
+        var scheduled = initial.Values.Where(r => r.Source == ReservationSource.Keyword
+            && r.SourceRuleId is int owner && operations.ContainsKey(owner) && r.Status == ReservationStatus.Scheduled).ToArray();
+        var targets = new HashSet<int>();
+        foreach (var pair in operations)
+        {
+            var ruleId = pair.Key;
+            var plan = pair.Value.Plan;
+            var owned = scheduled.Where(r => r.SourceRuleId == ruleId).ToArray();
+            if (plan is not null && (owned.Length != plan.ExpectedScheduled.Count
+                || plan.ExpectedScheduled.Any(expected => !initial.TryGetValue(expected.Id, out var current)
+                    || current.Status != ReservationStatus.Scheduled || current.Source != ReservationSource.Keyword
+                    || current.SourceRuleId != ruleId || current.DataVersion != expected.DataVersion
+                    || current.StartTime != expected.StartTime || current.EndTime != expected.EndTime
+                    || current.NetworkId != expected.NetworkId || current.TransportStreamId != expected.TransportStreamId
+                    || current.ServiceId != expected.ServiceId || current.EventId != expected.EventId
+                    || current.IsUserChain != expected.IsUserChain || current.UserChainPreviousId != expected.UserChainPreviousId
+                    || current.UserChainRootId != expected.UserChainRootId))) return Reject("reconcile_snapshot_changed");
+            var remove = plan?.StaleIds ?? owned.Select(r => r.Id).ToArray();
+            if (remove.Any(id => !owned.Any(r => r.Id == id))) return Reject("reconcile_target_changed");
+            targets.UnionWith(remove);
+        }
+        var affected = Connected(targets);
+        // Options and labels of a retained future segment must not race an already
+        // running chain either, even when no reservation is being removed.
+        var touched = inactiveChannels is not null || retiredEvents is not null ? affected : Connected(scheduled.Select(r => r.Id));
+        var children = initial.Values.Where(r => r.Source == ReservationSource.Epg
+            && r.Intent == ReservationIntent.SystemPreRecordEpg && r.SourceRuleId is int parent && targets.Contains(parent)).ToArray();
+        if (touched.Any(id => !initial.ContainsKey(id))) return Reject("chain_reference_missing");
+        if (touched.Concat(children.Select(r => r.Id)).Any(id => protectedIds.Contains(id)
+            || initial[id].Status is ReservationStatus.Starting or ReservationStatus.Recording
+            || HasOpenRecordingRuntime(initial[id]))) return Reject("chain_runtime_protected");
+        var working = new Dictionary<int, Reservation>(initial);
+        foreach (var id in targets) working.Remove(id);
+        var splitFailure=SplitTopologyAfterScheduledRemoval(con,tx,initial,working,affected,targets);
+        if(splitFailure is not null) return Reject(splitFailure);
+        var optionsUpdated = 0;
+        foreach (var pair in operations.Where(pair => pair.Value.Replacement is not null))
+        {
+            var ruleId = pair.Key;
+            var replacement = pair.Value.Replacement!;
+            var plan = pair.Value.Plan ?? throw new InvalidOperationException("Rule replacement has no reconciliation plan.");
+            if (scheduled.Any(r => r.SourceRuleId == ruleId))
+                optionsUpdated += SyncScheduledKeywordReservationRecordingOptions(con, tx, ruleId,
+                    new ReservationRecordingOptions(replacement.RecordCurrentServiceOnly, replacement.RecordSubtitles));
+            foreach (var row in scheduled.Where(r => r.SourceRuleId == ruleId && !targets.Contains(r.Id)))
+            {
+                var before = working[row.Id];
+                using var rename = con.CreateCommand(); rename.Transaction = tx;
+                rename.CommandText = """
+                    UPDATE reservations SET source_rule_name=$name,data_version=data_version+1,updated_at=$now
+                    WHERE id=$id AND source='keyword' AND source_rule_id=$rule AND status='scheduled' AND data_version=$version
+                    """;
+                rename.Parameters.AddWithValue("$name", plan.RuleName);
+                rename.Parameters.AddWithValue("$now", DateTime.Now.ToString("O"));
+                rename.Parameters.AddWithValue("$id", before.Id); rename.Parameters.AddWithValue("$rule", ruleId);
+                rename.Parameters.AddWithValue("$version", before.DataVersion);
+                if (rename.ExecuteNonQuery() != 1) return Reject("rule_name_cas_rejected");
+                var after = before.SnapshotForChainRequest(); after.SourceRuleName = plan.RuleName;
+                after.DataVersion++; after.UpdatedAt = DateTime.Now; working[after.Id] = after;
+            }
+        }
+        foreach (var id in targets)
+        {
+            using var delete = con.CreateCommand(); delete.Transaction = tx;
+            delete.CommandText = "DELETE FROM reservations WHERE id=$id AND source='keyword' AND source_rule_id=$rule AND status='scheduled' AND data_version=$version";
+            delete.Parameters.AddWithValue("$id", id); delete.Parameters.AddWithValue("$rule", initial[id].SourceRuleId!.Value);
+            delete.Parameters.AddWithValue("$version", initial[id].DataVersion);
+            if (delete.ExecuteNonQuery() != 1) return Reject("reservation_cas_rejected");
+        }
+        CancelScheduledPreRecordEpgChildrenForParents(con, tx, targets);
+        if (imported is not null)
+            ReplaceKeywordRules(con, tx, imported);
+        else foreach (var pair in operations)
+        {
+            if (pair.Value.KeepRule) continue;
+            if (pair.Value.Replacement is null)
+            {
+                using var deleteRule = con.CreateCommand();
+                deleteRule.Transaction = tx; deleteRule.CommandText = "DELETE FROM keyword_rules WHERE id=$id";
+                deleteRule.Parameters.AddWithValue("$id", pair.Key); deleteRule.ExecuteNonQuery();
+            }
+            else if (UpdateKeywordRule(con, tx, pair.Value.Replacement, DateTime.Now.ToString("O")) != 1)
+                return Reject("rule_missing");
+        }
+        foreach (var pair in operations.Where(pair => pair.Value.Replacement is not null))
+        {
+            foreach (var id in KeywordReservationBindingProjection.SynchronizeScheduled(con, tx, pair.Key))
+            {
+                if (!working.TryGetValue(id, out var before)) continue;
+                var after = before.SnapshotForChainRequest();
+                after.DataVersion++; after.UpdatedAt = DateTime.Now; working[id] = after;
+            }
+        }
+        var result = new KeywordRuleMutationResult(true,
+            inactiveProtectedCount > 0 ? "inactive_services_runtime_protected"
+                : protectedRuleCount > 0 ? "expired_rules_runtime_protected" : "applied", beforeCount, RuleCount(),
+            Array.AsReadOnly(targets.OrderBy(id => id).ToArray()), operations.Values.Sum(op => op.Plan?.Preserved ?? 0),
+            operations.Values.Sum(op => op.Plan?.PreservedSourceMissing ?? 0), optionsUpdated);
+        var metadata = new Dictionary<string, string?> { ["suppressUserEvent"] = "projection_cleanup",
+            ["reason"] = retiredEvents is not null ? "epg_authority_event_retired"
+                : inactiveChannels is not null ? "keyword_inactive_services"
+                : expiredBefore is not null ? "keyword_rules_expired"
+                : imported is not null ? "keyword_rules_imported"
+                : operations.Values.All(op => op.Replacement is null) ? "keyword_rule_deleted" : "keyword_rule_updated" };
+        return new PreparedKeywordMutation(result, initial, working, metadata);
+    }
+
+    private void PublishKeywordMutation(PreparedKeywordMutation prepared)
+    {
+        if (!prepared.Result.Applied || prepared.Initial is null || prepared.Working is null || prepared.Metadata is null)
+            throw new InvalidOperationException("Rejected keyword mutation cannot be published.");
+        var result = prepared.Result;
+        var initial = prepared.Initial;
+        var working = prepared.Working;
+        var metadata = prepared.Metadata;
+        var failures = new List<Exception>();
+        foreach (var after in ChangedTerminalDeletionRows(initial, working))
+        {
+            var before = initial[after.Id];
+            var fields = new List<string> { nameof(Reservation.DataVersion) };
+            if (before.IsUserChain != after.IsUserChain) fields.Add(nameof(Reservation.IsUserChain));
+            if (before.UserChainPreviousId != after.UserChainPreviousId) fields.Add(nameof(Reservation.UserChainPreviousId));
+            if (before.UserChainRootId != after.UserChainRootId) fields.Add(nameof(Reservation.UserChainRootId));
+            if (before.SourceRuleName != after.SourceRuleName) fields.Add(nameof(Reservation.SourceRuleName));
+            try { mutationJournal.Record(ReservationMutationKind.Updated, before.SnapshotForChainRequest(),
+                after.SnapshotForChainRequest(), metadata, fields.ToArray()); }
+            catch (Exception ex) { failures.Add(ex); }
+        }
+        foreach (var id in result.RemovedIds)
+        {
+            try { mutationJournal.Record(ReservationMutationKind.Removed, initial[id].SnapshotForChainRequest(), null, metadata); }
+            catch (Exception ex) { failures.Add(ex); }
+        }
+        if (failures.Count > 0) throw new AggregateException(failures);
     }
 
     public void DeleteKeywordRule(int id)
@@ -7768,6 +9520,13 @@ WHERE source <> 'Epg'
         // 内部EPG子予約の取消も状態遷移である。開始済み行は対象外とし、成功時にDataVersionを進める。
         using var con = db.Open();
         using var tx = con.BeginTransaction();
+        var total = CancelScheduledPreRecordEpgChildrenForParents(con, tx, ids);
+        tx.Commit();
+        return total;
+    }
+
+    private int CancelScheduledPreRecordEpgChildrenForParents(SqliteConnection con, SqliteTransaction tx, IEnumerable<int> ids)
+    {
         var total = 0;
         foreach (var parentId in ids)
         {
@@ -7787,169 +9546,8 @@ WHERE source <> 'Epg'
             cmd.Parameters.AddWithValue("$now", DateTime.Now.ToString("O"));
             total += cmd.ExecuteNonQuery();
         }
-        tx.Commit();
         return total;
     }
-
-    public int UpdateScheduledKeywordReservationRuleName(int ruleId, string ruleName)
-    {
-        using var con = db.Open();
-        using var tx = con.BeginTransaction();
-
-        var candidates = new List<(int Id, long DataVersion)>();
-        using (var sel = con.CreateCommand())
-        {
-            sel.Transaction = tx;
-            sel.CommandText = """
-                SELECT id, data_version
-                FROM reservations
-                WHERE source = 'keyword'
-                  AND status = 'scheduled'
-                  AND source_rule_id = $ruleId;
-                """;
-            sel.Parameters.AddWithValue("$ruleId", ruleId);
-            using var reader = sel.ExecuteReader();
-            while (reader.Read())
-                candidates.Add((reader.GetInt32(0), reader.GetInt64(1)));
-        }
-
-        // KEYWORD_RULE_NAME_VERSION_CAS_INVARIANT:
-        // 自動検索ルール名同期も予約更新である。選択後に開始・編集された行へ古いルール名を上書きしない。
-        var total = 0;
-        foreach (var candidate in candidates)
-        {
-            using var cmd = con.CreateCommand();
-            cmd.Transaction = tx;
-            cmd.CommandText = """
-                UPDATE reservations
-                SET source_rule_name = $ruleName,
-                    data_version = data_version + 1,
-                    updated_at = $now
-                WHERE id = $id
-                  AND source = 'keyword'
-                  AND status = 'scheduled'
-                  AND source_rule_id = $ruleId
-                  AND data_version = $dataVersion;
-                """;
-            cmd.Parameters.AddWithValue("$ruleName", ruleName ?? string.Empty);
-            cmd.Parameters.AddWithValue("$now", DateTime.Now.ToString("O"));
-            cmd.Parameters.AddWithValue("$id", candidate.Id);
-            cmd.Parameters.AddWithValue("$ruleId", ruleId);
-            cmd.Parameters.AddWithValue("$dataVersion", candidate.DataVersion);
-            total += cmd.ExecuteNonQuery();
-        }
-        tx.Commit();
-        return total;
-    }
-
-    /// <summary>
-    /// Canonical Basic EIT が世代交代として退場させた旧イベントに正確に紐づく、
-    /// 未開始の自動検索予約だけを同じauthority transitionの従属結果として退場させる。
-    /// Manual / Program / Starting以降はユーザーまたは実行正本なので対象外。
-    /// event_idは再利用され得るため、NID/TSID/SID/EIDに加えて開始・終了時刻まで完全一致させる。
-    /// </summary>
-    public int DeleteScheduledKeywordReservationsForRetiredEpgEvents(
-        IReadOnlyCollection<EpgRetiredEventIdentity> retiredEvents)
-    {
-        if (retiredEvents.Count == 0) return 0;
-
-        var retiredKeys = retiredEvents
-            .Select(e => (e.NetworkId, e.TransportStreamId, e.ServiceId, e.EventId, e.Start, e.End))
-            .ToHashSet();
-
-        using var con = db.Open();
-        using var tx = con.BeginTransaction();
-
-        var ruleIds = new List<int>();
-        using (var ruleSelect = con.CreateCommand())
-        {
-            ruleSelect.Transaction = tx;
-            ruleSelect.CommandText = """
-                SELECT DISTINCT source_rule_id
-                FROM reservations
-                WHERE source = 'keyword'
-                  AND status = 'scheduled'
-                  AND source_rule_id IS NOT NULL;
-                """;
-            using var reader = ruleSelect.ExecuteReader();
-            while (reader.Read())
-                ruleIds.Add(reader.GetInt32(0));
-        }
-
-        var removed = new List<Reservation>();
-        foreach (var ruleId in ruleIds)
-        {
-            var candidates = ReadScheduledKeywordReservations(con, tx, ruleId)
-                .Where(r => retiredKeys.Contains((
-                    r.NetworkId,
-                    r.TransportStreamId,
-                    r.ServiceId,
-                    r.EventId,
-                    r.StartTime,
-                    r.EndTime)))
-                .ToList();
-            if (candidates.Count == 0)
-                continue;
-
-            removed.AddRange(DeleteScheduledReservations(
-                con,
-                tx,
-                candidates,
-                ReservationSource.Keyword,
-                ruleId,
-                requireDataVersionMatch: true));
-        }
-
-        tx.Commit();
-        RecordProjectedReservationRemovals(removed, "epg_authority_event_retired");
-        return removed.Count;
-    }
-
-    public int DeleteScheduledKeywordReservationsByIds(int ruleId, IReadOnlyCollection<int> reservationIds)
-    {
-        if (reservationIds.Count == 0) return 0;
-
-        var ids = reservationIds.Where(id => id > 0).Distinct().ToHashSet();
-        if (ids.Count == 0) return 0;
-
-        using var con = db.Open();
-        using var tx = con.BeginTransaction();
-        var candidates = ReadScheduledKeywordReservations(con, tx, ruleId)
-            .Where(r => ids.Contains(r.Id))
-            .ToList();
-        var removed = DeleteScheduledReservations(con, tx, candidates, ReservationSource.Keyword, ruleId, requireDataVersionMatch: true);
-        tx.Commit();
-        RecordProjectedReservationRemovals(removed, "keyword_rule_reconcile");
-        return removed.Count;
-    }
-
-
-    /// <summary>
-    /// 指定ルール由来の「scheduled」ステータスの自動検索予約のみを物理削除する。
-    /// ルール更新・無効化・削除時に「リアルタイム整合性」を保つためのメソッド。
-    /// 
-    /// 削除対象は以下の全条件を満たす予約のみ：
-    ///   ・source = 'keyword'
-    ///   ・status = 'scheduled'
-    ///   ・source_rule_id = 指定ID
-    /// 
-    /// recording / completed / failed / cancelled は一切触らない。
-    /// 録画中(recording)の予約はユーザーの能動的な録画行為なのでTvAIrは止めない。
-    /// </summary>
-    /// <returns>削除した件数</returns>
-
-
-    public int DeleteScheduledByRuleId(int ruleId)
-    {
-        using var con = db.Open();
-        using var tx = con.BeginTransaction();
-        var candidates = ReadScheduledKeywordReservations(con, tx, ruleId);
-        var removed = DeleteScheduledReservations(con, tx, candidates, ReservationSource.Keyword, ruleId, requireDataVersionMatch: false);
-        tx.Commit();
-        RecordProjectedReservationRemovals(removed, "keyword_rule_removed");
-        return removed.Count;
-    }
-
 
     private static IReadOnlyList<Reservation> ReadScheduledKeywordReservations(
         SqliteConnection con,
@@ -8029,11 +9627,10 @@ WHERE source <> 'Epg'
     }
 
 
-    public void ReplaceKeywordRules(IReadOnlyList<KeywordRule> rules)
-    {
-        using var con = db.Open();
-        using var tx = con.BeginTransaction();
 
+
+    private void ReplaceKeywordRules(SqliteConnection con, SqliteTransaction tx, IReadOnlyList<KeywordRule> rules)
+    {
         using (var del = con.CreateCommand())
         {
             del.Transaction = tx;
@@ -8051,12 +9648,12 @@ WHERE source <> 'Epg'
                   (id, name, pattern, exclude_pattern, use_regex,
                    search_title, search_outline, search_detail, search_cast,
                    use_all_channels, target_services, target_genres, target_days, use_time_range, start_time, end_time, sort_order,
-                   expires_on, record_current_service_only, record_subtitles, auto_chain_reservations, enabled, created_at, updated_at)
+                   expires_on, record_current_service_only, record_subtitles, auto_chain_reservations, enabled, created_at, updated_at, plugin_binding_json)
                 VALUES
                   ($id, $name, $pat, $exc, $regex,
                    $stitle, $soutline, $sdetail, $scast,
                    $useAllChannels, $svc, $genres, $days, $useTime, $startTime, $endTime, $sortOrder,
-                   $exp, $recordCurrentServiceOnly, $recordSubtitles, $autoChainReservations, $en, $createdAt, $updatedAt);
+                   $exp, $recordCurrentServiceOnly, $recordSubtitles, $autoChainReservations, $en, $createdAt, $updatedAt, $binding);
                 """;
             cmd.Parameters.AddWithValue("$id", r.Id > 0 ? r.Id : i + 1);
             cmd.Parameters.AddWithValue("$name", r.Name ?? "");
@@ -8079,6 +9676,7 @@ WHERE source <> 'Epg'
             cmd.Parameters.AddWithValue("$recordCurrentServiceOnly", r.RecordCurrentServiceOnly ? 1 : 0);
             cmd.Parameters.AddWithValue("$recordSubtitles", r.RecordSubtitles ? 1 : 0);
             cmd.Parameters.AddWithValue("$autoChainReservations", r.AutoChainReservations ? 1 : 0);
+            cmd.Parameters.AddWithValue("$binding", r.PluginBindingJson ?? "[]");
             cmd.Parameters.AddWithValue("$en", r.Enabled ? 1 : 0);
             cmd.Parameters.AddWithValue("$createdAt", (r.CreatedAt == default ? DateTime.Now : r.CreatedAt).ToString("O"));
             cmd.Parameters.AddWithValue("$updatedAt", (r.UpdatedAt == default ? DateTime.Now : r.UpdatedAt).ToString("O"));
@@ -8096,7 +9694,6 @@ WHERE source <> 'Epg'
             seq.ExecuteNonQuery();
         }
 
-        tx.Commit();
     }
 
     public void ReorderKeywordRules(IReadOnlyList<int> orderedIds)
@@ -8116,62 +9713,17 @@ WHERE source <> 'Epg'
         tx.Commit();
     }
 
-    /// <summary>
-    /// 有効期限切れのキーワードルールと、そのルール由来のScheduled自動検索予約を
-    /// 同一Connection・同一Transactionで物理削除する。
-    /// 
-    /// source_rule_idで期限切れルール由来の行だけを限定し、他の有効ルール、
-    /// recording / completed / failed / cancelled の予約には触れない。
-    /// 予約削除とルール削除の片方だけが確定する中間状態を残してはならないため、
-    /// 全対象を一つのTransactionで確定する。
-    /// </summary>
-    /// <returns>削除したルール件数</returns>
-    public int PurgeExpiredKeywordRules()
-    {
-        var today = DateOnly.FromDateTime(DateTime.Now).ToString("yyyy-MM-dd");
-        using var con = db.Open();
-        using var tx = con.BeginTransaction();
-
-        var expiredIds = new List<int>();
-        using (var sel = con.CreateCommand())
-        {
-            sel.Transaction = tx;
-            sel.CommandText = "SELECT id FROM keyword_rules WHERE expires_on <> '' AND expires_on < $today;";
-            sel.Parameters.AddWithValue("$today", today);
-            using var reader = sel.ExecuteReader();
-            while (reader.Read()) expiredIds.Add(reader.GetInt32(0));
-        }
-
-        if (expiredIds.Count == 0)
-        {
-            tx.Commit();
-            return 0;
-        }
-
-        var removedReservations = new List<Reservation>();
-        foreach (var ruleId in expiredIds)
-        {
-            var candidates = ReadScheduledKeywordReservations(con, tx, ruleId);
-            removedReservations.AddRange(DeleteScheduledReservations(con, tx, candidates, ReservationSource.Keyword, ruleId, requireDataVersionMatch: false));
-
-            using var deleteRule = con.CreateCommand();
-            deleteRule.Transaction = tx;
-            deleteRule.CommandText = "DELETE FROM keyword_rules WHERE id = $ruleId;";
-            deleteRule.Parameters.AddWithValue("$ruleId", ruleId);
-            deleteRule.ExecuteNonQuery();
-        }
-
-        tx.Commit();
-        RecordProjectedReservationRemovals(removedReservations, "keyword_rule_expired");
-        return expiredIds.Count;
-    }
-
     // ─── プログラム予約ルール CRUD ────────────────────────────────
 
     public IReadOnlyList<ProgramRule> GetProgramRules()
     {
         using var con = db.Open();
-        using var cmd = con.CreateCommand();
+        return GetProgramRules(con,null);
+    }
+
+    private static IReadOnlyList<ProgramRule> GetProgramRules(SqliteConnection con,SqliteTransaction? tx)
+    {
+        using var cmd = con.CreateCommand();cmd.Transaction=tx;
         cmd.CommandText = """
             SELECT id, name, day_of_week, start_time, end_time,
                    network_id, transport_stream_id, service_id,
@@ -8225,23 +9777,12 @@ WHERE source <> 'Epg'
         cmd.ExecuteNonQuery();
     }
 
-    /// <summary>有効期限切れのプログラム予約ルールを削除する。</summary>
-    public int PurgeExpiredProgramRules()
-    {
-        var today = DateOnly.FromDateTime(DateTime.Now).ToString("yyyy-MM-dd");
-        using var con = db.Open();
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = "DELETE FROM program_rules WHERE expires_on <> '' AND expires_on < $today;";
-        cmd.Parameters.AddWithValue("$today", today);
-        return cmd.ExecuteNonQuery();
-    }
-
     /// <summary>
     /// ProgramGuideBlankクリックから作られた暫定プログラム予約ルールを、有効期限切れ後に掃除する。
     /// 運用中のScheduled予約だけを削除し、完了・失敗・取消済みの履歴は通常の履歴保持へ委ねる。
     /// 通常のプログラム予約は対象外。
     /// </summary>
-    public int PurgeExpiredProgramGuideMissingProgramRules()
+    internal int PurgeExpiredProgramGuideMissingProgramRules(Func<ProgramReservationCleanupRequest,ProgramReservationCleanupResult> execute)
     {
         var today = DateOnly.FromDateTime(DateTime.Now).ToString("yyyy-MM-dd");
         using var con = db.Open();
@@ -8279,63 +9820,9 @@ WHERE source <> 'Epg'
 
         if (targets.Count == 0) return 0;
 
-        using var tx = con.BeginTransaction();
-        var removedReservations = new List<Reservation>();
-        foreach (var target in targets)
-        {
-            using (var selReservations = con.CreateCommand())
-            {
-                selReservations.Transaction = tx;
-                selReservations.CommandText = """
-                    SELECT id, network_id, transport_stream_id, service_id, event_id,
-                           title, start_time, end_time, status, source, created_at, updated_at,
-                           channel_argument, is_conflicted, is_enabled, tuner_name, actual_tuner_name,
-                           recording_started_at, recording_finished_at, service_name,
-                           scheduled_start_time, source_rule_id, source_rule_name,
-                           is_user_chain, user_chain_previous_id, user_chain_root_id,
-                           recording_recovery_chain_id, recovery_parent_reservation_id, data_version,
-                           reservation_intent, created_through, created_by_plugin_id
-                    FROM reservations
-                    WHERE source = 'program'
-                      AND source_rule_id = $ruleId
-                      AND status = 'scheduled';
-                    """;
-                selReservations.Parameters.AddWithValue("$ruleId", target.Id);
-                var candidates = ReadReservations(selReservations, projectRuntimeStatus: false);
-                foreach (var candidate in candidates)
-                {
-                    using var delReservation = con.CreateCommand();
-                    delReservation.Transaction = tx;
-                    delReservation.CommandText = """
-                        DELETE FROM reservations
-                        WHERE id = $id
-                          AND source = 'program'
-                          AND status = 'scheduled'
-                          AND source_rule_id = $ruleId
-                          AND data_version = $dataVersion;
-                        """;
-                    delReservation.Parameters.AddWithValue("$id", candidate.Id);
-                    delReservation.Parameters.AddWithValue("$ruleId", target.Id);
-                    delReservation.Parameters.AddWithValue("$dataVersion", candidate.DataVersion);
-                    if (delReservation.ExecuteNonQuery() == 1)
-                        removedReservations.Add(candidate);
-                }
-            }
-
-            using (var delRule = con.CreateCommand())
-            {
-                delRule.Transaction = tx;
-                delRule.CommandText = "DELETE FROM program_rules WHERE id = $ruleId;";
-                delRule.Parameters.AddWithValue("$ruleId", target.Id);
-                delRule.ExecuteNonQuery();
-            }
-        }
-        tx.Commit();
-        RecordProjectedReservationRemovals(removedReservations, "program_guide_missing_rule_expired");
-
-        log.Add("PROGRAM_PLACEHOLDER_EXPIRED_CLEANUP", "ProgramRule",
-            $"result=OK deletedRules={targets.Count} deletedScheduledReservations={removedReservations.Count} ruleIds=[{string.Join(',', targets.Select(x => x.Id))}] reservationIds=[{string.Join(',', removedReservations.Select(x => x.Id).Distinct().OrderBy(x => x).Select(x => $"R{x}"))}] terminalHistory=preserved today={today} scope=program_guide_missing_only originClassifier=ReservationOriginClassifier normalProgramRules=untouched rule=release_contract");
-        return targets.Count;
+        var ids=targets.Select(t=>t.Id).ToArray();
+        var result=execute(new($"source_rule_id IN ({string.Join(',',ids)})",null,"program_guide_missing_rule_expired",ExpiredRuleIds:ids));
+        return result.Applied?result.RemovedRuleIds.Count:0;
     }
 
     // ─── 内部ヘルパー ────────────────────────────────────────────
@@ -8361,7 +9848,7 @@ WHERE source <> 'Epg'
                 Status              = ParseStatus(r.IsDBNull(8)  ? "" : r.GetString(8)),
                 Source              = ParseSource(r.IsDBNull(9)  ? "" : r.GetString(9)),
                 CreatedAt           = r.IsDBNull(10) ? DateTime.MinValue : DateTime.Parse(r.GetString(10)),
-                UpdatedAt           = r.IsDBNull(11) ? DateTime.MinValue : DateTime.Parse(r.GetString(11)),
+                UpdatedAt           = r.IsDBNull(11) || string.IsNullOrEmpty(r.GetString(11)) ? DateTime.MinValue : DateTime.Parse(r.GetString(11)),
                 ChannelArgument     = r.IsDBNull(12) ? "" : r.GetString(12),
                 IsConflicted        = !r.IsDBNull(13) && r.GetInt32(13) != 0,
                 IsEnabled           = r.IsDBNull(14) || r.GetInt32(14) != 0,
@@ -8437,14 +9924,18 @@ WHERE source <> 'Epg'
                 Enabled        = r.GetInt32(21) != 0,
                 CreatedAt      = r.IsDBNull(22) ? DateTime.MinValue : DateTime.Parse(r.GetString(22)),
                 UpdatedAt      = r.IsDBNull(23) ? DateTime.MinValue : DateTime.Parse(r.GetString(23)),
+                PluginBindingJson = r.IsDBNull(24) ? "[]" : r.GetString(24),
             });
         }
         return list;
     }
 
-    public void SyncProgramRuleReservations()
+    internal bool SyncProgramRuleReservations(Func<ProgramReservationCleanupRequest,ProgramReservationCleanupResult> execute)
     {
-        PurgeExpiredProgramGuideMissingProgramRules();
+        var pending=false;
+        ProgramReservationCleanupResult Apply(ProgramReservationCleanupRequest request)
+        { var result=execute(request);pending|=!result.Applied;return result; }
+        PurgeExpiredProgramGuideMissingProgramRules(Apply);
         var rules = GetProgramRules();
         var now = DateTime.Now;
         var programGuideBlankProgramRules = rules.Count(ReservationOriginClassifier.IsProgramGuideMissingProgramRule);
@@ -8455,7 +9946,7 @@ WHERE source <> 'Epg'
         foreach (var rule in rules)
         {
             evaluatedProgramRules++;
-            SyncProgramRuleReservation(rule, now);
+            SyncProgramRuleReservation(rule, now, Apply);
         }
 
         if (evaluatedProgramRules > 0)
@@ -8463,14 +9954,15 @@ WHERE source <> 'Epg'
 
         // ProgramRule同期は未開始の投影予約だけを再構成する。Recording以降は実行正本であり、
         // ルール削除・再計算・重複整理を理由に削除または上書きしてはならない。
-        DeleteScheduledProgramReservations(
-            "source_rule_id IS NOT NULL AND source_rule_id NOT IN (SELECT id FROM program_rules)",
-            bind: null,
-            reason: "program_rule_removed");
+        Apply(new("source_rule_id IS NOT NULL AND source_rule_id NOT IN (SELECT id FROM program_rules)",null,"program_rule_removed"));
+        return !pending;
     }
 
-    private void SyncProgramRuleReservation(ProgramRule rule, DateTime now)
+    private void SyncProgramRuleReservation(ProgramRule rule, DateTime now,
+        Func<ProgramReservationCleanupRequest,ProgramReservationCleanupResult> execute)
     {
+        int DeleteScheduledProgramReservations(string predicate,Action<SqliteCommand>? bind,string reason)
+        { var result=execute(new(predicate,bind,reason,ExpectedRule:rule));return result.Applied?result.RemovedIds.Count:0; }
         using var con = db.Open();
 
         if (!TryBuildNextProgramReservation(rule, now, out var reservation, out var serviceResolutionUnavailable))
@@ -8647,12 +10139,87 @@ WHERE source <> 'Epg'
             }
         }
 
-        DeleteScheduledProgramReservations(
-            "source_rule_id = $ruleId",
-            cmd => cmd.Parameters.AddWithValue("$ruleId", rule.Id),
-            "program_projection_replaced");
+        var replacement=execute(new("source_rule_id = $ruleId",cmd=>cmd.Parameters.AddWithValue("$ruleId",rule.Id),
+            "program_projection_replaced",reservation,rule));
+        if(!replacement.Applied) return;
+        log.Add("RESERVE_ENTRY","Program",$"共通入口要求/投影 source=Program id=R{replacement.AddedId} ruleId={rule.Id} name=[{rule.Name}] start={reservation.StartTime:MM/dd HH:mm} end={reservation.EndTime:MM/dd HH:mm} transaction=atomic_program_projection rule=release_contract");
+    }
 
-        using var ins = con.CreateCommand();
+    internal bool HasProgramCleanupWork(ProgramReservationCleanupRequest request)
+    {
+        if(request.Replacement is not null || request.ExpiredRuleIds is {Count:>0}) return true;
+        using var con=db.Open();using var cmd=con.CreateCommand();
+        cmd.CommandText=$"SELECT EXISTS(SELECT 1 FROM reservations WHERE source='program' AND status='scheduled' AND ({request.Predicate}))";
+        request.Bind?.Invoke(cmd);return Convert.ToInt32(cmd.ExecuteScalar())!=0;
+    }
+
+    // Only the common allocation core's scheduler admission may call this transaction.
+    internal ProgramReservationCleanupResult CommitProgramReservationCleanup(ProgramReservationCleanupRequest request,
+        IReadOnlySet<int> protectedIds,Action<ProgramReservationCleanupResult> recordCommitted)
+    {
+        ProgramReservationCleanupResult Reject(string why)=>new(false,why,Array.Empty<int>(),0,Array.Empty<int>());
+        using var con=db.Open();using var tx=con.BeginTransaction(System.Data.IsolationLevel.Serializable);
+        var initial=ReadTerminalDeletionRows(con,tx).ToDictionary(r=>r.Id);
+        var rules=GetProgramRules(con,tx).ToDictionary(r=>r.Id);
+        if(request.ExpectedRule is { } expected && (!rules.TryGetValue(expected.Id,out var currentRule)
+            || JsonSerializer.Serialize(expected)!=JsonSerializer.Serialize(currentRule))) return Reject("program_rule_changed");
+        if(request.Replacement is { } next && initial.Values.Any(r=>r.Source==ReservationSource.Program
+            && r.SourceRuleId==next.SourceRuleId && r.NetworkId==next.NetworkId
+            && r.TransportStreamId==next.TransportStreamId && r.ServiceId==next.ServiceId && r.StartTime==next.StartTime
+            && (r.Status is ReservationStatus.Starting or ReservationStatus.Recording or ReservationStatus.Stopping || HasOpenRecordingRuntime(r))))
+            return Reject("program_occurrence_runtime_owned");
+        var expiredIds=request.ExpiredRuleIds?.ToHashSet()??new HashSet<int>();
+        var today=DateOnly.FromDateTime(DateTime.Now).ToString("yyyy-MM-dd");
+        if(expiredIds.Any(id=>!rules.TryGetValue(id,out var rule)
+            || !ReservationOriginClassifier.IsProgramGuideMissingProgramRule(rule)
+            || string.IsNullOrEmpty(rule.ExpiresOn) || string.CompareOrdinal(rule.ExpiresOn,today)>=0)) return Reject("expired_program_rules_changed");
+        HashSet<int> targets;
+        using(var select=con.CreateCommand())
+        {
+            select.Transaction=tx;select.CommandText=$"SELECT id FROM reservations WHERE source='program' AND status='scheduled' AND ({request.Predicate})";
+            request.Bind?.Invoke(select);targets=new();using var reader=select.ExecuteReader();while(reader.Read())targets.Add(reader.GetInt32(0));
+        }
+        if(request.RequiredResolvedId is int resolvedId && targets.Count>0
+            && (!initial.TryGetValue(resolvedId,out var resolved) || protectedIds.Contains(resolvedId)
+                || resolved.Status!=ReservationStatus.Scheduled || HasOpenRecordingRuntime(resolved)))
+            return Reject("resolved_duplicate_runtime_protected");
+        var affected=ConnectedChainIds(initial,targets);
+        if(affected.Any(id=>!initial.ContainsKey(id)))return Reject("program_chain_reference_missing");
+        var preRecord=initial.Values.Where(r=>r.Source==ReservationSource.Epg&&r.Intent==ReservationIntent.SystemPreRecordEpg
+            && r.SourceRuleId is int parent&&affected.Contains(parent)).Select(r=>r.Id);
+        var expiredOwners=initial.Values.Where(r=>r.Source==ReservationSource.Program&&r.SourceRuleId is int owner&&expiredIds.Contains(owner)).Select(r=>r.Id);
+        if(affected.Concat(preRecord).Concat(expiredOwners).Any(id=>protectedIds.Contains(id)
+            || initial[id].Status is ReservationStatus.Starting or ReservationStatus.Recording or ReservationStatus.Stopping
+            || HasOpenRecordingRuntime(initial[id]))) return Reject("program_chain_runtime_protected");
+        var working=new Dictionary<int,Reservation>(initial);foreach(var id in targets)working.Remove(id);
+        var split=SplitTopologyAfterScheduledRemoval(con,tx,initial,working,affected,targets);
+        if(split is not null)return Reject(split);
+        foreach(var id in targets)
+        {
+            var row=initial[id];using var delete=con.CreateCommand();delete.Transaction=tx;
+            delete.CommandText="DELETE FROM reservations WHERE id=$id AND source='program' AND status='scheduled' AND data_version=$version AND source_rule_id IS $rule";
+            delete.Parameters.AddWithValue("$id",id);delete.Parameters.AddWithValue("$version",row.DataVersion);
+            delete.Parameters.AddWithValue("$rule",(object?)row.SourceRuleId??DBNull.Value);
+            if(delete.ExecuteNonQuery()!=1)return Reject("program_reservation_cas_rejected");
+        }
+        CancelScheduledPreRecordEpgChildrenForParents(con,tx,targets);
+        foreach(var id in expiredIds)
+        {
+            using var delete=con.CreateCommand();delete.Transaction=tx;delete.CommandText="DELETE FROM program_rules WHERE id=$id";delete.Parameters.AddWithValue("$id",id);
+            if(delete.ExecuteNonQuery()!=1)return Reject("program_rule_delete_rejected");
+        }
+        if(request.EmptyRuleId is int emptyId && targets.Count>0 && rules.TryGetValue(emptyId,out var emptyRule)
+            && ReservationOriginClassifier.IsProgramGuideMissingRuleName(emptyRule.Name))
+        {
+            using var delete=con.CreateCommand();delete.Transaction=tx;
+            delete.CommandText="DELETE FROM program_rules WHERE id=$id AND NOT EXISTS(SELECT 1 FROM reservations WHERE source='program' AND source_rule_id=$id)";
+            delete.Parameters.AddWithValue("$id",emptyId);if(delete.ExecuteNonQuery()==1)expiredIds.Add(emptyId);
+        }
+        var insertedId=0;
+        if(request.Replacement is { } reservation)
+        {
+            var now=DateTime.Now;
+        using var ins = con.CreateCommand();ins.Transaction=tx;
         ins.CommandText = """
             INSERT INTO reservations
               (network_id, transport_stream_id, service_id, event_id,
@@ -8683,63 +10250,39 @@ WHERE source <> 'Epg'
         ins.Parameters.AddWithValue("$sourceRuleName", reservation.SourceRuleName);
         ins.Parameters.AddWithValue("$now", now.ToString("O"));
         ins.ExecuteNonQuery();
-        using var lastIdCmd = con.CreateCommand();
+        using var lastIdCmd = con.CreateCommand();lastIdCmd.Transaction=tx;
         lastIdCmd.CommandText = "SELECT last_insert_rowid();";
-        var insertedId = Convert.ToInt32(lastIdCmd.ExecuteScalar());
-        log.Add("RESERVE_ENTRY", "Program", $"共通入口要求/投影 source=Program id=R{insertedId} ruleId={rule.Id} name=[{rule.Name}] dayOfWeek={rule.DayOfWeek} start={reservation.StartTime:MM/dd HH:mm} end={reservation.EndTime:MM/dd HH:mm} service=[{reservation.ServiceName}] rule=release_contract");
+        insertedId = Convert.ToInt32(lastIdCmd.ExecuteScalar());
 
-        // ProgramRule projection also records its committed mutation through the common journal.
-        var addedProgramReservation = GetById(insertedId);
-        if (addedProgramReservation is not null)
-            mutationJournal.Record(ReservationMutationKind.Added, null, addedProgramReservation);
-    }
-
-
-    private int DeleteScheduledProgramReservations(
-        string predicate,
-        Action<SqliteCommand>? bind,
-        string reason)
-    {
-        using var con = db.Open();
-        using var tx = con.BeginTransaction();
-        using var select = con.CreateCommand();
-        select.Transaction = tx;
-        select.CommandText = $"""
-            SELECT id, network_id, transport_stream_id, service_id, event_id,
-                   title, start_time, end_time, status, source, created_at, updated_at,
-                   channel_argument, is_conflicted, is_enabled, tuner_name, actual_tuner_name,
-                   recording_started_at, recording_finished_at, service_name,
-                   scheduled_start_time, source_rule_id, source_rule_name,
-                   is_user_chain, user_chain_previous_id, user_chain_root_id,
-                   recording_recovery_chain_id, recovery_parent_reservation_id, data_version,
-                   reservation_intent, created_through, created_by_plugin_id
-            FROM reservations
-            WHERE source = 'program'
-              AND status = 'scheduled'
-              AND ({predicate});
-            """;
-        bind?.Invoke(select);
-        var candidates = ReadReservations(select, projectRuntimeStatus: false);
-        var removed = new List<Reservation>();
-        foreach (var candidate in candidates)
-        {
-            using var delete = con.CreateCommand();
-            delete.Transaction = tx;
-            delete.CommandText = """
-                DELETE FROM reservations
-                WHERE id = $id
-                  AND source = 'program'
-                  AND status = 'scheduled'
-                  AND data_version = $dataVersion;
-                """;
-            delete.Parameters.AddWithValue("$id", candidate.Id);
-            delete.Parameters.AddWithValue("$dataVersion", candidate.DataVersion);
-            if (delete.ExecuteNonQuery() == 1)
-                removed.Add(candidate);
         }
-        tx.Commit();
-        RecordProjectedReservationRemovals(removed, reason);
-        return removed.Count;
+        // Invalidate unchanged scheduled prefixes whose membership lost a segment.
+        var changed=working.Values.Where(r=>initial.TryGetValue(r.Id,out var before)&&r.DataVersion!=before.DataVersion).Select(r=>r.Id).ToHashSet();
+        if(!TryAdvanceScheduledChainMembershipVersions(con,tx,initial.Values,
+            affected.Select(id=>initial[id].UserChainRootId??id).ToHashSet(),changed.Concat(targets).ToHashSet(),protectedIds,
+            DateTime.Now.ToString("O"),out _))return Reject("program_membership_snapshot_changed");
+        var after=ReadTerminalDeletionRows(con,tx).ToDictionary(r=>r.Id);
+        var result=new ProgramReservationCleanupResult(true,"applied",targets.OrderBy(id=>id).ToArray(),insertedId,expiredIds.OrderBy(id=>id).ToArray());
+        tx.Commit();recordCommitted(result);
+        var metadata=new Dictionary<string,string?>{{"suppressUserEvent","projection_cleanup"},{"reason",request.Reason}};
+        var failures=new List<Exception>();
+        foreach(var row in ChangedTerminalDeletionRows(initial,after))
+        {
+            try{mutationJournal.Record(ReservationMutationKind.Updated,initial[row.Id].SnapshotForChainRequest(),row.SnapshotForChainRequest(),metadata,
+                nameof(Reservation.IsUserChain),nameof(Reservation.UserChainPreviousId),nameof(Reservation.UserChainRootId),nameof(Reservation.Status),nameof(Reservation.DataVersion));}
+            catch(Exception ex){failures.Add(ex);}
+        }
+        foreach(var id in result.RemovedIds)
+        {
+            try{mutationJournal.Record(ReservationMutationKind.Removed,initial[id].SnapshotForChainRequest(),null,metadata);}
+            catch(Exception ex){failures.Add(ex);}
+        }
+        if(insertedId!=0)
+        {
+            try{mutationJournal.Record(ReservationMutationKind.Added,null,after[insertedId].SnapshotForChainRequest());}
+            catch(Exception ex){failures.Add(ex);}
+        }
+        if(failures.Count>0)throw new AggregateException(failures);
+        return result;
     }
 
     private ProgramRuleChannelResolution ResolveProgramRuleChannel(ProgramRule rule)
@@ -8922,6 +10465,7 @@ WHERE source <> 'Epg'
         cmd.Parameters.AddWithValue("$recordCurrentServiceOnly", r.RecordCurrentServiceOnly ? 1 : 0);
         cmd.Parameters.AddWithValue("$recordSubtitles", r.RecordSubtitles ? 1 : 0);
         cmd.Parameters.AddWithValue("$autoChainReservations", r.AutoChainReservations ? 1 : 0);
+        cmd.Parameters.AddWithValue("$binding", r.PluginBindingJson ?? "[]");
         cmd.Parameters.AddWithValue("$en",        r.Enabled ? 1 : 0);
         cmd.Parameters.AddWithValue("$now",       now);
     }

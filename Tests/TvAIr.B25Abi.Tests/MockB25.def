@@ -1,4 +1,0 @@
-LIBRARY B25Decoder
-EXPORTS
-    CreateB25Decoder
-    GetTestFlags

@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Globalization;
 
 namespace TvAIr.Tuner;
@@ -14,6 +14,7 @@ public static class ViewerRetuneFailureClassifier
             || string.Equals(errorCode, "process_not_found", StringComparison.Ordinal);
 }
 
+#if TVAIR_DEVELOPER_DIAGNOSTICS
 public static class ViewerRetuneDelayedDeathAudit
 {
 #if TVAIR_DEVELOPER_DIAGNOSTICS
@@ -101,3 +102,5 @@ public sealed record DelayedDeathResult(
     string Group,
     string Did,
     string BonDriver);
+
+#endif

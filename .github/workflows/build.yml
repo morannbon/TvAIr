@@ -1,19 +1,52 @@
 name: TvAIr Build
-
 on:
   workflow_dispatch:
   push:
-    tags:
-      - "v*.*.*"
-
+    tags: ['v*.*.*']
 permissions:
   contents: write
-
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 jobs:
-  build-and-draft:
-    uses: morannbon/TvAIr-Actions/.github/workflows/reusable-build-release.yml@v1.0.1
-    with:
-      product_name: TvAIr
-      solution: TvAIr.sln
-      package_script: .github/scripts/package.ps1
-      platforms_json: '["x64","x86"]'
+  build:
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [x64, x86]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - uses: microsoft/setup-msbuild@v2
+      - name: Rebuild public source with zero warnings
+        shell: pwsh
+        run: |
+          msbuild TvAIr.sln /restore /t:Rebuild /m /nr:false /p:Configuration=Release /p:Platform=${{ matrix.platform }} /p:PreferredToolArchitecture=x64 /p:LangVersion=12.0 /p:TvAIrDeveloperDiagnostics=false /p:AIrConDeveloperDiagnostics=false /p:AIrhythmDeveloperDiagnostics=false /warnaserror
+          if ($LASTEXITCODE -ne 0) { throw 'Build failed or produced warnings' }
+      - name: Package public binaries
+        shell: pwsh
+        run: |
+          & ./.github/scripts/package.ps1 -Platform "${{ matrix.platform }}" -RefName "${{ github.ref_name }}"
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: TvAIr-${{ matrix.platform }}-package
+          path: package/*.zip
+          if-no-files-found: error
+  draft-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: windows-2022
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: TvAIr-*-package
+          path: release
+          merge-multiple: true
+      - name: Create draft for final asset inspection
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" --repo "${{ github.repository }}" --draft --title "TvAIr ${{ github.ref_name }}" release/*.zip

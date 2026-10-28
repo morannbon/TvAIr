@@ -8,6 +8,7 @@ using TvAIr.Core;
 using TvAIr.Tuner;
 using TvAIr.Channel;
 using TvAIr.Epg;
+using TvAIr.Epg.Shared;
 using TvAIr.Epg.Projection;
 using System.Text.RegularExpressions;
 
@@ -30,7 +31,7 @@ namespace TvAIr.Schedule;
 /// normal EPGを録画要求のために停止・縮退・別Tuner救済してはならない。
 /// </summary>
 public sealed 
-class ReservationScheduler : BackgroundService
+class ReservationScheduler : BackgroundService, IScheduledChainRuntimeProtectionSource
 {
 
 private readonly ReservationStore _store;
@@ -96,6 +97,8 @@ private readonly ReservationStore _store;
     private readonly Dictionary<string, int> _chainBoundaryLastWaitBucket = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _recordingDueGate = new(1, 1);
     private readonly ConcurrentDictionary<int, RecordingStartOwnerEntry> _recordingStartInProgress = new();
+    private readonly ScheduledChainEditAdmission _chainEditAdmission;
+    private int _chainRuntimeProtectionReady;
     // RECORDING_LAUNCH_ORDER_INVARIANT:
     // 通常録画worker投入は設定グループごとに最大1件を同時単位とし、同一グループの追加投入は1秒間隔とする。
     // 明示チェーンは同一物理Tuner/worker/leaseのcontinuous capture内で予約ごとの別Sinkを管理する。
@@ -106,6 +109,7 @@ private readonly ReservationStore _store;
     // PRE_REC_TIME_FOLLOW_EVIDENCE_INVARIANT:
     // PreRecで実際に観測した同一EventIdentityの時刻は、録画開始後に古いProgramGuide投影で巻き戻してはならない。
     // 予約ID単位で保持し、terminal到達後はpruneする。録画中Followはこの証拠より後ろへの延長だけを許可する。
+    private readonly ConcurrentDictionary<int, RecordingProgressDecision> _recordingProgress = new();
     private readonly ConcurrentDictionary<int, RecordingTimeFollowEvidence> _recordingTimeFollowEvidence = new();
     private readonly AsyncLocal<string?> _powerResumeCycleContext = new();
     private readonly object _recordingAfterActionGate = new();
@@ -165,7 +169,10 @@ private readonly ReservationStore _store;
         DateTime End,
         DateTime ObservedAt,
         string LastSuppressedProjectionKey,
-        bool LivePresentBoundaryAuthoritative = false);
+        bool LivePresentBoundaryAuthoritative = false,
+        string? SupersededProjectionKey = null);
+
+    private sealed record ContinuousChainTerminalReceipt(ReservationLifecycleTransitionResult Transition, string? FailureReason);
 
     private sealed class ChainBoundaryExecutionEntry
     {
@@ -173,6 +180,11 @@ private readonly ReservationStore _store;
         public required int PredecessorId { get; init; }
         public required int SuccessorId { get; init; }
         public ChainBoundaryExecutionState State { get; set; } = ChainBoundaryExecutionState.NotStarted;
+        // Receipt of this boundary's successful Recording -> Stopping CAS, not a new owner.
+        // A different version or an unrelated Stopping row must never be adopted.
+        public long? PredecessorStoppingVersion { get; set; }
+        public ContinuousChainTerminalReceipt? PredecessorTerminalCommit { get; set; }
+        public bool PredecessorResultProjected { get; set; }
         public int Attempt { get; set; }
         public DateTime NextRetryAt { get; set; }
         public DateTime LastUpdatedAt { get; set; }
@@ -265,7 +277,8 @@ private readonly ReservationStore _store;
         NormalEpgWaveOccupation normalEpgWaveOccupation,
         ExternalTunerLeaseService externalTuners,
         ApplicationOperationGate applicationGate,
-        BroadcastTimeReference broadcastTimeReference)
+        BroadcastTimeReference broadcastTimeReference,
+        ScheduledChainEditAdmission chainEditAdmission)
     {
         _store         = store;
         _tunerPool     = tunerPool;
@@ -286,6 +299,7 @@ private readonly ReservationStore _store;
         _externalTuners = externalTuners;
         _applicationGate = applicationGate;
         _broadcastTimeReference = broadcastTimeReference;
+        _chainEditAdmission = chainEditAdmission;
     }
 
     // ─── BackgroundService ───────────────────────────────────────
@@ -327,7 +341,7 @@ private readonly ReservationStore _store;
             var now = DateTime.Now;
             foreach (var r in staleRecording)
             {
-                var reattach = TryReattachAliveRecordingWorker(r, now, RecordingReattachOrigin.Startup);
+                var reattach = await TryReattachAliveRecordingWorkerAsync(r, now, RecordingReattachOrigin.Startup, stoppingToken).ConfigureAwait(false);
                 if (reattach.State == RecordingWorkerReattachState.Attached)
                     continue;
                 if (reattach.State == RecordingWorkerReattachState.WorkerAliveOwnershipUnavailable)
@@ -353,21 +367,10 @@ private readonly ReservationStore _store;
         // Cancelled行に競合状態を残さず、予約一覧とログの終端状態を一致させる。
         ClearTerminalConflictResiduesSafe("startup_before_allocation");
 
-        // CHAIN_STARTUP_FEATURE_DISABLE_CONVERGENCE_INVARIANT:
-        // 設定OFFでScheduled chain topologyが残っている場合は、起動時に通常予約へ収束する。
-        // Starting/Recordingへ入ったsegmentはDetachScheduled...の対象外で、復旧/再attachしたphysical captureを壊さない。
+        // Reattach/recovery is complete before requesting convergence. The existing Init
+        // allocation route captures live runtime attachments and commits any detach itself.
         if (!_ini.UserChainRecordingEnabled)
-        {
-            // 再attach済みshared captureで既にOpenAtへ到達したScheduled successorはruntime参加済みとして保護する。
-            // statusだけでdetachすると、再起動直前に開いていたSinkを設定OFF収束が途中で切るため禁止する。
-            var runtimeAttachedIds = GetRuntimeAttachedChainReservationIds(DateTime.Now);
-            var startupDetach = _store.DetachScheduledUserChainsForFeatureDisable("Scheduler.Startup", runtimeAttachedIds);
-            if (startupDetach.Applied)
-                ReconcileActiveContinuousChainTopology("StartupFeatureDisabled");
-            else
-                _log.Add("CHAIN_LIFECYCLE_TRANSITION", "Startup",
-                    $"result=DETACH_FAILED reason={startupDetach.Reason} protectedRuntimeSegments={runtimeAttachedIds.Count} action=preserve_existing_topology_and_retry_runtime_scan rule=chain_lifecycle_single_source");
-        }
+            _allocationRoute.RequestDisabledChainConvergence();
 
         // 起動時に全scheduledの競合フラグを再評価（前回終了後の状態を反映）
         ReevaluateAndLog("Init");
@@ -394,30 +397,46 @@ private readonly ReservationStore _store;
         _forceAllocationReevaluate = false;
         _skipNextTickAllocationReevaluate = true;
 
+        Volatile.Write(ref _chainRuntimeProtectionReady, 1);
+        using var protectionShutdown = stoppingToken.Register(
+            () => Volatile.Write(ref _chainRuntimeProtectionReady, 0));
+
+        await ResumeLabWithdrawalsAtStartupAsync(stoppingToken);
+
         var chainBoundaryMonitorTask = Task.Run(() => ChainBoundaryMonitorLoopAsync(stoppingToken), stoppingToken);
         var recordingDueMonitorTask = Task.Run(() => RecordingDueMonitorLoopAsync(stoppingToken), stoppingToken);
 
-        while (!stoppingToken.IsCancellationRequested)
+        try
         {
-            try
+            while (!stoppingToken.IsCancellationRequested)
             {
-                await TickAsync(stoppingToken);
+                try
+                {
+                    await TickAsync(stoppingToken);
+                }
+                catch (OperationCanceledException) { break; }
+                catch (Exception ex)
+                {
+                    _log.Add("Scheduler", "Error", $"ポーリング例外: {ex.Message}");
+                }
+    
+                await Task.Delay(PollingIntervalMs, stoppingToken);
             }
-            catch (OperationCanceledException) { break; }
-            catch (Exception ex)
-            {
-                _log.Add("Scheduler", "Error", $"ポーリング例外: {ex.Message}");
-            }
-
-            await Task.Delay(PollingIntervalMs, stoppingToken);
         }
-
-        await StopAllSessionsAsync();
-        _log.Add("Scheduler", "Stop", "ReservationScheduler 停止。");
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // Cancellation during the polling delay must still run physical cleanup.
+        }
+        finally
+        {
+            Volatile.Write(ref _chainRuntimeProtectionReady, 0);
+            await StopAllSessionsAsync();
+            _log.Add("Scheduler", "Stop", "ReservationScheduler 停止。");
+        }
     }
 
 
-    private enum InterruptedRecordingRecoveryTrigger
+    internal enum InterruptedRecordingRecoveryTrigger
     {
         Startup,
         PowerResume,
@@ -437,6 +456,345 @@ private readonly ReservationStore _store;
 
     private bool HandleInterruptedRecordingWithoutWorker(Reservation r, DateTime now, InterruptedRecordingRecoveryTrigger trigger)
     {
+        var command = new InterruptedRecordingRecoveryCommand(r, trigger);
+        ReservationAllocationRouteResult result;
+        try
+        {
+            result = _allocationRoute.Run(new ReservationAllocationRouteRequest(
+                "InterruptedRecordingRecovery", trigger.ToString(), SyncProgramRuleReservations: false,
+                TopologyCommands: new[] { command }));
+        }
+        catch (Exception ex) when (command.Result is true)
+        {
+            _log.Add("REC_INTERRUPTED_RECOVERY_MAINTENANCE", $"R{r.Id}",
+                $"result=COMMITTED_POSTPROCESS_FAILED trigger={trigger} title={ReservationDisplayTitle(r.Title)} reason={SafeValue(ex.Message)} rule=interrupted_recording_recovery_atomic_contract");
+            return true;
+        }
+        if (command.Result.HasValue) return command.Result.Value;
+        _log.Add("REC_INTERRUPTED_RECOVERY_PENDING", $"R{r.Id}",
+            $"result=QUEUED trigger={trigger} reason={SafeValue(result.Reason)} title={ReservationDisplayTitle(r.Title)} action=execute_in_common_allocation_core rule=interrupted_recording_recovery_atomic_contract");
+        return false;
+    }
+
+    internal void RecordEpgImportCommit(string source, EpgReservationCommitResult result)
+    {
+        _log.Add("EPG_IMPORT_COMMIT", "CommonRoute",
+            $"source={SafeValue(source)} imported={result.Capture?.Upsert.Count ?? 0} otherInserted={result.Capture?.OtherSupplement?.InsertedEvents.Count ?? 0} retiredKeyword={result.RemovedIds.Count} result=COMMITTED rule=epg_import_commit_contract");
+    }
+
+    internal ProgramReservationCleanupResult ExecuteProgramReservationCleanupCore(ReservationStore store,ProgramReservationCleanupRequest request)
+    {
+        if(!ReferenceEquals(store,_store))throw new InvalidOperationException("Program cleanup store differs from allocation store.");
+        ProgramReservationCleanupResult Pending(string why)=>new(false,why,Array.Empty<int>(),0,Array.Empty<int>());
+        if(!_chainEditAdmission.TryEnterEdit(out var exclusion))return Pending("program_sync_admission_pending");
+        using var admission=exclusion!;
+        var protection=((IScheduledChainRuntimeProtectionSource)this).CaptureScheduledChainJoinRuntimeProtection(DateTime.Now);
+        if(!protection.ReadSucceeded)return Pending("program_sync_runtime_unavailable");
+        ProgramReservationCleanupResult? receipt=null;
+        try{return store.CommitProgramReservationCleanup(request,protection.ProtectedReservationIds.ToHashSet(),result=>
+            {receipt=result;admission.Dispose();});}
+        finally{if(receipt?.Applied==true)ReconcileActiveContinuousChainTopology("ProgramRuleSync");}
+    }
+
+    // Called only by the settings command inside the common allocation owner.
+    // Do not publish settings while a runtime start/control publication owns admission.
+    internal bool TryPublishSettingsCore(Action publish)
+    {
+        if (!_chainEditAdmission.TryEnterEdit(out var exclusion)) return false;
+        using var admission = exclusion!;
+        publish();
+        return true;
+    }
+
+    internal bool PrepareChainModeRebuildCore(string source,Action committed)
+    {
+        if(!_chainEditAdmission.TryEnterEdit(out var exclusion)) return false;
+        using var admission=exclusion!;
+        var protection=((IScheduledChainRuntimeProtectionSource)this).CaptureScheduledChainJoinRuntimeProtection(DateTime.Now);
+        if(!protection.ReadSucceeded) return false;
+        var protectedIds=protection.ProtectedReservationIds.Concat(GetRuntimeAttachedChainReservationIds(DateTime.Now)).ToHashSet();
+        var applied=false;
+        try
+        {
+            _store.DetachScheduledUserChainsForFeatureDisable(source,protectedIds,result=>
+            { if(result.Applied){applied=true;committed();admission.Dispose();} });
+        }
+        finally { if(applied) ReconcileActiveContinuousChainTopology(source); }
+        return applied;
+    }
+
+    internal void ExecuteAutomaticChainCore(ReservationStore store, int addedId, bool enabled,
+        Action<UserChainSequenceMutationResult> recordCommitted)
+    {
+        if (!ReferenceEquals(store,_store)) throw new InvalidOperationException("Automatic chain store differs from allocation store.");
+        if (!_chainEditAdmission.TryEnterEdit(out var exclusion)) return;
+        using var admission=exclusion!;
+        var protection=((IScheduledChainRuntimeProtectionSource)this).CaptureScheduledChainJoinRuntimeProtection(DateTime.Now);
+        if(!protection.ReadSucceeded) return;
+        var result=store.CommitAutomaticChain(addedId,enabled,DateTime.Now,
+            protection.ProtectedReservationIds.ToHashSet(),committed=>{recordCommitted(committed);admission.Dispose();});
+        recordCommitted(result);
+    }
+
+    internal void ExecuteExternalProjectionCore(ReservationStore store,ProgramProjectionReservationSyncService owner,
+        string source,Action<ExternalProjectionCommitResult> receipt)
+    {
+        if(!ReferenceEquals(store,_store)||!owner.UsesStore(store))throw new InvalidOperationException("External projection store differs.");
+        if(!_chainEditAdmission.TryEnterEdit(out var exclusion))return;
+        using var admission=exclusion!;
+        var protection=((IScheduledChainRuntimeProtectionSource)this).CaptureScheduledChainJoinRuntimeProtection(DateTime.Now);
+        if(!protection.ReadSucceeded)return;
+        ExternalProjectionCommitResult? committed=null;
+        try{owner.Commit(store,source,protection.ProtectedReservationIds.ToHashSet(),
+            _ini.LaterProgramPriority && _ini.ChainReservationMode==ChainModeContract.Automatic,
+            value=>{committed=value;receipt(value);admission.Dispose();});}
+        finally{if(committed?.TopologyChanged==true)ReconcileActiveContinuousChainTopology("ExternalProjection");}
+    }
+
+    internal void ExecuteProjectionPromotionCore(ReservationStore store,
+        ReservationProjectionPromotionService promotion, Action<ProjectionPromotionResult> recordResult)
+    {
+        if (!ReferenceEquals(store, _store) || !promotion.UsesReservationStore(store))
+            throw new InvalidOperationException("Projection promotion store differs from allocation store.");
+        if (!_chainEditAdmission.TryEnterEdit(out var exclusion)) return;
+        using var admission = exclusion!;
+        var protection = ((IScheduledChainRuntimeProtectionSource)this)
+            .CaptureScheduledChainJoinRuntimeProtection(DateTime.Now);
+        if (!protection.ReadSucceeded) return;
+        ProjectionPromotionResult? receipt=null;
+        try
+        {
+            var result=promotion.PromotePendingAtomicCore(protection.ProtectedReservationIds.ToHashSet(),
+                _ini.LaterProgramPriority && _ini.ChainReservationMode==ChainModeContract.Automatic,committed=>
+                {receipt=committed;recordResult(committed);admission.Dispose();});
+            recordResult(result);
+        }
+        finally{if(receipt?.TopologyChanged==true)ReconcileActiveContinuousChainTopology("ProjectionPromotion");}
+    }
+
+    internal void ExecuteAutomaticReservationCancellationCore(ReservationStore store, Reservation selected,
+        Action<ReservationCancellationResult> recordResult, WithdrawalProtectionLabPermit? labPermit = null)
+    {
+        if (!ReferenceEquals(store, _store)) throw new InvalidOperationException("Cancellation store differs from allocation store.");
+        if (!_chainEditAdmission.TryEnterEdit(out var exclusion)) return;
+        using var admission = exclusion!;
+        var protection = ((IScheduledChainRuntimeProtectionSource)this).CaptureScheduledChainJoinRuntimeProtection(DateTime.Now);
+        if (!protection.ReadSucceeded) return;
+        var protectedIds = protection.ProtectedReservationIds.ToHashSet();
+        if (labPermit is not null && !labPermit.TryDerive(store, protection, out protectedIds))
+        {
+            recordResult(new(false, "withdrawal_proof_rejected", selected.Id, Array.Empty<Reservation>(), false, 0));
+            return;
+        }
+        var applied = store.TryCancelReservationsAtomicCas(new[] { selected },
+            labPermit?.DurableOperation is null
+                ? new Dictionary<string,string?>{["suppressUserEvent"]="reservation_cancel_specialized"}
+                : new Dictionary<string,string?>{["withdrawalOperationId"]=labPermit.DurableOperation},
+            out _, selected.Id, committed => { recordResult(committed); admission.Dispose(); },
+            automaticSingle: true, protectedIds: protectedIds, labDecision: labPermit?.PersistDecision, labExpectedAffectedIds: labPermit?.ExpectedAffectedIds, labOperation: labPermit?.DurableOperation);
+        if (!applied) recordResult(new(false, "cancel_scope_state_or_runtime_changed", selected.Id,
+            Array.Empty<Reservation>(), false, 0));
+    }
+
+    internal void ExecuteEpgCaptureCommitCore(ReservationStore store, EpgStore epg,
+        IReadOnlyList<EpgEvent> upsert, IReadOnlyList<EpgEvent>? retire, IReadOnlyList<EpgEvent>? preserve,
+        SemaphoreSlim captureLane, CancellationToken cancellation, Action<EpgReservationCommitResult> recordResult,
+        IReadOnlyList<EpgEvent>? otherSupplementCandidates = null)
+    {
+        if (!ReferenceEquals(store, _store)) throw new InvalidOperationException("EPG capture store differs from allocation store.");
+        if (cancellation.IsCancellationRequested)
+        {
+            recordResult(new(false, "capture_cancelled", null, Array.Empty<int>()));
+            return;
+        }
+        if (!_chainEditAdmission.TryEnterEdit(out var exclusion)) return;
+        using var admission = exclusion!;
+        var protection = ((IScheduledChainRuntimeProtectionSource)this)
+            .CaptureScheduledChainJoinRuntimeProtection(DateTime.Now);
+        if (!protection.ReadSucceeded || !captureLane.Wait(0)) return;
+        var ownsLane = true;
+        try
+        {
+            if (cancellation.IsCancellationRequested)
+            {
+                recordResult(new(false, "capture_cancelled", null, Array.Empty<int>()));
+                return;
+            }
+            var result = store.CommitEpgCaptureAtomic(epg, upsert, retire, preserve,
+                protection.ProtectedReservationIds.ToHashSet(), committed =>
+                {
+                    recordResult(committed);
+                    ownsLane = false;
+                    captureLane.Release();
+                    admission.Dispose();
+                }, otherSupplementCandidates);
+            // A protected running chain retains the complete capture in the existing
+            // allocation queue. Its old EPG identity remains in the rolled-back DB.
+            if (result.Applied || result.Reason != "chain_runtime_protected") recordResult(result);
+        }
+        finally
+        {
+            if (ownsLane) captureLane.Release();
+        }
+    }
+
+    internal void ExecuteInactiveKeywordCleanupCore(ReservationStore store, KeywordMatcher matcher,
+        Action<KeywordRuleMutationResult> recordResult)
+    {
+        if (!ReferenceEquals(store, _store)) throw new InvalidOperationException("Inactive cleanup store differs from allocation store.");
+        if (!_chainEditAdmission.TryEnterEdit(out var exclusion)) return;
+        using var admission = exclusion!;
+        var protection = ((IScheduledChainRuntimeProtectionSource)this)
+            .CaptureScheduledChainJoinRuntimeProtection(DateTime.Now);
+        if (!protection.ReadSucceeded) return;
+        var context = matcher.CaptureInactiveCleanupContext();
+        var result = store.DeleteInactiveKeywordReservationsAtomic(context.Channels, context.Tuners,
+            protection.ProtectedReservationIds.ToHashSet(), committed => { recordResult(committed); admission.Dispose(); });
+        recordResult(result);
+    }
+
+    internal void ExecuteExpiredKeywordRuleDeletionCore(ReservationStore store, DateOnly today,
+        Action<KeywordRuleMutationResult> recordResult)
+    {
+        if (!ReferenceEquals(store, _store)) throw new InvalidOperationException("Rule expiry store differs from allocation store.");
+        if (!_chainEditAdmission.TryEnterEdit(out var exclusion)) return;
+        using var admission = exclusion!;
+        var protection = ((IScheduledChainRuntimeProtectionSource)this)
+            .CaptureScheduledChainJoinRuntimeProtection(DateTime.Now);
+        if (!protection.ReadSucceeded) return;
+        var result = store.DeleteExpiredKeywordRulesAtomic(today, protection.ProtectedReservationIds.ToHashSet(),
+            committed => { recordResult(committed); admission.Dispose(); });
+        recordResult(result);
+        if (result.Applied && (result.BeforeCount != result.AfterCount || result.Reason != "applied"))
+            _log.Add("KEYWORD_RULE_PURGE", "ExpiredRules",
+                $"期限切れルール整理: rules={result.BeforeCount - result.AfterCount} reservations={result.RemovedIds.Count} result={result.Reason}");
+    }
+
+    internal void ExecuteKeywordRuleImportCore(ReservationStore store, IReadOnlyList<KeywordRule> rules, KeywordMatcher matcher,
+        Action<KeywordRuleMutationResult> recordResult)
+    {
+        if (!ReferenceEquals(store, _store)) throw new InvalidOperationException("Rule import store differs from allocation store.");
+        if (!_chainEditAdmission.TryEnterEdit(out var exclusion))
+        {
+            recordResult(new(false, "runtime_busy", 0, 0, Array.Empty<int>()));
+            return;
+        }
+        using var admission = exclusion!;
+        var protection = ((IScheduledChainRuntimeProtectionSource)this)
+            .CaptureScheduledChainJoinRuntimeProtection(DateTime.Now);
+        if (!protection.ReadSucceeded)
+        {
+            recordResult(new(false, "runtime_unavailable", 0, 0, Array.Empty<int>()));
+            return;
+        }
+        var expectedRules = store.GetKeywordRules();
+        var scheduled = store.GetAll().Where(r => r.Source == ReservationSource.Keyword
+            && r.Status == ReservationStatus.Scheduled).ToArray();
+        var plans = rules.ToDictionary(r => r.Id,
+            r => matcher.PrepareRuleReconciliation(r, scheduled.Where(x => x.SourceRuleId == r.Id).ToArray()));
+        var result = store.ImportKeywordRulesAtomic(rules, expectedRules, plans, protection.ProtectedReservationIds.ToHashSet(),
+            committed => { recordResult(committed); admission.Dispose(); });
+        recordResult(result);
+    }
+
+    internal void ExecuteKeywordRuleUpdateCore(ReservationStore store, KeywordRule rule, KeywordMatcher matcher,
+        Action<KeywordRuleMutationResult> recordResult)
+    {
+        if (!ReferenceEquals(store, _store)) throw new InvalidOperationException("Rule update store differs from allocation store.");
+        if (!_chainEditAdmission.TryEnterEdit(out var exclusion))
+        {
+            recordResult(new(false, "runtime_busy", 0, 0, Array.Empty<int>()));
+            return;
+        }
+        using var admission = exclusion!;
+        var protection = ((IScheduledChainRuntimeProtectionSource)this)
+            .CaptureScheduledChainJoinRuntimeProtection(DateTime.Now);
+        if (!protection.ReadSucceeded)
+        {
+            recordResult(new(false, "runtime_unavailable", 0, 0, Array.Empty<int>()));
+            return;
+        }
+        var scheduled = store.GetAll().Where(r => r.Source == ReservationSource.Keyword
+            && r.Status == ReservationStatus.Scheduled && r.SourceRuleId == rule.Id).ToArray();
+        var plan = matcher.PrepareRuleReconciliation(rule, scheduled);
+        var result = store.UpdateKeywordRuleAtomic(rule, plan, protection.ProtectedReservationIds.ToHashSet(),
+            committed => { recordResult(committed); admission.Dispose(); });
+        recordResult(result);
+    }
+
+    internal void ExecuteKeywordRuleDeletionCore(ReservationStore store, int ruleId,
+        Action<KeywordRuleMutationResult> recordResult)
+    {
+        if (!ReferenceEquals(store, _store)) throw new InvalidOperationException("Rule deletion store differs from allocation store.");
+        if (!_chainEditAdmission.TryEnterEdit(out var exclusion))
+        {
+            recordResult(new(false, "runtime_busy", 0, 0, Array.Empty<int>()));
+            return;
+        }
+        using var admission = exclusion!;
+        var protection = ((IScheduledChainRuntimeProtectionSource)this)
+            .CaptureScheduledChainJoinRuntimeProtection(DateTime.Now);
+        if (!protection.ReadSucceeded)
+        {
+            recordResult(new(false, "runtime_unavailable", 0, 0, Array.Empty<int>()));
+            return;
+        }
+        var result = store.DeleteKeywordRuleAtomic(ruleId, protection.ProtectedReservationIds.ToHashSet(),
+            committed => { recordResult(committed); admission.Dispose(); });
+        recordResult(result);
+    }
+
+    internal void ExecuteExpiredHistoryRetentionCore(ReservationStore store, DateTime cutoff,
+        Action<TerminalLogDeletionResult> recordCommitted)
+    {
+        if (!ReferenceEquals(store, _store)) throw new InvalidOperationException("Retention store differs from the allocation core store.");
+        if (!_chainEditAdmission.TryEnterEdit(out var exclusion)) return;
+        using var retentionAdmission = exclusion!;
+        var protection = ((IScheduledChainRuntimeProtectionSource)this)
+            .CaptureScheduledChainJoinRuntimeProtection(DateTime.Now);
+        if (!protection.ReadSucceeded) return;
+        var protectedIds = protection.ProtectedReservationIds.ToHashSet();
+        try
+        {
+            // A terminal reservation can still own an unprojected recording result after
+            // its runtime owner has gone. Keep its durable receipt until the canonical
+            // result ledger confirms the same recording occurrence, even if JSON is stale.
+            protectedIds.UnionWith(ReadUnprojectedContinuousChainReservationIds());
+        }
+        catch (Exception ex)
+        {
+            _log.Add("CHAIN_HISTORY_RETENTION", "Maintenance",
+                $"result=DEFERRED reason=result_protection_unavailable errorType={ex.GetType().Name} rule=recording_result_projection_contract");
+            return;
+        }
+        store.DeleteExpiredTerminalLogEntriesAtomic(cutoff, protectedIds,
+            result => { recordCommitted(result); retentionAdmission.Dispose(); });
+    }
+
+    internal bool? ExecuteInterruptedRecordingRecoveryCore(ReservationStore store, Reservation expected,
+        InterruptedRecordingRecoveryTrigger trigger)
+    {
+        if (!ReferenceEquals(store, _store))
+            throw new InvalidOperationException("Recovery store differs from the allocation core store.");
+        if (!_chainEditAdmission.TryEnterEdit(out var recoveryExclusion)) return null;
+        using var recoveryAdmission = recoveryExclusion!;
+        var r = store.GetById(expected.Id);
+        var now = DateTime.Now;
+        if (r is null || r.Status != ReservationStatus.Recording || r.DataVersion != expected.DataVersion)
+        {
+            _log.Add("REC_INTERRUPTED_RECOVERY_STALE", $"R{expected.Id}",
+                $"result=SKIPPED reason=observed_recording_changed title={ReservationDisplayTitle(expected.Title)} trigger={trigger} rule=interrupted_recording_recovery_atomic_contract");
+            return false;
+        }
+        lock (_sessionGate)
+        {
+            if (_activeSessions.ContainsKey(r.Id) || _recordingStartInProgress.ContainsKey(r.Id))
+            {
+                _log.Add("REC_INTERRUPTED_RECOVERY_STALE", $"R{r.Id}",
+                    $"result=SKIPPED reason=runtime_owner_present title={ReservationDisplayTitle(r.Title)} trigger={trigger} rule=interrupted_recording_recovery_atomic_contract");
+                return false;
+            }
+        }
         using var recoveryEventScope = _typedEvents.BeginOutboxScope(out var commitRecoveryEvents);
         var isStartup = trigger == InterruptedRecordingRecoveryTrigger.Startup;
         var phase = trigger switch
@@ -459,7 +817,7 @@ private readonly ReservationStore _store;
             _ => "PowerResumeRecordingRecovery"
         };
         var interruptedFile = ProbeInterruptedRecordingFile(r);
-        if (TryFinalizePastEndedRecordingAsCompleted(r, interruptedFile.Summary, now))
+        if (TryFinalizePastEndedRecordingAsCompleted(r, interruptedFile.Summary, now, recoveryAdmission.Dispose))
         {
             commitRecoveryEvents();
             _log.Add("PLUGIN_TYPED_EVENT_OUTBOX", $"R{r.Id}",
@@ -482,21 +840,26 @@ private readonly ReservationStore _store;
 
         if (recoverable && now < r.EndTime)
         {
+            var recoveryId = 0;
             try
             {
                 // INTERRUPTED_RECORDING_RECOVERY_ATOMIC_INVARIANT:
                 // 元予約終端化・復旧予約追加・チェーン付替えは同一トランザクションで確定する。
                 // Startup/PowerResumeのどちらでも、元予約だけを先にFailedへ落とす二段更新へ戻してはならない。
-                var recoveryId = _store.FinalizeAndAddInterruptedRecordingRecoveryReservation(
+                _store.FinalizeAndAddInterruptedRecordingRecoveryReservation(
                     r,
                     now,
                     isStartup
                         ? "recovery_requeued_as_new_reservation"
                         : "power_resume_requeued_as_new_reservation",
                     interruptedFile.Summary,
-                    outboxOperation);
-                _log.Add($"REC_{phaseTag}_RECOVERY_REQUEUE", $"R{recoveryId}",
-                    $"result=REQUEUED_AS_NEW source=R{r.Id} recovery=R{recoveryId} trigger={phase} reason=recording_window_still_recoverable_and_original_finalized_atomically now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} recoverUntil={recoverUntil:MM/dd HH:mm:ss} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} fileCollisionPolicy=append_number_suffix rule=interrupted_recording_recovery_atomic_contract");
+                    outboxOperation,
+                    committedId => { recoveryId = committedId; recoveryAdmission.Dispose(); });
+            }
+            catch (Exception ex) when (recoveryId > 0)
+            {
+                _log.Add($"REC_{phaseTag}_RECOVERY_NOTIFICATION", $"R{recoveryId}",
+                    $"result=COMMITTED_POSTPROCESS_FAILED source=R{r.Id} recovery=R{recoveryId} trigger={phase} reason={SafeValue(ex.Message)} action=continue_with_committed_recovery rule=interrupted_recording_recovery_atomic_contract");
             }
             catch (InvalidOperationException ex)
             {
@@ -504,17 +867,29 @@ private readonly ReservationStore _store;
                     $"result=REJECTED action=rollback_atomic_recovery expectedDataVersion={r.DataVersion} trigger={phase} reason={SafeValue(ex.Message)} rule=interrupted_recording_recovery_atomic_contract");
                 return false;
             }
+            _log.Add($"REC_{phaseTag}_RECOVERY_REQUEUE", $"R{recoveryId}",
+                    $"result=REQUEUED_AS_NEW source=R{r.Id} recovery=R{recoveryId} trigger={phase} reason=recording_window_still_recoverable_and_original_finalized_atomically now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} recoverUntil={recoverUntil:MM/dd HH:mm:ss} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} fileCollisionPolicy=append_number_suffix rule=interrupted_recording_recovery_atomic_contract");
         }
         else
         {
-            var finalized = _store.FinalizeInterruptedRecording(
+            var finalized = false;
+            try
+            {
+                finalized = _store.FinalizeInterruptedRecording(
                 r,
                 now,
                 isStartup
                     ? "outside_recoverable_window_or_not_recordable"
                     : "power_resume_outside_recoverable_window_or_not_recordable",
                 interruptedFile.Summary,
-                outboxOperation);
+                outboxOperation,
+                () => { finalized = true; recoveryAdmission.Dispose(); });
+            }
+            catch (Exception ex) when (finalized)
+            {
+                _log.Add($"REC_{phaseTag}_RECOVERY_NOTIFICATION", $"R{r.Id}",
+                    $"result=COMMITTED_POSTPROCESS_FAILED trigger={phase} reason={SafeValue(ex.Message)} action=continue_with_committed_finalization rule=interrupted_recording_recovery_atomic_contract");
+            }
             if (!finalized)
             {
                 _log.Add($"REC_{phaseTag}_RECOVERY_CAS", $"R{r.Id}",
@@ -593,6 +968,8 @@ private readonly ReservationStore _store;
         {
             try
             {
+                // Advance pending Worker acknowledgements through the same canonical route.
+                ProgressPendingLabWithdrawalMaintenance(stoppingToken);
                 await CheckContinuousChainBoundariesAsync(DateTime.Now, stoppingToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
@@ -742,6 +1119,10 @@ private readonly ReservationStore _store;
     }
 
 
+    private string CreateRecordingFileDeclaration(Reservation reservation, string output, string result, string stats, string job)
+        => RecordingFileCatalog.CreateDeclaration(reservation, output, result, stats, job,
+            _store.GetReservationPluginBindings(reservation.Id));
+
     private static string? TryGetCommandLine(int pid)
     {
         try
@@ -762,7 +1143,7 @@ private readonly ReservationStore _store;
     }
 
 
-    private bool TryFinalizePastEndedRecordingAsCompleted(Reservation r, string interruptedFile, DateTime now)
+    private bool TryFinalizePastEndedRecordingAsCompleted(Reservation r, string interruptedFile, DateTime now, Action? onCommitted = null)
     {
         // release_contract:
         // Recoveryで作り直した録画や、TvAIr本体だけ再起動した後の録画が
@@ -791,7 +1172,18 @@ private readonly ReservationStore _store;
         if (!completedResult && !fileEvidence.LikelyCompleted)
             return false;
 
-        var finalize = _store.TryFinalizePastEndedRecordingAsCompleted(r.Id, r.DataVersion, now);
+        ReservationLifecycleTransitionResult? committed = null;
+        try
+        {
+            committed = _store.TryFinalizePastEndedRecordingAsCompleted(r.Id, r.DataVersion, now,
+                result => { committed = result; onCommitted?.Invoke(); });
+        }
+        catch (Exception ex) when (committed is { Applied: true })
+        {
+            _log.Add("REC_INTERRUPTED_RECOVERY_NOTIFICATION", $"R{r.Id}",
+                $"result=COMMITTED_POSTPROCESS_FAILED reason={SafeValue(ex.Message)} action=continue_with_completed_finalization rule=interrupted_recording_recovery_atomic_contract");
+        }
+        var finalize = committed ?? throw new InvalidOperationException("Recovery finalization outcome is unavailable.");
         if (!finalize.Applied)
         {
             _log.Add("REC_INTERRUPTED_RECOVERY_FINALIZE", $"R{r.Id}",
@@ -933,8 +1325,9 @@ private readonly ReservationStore _store;
         public static PastEndedRecordingFileEvidence NotCompleted(string summary) => new(false, summary);
     }
 
-    private RecordingWorkerReattachResult TryReattachAliveRecordingWorker(Reservation reservation, DateTime now, RecordingReattachOrigin origin)
+    private async Task<RecordingWorkerReattachResult> TryReattachAliveRecordingWorkerAsync(Reservation reservation, DateTime now, RecordingReattachOrigin origin, CancellationToken cancellationToken)
     {
+        using var runtimeAdmission = await _chainEditAdmission.EnterRuntimePublicationAsync(cancellationToken).ConfigureAwait(false);
         var source = origin == RecordingReattachOrigin.Startup ? "startup" : "resume";
         var candidates = FindAliveRecordingWorkerCandidates(reservation.Id);
         if (candidates.Count == 0)
@@ -979,7 +1372,7 @@ private readonly ReservationStore _store;
             if (isSharedReattach && ChainControlState.TryReadLatestSnapshot(chainControlPath, out var reattachControl))
             {
                 sharedCaptureRootReservationId = reattachControl.ChainRootReservationId;
-                var maxClose = reattachControl.Segments.Select(x => x.CloseAt).DefaultIfEmpty(DateTime.MinValue).Max();
+                var maxClose = reattachControl.Segments.Select(x => x.EffectiveCloseAt).DefaultIfEmpty(DateTime.MinValue).Max();
                 if (maxClose != DateTime.MinValue)
                     sharedCaptureEnd = maxClose;
             }
@@ -1042,6 +1435,7 @@ private readonly ReservationStore _store;
                 postEndMarginSeconds,
                 chainControlPath: isSharedReattach ? chainControlPath : string.Empty,
                 sharedCaptureRootReservationId: isSharedReattach ? (sharedCaptureRootReservationId ?? metadataReservationId) : null);
+            session.BindWorkerObservationPath(ReadString(root,"runtimeStatsPath"));
             // RECORDING_REATTACH_COMMIT_INVARIANT:
             // 永続状態が既にRecordingであるworkerの再接続なので、登録前に正式録画sessionへ昇格する。
             if (!session.TryMarkRecordingCommitted())
@@ -1440,29 +1834,31 @@ private readonly ReservationStore _store;
             _activeSessions.TryGetValue(reservationId, out session);
         }
 
+        StopPhaseGate.PhysicalReleaseBarrier? preparationScope = null;
+        var stopTaskOwnsRequest = false;
         try
         {
             var policyReservation = _store.GetById(reservationId);
             var policyService = SafeValue(policyReservation?.ServiceName);
             var policyTitle = ReservationDisplayTitle(policyReservation?.Title);
             var policyRawTitleBlank = ReservationTitleDisplayContract.RawBlankFlag(policyReservation?.Title);
-            if (policyReservation is not null)
-            {
-                var suppressUntil = policyReservation.EndTime.AddSeconds(Math.Max(0, _ini.PostEndMarginSeconds));
-                if (suppressUntil < DateTime.Now)
-                    suppressUntil = policyReservation.EndTime;
-                _store.AddManualStoppedOccurrence(policyReservation, suppressUntil, "recording_stop");
-            }
-
-            var siblingStops = policyReservation is null
-                ? new List<RecordingSession>()
-                : FindSameOccurrenceActiveSessionsForManualStop(policyReservation, reservationId);
-            var siblingCancelled = policyReservation is null
-                ? 0
-                : CancelSameOccurrenceScheduledReservationsForManualStop(policyReservation, reservationId);
-
-            var detached = _store.TryDetachUserChainSuccessorsForManualStopAtomicCas(
-                reservationId, out var detachedSuccessors);
+            if (policyReservation is null) return StopRecordingRequestResult.CreateFailed(reservationId);
+            var expectedSession = session;
+            var resource = session?.Lease.Name;
+            if (string.IsNullOrWhiteSpace(resource)) resource = policyReservation.ActualTunerName;
+            if (string.IsNullOrWhiteSpace(resource)) resource = policyReservation.TunerName;
+            preparationScope = StopPhaseGate.EnterPhysicalReleaseBarrier(reservationId, resource);
+            var command = ManualStopPreparationCommand.ForManualStopRequest(reservationId);
+            var detachOutcome = PrepareManualStop(command, preparationScope);
+            if (detachOutcome is not { Applied: true })
+                return StopRecordingRequestResult.CreateFailed(reservationId);
+            lock (_sessionGate) _activeSessions.TryGetValue(reservationId, out session);
+            if (!ReferenceEquals(expectedSession, session) || (session is not null && session.ReservationId != reservationId))
+                return StopRecordingRequestResult.CreateFailed(reservationId);
+            var siblingStops = command.SiblingStops;
+            var siblingCancelled = command.SiblingScheduledCancelled;
+            var detached = detachOutcome.Applied;
+            var detachedSuccessors = detachOutcome.DetachedSuccessors;
             SafeManualStopLog("CHAIN_STOP_POLICY", $"R{reservationId}",
                 $"operation=ManualStop service={policyService} title={policyTitle} rawTitleBlank={policyRawTitleBlank} policy=current_segment_only successorAction={(detached ? (detachedSuccessors.Count > 0 ? "DetachKeepScheduled" : "None") : "DetachCasRejectedKeepLatestChain")} detachedSuccessors={detachedSuccessors.Count} cancelSuccessors=False siblingActiveStops={siblingStops.Count} siblingScheduledCancelled={siblingCancelled} normalReservationStopRouteUnchanged=True rule=recording_lifecycle_cas_contract");
             if (detachedSuccessors.Count > 0)
@@ -1470,10 +1866,7 @@ private readonly ReservationStore _store;
                 SafeManualStopLog("CHAIN_SESSION_DETACH", $"R{reservationId}",
                     $"operation=ManualStop result=SUCCESSORS_DETACHED count={detachedSuccessors.Count} targets=[{string.Join(",", detachedSuccessors.Select(x => $"R{x.Id}:{SafeValue(x.ServiceName)}:{ReservationDisplayTitle(x.Title, 40)}"))}] sessionReleaseDeferredUntilStop=True rule=release_contract");
 
-                // CHAIN_CANONICAL_SEAM_INVARIANT:
-                // manual-stop detachの保存commit後、active chain control / lease / session lifetimeを即時再計算する。
-                // これにより旧topologyをworker controlへ残したまま停止処理へ進まない。
-                ReconcileActiveContinuousChainTopology($"ManualStopDetach:R{reservationId}");
+                // Runtime reconciliation is owned by the common preparation core.
             }
 
             foreach (var sibling in siblingStops)
@@ -1488,93 +1881,161 @@ private readonly ReservationStore _store;
 
                 SafeManualStopLog("MANUAL_STOP_OCCURRENCE", $"R{reservationId}",
                     $"result=SIBLING_STOP_REQUEST target=R{sid} source=R{reservationId} reason=same_occurrence_manual_stop pid={sibling.ProcessId} tuner={SafeValue(sibling.Lease.Name)} rule=release_contract");
-                StartManualStopTask(sibling, ReservationStatus.Cancelled, sid,
-                    $"同一発生回の手動停止により録画を停止しました。source=R{reservationId}");
+                StopPhaseGate.PhysicalReleaseBarrier? siblingScope = null;
+                var siblingTaskOwnsRequest = false;
+                try
+                {
+                    siblingScope = StopPhaseGate.EnterPhysicalReleaseBarrier(sid, sibling.Lease.Name);
+                    siblingTaskOwnsRequest = true;
+                    _ = StartManualStopTask(sibling, ReservationStatus.Cancelled, sid,
+                        $"同一発生回の手動停止により録画を停止しました。source=R{reservationId}", siblingScope);
+                }
+                finally
+                {
+                    if (!siblingTaskOwnsRequest)
+                    {
+                        if (siblingScope is not null) CompleteManualStopPreparationScope(siblingScope, sid);
+                        ReleaseManualStopRequest(sid);
+                    }
+                }
             }
 
             if (session is null)
             {
-                try
+                // MANUAL_STOP_NO_SESSION_CAS_INVARIANT:
+                // session不在を理由に状態を無条件Cancelledへ上書きしない。
+                // Scheduled/Startingは判定時世代で取消す。Recordingはruntime ownerを再確認し、完全にownerlessの場合だけ正規のStopping経由でCancelledへ収束する。
+                var latest = _store.GetById(reservationId);
+                if (latest is null)
+                    return StopRecordingRequestResult.CreateFailed(reservationId);
+
+                ReservationLifecycleTransitionResult cancelResult;
+                if (latest.Status == ReservationStatus.Scheduled)
                 {
-                    // MANUAL_STOP_NO_SESSION_CAS_INVARIANT:
-                    // session不在を理由に状態を無条件Cancelledへ上書きしない。
-                    // Scheduled/Startingは判定時世代で取消す。Recordingはruntime ownerを再確認し、完全にownerlessの場合だけ正規のStopping経由でCancelledへ収束する。
-                    var latest = _store.GetById(reservationId);
-                    if (latest is null)
-                        return StopRecordingRequestResult.CreateFailed(reservationId);
-
-                    ReservationLifecycleTransitionResult cancelResult;
-                    if (latest.Status == ReservationStatus.Scheduled)
-                    {
-                        cancelResult = _store.TryFinalizeScheduledReservation(
-                            latest.Id, latest.DataVersion, ReservationStatus.Cancelled, "manual_stop_no_session");
-                    }
-                    else if (latest.Status == ReservationStatus.Starting)
-                    {
-                        cancelResult = _store.TryCancelStartingReservation(
-                            latest.Id, latest.DataVersion, "manual_stop_no_session");
-                    }
-                    else if (latest.Status == ReservationStatus.Recording)
-                    {
-                        if (TryResolveLiveRecordingRuntimeOwnerForManualStop(latest, out var liveOwnerKind, out var liveOwnerPid, out var liveOwnerTuner))
-                        {
-                            SafeManualStopLog("MANUAL_STOP_NO_SESSION", $"R{reservationId}",
-                                $"result=REJECTED status={latest.Status} dataVersion={latest.DataVersion} reason=live_runtime_owner ownerKind={liveOwnerKind} " +
-                                $"pid={(liveOwnerPid > 0 ? liveOwnerPid.ToString() : "-")} tuner={SafeValue(liveOwnerTuner)} action=keep_latest_state rule=recording_lifecycle_cas_contract");
-                            return StopRecordingRequestResult.CreateFailed(reservationId);
-                        }
-
-                        var stopping = _store.TryBeginRecordingStop(latest.Id, latest.DataVersion);
-                        if (!stopping.Applied)
-                        {
-                            SafeManualStopLog("MANUAL_STOP_NO_SESSION", $"R{reservationId}",
-                                $"result=CAS_REJECTED stage=recording_to_stopping status={latest.Status} reason={SafeValue(stopping.Reason)} " +
-                                $"dataVersion={stopping.PreviousDataVersion}->{stopping.CurrentDataVersion} action=keep_latest_state rule=recording_lifecycle_cas_contract");
-                            return StopRecordingRequestResult.CreateFailed(reservationId);
-                        }
-
-                        cancelResult = _store.TryCompleteRecordingStop(
-                            latest.Id, stopping.CurrentDataVersion, ReservationStatus.Cancelled, "manual_stop_ownerless_recording");
-                        if (cancelResult.Applied)
-                        {
-                            CleanupDeadSharedCaptureSessionForTerminalReservation(latest.Id, "manual_stop_ownerless_recording");
-                            SafeManualStopLog("MANUAL_STOP_NO_SESSION", $"R{reservationId}",
-                                $"result=TERMINALIZED status=Recording->Stopping->Cancelled dataVersion={latest.DataVersion}->{cancelResult.CurrentDataVersion} " +
-                                "runtimeOwner=False workerStop=not_required leaseRelease=already_not_owned action=converge_terminal rule=recording_lifecycle_convergence_contract");
-                        }
-                    }
-                    else
+                    cancelResult = _store.TryFinalizeScheduledReservation(
+                        latest.Id, latest.DataVersion, ReservationStatus.Cancelled, "manual_stop_no_session");
+                }
+                else if (latest.Status == ReservationStatus.Starting)
+                {
+                    cancelResult = _store.TryCancelStartingReservation(
+                        latest.Id, latest.DataVersion, "manual_stop_no_session");
+                }
+                else if (latest.Status == ReservationStatus.Recording)
+                {
+                    if (TryResolveLiveRecordingRuntimeOwnerForManualStop(latest, out var liveOwnerKind, out var liveOwnerPid, out var liveOwnerTuner))
                     {
                         SafeManualStopLog("MANUAL_STOP_NO_SESSION", $"R{reservationId}",
-                            $"result=REJECTED status={latest.Status} dataVersion={latest.DataVersion} reason=runtime_owner_required action=keep_latest_state rule=recording_lifecycle_cas_contract");
+                            $"result=REJECTED status={latest.Status} dataVersion={latest.DataVersion} reason=live_runtime_owner ownerKind={liveOwnerKind} " +
+                            $"pid={(liveOwnerPid > 0 ? liveOwnerPid.ToString() : "-")} tuner={SafeValue(liveOwnerTuner)} action=keep_latest_state rule=recording_lifecycle_cas_contract");
                         return StopRecordingRequestResult.CreateFailed(reservationId);
                     }
 
-                    if (!cancelResult.Applied)
+                    var stopping = _store.TryBeginRecordingStop(latest.Id, latest.DataVersion);
+                    if (!stopping.Applied)
                     {
                         SafeManualStopLog("MANUAL_STOP_NO_SESSION", $"R{reservationId}",
-                            $"result=CAS_REJECTED status={latest.Status} reason={SafeValue(cancelResult.Reason)} dataVersion={cancelResult.PreviousDataVersion}->{cancelResult.CurrentDataVersion} action=keep_latest_state rule=recording_lifecycle_cas_contract");
+                            $"result=CAS_REJECTED stage=recording_to_stopping status={latest.Status} reason={SafeValue(stopping.Reason)} " +
+                            $"dataVersion={stopping.PreviousDataVersion}->{stopping.CurrentDataVersion} action=keep_latest_state rule=recording_lifecycle_cas_contract");
                         return StopRecordingRequestResult.CreateFailed(reservationId);
                     }
 
-                    _forceAllocationReevaluate = true;
-                    return StopRecordingRequestResult.CreateAccepted(reservationId);
+                    cancelResult = _store.TryCompleteRecordingStop(
+                        latest.Id, stopping.CurrentDataVersion, ReservationStatus.Cancelled, "manual_stop_ownerless_recording");
+                    if (cancelResult.Applied)
+                    {
+                        CleanupDeadSharedCaptureSessionForTerminalReservation(latest.Id, "manual_stop_ownerless_recording");
+                        SafeManualStopLog("MANUAL_STOP_NO_SESSION", $"R{reservationId}",
+                            $"result=TERMINALIZED status=Recording->Stopping->Cancelled dataVersion={latest.DataVersion}->{cancelResult.CurrentDataVersion} " +
+                            "runtimeOwner=False workerStop=not_required leaseRelease=already_not_owned action=converge_terminal rule=recording_lifecycle_convergence_contract");
+                    }
                 }
-                finally
+                else
                 {
-                    ReleaseManualStopRequest(reservationId);
+                    SafeManualStopLog("MANUAL_STOP_NO_SESSION", $"R{reservationId}",
+                        $"result=REJECTED status={latest.Status} dataVersion={latest.DataVersion} reason=runtime_owner_required action=keep_latest_state rule=recording_lifecycle_cas_contract");
+                    return StopRecordingRequestResult.CreateFailed(reservationId);
                 }
+
+                if (!cancelResult.Applied)
+                {
+                    SafeManualStopLog("MANUAL_STOP_NO_SESSION", $"R{reservationId}",
+                        $"result=CAS_REJECTED status={latest.Status} reason={SafeValue(cancelResult.Reason)} dataVersion={cancelResult.PreviousDataVersion}->{cancelResult.CurrentDataVersion} action=keep_latest_state rule=recording_lifecycle_cas_contract");
+                    return StopRecordingRequestResult.CreateFailed(reservationId);
+                }
+
+                _forceAllocationReevaluate = true;
+                return StopRecordingRequestResult.CreateAccepted(reservationId);
             }
 
-            StartManualStopTask(session, ReservationStatus.Cancelled, reservationId, "録画を手動停止しました。");
+            var transferredScope = preparationScope;
+            preparationScope = null;
+            stopTaskOwnsRequest = true; // StartManualStopTask owns success and launch-failure cleanup
+            _ = StartManualStopTask(session, ReservationStatus.Cancelled, reservationId, "録画を手動停止しました。", transferredScope);
             return StopRecordingRequestResult.CreateAccepted(reservationId);
         }
         catch (Exception ex)
         {
-            ReleaseManualStopRequest(reservationId);
             SafeManualStopLog("MANUAL_STOP_REQUEST", $"R{reservationId}",
                 $"result=FAILED action=release_request errorType={ex.GetType().Name} error={TrimForLog(ex.Message, 240)} rule=release_contract");
             return StopRecordingRequestResult.CreateFailed(reservationId);
+        }
+        finally
+        {
+            if (preparationScope is not null)
+            {
+                CompleteManualStopPreparationScope(preparationScope, reservationId);
+            }
+            if (!stopTaskOwnsRequest) ReleaseManualStopRequest(reservationId);
+        }
+    }
+
+    private ManualStopChainDetachResult? PrepareManualStop(ManualStopPreparationCommand command,
+        StopPhaseGate.PhysicalReleaseBarrier scope)
+    {
+        try { _allocationRoute.RunManualStopPreparation(command, scope); }
+        catch (Exception ex) when (command.Result is { Applied: true })
+        {
+            SafeManualStopLog("CHAIN_STOP_NOTIFICATION", $"R{command.ReservationId}",
+                $"result=FAILED topologyCommitted=True action=continue_existing_stop errorType={ex.GetType().Name} error={TrimForLog(ex.Message, 240)} rule=release_contract");
+        }
+        return command.Result;
+    }
+
+    // Called only by the stop preparation command while the common route owns the flight.
+    internal void PrepareManualStopOccurrencePolicy(ManualStopPreparationCommand command)
+    {
+        var reservation = _store.GetById(command.ReservationId)
+            ?? throw new InvalidOperationException("Manual-stop reservation no longer exists.");
+        if (reservation.Status is not (ReservationStatus.Scheduled or ReservationStatus.Starting or ReservationStatus.Recording))
+            throw new InvalidOperationException("Manual-stop reservation is no longer active.");
+        command.PolicySnapshot = reservation.SnapshotForChainRequest();
+        command.PostEndMarginSeconds = Math.Max(0, _ini.PostEndMarginSeconds);
+        command.SiblingStops = FindSameOccurrenceActiveSessionsForManualStop(reservation, command.ReservationId);
+    }
+
+    private void CompleteManualStopPreparationScope(StopPhaseGate.PhysicalReleaseBarrier scope, int reservationId)
+    {
+        ReservationAllocationRouteRequest? resumeRequest = null;
+        try
+        {
+            scope.Dispose();
+            var pending = StopPhaseGate.ConsumeDeferred();
+            if (pending.allocationRequest is not null || pending.wakeRebuild)
+            {
+                var request = pending.allocationRequest ?? new("RecordingStop", "ReleasePreparation",
+                    SyncProgramRuleReservations: false, ReevaluateAllocations: true);
+                // Another ordinary stop may still own a resource. Re-enter its normal gate.
+                resumeRequest = request with { BypassStopPhaseGate = false,
+                    ReevaluateAllocations = true, RefreshPreRecordEpgEntries = true, RefreshWakeTask = true };
+                _allocationRoute.Run(resumeRequest);
+            }
+        }
+        catch (Exception ex)
+        {
+            if (resumeRequest is not null) _allocationRoute.RetainStopResumeRequest(resumeRequest);
+            _forceAllocationReevaluate = true;
+            SafeManualStopLog("MANUAL_STOP_RELEASE", $"R{reservationId}",
+                $"result=FAILED action=retry_existing_scheduler errorType={ex.GetType().Name} error={TrimForLog(ex.Message, 240)} rule=release_contract");
         }
     }
 
@@ -1682,15 +2143,21 @@ private readonly ReservationStore _store;
             _manualStopRequests.Remove(reservationId);
     }
 
-    private void StartManualStopTask(RecordingSession session, ReservationStatus finalStatus, int reservationId, string completionMessage)
+    private Task StartManualStopTask(RecordingSession session, ReservationStatus finalStatus, int reservationId, string completionMessage,
+        StopPhaseGate.PhysicalReleaseBarrier? preparationScope = null)
     {
         try
         {
-            _ = Task.Run(async () =>
+            return Task.Run(async () =>
             {
+                Task? finalizationCompletion = null;
                 try
                 {
+                    if (session.ReservationId != reservationId)
+                        throw new InvalidOperationException("Manual-stop runtime owner changed before execution.");
                     await StopSessionAsync(session, finalStatus).ConfigureAwait(false);
+                    finalizationCompletion = session.WaitForFinalizationAttemptAsync();
+                    await finalizationCompletion.ConfigureAwait(false);
                     _forceAllocationReevaluate = true;
                     SafeManualStopLog("Scheduler", $"R{reservationId}", completionMessage);
                 }
@@ -1702,12 +2169,20 @@ private readonly ReservationStore _store;
                 }
                 finally
                 {
+                    // A duplicate StopSessionAsync may have returned while another owner
+                    // still finalizes this same session. Its completion is evidence, not a delay.
+                    finalizationCompletion ??= session.WaitForFinalizationAttemptAsync();
+                    await finalizationCompletion.ConfigureAwait(false);
+                    if (preparationScope is not null)
+                        CompleteManualStopPreparationScope(preparationScope, reservationId);
                     ReleaseManualStopRequest(reservationId);
                 }
             });
         }
         catch
         {
+            if (preparationScope is not null)
+                CompleteManualStopPreparationScope(preparationScope, reservationId);
             ReleaseManualStopRequest(reservationId);
             throw;
         }
@@ -1730,61 +2205,150 @@ private readonly ReservationStore _store;
         {
             var candidate = _store.GetById(session.ReservationId);
             if (candidate is null) continue;
-            if (!IsSameOccurrenceForManualStop(policyReservation, candidate)) continue;
+            if (!ManualStopOccurrencePolicy.IsSameOccurrence(policyReservation, candidate)) continue;
             result.Add(session);
         }
         return result;
     }
 
-    private int CancelSameOccurrenceScheduledReservationsForManualStop(Reservation policyReservation, int excludedReservationId)
-    {
-        var targets = _store.GetAll()
-            .Where(x => x.Id != excludedReservationId)
-            .Where(x => x.Status == ReservationStatus.Scheduled)
-            .Where(x => IsSameOccurrenceForManualStop(policyReservation, x))
-            .GroupBy(x => x.Id)
-            .Select(x => x.First())
-            .ToList();
-
-        var cancelled = 0;
-        foreach (var target in targets)
-        {
-            var result = _store.TryFinalizeScheduledReservation(
-                target.Id, target.DataVersion, ReservationStatus.Cancelled, "same_occurrence_manual_stop");
-            _log.Add("MANUAL_STOP_OCCURRENCE", $"R{excludedReservationId}",
-                $"result={(result.Applied ? "SIBLING_CANCEL" : "SIBLING_CANCEL_CAS_REJECTED")} target=R{target.Id} reason=same_occurrence_manual_stop detail={SafeValue(result.Reason)} dataVersion={result.PreviousDataVersion}->{result.CurrentDataVersion} rule=release_contract");
-            if (result.Applied) cancelled++;
-        }
-        return cancelled;
-    }
-
-    private static bool IsSameOccurrenceForManualStop(Reservation a, Reservation b)
-    {
-        if (a.NetworkId != b.NetworkId || a.TransportStreamId != b.TransportStreamId || a.ServiceId != b.ServiceId)
-            return false;
-
-        if (a.EventId != 0 && b.EventId != 0 && a.EventId == b.EventId)
-            return true;
-
-        var exactTime = a.StartTime == b.StartTime && a.EndTime == b.EndTime;
-        if (exactTime) return true;
-
-        var overlaps = a.StartTime < b.EndTime && b.StartTime < a.EndTime;
-        if (!overlaps) return false;
-
-        return string.Equals(NormalizeTitleForOccurrenceCompare(a.Title), NormalizeTitleForOccurrenceCompare(b.Title), StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string NormalizeTitleForOccurrenceCompare(string? title)
-    {
-        if (string.IsNullOrWhiteSpace(title)) return string.Empty;
-        return Regex.Replace(title.Trim(), @"\s+", " ");
-    }
 
     // ─── ポーリング ──────────────────────────────────────────────
 
+    internal LabWithdrawalOwnerIdentity? LabResolveWithdrawalOwner(int selected)
+    {
+        RecordingSession[] sessions;lock(_sessionGate)sessions=_activeSessions.Values.Distinct().ToArray();
+        var matches=sessions.Where(s=>s.IsRecordingCommitted&&s.IsSharedChainCapture&&s.ReservationId!=selected
+            &&s.ChainControl is not null&&s.ChainControl.TryGetSegment(selected,out var segment)&&segment.Enabled).ToArray();
+        return matches.Length==1?LabCaptureWithdrawalOwner(matches[0].ReservationId,matches[0].ChainControlPath):null;
+    }
+    internal void LabPublishWithdrawal(LabWithdrawalOwnerIdentity owner,LabWithdrawalWireRequest request)
+    {
+        RecordingSession? session;lock(_sessionGate)_activeSessions.TryGetValue(owner.OwnerReservationId,out session);
+        ChainControlState? control=null;
+        if(session is not null){
+            var identity=session.WorkerIdentity;
+            var current=identity.ProcessStartTimeUtc.HasValue?new LabWithdrawalOwnerIdentity(session.ReservationId,identity.ProcessId,identity.ProcessStartTimeUtc.Value,identity.ExecutablePath,session.ChainControlPath):null;
+            if(!owner.SameOwner(current))throw new IOException("Withdrawal owner changed.");
+            control=session.ChainControl;
+        }else if(LabWorkerExitProbe.Observe(owner.ProcessIdentity)==LabWorkerPresence.Exited
+            &&ChainControlState.TryOpen(owner.ControlPath,out var stored))control=stored;
+        if(control is null)throw new IOException("Withdrawal owner is not attached.");
+        control.Update(snapshot=>{
+            if(!snapshot.Segments.Any(s=>s.ReservationId==owner.OwnerReservationId))throw new IOException("Withdrawal control owner mismatch.");
+            return snapshot with{Withdrawals=snapshot.Withdrawals.Where(w=>w.OperationId!=request.OperationId).Append(request).ToArray()};
+        });
+    }
+
+    internal LabWithdrawalOwnerIdentity? LabCaptureWithdrawalOwner(int owner,string controlPath)
+    {
+        RecordingSession? captured;
+        lock(_sessionGate) _activeSessions.TryGetValue(owner,out captured);
+        if(captured is null||!captured.IsRecordingCommitted||!captured.IsSharedChainCapture
+            ||!string.Equals(controlPath,captured.ChainControlPath,StringComparison.OrdinalIgnoreCase))return null;
+        var identity=captured.WorkerIdentity;
+        if(!identity.IsAvailable||!identity.ProcessStartTimeUtc.HasValue)return null;
+        var binding=new LabWithdrawalOwnerIdentity(owner,identity.ProcessId,identity.ProcessStartTimeUtc.Value,identity.ExecutablePath,controlPath);
+        if(!binding.IsValid||!TvAirManagedProcessRegistry.TryGet(identity.ProcessId,out var registration)
+            ||registration.Purpose!=ManagedTvTestProcessPurpose.RecordingWorker||registration.ReservationId!=owner)return null;
+        var observed=TvAirManagedProcessRegistry.CaptureIdentity(identity.ProcessId);
+        bool Same(ManagedProcessIdentity other)=>other.IsAvailable&&other.ProcessStartTimeUtc.HasValue
+            &&other.ProcessId==identity.ProcessId&&other.ProcessStartTimeUtc==identity.ProcessStartTimeUtc
+            &&TvAirManagedProcessRegistry.IdentityMatches(identity,other);
+        if(!Same(registration.Identity)||!Same(observed))return null;
+        lock(_sessionGate)return _activeSessions.TryGetValue(owner,out var current)&&ReferenceEquals(captured,current)&&current.IsRecordingCommitted?binding:null;
+    }
+    internal bool LabValidateBoundWithdrawalWorkerReceipt(LabWithdrawalOwnerIdentity binding,JsonElement receipt)
+        =>binding.IsValid&&binding.SameOwner(LabCaptureWithdrawalOwner(binding.OwnerReservationId,binding.ControlPath))
+            &&LabValidateWithdrawalWorkerReceipt(binding.OwnerReservationId,binding.ControlPath,receipt);
+
+    internal bool LabValidateWithdrawalWorkerReceipt(int owner,string controlPath,JsonElement receipt)
+    {
+        RecordingSession? captured;
+        lock (_sessionGate) _activeSessions.TryGetValue(owner,out captured);
+        if(captured is null || !captured.IsRecordingCommitted || !captured.IsSharedChainCapture
+            || !string.Equals(captured.ChainControlPath,controlPath,StringComparison.OrdinalIgnoreCase)) return false;
+        if(!TvAirManagedProcessRegistry.TryGet(captured.ProcessId,out var registration)
+            ||registration.Purpose!=ManagedTvTestProcessPurpose.RecordingWorker||registration.ReservationId!=owner
+            ||!LabWorkerReceiptBinding.Matches(receipt,captured.WorkerIdentity,registration.Identity)) return false;
+        var observed=TvAirManagedProcessRegistry.CaptureIdentity(captured.ProcessId);
+        if(!LabWorkerReceiptBinding.Matches(receipt,captured.WorkerIdentity,observed))return false;
+        lock(_sessionGate) return _activeSessions.TryGetValue(owner,out var current)
+            && ReferenceEquals(captured,current) && current.IsRecordingCommitted;
+    }
+
+    private int _labWithdrawalStartupScanComplete;
+    private string? _labWithdrawalStartupIssue;
+
+    internal async Task<bool> ResumeLabWithdrawalsAtStartupAsync(CancellationToken ct)
+    {
+        if (ct.IsCancellationRequested || Volatile.Read(ref _chainRuntimeProtectionReady) == 0
+            || StopPhaseGate.IsStopping) return false;
+        if (Volatile.Read(ref _labWithdrawalStartupScanComplete) != 0) return true;
+        var issues = new List<string>();
+        try
+        {
+            var journal = _store.LabOpenWithdrawalJournal();
+            var factory = new LabWithdrawalOperationFactory(this, journal);
+            foreach (var row in journal.ListUnsettled())
+            {
+                if (ct.IsCancellationRequested || StopPhaseGate.IsStopping) return false;
+                if (row.Selected <= 0 || !Guid.TryParseExact(row.Operation, "N", out var operation))
+                {
+                    issues.Add("invalid-operation-identity");
+                    continue;
+                }
+                var admission = await _allocationRoute.AdmitLabWithdrawalAsync(
+                    operation, row.Selected, () => factory.Restore(row));
+                if (admission.Operation is null) issues.Add("unrestorable-operation");
+                else if (admission.Operation.Completion.IsCompletedSuccessfully
+                    && admission.Operation.Completion.Result is not ("committed" or "aborted"))
+                    issues.Add("canonical-recovery-rejected");
+            }
+        }
+        catch (Exception ex) when (ex is Microsoft.Data.Sqlite.SqliteException or IOException
+            or UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+            issues.Add(ex.GetType().Name);
+        }
+        var issue = string.Join(",", issues.Distinct().OrderBy(s => s));
+        if (issue.Length != 0)
+        {
+            if (_labWithdrawalStartupIssue != issue)
+                _log.Add("Scheduler", "WithdrawalRecovery", $"未完了の予約取消を復旧待ちとして保持します。reason={issue}");
+            _labWithdrawalStartupIssue = issue;
+            return false;
+        }
+        _labWithdrawalStartupIssue = null;
+        // Admission is not settlement. Keep the existing startup retry active until
+        // the durable journal confirms that no pending operation or claim remains.
+        try
+        {
+            if (_store.LabOpenWithdrawalJournal().ListUnsettled().Count != 0) return false;
+        }
+        catch (Exception ex) when (ex is Microsoft.Data.Sqlite.SqliteException or IOException
+            or UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+            return false;
+        }
+        Volatile.Write(ref _labWithdrawalStartupScanComplete, 1);
+        return true;
+    }
+
+    internal bool ProgressPendingLabWithdrawalMaintenance(CancellationToken ct)
+    {
+        if (ct.IsCancellationRequested || Volatile.Read(ref _chainRuntimeProtectionReady) == 0
+            || StopPhaseGate.IsStopping || !_allocationRoute.HasPendingLabWithdrawalWork) return false;
+        var result = _allocationRoute.Run(new ReservationAllocationRouteRequest(
+            "WithdrawalMaintenance", "ExistingTick", SyncProgramRuleReservations: false,
+            ReevaluateAllocations: false, RefreshPreRecordEpgEntries: false, RefreshWakeTask: false),
+            waitForActiveSingleFlight: false);
+        return !result.Deferred && !result.RetryRequired;
+    }
+
     private async Task TickAsync(CancellationToken ct)
     {
+        await ResumeLabWithdrawalsAtStartupAsync(ct);
+        ProgressPendingLabWithdrawalMaintenance(ct);
         var now = DateTime.Now;
 
         AuditReservationsAroundNow(now, "TickWindow", force: false);
@@ -1904,6 +2468,11 @@ private readonly ReservationStore _store;
                 UpdateWakeTasksForMaintenance();
             }
         }
+
+        // Reuse the normal maintenance tick, after due recording work. No new worker/queue.
+        var recordingRuntimeDirectory = Path.Combine(AppContext.BaseDirectory, "runtime", "tvairepgrec-production-recording");
+        await ResumePersistedContinuousChainStopsAsync(recordingRuntimeDirectory, ct).ConfigureAwait(false);
+        ResumePersistedContinuousChainResults(recordingRuntimeDirectory, ct);
     }
 
 
@@ -2743,7 +3312,14 @@ private readonly ReservationStore _store;
             ProcessId = Environment.ProcessId
         };
 
-        if (!_recordingStartInProgress.TryAdd(r.Id, owner))
+        var startOwnerAcquired = TryRegisterRecordingStartOwner(r.Id, owner, out var editBusy);
+        if (editBusy)
+        {
+            _log.Add("REC_START_CLAIM", r.Title ?? string.Empty,
+                $"result=DEFER reason=chain_edit_admission_busy reservationId={r.Id} nextTick=True noStartClaim=True");
+            return false;
+        }
+        if (!startOwnerAcquired)
         {
             if (!_recordingStartInProgress.TryGetValue(r.Id, out var existingOwner))
             {
@@ -2819,6 +3395,24 @@ private readonly ReservationStore _store;
         return ownerResult;
     }
 
+
+    // Only the existing start-owner insertion is admitted here. Never retain the
+    // admission through allocation, worker launch, owner convergence, or joiner waits.
+    private bool TryRegisterRecordingStartOwner(
+        int reservationId, RecordingStartOwnerEntry owner, out bool editBusy)
+    {
+        editBusy = false;
+        // Joining an existing owner does not publish a new runtime membership.
+        // If it disappears, the existing caller retries through the normal entry.
+        if (_recordingStartInProgress.ContainsKey(reservationId)) return false;
+        if (!_chainEditAdmission.TryEnterRuntimePublication(out var admission))
+        {
+            editBusy = true;
+            return false;
+        }
+        using (admission)
+            return _recordingStartInProgress.TryAdd(reservationId, owner);
+    }
 
     private async Task RecoverDueOrphanStartingReservationsAsync(DateTime now, CancellationToken ct)
     {
@@ -3835,6 +4429,7 @@ private readonly ReservationStore _store;
             chainControlPath: directStart.ChainControlPath,
             sharedCaptureRootReservationId: directStart.ContinuousChainCapture ? (r.UserChainRootId ?? r.Id) : null,
             physicalCapturePlannedEndTime: physicalCaptureEnd);
+        session.BindWorkerObservationPath(directStart.RuntimeStatsPath);
         if (physicalCaptureEnd > plannedEnd)
             lease.UpdatePlannedEndTime(physicalCaptureEnd, $"ContinuousChainInitialCapture R{r.Id}");
 
@@ -3985,7 +4580,8 @@ private readonly ReservationStore _store;
         string ResultPath,
         string RuntimeStatsPath,
         bool CurrentServiceOnly,
-        bool SaveSubtitles);
+        bool SaveSubtitles)
+    { public string RecordingFileDeclaration { get; init; } = string.Empty; }
 
     private sealed record RecordingWorkerStartResult(
         bool Success,
@@ -4080,7 +4676,7 @@ private readonly ReservationStore _store;
         // Every record worker receives an initially single-segment immutable chain-control snapshot store.
         // This keeps an already-running predecessor upgradable when the user adds an explicit
         // chain child after recording has started, without reopening BonDriver or restarting the worker.
-        var chainControlPath = Path.Combine(workDir, $"record_chain_control_R{r.Id}_{stamp}_{Guid.NewGuid():N}");
+        var chainControlPath = Path.Combine(_recordingResults.Files.PendingControlDirectory, $"record_chain_control_R{r.Id}_{stamp}_{Guid.NewGuid():N}");
         var chainSegmentResultPath = string.Empty;
         var chainSegmentRuntimeStatsPath = string.Empty;
         var continuousChainCapture = false;
@@ -4136,7 +4732,9 @@ private readonly ReservationStore _store;
                     segmentResultPath,
                     segmentRuntimeStatsPath,
                     segmentRecordingOptions.CurrentServiceOnly,
-                    segmentRecordingOptions.SaveSubtitles));
+                    segmentRecordingOptions.SaveSubtitles)
+                { RecordingFileDeclaration = CreateRecordingFileDeclaration(segmentReservation,
+                    segmentOutputPath, segmentResultPath, segmentRuntimeStatsPath, requestPath) });
                 if (index == 0)
                 {
                     chainSegmentResultPath = segmentResultPath;
@@ -4161,7 +4759,7 @@ private readonly ReservationStore _store;
                     segment.ResultPath,
                     segment.RuntimeStatsPath,
                     segment.CurrentServiceOnly,
-                    segment.SaveSubtitles)).ToArray());
+                    segment.SaveSubtitles) { RecordingFileDeclaration = segment.RecordingFileDeclaration }).ToArray());
             ChainControlState.CreateNewStore(chainControlPath, initialChainControl);
             _log.Add("CHAIN_CONTINUOUS_CAPTURE_PLAN", $"R{r.Id}",
                 $"result={(continuousChainCapture ? "ARMED" : "UPGRADE_READY")} root=R{r.UserChainRootId ?? r.Id} captureTuner={SafeValue(lease.Name)} did={SafeValue(lease.Did)} segments={chainSegments.Count} captureStart={now:MM/dd HH:mm:ss.fff} captureEnd={capturePlannedEnd:MM/dd HH:mm:ss.fff} " +
@@ -4357,9 +4955,63 @@ private readonly ReservationStore _store;
 
 
 
+    private HashSet<int> ReadUnprojectedContinuousChainReservationIds()
+    {
+        var pending = new HashSet<int>();
+        foreach (var candidate in _store.ListContinuousChainFinalizationCandidates())
+            if (!_recordingResults.HasFinalizedOccurrence(ContinuousChainResultIdentity(candidate)))
+                pending.Add(candidate.Id);
+        return pending;
+    }
+
     private void PruneExpiredRecordingRuntimeEvidence(string workDir)
     {
-        if (string.IsNullOrWhiteSpace(workDir) || !Directory.Exists(workDir)) return;
+        if (string.IsNullOrWhiteSpace(workDir) || !Path.IsPathFullyQualified(workDir) || !Directory.Exists(workDir)) return;
+        // The physical job/control bundle can outlive several logical owners. Do not
+        // infer disposable files from only the current segment's response/stats paths.
+        lock (_sessionGate)
+            if (_activeSessions.Count != 0) return;
+        var root = Path.GetFullPath(workDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        bool PlainRetentionTarget(string path)
+        {
+            var full = Path.GetFullPath(path);
+            if (!full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return false;
+            var current = full;
+            while (true)
+            {
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) return false;
+                if (string.Equals(current, root, StringComparison.OrdinalIgnoreCase)) break;
+                current = Path.GetDirectoryName(current)!;
+                if (string.IsNullOrEmpty(current)) return false;
+            }
+            // Check a directory's descendants without traversing reparse points.
+            var pending = new Stack<string>(); pending.Push(full);
+            while (pending.Count != 0)
+            {
+                var entry = pending.Pop();
+                var attributes = File.GetAttributes(entry);
+                if ((attributes & FileAttributes.ReparsePoint) != 0) return false;
+                if ((attributes & FileAttributes.Directory) != 0)
+                    foreach (var child in Directory.EnumerateFileSystemEntries(entry)) pending.Push(child);
+            }
+            return true;
+        }
+
+        // The job/control files are required to bind a persisted terminal receipt.
+        // Do not infer disposable paths from an invalid or incomplete receipt. Defer
+        // this automatic sweep until all pending results are durable instead.
+        try
+        {
+            if (_store.HasPendingContinuousChainStopReceipt()
+                || ReadUnprojectedContinuousChainReservationIds().Count != 0
+                || _store.LabOpenWithdrawalJournal().ListUnsettled().Count != 0) return;
+        }
+        catch (Exception ex)
+        {
+            _log.Add("CHAIN_RUNTIME_RETENTION", "Maintenance",
+                $"result=DEFERRED reason=result_protection_unavailable errorType={ex.GetType().Name} rule=recording_result_projection_contract");
+            return;
+        }
 
         var cutoffUtc = DateTime.UtcNow - RecordingRuntimeEvidenceRetention;
         var deleted = 0;
@@ -4389,14 +5041,20 @@ private readonly ReservationStore _store;
                         : DateTime.MaxValue;
                 if (lastWriteUtc > cutoffUtc) continue;
 
-                if (File.Exists(path))
-                    File.Delete(path);
-                else if (Directory.Exists(path))
-                    Directory.Delete(path, recursive: true);
-                else
-                    continue;
-
-                deleted++;
+                // Recheck publication while holding the same gate used by session owners.
+                // Keep every remaining artifact if a session appeared during enumeration.
+                lock (_sessionGate)
+                {
+                    if (_activeSessions.Count != 0) return;
+                    if (!PlainRetentionTarget(path)) continue;
+                    if (File.Exists(path))
+                        File.Delete(path);
+                    else if (Directory.Exists(path))
+                        Directory.Delete(path, recursive: true);
+                    else
+                        continue;
+                    deleted++;
+                }
             }
             catch
             {
@@ -5227,21 +5885,29 @@ private readonly ReservationStore _store;
 
         // Runtimeの実行可否は設定値から再推測せず、現在保存されているexplicit-chain topologyを正本とする。
         // 設定OFF遷移ではScheduled行を先にdetachするため、ここに残るpairはStarting/Recording等の完走対象だけである。
-        var chains = _store.GetChainPredecessors(); // key=後続ID, value=前番組ID
-        if (chains.Count == 0) return;
-        var successorOf = chains.ToDictionary(kv => kv.Value, kv => kv.Key);
-
         List<RecordingSession> active;
-        lock (_sessionGate) active = _activeSessions.Values.Where(x => x.IsRecordingCommitted).ToList();
+        bool hasPendingResult;
+        lock (_sessionGate)
+        {
+            active = _activeSessions.Values.Where(x => x.IsRecordingCommitted).ToList();
+            var owners = active.Select(x => x.ReservationId).ToHashSet();
+            hasPendingResult = _chainBoundaryExecutions.Values.Any(x =>
+                (x.PredecessorTerminalCommit is not null || x.PredecessorStoppingVersion.HasValue) && !x.PredecessorResultProjected
+                && owners.Contains(x.PredecessorId));
+        }
         if (active.Count == 0) return;
+        var chains = _store.GetChainPredecessors(); // key=後続ID, value=前番組ID
+        if (chains.Count == 0 && !hasPendingResult) return;
+        var successorOf = chains.ToDictionary(kv => kv.Value, kv => kv.Key);
 
         // ACTIVE_SHARED_CAPTURE_LIFETIME_RECONCILIATION_INVARIANT:
         // Physical capture lifetime is derived from the currently connected persisted chain segments, not from
         // the historical maximum once observed by this process. Reconcile every active shared capture before
         // boundary planning so cancellation, settings detach, disable, time-follow shortening and rebase can shrink
         // the worker/tuner lifetime just as additions/extensions can grow it.
-        foreach (var session in active)
-            ReconcileSharedCaptureLifetimeFromCanonicalReservations(session, "BoundaryScan");
+        if (chains.Count > 0)
+            foreach (var session in active)
+                ReconcileSharedCaptureLifetimeFromCanonicalReservations(session, "BoundaryScan");
 
         _log.Add("Scheduler", "Chain",
             $"チェーン検索: セッション数={active.Count} 有効チェーンペア数={successorOf.Count} " +
@@ -5309,6 +5975,22 @@ private readonly ReservationStore _store;
         Reservation successor,
         DateTime now)
     {
+        if (!_chainEditAdmission.TryEnterRuntimePublication(out var admission))
+            return false;
+        using var runtimeAdmission = admission;
+        // The boundary map and arguments may predate an edit. Read the connection again
+        // after admission, before publishing a new sink to the worker.
+        var latestPredecessor = _store.GetById(predecessor.Id);
+        var latestSuccessor = _store.GetById(successor.Id);
+        if (latestPredecessor is null || latestSuccessor is null
+            || session.ReservationId != latestPredecessor.Id
+            || !latestSuccessor.IsUserChain
+            || latestSuccessor.UserChainPreviousId != latestPredecessor.Id
+            || !latestSuccessor.IsEnabled || latestSuccessor.IsConflicted
+            || latestSuccessor.Status is not (ReservationStatus.Scheduled or ReservationStatus.Starting or ReservationStatus.Recording))
+            return false;
+        predecessor = latestPredecessor;
+        successor = latestSuccessor;
         var control = session.ChainControl;
         if (control is null || !IsSameServiceIdentity(predecessor, successor))
             return false;
@@ -5401,7 +6083,9 @@ private readonly ReservationStore _store;
                     var naming = ResolveRecordingWorkerFileNameTimePolicy(successor, successor.StartTime);
                     var successorFile = BuildRecordingWorkerFileName(successor, naming.BaseTime, session.Lease, null);
                     var successorOutputPath = MakeUniqueRecordingPath(Path.Combine(recordFolder, successorFile.FileName));
-                    var controlDir = Path.GetDirectoryName(session.ChainControlPath) ?? AppContext.BaseDirectory;
+                    var controlDir = Path.GetDirectoryName(session.JobPath);
+                    if (string.IsNullOrWhiteSpace(controlDir))
+                        controlDir = Path.GetDirectoryName(session.ChainControlPath) ?? AppContext.BaseDirectory;
                     var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
                     var successorResultPath = Path.Combine(controlDir, $"record_chain_segment_result_R{successor.Id}_{stamp}_{Guid.NewGuid():N}.json");
                     var successorRuntimeStatsPath = Path.Combine(controlDir, $"record_chain_segment_runtime_R{successor.Id}_{stamp}_{Guid.NewGuid():N}.jsonl");
@@ -5418,19 +6102,24 @@ private readonly ReservationStore _store;
                         successorResultPath,
                         successorRuntimeStatsPath,
                         successorRecordingOptions.CurrentServiceOnly,
-                        successorRecordingOptions.SaveSubtitles));
+                        successorRecordingOptions.SaveSubtitles)
+                    { RecordingFileDeclaration = CreateRecordingFileDeclaration(successor,
+                        successorOutputPath, successorResultPath, successorRuntimeStatsPath, session.JobPath) });
                 }
 
                 var rootId = current.ChainRootReservationId > 0
                     ? current.ChainRootReservationId
                     : session.SharedCaptureRootReservationId ?? predecessor.UserChainRootId ?? predecessor.Id;
-                return new ChainControlSnapshot(rootId, true, rebuilt.ToArray());
+                return new ChainControlSnapshot(rootId, true, rebuilt.ToArray()) { Withdrawals = current.Withdrawals };
             });
 
             if (updated is null || string.IsNullOrWhiteSpace(predecessorResultPath))
                 return false;
 
-            var captureEnd = updated.Segments.Where(x => x.Enabled).Select(x => x.CloseAt).DefaultIfEmpty(successorCloseAt).Max();
+            var captureEnd = updated.Segments.Where(x => x.Enabled).Select(x => x.EffectiveCloseAt).DefaultIfEmpty(successorCloseAt).Max();
+            // A rejected physical lease update must not acknowledge a new session deadline
+            // or promote a single capture to shared. The published control remains retryable.
+            session.Lease.UpdatePlannedEndTime(captureEnd, $"DynamicChainUpgrade R{predecessor.Id}->R{successor.Id}");
             if (!wasSharedCapture)
             {
                 session.ActivateSharedChainCapture(
@@ -5443,7 +6132,6 @@ private readonly ReservationStore _store;
             {
                 session.UpdatePhysicalCaptureEndTime(captureEnd);
             }
-            session.Lease.UpdatePlannedEndTime(captureEnd, $"DynamicChainUpgrade R{predecessor.Id}->R{successor.Id}");
 
             _log.Add("CHAIN_CONTINUOUS_CAPTURE_UPGRADE", $"R{predecessor.Id}",
                 $"result=SUCCESS predecessor=R{predecessor.Id} successor=R{successor.Id} pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} did={SafeValue(session.Lease.Did)} " +
@@ -5457,6 +6145,28 @@ private readonly ReservationStore _store;
                 $"result=FAILED predecessor=R{predecessor.Id} successor=R{successor.Id} error={SafeValue(ex.GetType().Name)}:{SafeValue(ex.Message)} action=keep_existing_capture_retry_no_boundary_fallback rule=chain_continuous_capture_contract");
             return false;
         }
+    }
+
+    /// <summary>
+    /// Read-only evidence for future whole-component edits. Include provisional and single-sink
+    /// sessions and every enabled control segment, not only segments whose OpenAt has arrived.
+    /// This observation is not an atomic edit permit and must not be used as a commit token.
+    /// </summary>
+    ScheduledChainRuntimeProtectionSnapshot IScheduledChainRuntimeProtectionSource.CaptureScheduledChainJoinRuntimeProtection(DateTime observedAt)
+    {
+        if (Volatile.Read(ref _chainRuntimeProtectionReady) == 0)
+            return new(observedAt, Array.Empty<int>(), Array.Empty<ScheduledChainRuntimeProtectionEntry>(),
+                Array.AsReadOnly(new[] { new ScheduledChainRuntimeProtectionIssue(0, "runtime_initialization_pending") }));
+        return CaptureScheduledChainJoinRuntimeProtection(observedAt);
+    }
+
+    public ScheduledChainRuntimeProtectionSnapshot CaptureScheduledChainJoinRuntimeProtection(DateTime observedAt)
+    {
+        var startingOwners = _recordingStartInProgress.Keys.ToArray();
+        RecordingSession[] active;
+        lock (_sessionGate)
+            active = _activeSessions.Values.ToArray();
+        return ScheduledChainRuntimeProtectionReader.Capture(active, startingOwners, observedAt);
     }
 
     /// <summary>
@@ -5500,7 +6210,11 @@ private readonly ReservationStore _store;
     /// 次の通常境界tickまで待たずcanonical topologyへ合わせる。
     /// </summary>
     public void ReconcileActiveContinuousChainTopology(string reason)
+        => TryReconcileActiveContinuousChainTopology(reason, false);
+
+    internal bool TryReconcileActiveContinuousChainTopology(string reason, bool requireSuccess)
     {
+        var succeeded = true;
         List<RecordingSession> active;
         lock (_sessionGate)
             active = _activeSessions.Values.Where(x => x.IsRecordingCommitted && x.IsSharedChainCapture).ToList();
@@ -5509,26 +6223,31 @@ private readonly ReservationStore _store;
         {
             try
             {
-                ReconcileSharedCaptureLifetimeFromCanonicalReservations(session, reason);
+                ReconcileSharedCaptureLifetimeFromCanonicalReservationsCore(session, reason, requireSuccess);
             }
             catch (Exception ex)
             {
+                succeeded = false;
                 _log.Add("CHAIN_RUNTIME_TOPOLOGY_RECONCILE", $"R{session.ReservationId}",
                     $"result=FAILED reason={SafeValue(reason)} exception={SafeValue(ex.GetType().Name)} message={TrimForLog(ex.Message, 180)} action=retry_on_boundary_scan rule=chain_lifecycle_single_source");
             }
         }
 
         _log.Add("CHAIN_RUNTIME_TOPOLOGY_RECONCILE", "Summary",
-            $"result=COMPLETED reason={SafeValue(reason)} activeSharedCaptures={active.Count} rule=chain_lifecycle_single_source");
+            $"result={(succeeded ? "COMPLETED" : "RETRY_REQUIRED")} reason={SafeValue(reason)} activeSharedCaptures={active.Count} rule=chain_lifecycle_single_source");
+        return succeeded;
     }
 
     private DateTime ReconcileSharedCaptureLifetimeFromCanonicalReservations(RecordingSession session, string reason)
+        => ReconcileSharedCaptureLifetimeFromCanonicalReservationsCore(session, reason, false);
+
+    private DateTime ReconcileSharedCaptureLifetimeFromCanonicalReservationsCore(RecordingSession session, string reason, bool requireSuccess)
     {
         if (!session.IsSharedChainCapture || session.ChainControl is null)
             return session.PhysicalCaptureEndTime;
 
         var before = session.PhysicalCaptureEndTime;
-        var canonicalEnd = RefreshContinuousChainControlTimings(session, reason);
+        var canonicalEnd = RefreshContinuousChainControlTimingsCore(session, reason, requireSuccess);
         // The logical owner segment is always a hard lower bound. This protects the current recording while
         // still allowing a previously extended downstream lifetime to contract after topology mutations.
         if (canonicalEnd < session.PlannedEndTime)
@@ -5556,82 +6275,65 @@ private readonly ReservationStore _store;
         return canonicalEnd;
     }
 
-    private DateTime RefreshLivePresentWorkerHold(RecordingSession session, Reservation reservation, DateTime now, string reason)
+    private DateTime ResolveRecordingExecutionEnd(RecordingSession session, Reservation reservation, DateTime formalCloseAt)
     {
-        // This is physical-lifetime protection only. Never mutate Reservation.EndTime, ProgramGuide timing,
-        // or session.LogicalSegmentEndTime from present-only evidence. The 2026-09-24 chain incident proved
-        // logical segment end and physical capture end must remain independent.
-        var requestedHoldEnd = now.AddSeconds(RecordingLivePresentWorkerHoldSeconds);
-        var control = session.ChainControl;
-        if (control is null)
-        {
-            _log.Add("REC_FOLLOW_PRESENT_WORKER_HOLD", $"R{reservation.Id}",
-                $"result=FAILED reason=control_unavailable requestedHoldEnd={requestedHoldEnd:MM/dd HH:mm:ss.fff} logicalSegmentEnd={session.LogicalSegmentEndTime:MM/dd HH:mm:ss.fff} source={SafeValue(reason)} action=do_not_mutate_formal_timing rule=recording_live_present_stop_hold_contract");
-            return session.PhysicalCaptureEndTime;
-        }
-
-        try
-        {
-            var updated = control.Update(current =>
-            {
-                var found = false;
-                var rebuilt = current.Segments.Select(item =>
-                {
-                    if (item.ReservationId != reservation.Id)
-                        return item;
-                    found = true;
-                    return item.CloseAt >= requestedHoldEnd
-                        ? item
-                        : item with { CloseAt = requestedHoldEnd };
-                }).ToArray();
-                if (!found)
-                    return null;
-                return new ChainControlSnapshot(current.ChainRootReservationId, current.ContinuousCapture, rebuilt);
-            });
-
-            if (updated is null)
-            {
-                _log.Add("REC_FOLLOW_PRESENT_WORKER_HOLD", $"R{reservation.Id}",
-                    $"result=FAILED reason=control_segment_missing requestedHoldEnd={requestedHoldEnd:MM/dd HH:mm:ss.fff} logicalSegmentEnd={session.LogicalSegmentEndTime:MM/dd HH:mm:ss.fff} source={SafeValue(reason)} action=do_not_mutate_formal_timing rule=recording_live_present_stop_hold_contract");
-                return session.PhysicalCaptureEndTime;
-            }
-
-            var physicalEnd = updated.Segments
-                .Where(item => item.Enabled)
-                .Select(item => item.CloseAt)
-                .DefaultIfEmpty(requestedHoldEnd)
-                .Max();
-            if (physicalEnd < session.LogicalSegmentEndTime)
-                physicalEnd = session.LogicalSegmentEndTime;
-
-            // Commit physical owner first. LogicalSegmentEnd stays untouched by design.
-            session.Lease.UpdatePlannedEndTime(physicalEnd, $"LivePresentHold R{reservation.Id}");
-            session.UpdatePhysicalCaptureEndTime(physicalEnd);
-            _log.Add("REC_FOLLOW_PRESENT_WORKER_HOLD", $"R{reservation.Id}",
-                $"result=UPDATED requestedHoldEnd={requestedHoldEnd:MM/dd HH:mm:ss.fff} workerDeadline={physicalEnd:MM/dd HH:mm:ss.fff} logicalSegmentEnd={session.LogicalSegmentEndTime:MM/dd HH:mm:ss.fff} " +
-                $"reservationMutation=none programGuideMutation=none logicalSegmentEndMutation=none source={SafeValue(reason)} controlStore=immutable_generation workerRestart=False rule=recording_live_present_stop_hold_contract");
-            return physicalEnd;
-        }
-        catch (Exception ex)
-        {
-            _log.Add("REC_FOLLOW_PRESENT_WORKER_HOLD", $"R{reservation.Id}",
-                $"result=FAILED reason=control_update_failed requestedHoldEnd={requestedHoldEnd:MM/dd HH:mm:ss.fff} logicalSegmentEnd={session.LogicalSegmentEndTime:MM/dd HH:mm:ss.fff} source={SafeValue(reason)} errorType={ex.GetType().Name} error={TrimForLog(ex.Message, 180)} action=do_not_mutate_formal_timing rule=recording_live_present_stop_hold_contract");
-            return session.PhysicalCaptureEndTime;
-        }
+        var progress=EvaluateRecordingProgress(session,reservation,DateTime.Now);
+        // Explicit disappearance can prove completion without a precise broadcast boundary.
+        // Use observation time only as the execution stop point, never as Reservation.EndTime.
+        return progress.Status==RecordingProgressStatus.Ended && !progress.End.HasValue && progress.EndedObservedAt.HasValue
+            ? progress.EndedObservedAt.Value.LocalDateTime.AddSeconds(session.PostEndMarginSeconds) : formalCloseAt;
     }
 
-    private DateTime RefreshSingleRecordingControlTiming(RecordingSession session, Reservation reservation, DateTime followedEnd, string reason)
+    private RecordingProgressDecision? PublishedRecordingProgress(RecordingSession session, Reservation reservation)
     {
+        _recordingProgress.TryGetValue(reservation.Id,out var current);
+        if(session.ChainControl is not null && session.ChainControl.TryGetSegment(reservation.Id,out var segment)
+            && SameRecordingProgress(segment.Progress,current)) return segment.Progress;
+        return current;
+    }
+
+    private static bool SameRecordingProgress(RecordingProgressDecision? left, RecordingProgressDecision? right)
+        => left is null ? right is null : right is not null && left.Status==right.Status && left.End==right.End
+            && left.Hold==right.Hold && left.Seen==right.Seen && left.EndedObservedAt==right.EndedObservedAt;
+
+    private bool RecordingProgressNeedsPublication(RecordingSession session, Reservation reservation)
+        => _recordingProgress.TryGetValue(reservation.Id,out var progress) && progress.Seen
+            && session.ChainControl is not null && session.ChainControl.TryGetSegment(reservation.Id,out var segment)
+            && !SameRecordingProgress(segment.Progress,progress);
+
+    private DateTime? ResolveRecordingSegmentHold(RecordingSession session, Reservation reservation, DateTime closeAt)
+    {
+        var now=DateTime.Now;
+        var decision=EvaluateRecordingProgress(session,reservation,now);
+        if(!decision.Hold || now<closeAt.AddSeconds(-RecordingLivePresentWorkerHoldSeconds)) return null;
+        if(session.ChainControl is not null && session.ChainControl.TryGetSegment(reservation.Id,out var existing)
+            && existing.HoldUntil>now.AddSeconds(30)) return existing.HoldUntil;
+        return now.AddSeconds(RecordingLivePresentWorkerHoldSeconds);
+    }
+
+    private DateTime? RefreshSingleRecordingControlTiming(RecordingSession session, Reservation reservation, DateTime followedEnd, string reason)
+    {
+        // Null means deferred. The caller must not acknowledge the logical/physical
+        // deadline in session state, otherwise the next follow pass can skip the retry.
+        if (!_chainEditAdmission.TryEnterRuntimePublication(out var admission))
+            return null;
+        using var runtimeAdmission = admission;
         var control = session.ChainControl;
         if (control is null)
         {
             _log.Add("REC_FOLLOW_WORKER_DEADLINE", $"R{reservation.Id}",
                 $"result=KEEP_SESSION_ONLY reason=control_unavailable requestedEnd={followedEnd:MM/dd HH:mm:ss.fff} source={SafeValue(reason)} workerRestart=False rule=recording_timing_ssot_contract");
-            return followedEnd;
+            return string.IsNullOrWhiteSpace(session.ChainControlPath) ? followedEnd : null;
         }
 
         try
         {
+            var latest = _store.GetById(reservation.Id);
+            if (latest is null || latest.Id != session.ReservationId)
+                return null;
+            reservation = latest;
+            // followedEnd is the caller's resolved logical/chain deadline, not simply
+            // the reservation's EndTime. Preserve that time-follow policy.
             var options = _store.GetReservationRecordingOptions(reservation.Id);
             var updated = control.Update(current =>
             {
@@ -5647,25 +6349,27 @@ private readonly ReservationStore _store;
                         Title = reservation.Title ?? item.Title,
                         Enabled = reservation.IsEnabled,
                         CloseAt = followedEnd,
+                        HoldUntil = ResolveRecordingSegmentHold(session, reservation, followedEnd),
+                        Progress = PublishedRecordingProgress(session,reservation),
                         CurrentServiceOnly = options.CurrentServiceOnly,
                         SaveSubtitles = options.SaveSubtitles
                     };
                 }).ToArray();
                 if (!found)
                     return null;
-                return new ChainControlSnapshot(current.ChainRootReservationId, current.ContinuousCapture, rebuilt);
+                return new ChainControlSnapshot(current.ChainRootReservationId, current.ContinuousCapture, rebuilt) { Withdrawals = current.Withdrawals };
             });
 
             if (updated is null)
             {
                 _log.Add("REC_FOLLOW_WORKER_DEADLINE", $"R{reservation.Id}",
-                    $"result=KEEP_SESSION_ONLY reason=control_segment_missing requestedEnd={followedEnd:MM/dd HH:mm:ss.fff} source={SafeValue(reason)} workerRestart=False rule=recording_timing_ssot_contract");
-                return followedEnd;
+                    $"result=RETRY_PENDING reason=control_segment_missing requestedEnd={followedEnd:MM/dd HH:mm:ss.fff} source={SafeValue(reason)} workerRestart=False rule=recording_timing_ssot_contract");
+                return null;
             }
 
             var controlEnd = updated.Segments
                 .Where(item => item.Enabled)
-                .Select(item => item.CloseAt)
+                .Select(item => item.EffectiveCloseAt)
                 .DefaultIfEmpty(followedEnd)
                 .Max();
             _log.Add("REC_FOLLOW_WORKER_DEADLINE", $"R{reservation.Id}",
@@ -5675,16 +6379,34 @@ private readonly ReservationStore _store;
         catch (Exception ex)
         {
             _log.Add("REC_FOLLOW_WORKER_DEADLINE", $"R{reservation.Id}",
-                $"result=KEEP_SESSION_ONLY reason=control_update_failed requestedEnd={followedEnd:MM/dd HH:mm:ss.fff} source={SafeValue(reason)} errorType={ex.GetType().Name} error={TrimForLog(ex.Message, 180)} workerRestart=False rule=recording_timing_ssot_contract");
-            return followedEnd;
+                $"result=RETRY_PENDING reason=control_update_failed requestedEnd={followedEnd:MM/dd HH:mm:ss.fff} source={SafeValue(reason)} errorType={ex.GetType().Name} error={TrimForLog(ex.Message, 180)} workerRestart=False rule=recording_timing_ssot_contract");
+            return null;
         }
     }
 
     private DateTime RefreshContinuousChainControlTimings(RecordingSession session, string reason)
+        => RefreshContinuousChainControlTimingsCore(session, reason, false);
+
+    private DateTime RefreshContinuousChainControlTimingsCore(RecordingSession session, string reason, bool requireSuccess)
+    {
+        if (!session.IsSharedChainCapture || session.ChainControl is null) return session.PhysicalCaptureEndTime;
+        var reservation=_store.GetById(session.ReservationId);
+        if(reservation is not null && TryApplyRecordingFollowTiming(session,reservation,session.PlannedEndTime,reason))
+            return session.PhysicalCaptureEndTime;
+        if(requireSuccess) throw new IOException("Canonical control publication unavailable.");
+        return session.PhysicalCaptureEndTime;
+    }
+
+    private DateTime? TryPublishContinuousChainControlTimings(RecordingSession session, string reason)
     {
         var control = session.ChainControl;
         if (!session.IsSharedChainCapture || control is null)
-            return session.PhysicalCaptureEndTime;
+            return null;
+        if (!_chainEditAdmission.TryEnterRuntimePublication(out var admission))
+        {
+            return null;
+        }
+        using var runtimeAdmission = admission;
         var connectedSegmentIds = _store.GetStoredUserChainDescendantIds(session.ReservationId, includeAnchor: true);
         try
         {
@@ -5699,7 +6421,7 @@ private readonly ReservationStore _store;
                         continue;
                     var options = _store.GetReservationRecordingOptions(item.ReservationId);
                     var openAt = first ? item.OpenAt : reservation.StartTime.AddSeconds(-_ini.PreStartMarginSeconds);
-                    var closeAt = reservation.EndTime.AddSeconds(session.PostEndMarginSeconds);
+                    var closeAt = ResolveRecordingExecutionEnd(session,reservation,reservation.EndTime.AddSeconds(session.PostEndMarginSeconds));
                     var lifecycleActive = reservation.IsEnabled && reservation.Status is ReservationStatus.Scheduled or ReservationStatus.Starting or ReservationStatus.Recording;
                     var topologyConnected = connectedSegmentIds.Contains(item.ReservationId);
                     var enabled = lifecycleActive && topologyConnected;
@@ -5710,6 +6432,8 @@ private readonly ReservationStore _store;
                         Enabled = enabled,
                         OpenAt = openAt,
                         CloseAt = closeAt,
+                        HoldUntil = enabled ? ResolveRecordingSegmentHold(session, reservation, closeAt) : null,
+                        Progress = PublishedRecordingProgress(session,reservation),
                         CurrentServiceOnly = options.CurrentServiceOnly,
                         SaveSubtitles = options.SaveSubtitles
                     });
@@ -5720,13 +6444,17 @@ private readonly ReservationStore _store;
                 var rootId = current.ChainRootReservationId > 0
                     ? current.ChainRootReservationId
                     : session.SharedCaptureRootReservationId ?? session.ReservationId;
-                return new ChainControlSnapshot(rootId, true, rebuilt.ToArray());
+                return new ChainControlSnapshot(rootId, true, rebuilt.ToArray()) { Withdrawals = current.Withdrawals };
             });
             if (updated is null)
-                return session.PhysicalCaptureEndTime;
-            var maxClose = updated.Segments.Where(x => x.Enabled).Select(x => x.CloseAt).DefaultIfEmpty(DateTime.MinValue).Max();
+            {
+                return null;
+            }
+            var maxClose = updated.Segments.Where(x => x.Enabled).Select(x => x.EffectiveCloseAt).DefaultIfEmpty(DateTime.MinValue).Max();
             if (maxClose == DateTime.MinValue)
-                return session.PhysicalCaptureEndTime;
+            {
+                return null;
+            }
             _log.Add("CHAIN_CONTINUOUS_CAPTURE_TIMING", $"R{session.ReservationId}",
                 $"result=UPDATED reason={SafeValue(reason)} captureEnd={maxClose:MM/dd HH:mm:ss.fff} segments={updated.Segments.Length} connectedSegments={connectedSegmentIds.Count} physicalRetune=False workerRestart=False controlStore=immutable_generation rule=chain_continuous_capture_contract");
             return maxClose;
@@ -5735,7 +6463,39 @@ private readonly ReservationStore _store;
         {
             _log.Add("CHAIN_CONTINUOUS_CAPTURE_TIMING", $"R{session.ReservationId}",
                 $"result=KEEP_EXISTING reason={SafeValue(reason)} errorType={ex.GetType().Name} error={TrimForLog(ex.Message, 180)} captureEnd={session.PhysicalCaptureEndTime:MM/dd HH:mm:ss.fff} rule=chain_continuous_capture_contract");
-            return session.PhysicalCaptureEndTime;
+            return null;
+        }
+    }
+
+    private bool RetryPendingRecordingFollowTiming(RecordingSession session, Reservation reservation, DateTime logicalEnd)
+        => !session.FollowTimingPublicationPending
+            || TryApplyRecordingFollowTiming(session, reservation, logicalEnd, $"RecordingFollowRetry R{reservation.Id}");
+
+    // One acknowledgement boundary for owner and member time-follow. Pending is session-owned,
+    // not an EIT-change flag: a member-only DB change must also retry after publication failure.
+    private bool TryApplyRecordingFollowTiming(RecordingSession session, Reservation reservation, DateTime logicalEnd, string reason)
+    {
+        lock (session.FollowTimingPublicationGate)
+        {
+            if (reservation.Id != session.ReservationId) return false;
+            session.FollowTimingPublicationPending = true;
+            if (!_chainEditAdmission.TryEnterRuntimePublication(out var admission)) return false;
+            using var publication = admission;
+            var physicalEnd = session.IsSharedChainCapture
+                ? TryPublishContinuousChainControlTimings(session, reason)
+                : RefreshSingleRecordingControlTiming(session, reservation, logicalEnd, reason);
+            if (!physicalEnd.HasValue) return false;
+            try { session.Lease.UpdatePlannedEndTime(physicalEnd.Value, reason); }
+            catch(InvalidOperationException ex)
+            {
+                _log.Add("REC_END_PUBLICATION",$"R{reservation.Id}",
+                    $"result=RETRY_PENDING reason=lease_update_rejected error={TrimForLog(ex.Message,180)} rule=recording_end_decision_contract");
+                return false;
+            }
+            session.UpdatePlannedEndTime(logicalEnd);
+            session.UpdatePhysicalCaptureEndTime(physicalEnd.Value);
+            session.FollowTimingPublicationPending = false;
+            return true;
         }
     }
 
@@ -5747,10 +6507,19 @@ private readonly ReservationStore _store;
         DateTime now,
         CancellationToken ct)
     {
+        if (!_chainEditAdmission.TryEnterRuntimePublication(out var admission))
+            return false;
+        using var runtimeAdmission = admission;
         var predecessorId = session.ReservationId;
+        var connectedSuccessor = _store.GetById(successor.Id);
+        if (connectedSuccessor is null || !connectedSuccessor.IsUserChain
+            || connectedSuccessor.UserChainPreviousId != predecessorId)
+            return false;
+        successor = connectedSuccessor;
         if (session.ChainControl is null
             || !session.ChainControl.TryGetSegment(predecessorId, out var predecessorState)
-            || !session.ChainControl.TryGetSegment(successor.Id, out var successorState))
+            || !session.ChainControl.TryGetSegment(successor.Id, out var successorState)
+            || !successorState.Enabled)
         {
             _log.Add("CHAIN_CONTINUOUS_CAPTURE_BOUNDARY", $"R{predecessorId}",
                 $"result=RETRYABLE_FAILED predecessor=R{predecessorId} successor=R{successor.Id} reason=control_segment_missing control={SafeValue(session.ChainControlPath)} action=keep_capture_and_retry rule=chain_continuous_capture_contract");
@@ -5810,9 +6579,21 @@ private readonly ReservationStore _store;
         var predecessor = _store.GetById(predecessorId);
         if (predecessor is null)
             return false;
-        if (predecessor.Status == ReservationStatus.Recording)
+        bool IsCurrentSuccessor(Reservation? candidate)
+            => candidate is not null && candidate.IsEnabled && !candidate.IsConflicted
+                && candidate.IsUserChain && candidate.UserChainPreviousId == predecessorId
+                && candidate.UserChainRootId == (predecessor.UserChainRootId ?? predecessorId)
+                && IsSameServiceIdentity(predecessor, candidate)
+                && candidate.Status is ReservationStatus.Starting or ReservationStatus.Recording;
+        if (predecessor.Status == ReservationStatus.Recording
+            || (predecessor.Status == ReservationStatus.Stopping
+                && boundaryExecution.PredecessorStoppingVersion == predecessor.DataVersion)
+            || (!boundaryExecution.PredecessorResultProjected
+                && boundaryExecution.PredecessorTerminalCommit is { } terminalReceipt
+                && terminalReceipt.Transition.CurrentDataVersion == predecessor.DataVersion
+                && terminalReceipt.Transition.CurrentStatus == predecessor.Status))
         {
-            if (!await FinalizeContinuousChainSegmentAsync(session, predecessor, predecessorSegment, ct).ConfigureAwait(false))
+            if (!await FinalizeContinuousChainSegmentAsync(session, predecessor, predecessorSegment, boundaryExecution, ct).ConfigureAwait(false))
                 return false;
         }
         else if (predecessor.Status is not (ReservationStatus.Completed or ReservationStatus.Failed))
@@ -5824,11 +6605,11 @@ private readonly ReservationStore _store;
         // If the successor CAS was transiently rejected after predecessor finalization, the next boundary retry resumes here
         // without re-finalizing or stopping the shared physical capture.
         latestSuccessor = _store.GetById(successor.Id);
-        if (latestSuccessor is null || latestSuccessor.Status is not (ReservationStatus.Starting or ReservationStatus.Recording))
+        if (!IsCurrentSuccessor(latestSuccessor))
             return false;
 
-        var committedSuccessor = latestSuccessor;
-        if (latestSuccessor.Status == ReservationStatus.Starting)
+        var committedSuccessor = latestSuccessor!;
+        if (latestSuccessor!.Status == ReservationStatus.Starting)
         {
             var startCommit = _store.TryCompleteRecordingStart(latestSuccessor.Id, latestSuccessor.DataVersion, session.Lease.Name, successorSegment.OpenAt);
             if (!startCommit.Applied)
@@ -5845,6 +6626,11 @@ private readonly ReservationStore _store;
                 $"result=RESUME predecessor=R{predecessorId} successor=R{successor.Id} reason=successor_already_recording_retry_pool_owner_transfer pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} physicalRetune=False workerRestart=False rule=chain_continuous_capture_contract");
         }
 
+        // Terminal/start observers can run other reservation work. Re-read before the lease
+        // transfer rather than accepting the earlier successful lifecycle receipt as eligibility.
+        var transferSuccessor = _store.GetById(successor.Id);
+        if (!IsCurrentSuccessor(transferSuccessor)) return false;
+        committedSuccessor = transferSuccessor!;
         var captureEnd = RefreshContinuousChainControlTimings(session, $"OwnerTransfer R{predecessorId}->R{successor.Id}");
         try
         {
@@ -5885,15 +6671,109 @@ private readonly ReservationStore _store;
                      .Where(path => !string.IsNullOrWhiteSpace(path))
                      .Distinct(StringComparer.OrdinalIgnoreCase))
         {
+            if (_recordingResults?.Files.IsPendingArtifact(internalPath) == true) continue;
             try { if (File.Exists(internalPath)) File.Delete(internalPath); } catch { }
         }
         return true;
+    }
+
+    // A read handle is held until the caller finishes verification. This is file evidence,
+    // never a tuner lease or permission to replay a lifecycle/notification.
+    private static FileStream? TryOpenContinuousChainFinalizationEvidenceFiles(
+        ContinuousChainFinalizationEvidence evidence, string runtimeDirectory)
+        => TryOpenContinuousChainSegmentEvidenceFiles(evidence.Reservation, evidence.Artifact, runtimeDirectory);
+
+    private static FileStream? TryOpenContinuousChainStopEvidenceFiles(
+        ContinuousChainStopEvidence evidence, string runtimeDirectory)
+        => TryOpenContinuousChainSegmentEvidenceFiles(evidence.Reservation, evidence.Artifact, runtimeDirectory);
+
+    // Physical segment evidence has one validator for both lifecycle phases. A held
+    // read handle proves file exclusion only; it never grants runtime ownership.
+    private static FileStream? TryOpenContinuousChainSegmentEvidenceFiles(
+        Reservation reservation, ContinuousChainFinalizationArtifact artifact, string runtimeDirectory)
+    {
+        FileStream? outputRead = null;
+        try
+        {
+            if (!Path.IsPathFullyQualified(runtimeDirectory)) return null;
+            var root = Path.GetFullPath(runtimeDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            bool InRuntime(string path) => !string.IsNullOrWhiteSpace(path) && Path.IsPathFullyQualified(path)
+                && Path.GetFullPath(path).StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+            bool SamePath(string? left, string right) => !string.IsNullOrWhiteSpace(left) && Path.IsPathFullyQualified(left)
+                && string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), StringComparison.OrdinalIgnoreCase);
+            bool PlainRuntimePath(string path)
+            {
+                if (!InRuntime(path)) return false;
+                var current = Path.GetFullPath(path);
+                while (true)
+                {
+                    if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) return false;
+                    if (string.Equals(current, root, StringComparison.OrdinalIgnoreCase)) return true;
+                    current = Path.GetDirectoryName(current)!;
+                    if (string.IsNullOrEmpty(current)) return false;
+                }
+            }
+            if (!PlainRuntimePath(artifact.JobPath) || !PlainRuntimePath(artifact.ControlPath)
+                || !PlainRuntimePath(artifact.ResultPath) || !PlainRuntimePath(artifact.RuntimeStatsPath)) return null;
+            if (new FileInfo(artifact.JobPath).Length > 1024 * 1024 || new FileInfo(artifact.ResultPath).Length > 1024 * 1024) return null;
+            foreach (var path in Directory.EnumerateFiles(artifact.ControlPath))
+                if (!PlainRuntimePath(path)) return null;
+            using var jobDocument = JsonDocument.Parse(File.ReadAllText(artifact.JobPath));
+            var job = jobDocument.RootElement;
+            if (job.GetProperty("mode").GetString() != "record" || string.IsNullOrWhiteSpace(job.GetProperty("jobId").GetString())
+                || !SamePath(job.GetProperty("chainControlPath").GetString(), artifact.ControlPath)) return null;
+            var primaryId = job.GetProperty("recording").GetProperty("reservationId").GetInt32();
+            if (primaryId <= 0) return null;
+            if (!job.GetProperty("channels").EnumerateArray().Any(channel =>
+                channel.GetProperty("networkId").GetInt32() == reservation.NetworkId
+                && channel.GetProperty("transportStreamId").GetInt32() == reservation.TransportStreamId
+                && channel.GetProperty("serviceId").GetInt32() == reservation.ServiceId)) return null;
+            if (!ChainControlState.TryReadLatestSnapshot(artifact.ControlPath, out var control) || control.Version != 1
+                || control.ChainRootReservationId <= 0 || control.Segments.Count(x => x.ReservationId == primaryId) != 1) return null;
+            var segments = control.Segments.Where(x => x.ReservationId == reservation.Id).ToArray();
+            if (segments.Length != 1) return null;
+            var segment = segments[0];
+            if (segment.CloseAt <= segment.OpenAt || !SamePath(segment.OutputPath, artifact.OutputPath)
+                || !SamePath(segment.ResultPath, artifact.ResultPath) || !SamePath(segment.RuntimeStatsPath, artifact.RuntimeStatsPath)) return null;
+            using var resultDocument = JsonDocument.Parse(File.ReadAllText(artifact.ResultPath));
+            var wrapper = resultDocument.RootElement;
+            var result = wrapper.GetProperty("result");
+            var pid = wrapper.GetProperty("recorderPid").GetInt32();
+            if (pid <= 0 || wrapper.GetProperty("success").ValueKind is not (JsonValueKind.True or JsonValueKind.False)
+                || !SamePath(result.GetProperty("outputPath").GetString(), artifact.OutputPath)
+                || !SamePath(result.GetProperty("runtimeStatsPath").GetString(), artifact.RuntimeStatsPath)
+                || result.GetProperty("endedAt").GetDateTimeOffset() < result.GetProperty("startedAt").GetDateTimeOffset()) return null;
+            var bytes = result.GetProperty("bytesWritten").GetInt64();
+            // Only the bounded tail is needed; normal runtime files can span hours.
+            using var statsRead = new FileStream(artifact.RuntimeStatsPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            var tail = new byte[(int)Math.Min(65536, statsRead.Length)];
+            statsRead.Seek(-tail.Length, SeekOrigin.End); statsRead.ReadExactly(tail);
+            var lines = System.Text.Encoding.UTF8.GetString(tail).Split(new[]{'\r','\n'}, StringSplitOptions.RemoveEmptyEntries);
+            if (lines.Length == 0) return null;
+            using var statsDocument = JsonDocument.Parse(lines[^1].TrimStart('\uFEFF'));
+            var stats = statsDocument.RootElement;
+            if (!stats.GetProperty("final").GetBoolean() || !stats.GetProperty("sharedCapture").GetBoolean()
+                || stats.GetProperty("verdict").GetString() != "CHAIN_SEGMENT_FINAL"
+                || stats.GetProperty("completeness").GetString() != "complete"
+                || stats.GetProperty("reservationId").GetInt32() != reservation.Id
+                || stats.GetProperty("workerPid").GetInt32() != pid || stats.GetProperty("bytesWritten").GetInt64() != bytes) return null;
+            outputRead = new FileStream(artifact.OutputPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            if (bytes < 0 || outputRead.Length != bytes) { outputRead.Dispose(); return null; }
+            return outputRead;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or KeyNotFoundException
+            or InvalidOperationException or FormatException or OverflowException or ArgumentException or NotSupportedException)
+        {
+            outputRead?.Dispose();
+            return null;
+        }
     }
 
     private async Task<bool> FinalizeContinuousChainSegmentAsync(
         RecordingSession session,
         Reservation reservation,
         ContinuousChainSegmentArtifact segment,
+        ChainBoundaryExecutionEntry boundaryExecution,
         CancellationToken ct)
     {
         var rid = reservation.Id;
@@ -5909,12 +6789,34 @@ private readonly ReservationStore _store;
             return false;
         }
 
-        var stopClaim = _store.TryBeginRecordingStop(rid, reservation.DataVersion);
-        if (!stopClaim.Applied)
+        var receipt = boundaryExecution.PredecessorTerminalCommit;
+        long stoppingVersion = 0;
+        if (receipt is not null)
         {
-            _log.Add("CHAIN_CONTINUOUS_SEGMENT_FINALIZE", $"R{rid}",
-                $"result=RETRYABLE_FAILED reason=stop_claim_rejected detail={SafeValue(stopClaim.Reason)} physicalCaptureContinues=True rule=chain_continuous_capture_contract");
-            return false;
+            if (receipt.Transition.CurrentDataVersion != reservation.DataVersion
+                || receipt.Transition.CurrentStatus != reservation.Status)
+                return false;
+        }
+        else if (reservation.Status == ReservationStatus.Stopping)
+        {
+            if (boundaryExecution.PredecessorStoppingVersion != reservation.DataVersion)
+                return false;
+            stoppingVersion = reservation.DataVersion;
+        }
+        else
+        {
+            var stopClaim = _store.TryBeginContinuousChainRecordingStop(rid, reservation.DataVersion,
+                new ContinuousChainFinalizationArtifact(segment.OutputPath, segment.ResultPath, segment.RuntimeStatsPath)
+                { JobPath = session.JobPath, ControlPath = session.ChainControlPath },
+                committed => boundaryExecution.PredecessorStoppingVersion = committed.CurrentDataVersion);
+            if (!stopClaim.Applied)
+            {
+                _log.Add("CHAIN_CONTINUOUS_SEGMENT_FINALIZE", $"R{rid}",
+                    $"result=RETRYABLE_FAILED reason=stop_claim_rejected detail={SafeValue(stopClaim.Reason)} physicalCaptureContinues=True rule=chain_continuous_capture_contract");
+                return false;
+            }
+            stoppingVersion = stopClaim.CurrentDataVersion;
+            boundaryExecution.PredecessorStoppingVersion = stoppingVersion;
         }
 
         var outcome = ReadRecordingWorkerOutcome(segment.ResultPath, segment.RuntimeStatsPath);
@@ -5929,17 +6831,45 @@ private readonly ReservationStore _store;
                 $"result=FAILED errorType={ex.GetType().Name} error={TrimForLog(ex.Message, 180)} action=continue_completion_evidence rule=chain_continuous_capture_contract");
         }
         var evidence = EvaluateRecordingCompletionEvidence(outcome, verify);
-        var finalStatus = evidence.CanKeepCompleted ? ReservationStatus.Completed : ReservationStatus.Failed;
-        var failureReason = evidence.CanKeepCompleted ? null : evidence.Reason;
-        var terminal = _store.TryCompleteRecordingStop(rid, stopClaim.CurrentDataVersion, finalStatus, failureReason);
-        if (!terminal.Applied)
+        var finalStatus = receipt?.Transition.CurrentStatus
+            ?? (evidence.CanKeepCompleted ? ReservationStatus.Completed : ReservationStatus.Failed);
+        var failureReason = receipt is not null ? receipt.FailureReason : (evidence.CanKeepCompleted ? null : evidence.Reason);
+        if (receipt is null)
         {
-            _log.Add("CHAIN_CONTINUOUS_SEGMENT_FINALIZE", $"R{rid}",
-                $"result=FAILED reason=terminal_commit_rejected detail={SafeValue(terminal.Reason)} physicalCaptureContinues=True rule=chain_continuous_capture_contract");
-            return false;
+            var terminal = _store.TryCompleteRecordingStopWithReceipt(rid, stoppingVersion, finalStatus, failureReason,
+                committed => boundaryExecution.PredecessorTerminalCommit = new(committed, failureReason),
+                new ContinuousChainFinalizationArtifact(segment.OutputPath, segment.ResultPath, segment.RuntimeStatsPath)
+                { JobPath = session.JobPath, ControlPath = session.ChainControlPath });
+            if (!terminal.Applied)
+            {
+                _log.Add("CHAIN_CONTINUOUS_SEGMENT_FINALIZE", $"R{rid}",
+                    $"result=FAILED reason=terminal_commit_rejected detail={SafeValue(terminal.Reason)} physicalCaptureContinues=True rule=chain_continuous_capture_contract");
+                return false;
+            }
         }
 
         var committed = _store.GetById(rid) ?? reservation;
+        if (!TryProjectContinuousChainResult(committed, segment, outcome, finalStatus, failureReason,
+            new ContinuousChainResultProjectionContext(session.ProcessId, true, _tunerPool.GetStatusSummary()))) return false;
+        boundaryExecution.PredecessorResultProjected = true;
+        _log.Add("CHAIN_CONTINUOUS_SEGMENT_FINALIZE", $"R{rid}",
+            $"result={finalStatus} bytes={outcome.BytesWritten} packets={outcome.PacketsWritten} outputDrops={SafeValue(outcome.OutputContinuityDrops)} outputCcErrors={SafeValue(outcome.OutputContinuityErrors)} outputSyncErrors={SafeValue(outcome.OutputSyncErrors)} outputScrambled={SafeValue(outcome.OutputScrambledPackets)} targetMediaScrambled={SafeValue(outcome.OutputTargetMediaScrambledPackets)} " +
+            $"leaseReleased=False workerStopped=False physicalCaptureContinues=True output={SafeValue(segment.OutputPath)} rule=chain_continuous_capture_contract");
+        // CHAIN_CONTINUOUS_CAPTURE_BOUNDARY_EVIDENCE_LIFETIME_INVARIANT:
+        // Keep the predecessor segment result/runtime files until logical owner transfer succeeds.
+        // ProcessContinuousChainBoundaryAsync deliberately uses ResultPath existence as the durable
+        // "segment closed" boundary-transfer gate. Deleting it here makes the next retry wait forever if any
+        // concurrent lifecycle mutation prevented owner transfer in the same scheduler tick.
+        return true;
+    }
+
+    private sealed record ContinuousChainResultProjectionContext(int WorkerProcessId, bool SharedCaptureContinues, string TunerState);
+
+    private bool TryProjectContinuousChainResult(Reservation committed, ContinuousChainSegmentArtifact segment,
+        RecordingWorkerOutcome outcome, ReservationStatus finalStatus, string? failureReason,
+        ContinuousChainResultProjectionContext context, Action? beforeExternalPublication = null)
+    {
+        var rid = committed.Id;
         static long? ParseQuality(string value) => long.TryParse(value, out var parsed) ? parsed : null;
         var drop = ParseQuality(outcome.OutputContinuityDrops);
         var error = ParseQuality(outcome.OutputContinuityErrors);
@@ -5970,36 +6900,43 @@ private readonly ReservationStore _store;
             QualityDataAvailable = qualityAvailable,
             QualityCompleteness = qualityAvailable ? outcome.QualityCompleteness : "unavailable",
             QualitySource = qualityAvailable ? outcome.QualitySource : "Unavailable",
-            ResourceReleaseState = "shared_capture_retained_for_chain_successor",
+            ResourceReleaseState = context.SharedCaptureContinues ? "shared_capture_retained_for_chain_successor" : "segment_file_release_verified",
             ResultFinalized = true,
             Succeeded = finalStatus == ReservationStatus.Completed
         }, committed);
         var termination = new RecordingTerminationEvidence
         {
             RecordingRecoveryChainId = committed.RecordingRecoveryChainId ?? string.Empty,
-            PowerResumeCycleId = _powerResumeCycleContext.Value ?? string.Empty,
+            PowerResumeCycleId = context.SharedCaptureContinues ? _powerResumeCycleContext.Value ?? string.Empty : string.Empty,
             TerminationReason = finalStatus == ReservationStatus.Completed ? "completed_shared_capture_segment" : (failureReason ?? "shared_capture_segment_failed"),
-            WorkerProcessId = session.ProcessId,
-            WorkerIdentityResult = "owned_process_shared_capture_continues",
-            LastFileGrowthAt = DateTime.Now,
+            WorkerProcessId = context.WorkerProcessId,
+            WorkerIdentityResult = context.SharedCaptureContinues ? "owned_process_shared_capture_continues" : "not_observed_during_result_recovery",
+            LastFileGrowthAt = context.SharedCaptureContinues ? DateTime.Now : null,
             LastObservedFileSize = File.Exists(segment.OutputPath) ? new FileInfo(segment.OutputPath).Length : 0,
-            StopRequestedAt = DateTime.Now,
-            StopRequestResult = "not_requested_shared_capture",
+            StopRequestedAt = context.SharedCaptureContinues ? DateTime.Now : null,
+            StopRequestResult = context.SharedCaptureContinues ? "not_requested_shared_capture" : "not_requested_result_recovery",
             ResultFileState = outcome.ResponseExists ? "present" : "missing",
-            LeaseReleaseResult = "retained_for_chain_successor",
-            RegistryReleaseResult = "retained_for_chain_successor",
-            TunerStateAfterRelease = _tunerPool.GetStatusSummary()
+            LeaseReleaseResult = context.SharedCaptureContinues ? "retained_for_chain_successor" : "not_observed_during_result_recovery",
+            RegistryReleaseResult = context.SharedCaptureContinues ? "retained_for_chain_successor" : "not_observed_during_result_recovery",
+            TunerStateAfterRelease = context.TunerState
         };
-        try { _userEvents.EnrichRecordingResult(result, termination.ToDetails()); } catch { }
+        try
+        {
+            if (context.SharedCaptureContinues) _userEvents.EnrichRecordingResult(result, termination.ToDetails());
+            else _userEvents.EnrichRecoveredRecordingResult(result, termination.ToDetails());
+        }
+        catch { }
         RecordingResultUpsertOutcome? upsert = null;
         try { upsert = _recordingResults.Upsert(result, termination); } catch { }
+        if (upsert is null) return false; // Keep the committed receipt and artifacts for projection retry.
+        beforeExternalPublication?.Invoke();
         if (upsert == RecordingResultUpsertOutcome.AppliedNewFinalized)
         {
             try
             {
                 using var eventScope = _typedEvents.BeginOutboxScope(out var commitEvents);
                 _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{rid}",
-                    $"result=READY source=shared_chain_segment projection=PluginTypedEvent segmentSinkReleased=True sharedWorkerContinues=True path={SafeValue(result.FilePath)} externalReadAllowed={(result.FileCreated == true && !string.IsNullOrWhiteSpace(result.FilePath) ? "True" : "NoFile")} rule=recording_result_finalized_file_release_contract");
+                    $"result=READY source={(context.SharedCaptureContinues ? "shared_chain_segment" : "stored_chain_segment")} projection=PluginTypedEvent segmentSinkReleased=True sharedWorkerContinues={context.SharedCaptureContinues} path={SafeValue(result.FilePath)} externalReadAllowed={(result.FileCreated == true && !string.IsNullOrWhiteSpace(result.FilePath) ? "True" : "NoFile")} rule=recording_result_finalized_file_release_contract");
                 _typedEvents.Publish(new TvAirEventDto
                 {
                     EventType = TvAirEventType.RecordingResultFinalized,
@@ -6010,20 +6947,249 @@ private readonly ReservationStore _store;
                     ServiceName = committed.ServiceName,
                     ProgramTitle = committed.Title,
                     Reservation = PluginTypedEventHub.ToSnapshot(committed),
+                    PluginBindings = _store.GetReservationPluginBindings(rid),
                     RecordingResult = result
                 });
                 commitEvents();
             }
             catch { }
         }
-        _log.Add("CHAIN_CONTINUOUS_SEGMENT_FINALIZE", $"R{rid}",
-            $"result={finalStatus} bytes={outcome.BytesWritten} packets={outcome.PacketsWritten} outputDrops={SafeValue(outcome.OutputContinuityDrops)} outputCcErrors={SafeValue(outcome.OutputContinuityErrors)} outputSyncErrors={SafeValue(outcome.OutputSyncErrors)} outputScrambled={SafeValue(outcome.OutputScrambledPackets)} targetMediaScrambled={SafeValue(outcome.OutputTargetMediaScrambledPackets)} " +
-            $"leaseReleased=False workerStopped=False physicalCaptureContinues=True output={SafeValue(segment.OutputPath)} rule=chain_continuous_capture_contract");
-        // CHAIN_CONTINUOUS_CAPTURE_BOUNDARY_EVIDENCE_LIFETIME_INVARIANT:
-        // Keep the predecessor segment result/runtime files until logical owner transfer succeeds.
-        // ProcessContinuousChainBoundaryAsync deliberately uses ResultPath existence as the durable
-        // "segment closed" boundary-transfer gate. Deleting it here makes the next retry wait forever if any
-        // concurrent lifecycle mutation prevented owner transfer in the same scheduler tick.
+        return true;
+    }
+
+    private static TvAirRecordingResultDto ContinuousChainResultIdentity(Reservation reservation) => new()
+    {
+        ReservationId = $"R{reservation.Id}", EventTitle = reservation.Title,
+        NetworkId = reservation.NetworkId, TransportStreamId = reservation.TransportStreamId,
+        ServiceId = reservation.ServiceId, EventId = reservation.EventId,
+        ScheduledStartTime = new DateTimeOffset(reservation.ScheduledStartTime ?? reservation.StartTime)
+    };
+
+    // Read-only verification runs before submitting to the same canonical allocation route.
+    // The existing normal tick calls this through the bounded inspection sweep.
+    private async Task<bool> TryResumePersistedContinuousChainStopAsync(int id, string runtimeDirectory, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (Volatile.Read(ref _chainRuntimeProtectionReady) == 0) return false;
+        var protection = CaptureScheduledChainJoinRuntimeProtection(DateTime.Now);
+        if (!protection.ReadSucceeded || protection.ProtectedReservationIds.Contains(id)) return false;
+        var evidence = _store.ReadContinuousChainStopEvidence(id, runtimeDirectory);
+        if (evidence is null) return false;
+        var outputRead = TryOpenContinuousChainStopEvidenceFiles(evidence, runtimeDirectory);
+        if (outputRead is null) return false;
+        try
+        {
+            var verification = await RecordingTsVerifier.VerifyAsync(evidence.Reservation, evidence.Artifact.OutputPath,
+                "stored_chain_stop_segment_close", _log).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            using var verified = new ContinuousChainStopVerification(evidence, verification, outputRead, runtimeDirectory, ct);
+            outputRead = null; // Ownership transferred; the producer must not close a consumed read.
+            var command = new ContinuousChainStopRecoveryCommand(verified);
+            try
+            {
+                _allocationRoute.Run(new ReservationAllocationRouteRequest("ChainStopRecovery", "StoredSegment",
+                    SyncProgramRuleReservations: false, TopologyCommands: new[] { command }));
+            }
+            catch (Exception ex) when (command.Result is { Applied: true })
+            {
+                _log.Add("CHAIN_STOP_RECOVERY", evidence.Reservation.Title,
+                    $"result=COMMITTED_POSTPROCESS_FAILED errorType={ex.GetType().Name} action=resume_existing_result_projection rule=recording_result_projection_contract");
+            }
+            // A committed lifecycle is never replayed just because result persistence failed.
+            if (command.Result is not { Applied: true }) return false;
+            TryResumePersistedContinuousChainResult(id, runtimeDirectory, ct);
+            return true;
+        }
+        finally
+        {
+            outputRead?.Dispose();
+        }
+    }
+
+    internal void ExecuteContinuousChainStopRecoveryCore(ReservationStore store,
+        ContinuousChainStopVerification verified, Action<ReservationLifecycleTransitionResult> recordCommitted)
+    {
+        if (!ReferenceEquals(store, _store)) throw new InvalidOperationException("Stop recovery store differs from allocation store.");
+        var observed = verified.Evidence;
+        void Reject(string reason) => recordCommitted(new(false, reason, observed.Reservation.Id,
+            ReservationStatus.Stopping, null, observed.Reservation.DataVersion, observed.Reservation.DataVersion, null));
+        if (!verified.IsActive) { Reject("verification_expired"); return; }
+        if (verified.Cancellation.IsCancellationRequested) { Reject("recovery_cancelled"); return; }
+        if (Volatile.Read(ref _chainRuntimeProtectionReady) == 0) return;
+        if (!_chainEditAdmission.TryEnterEdit(out var admission)) return;
+        using var recoveryAdmission = admission!;
+        var protection = CaptureScheduledChainJoinRuntimeProtection(DateTime.Now);
+        if (!protection.ReadSucceeded || protection.ProtectedReservationIds.Contains(observed.Reservation.Id)) return;
+        var current = store.ReadContinuousChainStopEvidence(observed.Reservation.Id, verified.RuntimeDirectory);
+        if (current is null || current.Reservation.DataVersion != observed.Reservation.DataVersion
+            || current.Artifact != observed.Artifact
+            || current.Reservation.NetworkId != observed.Reservation.NetworkId
+            || current.Reservation.TransportStreamId != observed.Reservation.TransportStreamId
+            || current.Reservation.ServiceId != observed.Reservation.ServiceId
+            || current.Reservation.EventId != observed.Reservation.EventId
+            || current.Reservation.StartTime != observed.Reservation.StartTime
+            || current.Reservation.EndTime != observed.Reservation.EndTime
+            || current.Reservation.ScheduledStartTime != observed.Reservation.ScheduledStartTime
+            || current.Reservation.RecordingStartedAt != observed.Reservation.RecordingStartedAt)
+        { Reject("stop_evidence_changed"); return; }
+        using var boundRead = TryOpenContinuousChainStopEvidenceFiles(current, verified.RuntimeDirectory);
+        if (boundRead is null) { Reject("segment_evidence_unavailable"); return; }
+        using var verifiedRead = verified.TakeRead();
+        if (verifiedRead is null) { Reject("verification_expired"); return; }
+        if (verified.Cancellation.IsCancellationRequested) { Reject("recovery_cancelled"); return; }
+        var outcome = ReadRecordingWorkerOutcome(current.Artifact.ResultPath, current.Artifact.RuntimeStatsPath);
+        var completion = EvaluateRecordingCompletionEvidence(outcome, verified.Verification);
+        var terminal = completion.CanKeepCompleted ? ReservationStatus.Completed : ReservationStatus.Failed;
+        var reason = completion.CanKeepCompleted ? null : completion.Reason;
+        var result = store.TryCompleteRecordingStopWithReceipt(current.Reservation.Id, current.Reservation.DataVersion,
+            terminal, reason, committed =>
+            {
+                recordCommitted(committed);
+                // Release every file/admission owned by this attempt before external observers.
+                boundRead.Dispose(); verifiedRead.Dispose(); recoveryAdmission.Dispose();
+            }, current.Artifact);
+        if (!result.Applied) recordCommitted(result);
+    }
+
+    private int _storedChainStopSweepRunning;
+    private int _lastStoredChainStopCandidateId;
+
+    // One attempt per normal tick, rotating past invalid evidence without starving later rows.
+    // These fields serialize inspection only; SQLite and the common route own all mutations.
+    private async Task<int> ResumePersistedContinuousChainStopsAsync(string runtimeDirectory, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (Volatile.Read(ref _chainRuntimeProtectionReady) == 0
+            || Interlocked.CompareExchange(ref _storedChainStopSweepRunning, 1, 0) != 0) return 0;
+        try
+        {
+            var protection = CaptureScheduledChainJoinRuntimeProtection(DateTime.Now);
+            if (!protection.ReadSucceeded) return 0;
+            var candidates = _store.ListContinuousChainStopCandidateIds()
+                .Where(id => !protection.ProtectedReservationIds.Contains(id)).ToArray();
+            if (candidates.Length == 0) return 0;
+            var last = _lastStoredChainStopCandidateId;
+            var id = candidates.FirstOrDefault(id => id > last);
+            if (id == 0) id = candidates[0];
+            _lastStoredChainStopCandidateId = id;
+            ct.ThrowIfCancellationRequested();
+            return await TryResumePersistedContinuousChainStopAsync(id, runtimeDirectory, ct).ConfigureAwait(false) ? 1 : 0;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _log.Add("CHAIN_STOP_SWEEP", "Maintenance",
+                $"result=DEFERRED errorType={ex.GetType().Name} action=keep_evidence_next_normal_tick rule=recording_result_projection_contract");
+            return 0;
+        }
+        finally { Volatile.Write(ref _storedChainStopSweepRunning, 0); }
+    }
+
+    private int ResumePersistedContinuousChainResults(string runtimeDirectory, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (Volatile.Read(ref _chainRuntimeProtectionReady) == 0) return 0;
+        var resumed = 0;
+        foreach (var candidate in _store.ListContinuousChainFinalizationCandidates())
+        {
+            ct.ThrowIfCancellationRequested();
+            if (_recordingResults.HasFinalizedOccurrence(ContinuousChainResultIdentity(candidate))) continue;
+            try
+            {
+                if (TryResumePersistedContinuousChainResult(candidate.Id, runtimeDirectory, ct)) resumed++;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                _log.Add("CHAIN_STORED_RESULT_RETRY", candidate.Title,
+                    $"result=FAILED errorType={ex.GetType().Name} action=keep_evidence_next_normal_tick rule=recording_result_projection_contract");
+            }
+        }
+        return resumed;
+    }
+
+    // Result projection only. No session, worker, tuner acquisition or lifecycle mutation.
+    private bool TryResumePersistedContinuousChainResult(int reservationId, string runtimeDirectory, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (Volatile.Read(ref _chainRuntimeProtectionReady) == 0) return false;
+        var observed = _store.ReadContinuousChainFinalizationEvidence(reservationId, runtimeDirectory);
+        if (observed is null) return false;
+        var identity = ContinuousChainResultIdentity(observed.Reservation);
+        if (_recordingResults.HasFinalizedOccurrence(identity)) return true;
+        if (!_chainEditAdmission.TryEnterEdit(out var admission)) return false;
+        using var resultAdmission = admission!;
+        var protection = CaptureScheduledChainJoinRuntimeProtection(DateTime.Now);
+        if (!protection.ReadSucceeded || protection.ProtectedReservationIds.Contains(reservationId)) return false;
+        var current = _store.ReadContinuousChainFinalizationEvidence(reservationId, runtimeDirectory);
+        if (current is null || current.Reservation.DataVersion != observed.Reservation.DataVersion
+            || current.Artifact != observed.Artifact) return false;
+        using var outputRead = TryOpenContinuousChainFinalizationEvidenceFiles(current, runtimeDirectory);
+        if (outputRead is null) return false;
+        ct.ThrowIfCancellationRequested();
+        var artifact = current.Artifact;
+        var segment = new ContinuousChainSegmentArtifact(reservationId, current.Reservation.StartTime,
+            current.Reservation.EndTime, artifact.OutputPath, artifact.ResultPath, artifact.RuntimeStatsPath);
+        var outcome = ReadRecordingWorkerOutcome(artifact.ResultPath, artifact.RuntimeStatsPath);
+        return TryProjectContinuousChainResult(current.Reservation, segment, outcome, current.Reservation.Status,
+            current.FailureReason, new ContinuousChainResultProjectionContext(0, false, "not_observed_during_result_recovery"),
+            () => { outputRead.Dispose(); resultAdmission.Dispose(); });
+    }
+
+    // Resume only stop or terminal receipts committed by this live session's existing boundary.
+    // This runs inside the normal boundary scan, even when cancellation removed the last edge.
+    private async Task<bool> ResumePendingContinuousChainResultsAsync(
+        RecordingSession session, IReadOnlyDictionary<int, int> successorOf, DateTime now, CancellationToken ct,
+        bool committedOnly = false)
+    {
+        ChainBoundaryExecutionEntry[] pending;
+        lock (_sessionGate)
+            pending = _chainBoundaryExecutions.Values.Where(x =>
+                x.PredecessorId == session.ReservationId && (x.PredecessorTerminalCommit is not null || x.PredecessorStoppingVersion.HasValue)
+                && !x.PredecessorResultProjected
+                && (!committedOnly || x.PredecessorTerminalCommit is not null)).ToArray();
+        foreach (var entry in pending)
+        {
+            if (!TryBeginChainBoundaryExecution(entry.Key, entry.PredecessorId, entry.SuccessorId, now, out var executing))
+                return false;
+            var projected = false;
+            try
+            {
+                ct.ThrowIfCancellationRequested();
+                if (!_chainEditAdmission.TryEnterRuntimePublication(out var admission)) return false;
+                using var runtimeAdmission = admission;
+                if (!ReferenceEquals(executing, entry)) return false;
+                var receipt = entry.PredecessorTerminalCommit;
+                var expectedVersion = receipt?.Transition.CurrentDataVersion ?? entry.PredecessorStoppingVersion;
+                var expectedStatus = receipt?.Transition.CurrentStatus ?? ReservationStatus.Stopping;
+                var reservation = _store.GetById(entry.PredecessorId);
+                if (reservation is null || !expectedVersion.HasValue || reservation.DataVersion != expectedVersion.Value
+                    || reservation.Status != expectedStatus
+                    || session.ChainControl is null
+                    || !session.ChainControl.TryGetSegment(entry.PredecessorId, out var segment)) return false;
+                var artifact = new ContinuousChainSegmentArtifact(segment.ReservationId, segment.OpenAt,
+                    segment.CloseAt, segment.OutputPath, segment.ResultPath, segment.RuntimeStatsPath);
+                projected = await FinalizeContinuousChainSegmentAsync(session, reservation, artifact, entry, ct).ConfigureAwait(false);
+                if (!projected) return false;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                _log.Add("CHAIN_RESULT_PROJECTION_RETRY", $"R{entry.PredecessorId}",
+                    $"result=RETRYABLE_FAILED errorType={ex.GetType().Name} ownerTransfer=False rule=chain_lifecycle_single_source");
+                return false;
+            }
+            finally
+            {
+                if (projected)
+                {
+                    if (!successorOf.TryGetValue(entry.PredecessorId, out var nextId) || nextId != entry.SuccessorId)
+                        CompleteChainBoundaryExecution(entry, false, false, "result_projected_without_successor", now);
+                    else DeferSharedCaptureBoundaryExecution(entry, "terminal_result_projected", now);
+                }
+                else CompleteChainBoundaryExecution(entry, false, true, "terminal_result_projection_pending", now);
+            }
+        }
         return true;
     }
 
@@ -6033,7 +7199,7 @@ private readonly ReservationStore _store;
         DateTime now,
         CancellationToken ct)
     {
-
+            if (!await ResumePendingContinuousChainResultsAsync(session, successorOf, now, ct).ConfigureAwait(false)) return;
             if (!successorOf.TryGetValue(session.ReservationId, out var successorId)) return;
 
             var successor = _store.GetById(successorId);
@@ -6045,8 +7211,8 @@ private readonly ReservationStore _store;
                 var captureEnd = RefreshContinuousChainControlTimings(session, $"BoundaryScan R{session.ReservationId}->R{successorId}");
                 if (captureEnd != session.PhysicalCaptureEndTime)
                 {
-                    session.UpdatePhysicalCaptureEndTime(captureEnd);
                     session.Lease.UpdatePlannedEndTime(captureEnd, $"BoundaryScan R{session.ReservationId}->R{successorId}");
+                    session.UpdatePhysicalCaptureEndTime(captureEnd);
                 }
             }
             if (successor is null)
@@ -6164,8 +7330,17 @@ private readonly ReservationStore _store;
 
             if (session.IsSharedChainCapture)
             {
-                var continuousResult = await ProcessContinuousChainBoundaryAsync(
-                    session, successor, successorDueTime, boundaryExecution, now, ct).ConfigureAwait(false);
+                bool continuousResult;
+                try
+                {
+                    continuousResult = await ProcessContinuousChainBoundaryAsync(
+                        session, successor, successorDueTime, boundaryExecution, now, ct).ConfigureAwait(false);
+                }
+                catch
+                {
+                    CompleteChainBoundaryExecution(boundaryExecution, false, true, "continuous_capture_exception", now);
+                    throw;
+                }
                 if (continuousResult)
                     CompleteChainBoundaryExecution(boundaryExecution, true, false, "continuous_capture_owner_transferred", now);
                 else
@@ -6343,7 +7518,7 @@ private readonly ReservationStore _store;
         foreach (var reservation in dbRecording.Where(x => !activeIds.Contains(x.Id)))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var reattach = TryReattachAliveRecordingWorker(reservation, reconcileNow, RecordingReattachOrigin.Resume);
+            var reattach = await TryReattachAliveRecordingWorkerAsync(reservation, reconcileNow, RecordingReattachOrigin.Resume, cancellationToken).ConfigureAwait(false);
             if (reattach.State == RecordingWorkerReattachState.Attached)
             {
                 resumeAttached++;
@@ -6919,18 +8094,15 @@ private readonly ReservationStore _store;
                 continue;
             }
 
-            var hasLiveEvidence = TryReadLiveRecordingEventEvidence(session.RuntimeStatsPath, r, now, out var liveEvidence);
 
             var projectedEvent = _programEvents.GetByEventKey(r.NetworkId, r.TransportStreamId, r.ServiceId, r.EventId);
             var ev = ResolveRecordingFollowEvent(r, projectedEvent?.ToEpgEvent(), session);
             if (ev is null)
             {
-                var liveTargetPresentWithoutProjection = hasLiveEvidence && liveEvidence.IsFreshTargetPresent(r, now);
-                if (liveTargetPresentWithoutProjection
-                    && !session.IsSharedChainCapture
-                    && !HasScheduledDirectChainSuccessor(r))
+                var liveTargetPresentWithoutProjection = EvaluateRecordingProgress(session, r, now).Hold;
+                if (liveTargetPresentWithoutProjection)
                 {
-                    RefreshLivePresentWorkerHold(session, r, now, "RecordingFollowMissingProjection");
+                    TryApplyRecordingFollowTiming(session, r, session.PlannedEndTime, "RecordingProgressMissingProjection");
                 }
                 _log.Add("REC_FOLLOW_CHECK", $"R{r.Id}",
                     $"result=MISS reason=epg_event_not_found nid={r.NetworkId} tsid={r.TransportStreamId} svcId={r.ServiceId} eventId={r.EventId} tuner={SafeValue(session.Lease.Name)} source=active_recording_session_no_extra_tuner plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} " +
@@ -6938,61 +8110,12 @@ private readonly ReservationStore _store;
                 continue;
             }
 
-            // RECORDING_LIVE_EIT_FOLLOW_INVARIANT:
-            // 同一録画workerのcurrent EIT p/f actual presentに限り、延長と短縮を両方向で採用する。
-            // schedule/ProgramGuide投影だけの短縮は、古い情報による途中切れを防ぐため採用しない。
-            // 短縮はpresentの同一EIDと有効期間が実観測で確認できた場合だけ許可する。
-            if (hasLiveEvidence
-                && liveEvidence.HasFreshExpectedEvent(now)
-                && liveEvidence.IsFreshTargetPresent(r, now)
-                && liveEvidence.End > liveEvidence.Start
-                && Math.Abs((liveEvidence.End - ev.End).TotalSeconds) > 1)
-            {
-                var previousEnd = ev.End;
-                var shortening = liveEvidence.End < ev.End;
-                ev = CloneEpgEventWithEnd(ev, liveEvidence.End);
-                _recordingTimeFollowEvidence[r.Id] = new RecordingTimeFollowEvidence(
-                    r.NetworkId, r.TransportStreamId, r.ServiceId, r.EventId,
-                    ev.Start, liveEvidence.End, liveEvidence.ObservedAt, string.Empty,
-                    LivePresentBoundaryAuthoritative: true);
-                _log.Add("REC_FOLLOW_LIVE_EIT", $"R{r.Id}",
-                    $"result={(shortening ? "SHORTEN" : "EXTEND")} source=recording_worker_current_present_eit table=0x{liveEvidence.TableId:X2} section={liveEvidence.SectionNumber} currentNext={liveEvidence.CurrentNextIndicator} runningStatus={liveEvidence.RunningStatus} " +
-                    $"event={r.NetworkId}/{r.TransportStreamId}/{r.ServiceId}/{r.EventId} projectedEnd={previousEnd:MM/dd HH:mm:ss} liveEnd={liveEvidence.End:MM/dd HH:mm:ss} " +
-                    $"observedAt={liveEvidence.ObservedAt:MM/dd HH:mm:ss} ageSec={(now - liveEvidence.ObservedAt).TotalSeconds:F1} tuner={SafeValue(session.Lease.Name)} pid={session.ProcessId} " +
-                    "direction=live_present_both extraTunerLease=0 rule=recording_live_eit_time_follow_contract");
-            }
-
-            // Recording boundary is resolved once before the common CAS/worker control path.
-            // For standalone recordings, a fresh actual-present successor also proves that
-            // the target program has ended, even when the previously observed duration is stale.
-            // Shared/explicit chains retain their separately approved boundary contract.
-            if (!session.IsSharedChainCapture
-                && !r.IsUserChain
-                && !HasScheduledDirectChainSuccessor(r)
-                && hasLiveEvidence
-                && TryResolveActualPresentSuccessorBoundary(liveEvidence, r, now, out var successorBoundary)
-                && successorBoundary < ev.End)
-            {
-                var oldEnd = ev.End;
-                ev = CloneEpgEventWithEnd(ev, successorBoundary);
-                _recordingTimeFollowEvidence[r.Id] = new RecordingTimeFollowEvidence(
-                    r.NetworkId, r.TransportStreamId, r.ServiceId, r.EventId,
-                    ev.Start, successorBoundary, liveEvidence.PresentObservedAt, string.Empty,
-                    LivePresentBoundaryAuthoritative: true);
-                _log.Add("REC_FOLLOW_LIVE_EIT", $"R{r.Id}",
-                    $"result=EARLY_END_CONFIRMED source=recording_worker_actual_present_successor " +
-                    $"event={r.NetworkId}/{r.TransportStreamId}/{r.ServiceId}/{r.EventId} " +
-                    $"successorEid={liveEvidence.PresentEventId} successorStart={successorBoundary:MM/dd HH:mm:ss} " +
-                    $"previousEnd={oldEnd:MM/dd HH:mm:ss} " +
-                    $"observedAt={liveEvidence.PresentObservedAt:MM/dd HH:mm:ss} " +
-                    "action=apply_common_follow_cas_and_worker_deadline rule=recording_boundary_single_source_contract");
-            }
-
-            var singleProgramFollowedEnd = ev.End.AddSeconds(session.PostEndMarginSeconds);
+            var singleProgramFollowedEnd = ResolveRecordingExecutionEnd(session,r,ev.End.AddSeconds(session.PostEndMarginSeconds));
             var followedEnd = session.IsSharedChainCapture
                 ? singleProgramFollowedEnd
                 : ResolveChainPlannedEndForRecordingFollow(r, singleProgramFollowedEnd, session.PlannedEndTime);
-            var livePresentStopHoldCandidate = hasLiveEvidence && liveEvidence.IsFreshTargetPresent(r, now);
+            var progressDecision = EvaluateRecordingProgress(session, r, now);
+            var livePresentStopHoldCandidate = progressDecision.Hold;
             var chainPlannedEndPreserved = followedEnd > singleProgramFollowedEnd;
             var epgStartMovesEarlier = ev.Start < r.StartTime.AddSeconds(-30);
             var protectUserRuntimeStart = IsUserRuntimeStartRewindGuardTarget(r, session);
@@ -7006,7 +8129,7 @@ private readonly ReservationStore _store;
             // 通常番組の時間追従には30秒の変化検出閾値を維持するが、明示チェーンのSink境界は別契約である。
             // 後続pre-margin開始と前段post-margin終了を同じChainControlへ反映するため、
             // チェーン境界の変化を30秒未満として捨てず、1秒超の実境界変化を正本へ反映する。
-            var endChanged = Math.Abs((ev.End - r.EndTime).TotalSeconds) > 30 || chainBoundaryChanged;
+            var endChanged = Math.Abs((ev.End - r.EndTime).TotalSeconds) > (progressDecision.End.HasValue ? 1 : 30) || chainBoundaryChanged;
             var plannedChanged = Math.Abs((followedEnd - session.LogicalSegmentEndTime).TotalSeconds) > 1;
 
             _log.Add("REC_FOLLOW_CHECK", $"R{r.Id}",
@@ -7028,20 +8151,17 @@ private readonly ReservationStore _store;
 
             if (!startChanged && !endChanged && !plannedChanged)
             {
-                // LIVE_PRESENT_WORKER_HOLD_INVARIANT:
-                // 正式Endが変わらないまま同一EID presentが継続する放送延長では、Reservation/ProgramGuide/
-                // LogicalSegmentEndを捏造せず、workerの物理deadlineだけを短いrolling holdで延命する。
-                // 明示チェーン後続がある場合はsuccessor head completenessを優先し、このholdを適用しない。
-                if (livePresentStopHoldCandidate
-                    && !session.IsSharedChainCapture
-                    && !hasScheduledDirectChainSuccessor)
-                {
-                    RefreshLivePresentWorkerHold(session, r, now, "RecordingFollowPresentOnly");
-                }
+                // Rolling hold and formal timing share one publication/acknowledgement path.
+                var hasPublishedHold=session.ChainControl?.ReadSnapshot().Segments.Any(x=>x.HoldUntil.HasValue)==true;
+                var progressPublicationAttempted=(livePresentStopHoldCandidate && now>=session.PlannedEndTime.AddSeconds(-RecordingLivePresentWorkerHoldSeconds)) || hasPublishedHold || RecordingProgressNeedsPublication(session,r);
+                if (progressPublicationAttempted)
+                    TryApplyRecordingFollowTiming(session,r,followedEnd,"RecordingProgressHold");
 
                 // 親自身に時刻変化がなくても、後続子のEITだけが更新される場合がある。
                 // 同一録画セッションから未開始memberを確認し、追加Tunerなしで追従する。
-                FollowScheduledChainMembersFromActiveSession(r, session);
+                var memberPublicationAttempted = FollowScheduledChainMembersFromActiveSession(r, session);
+                if (!memberPublicationAttempted && !progressPublicationAttempted)
+                    RetryPendingRecordingFollowTiming(session, r, followedEnd);
                 continue;
             }
 
@@ -7093,6 +8213,10 @@ private readonly ReservationStore _store;
                         $"rule=chain_follow_boundary_contract");
                     if (!atomicUpdated)
                         continue;
+
+                    // The committed series timing also supersedes the member-follow cache.
+                    // Otherwise the next member pass can undo this same transaction with old EPG timing.
+                    RememberCommittedChainFollowEvidence(successorSeries, boundaryDelta);
                 }
                 else
                 {
@@ -7151,12 +8275,9 @@ private readonly ReservationStore _store;
                 }
             }
 
-            var effectiveCaptureEnd = session.IsSharedChainCapture
-                ? RefreshContinuousChainControlTimings(session, $"RecordingFollow R{r.Id}")
-                : RefreshSingleRecordingControlTiming(session, r, followedEnd, $"RecordingFollow R{r.Id}");
-            session.UpdatePlannedEndTime(followedEnd);
-            session.UpdatePhysicalCaptureEndTime(effectiveCaptureEnd);
-            session.Lease.UpdatePlannedEndTime(effectiveCaptureEnd, $"RecordingFollow R{r.Id}");
+            if (!TryApplyRecordingFollowTiming(session, r, followedEnd, $"RecordingFollow R{r.Id}"))
+                continue;
+            var effectiveCaptureEnd = session.PhysicalCaptureEndTime;
 
             _log.Add("REC_FOLLOW_UPDATE", $"R{r.Id}",
                 $"source=active_recording_session_no_extra_tuner route=ALLOC_ROUTE oldStart={r.StartTime:MM/dd HH:mm:ss} newStart={effectiveNewStart:MM/dd HH:mm:ss} epgStart={ev.Start:MM/dd HH:mm:ss} startRewindSuppressed={suppressStartRewind} " +
@@ -7198,6 +8319,25 @@ private readonly ReservationStore _store;
     }
 
 
+    private void RememberCommittedChainFollowEvidence(IReadOnlyList<Reservation> previousMembers, TimeSpan delta)
+    {
+        foreach (var member in previousMembers)
+        {
+            var projection = _programEvents.GetByEventKey(member.NetworkId, member.TransportStreamId, member.ServiceId, member.EventId);
+            var start = member.StartTime.Add(delta);
+            var end = member.EndTime.Add(delta);
+            // Remember the displaced projection, not a maximum end time: a negative delta must
+            // remain valid too. A later live p/f observation still has priority in the resolver.
+            var supersededKey = projection is not null && (delta >= TimeSpan.Zero
+                ? projection.Start < start || projection.End < end
+                : projection.Start > start || projection.End > end)
+                ? $"{projection.Start.Ticks}:{projection.End.Ticks}" : null;
+            _recordingTimeFollowEvidence[member.Id] = new RecordingTimeFollowEvidence(
+                member.NetworkId, member.TransportStreamId, member.ServiceId, member.EventId,
+                start, end, DateTime.Now, string.Empty, SupersededProjectionKey: supersededKey);
+        }
+    }
+
     private void RememberPreRecordTimeFollowEvidence(
         IReadOnlyList<Reservation> targets,
         IReadOnlyList<EpgEvent> observedEvents)
@@ -7230,6 +8370,22 @@ private readonly ReservationStore _store;
 
     private EpgEvent? ResolveRecordingFollowEvent(Reservation reservation, EpgEvent? projectedEvent, RecordingSession session)
     {
+        var decision = EvaluateRecordingProgress(session, reservation, DateTime.Now);
+        if (decision.End.HasValue && decision.Status is RecordingProgressStatus.Present or RecordingProgressStatus.Suspended or RecordingProgressStatus.Ended)
+        {
+            var end = decision.End.Value.LocalDateTime;
+            var start = projectedEvent?.Start ?? reservation.StartTime;
+            if (end > start)
+            {
+                var source = projectedEvent ?? new EpgEvent { NetworkId=reservation.NetworkId, TransportStreamId=reservation.TransportStreamId,
+                    ServiceId=reservation.ServiceId, EventId=reservation.EventId, Start=start, End=end };
+                _recordingTimeFollowEvidence[reservation.Id] = new RecordingTimeFollowEvidence(reservation.NetworkId,
+                    reservation.TransportStreamId,reservation.ServiceId,reservation.EventId,start,end,DateTime.Now,string.Empty,
+                    LivePresentBoundaryAuthoritative:true);
+                return CloneEpgEventWithEnd(source,end);
+            }
+        }
+
         var hasMatchingEvidence = _recordingTimeFollowEvidence.TryGetValue(reservation.Id, out var evidence)
             && evidence.NetworkId == reservation.NetworkId
             && evidence.TransportStreamId == reservation.TransportStreamId
@@ -7289,16 +8445,18 @@ private readonly ReservationStore _store;
         // RECORDING_TIME_FOLLOW_NO_STALE_ROLLBACK_INVARIANT:
         // PreRecの実観測値より前へ戻す投影は録画欠落を生むため採用しない。
         // 後ろへの開始移動・終了延長は安全側の新しい追従として採用し、その最大境界を証拠へ昇格する。
-        var resolvedStart = projectedEvent.Start < resolvedEvidence.Start ? resolvedEvidence.Start : projectedEvent.Start;
+        var projectionKey = $"{projectedEvent.Start.Ticks}:{projectedEvent.End.Ticks}";
+        var supersededProjection = string.Equals(resolvedEvidence.SupersededProjectionKey, projectionKey, StringComparison.Ordinal);
+        var resolvedStart = supersededProjection || projectedEvent.Start < resolvedEvidence.Start ? resolvedEvidence.Start : projectedEvent.Start;
         // Once current p/f present has established a boundary, a cached ProgramGuide projection
         // cannot extend it again. Only a later verified live observation may replace it.
-        var resolvedEnd = resolvedEvidence.LivePresentBoundaryAuthoritative
+        var resolvedEnd = supersededProjection || resolvedEvidence.LivePresentBoundaryAuthoritative
             ? resolvedEvidence.End
             : (projectedEvent.End < resolvedEvidence.End ? resolvedEvidence.End : projectedEvent.End);
         if (resolvedEnd <= resolvedStart)
             resolvedEnd = resolvedEvidence.End;
 
-        var rollbackSuppressed = projectedEvent.Start < resolvedEvidence.Start
+        var rollbackSuppressed = supersededProjection || projectedEvent.Start < resolvedEvidence.Start
             || (resolvedEvidence.LivePresentBoundaryAuthoritative
                 ? projectedEvent.End != resolvedEvidence.End
                 : projectedEvent.End < resolvedEvidence.End);
@@ -7354,73 +8512,6 @@ private readonly ReservationStore _store;
         };
     }
 
-    private sealed record LiveRecordingEventEvidence(
-        DateTime Start,
-        DateTime End,
-        DateTime ObservedAt,
-        int RunningStatus,
-        int TableId,
-        int SectionNumber,
-        int CurrentNextIndicator,
-        int PresentEventId,
-        DateTime PresentStart,
-        DateTime PresentEnd,
-        DateTime PresentObservedAt,
-        int PresentRunningStatus,
-        int PresentTableId,
-        int PresentSectionNumber,
-        int PresentCurrentNextIndicator)
-    {
-        public bool HasFreshExpectedEvent(DateTime now)
-            => TableId == 0x4E
-                && SectionNumber == 0
-                && CurrentNextIndicator == 1
-                && Start != default
-                && End > Start
-                && ObservedAt != default
-                && ObservedAt <= now.AddSeconds(5)
-                && now - ObservedAt <= TimeSpan.FromSeconds(30);
-
-        public bool IsFreshTargetPresent(Reservation reservation, DateTime now)
-            // Presentはactual EIT p/f section=0/current_next=1 + exact EID + freshnessで確定する。
-            // start_time/durationは正式時刻情報であり、古いdurationを理由に放送中Evidenceを否定しない。
-            => PresentTableId == 0x4E
-                && PresentSectionNumber == 0
-                && PresentCurrentNextIndicator == 1
-                && PresentEventId == reservation.EventId
-                && PresentObservedAt != default
-                && PresentObservedAt <= now.AddSeconds(5)
-                && now - PresentObservedAt <= TimeSpan.FromSeconds(30);
-    }
-
-    private static bool TryResolveActualPresentSuccessorBoundary(
-        LiveRecordingEventEvidence live,
-        Reservation target,
-        DateTime now,
-        out DateTime boundary)
-    {
-        boundary = default;
-        // ARIB actual EIT p/f section 0 is the live present evidence. A schedule
-        // projection alone must never terminate an in-progress live broadcast.
-        if (live.PresentTableId != 0x4E
-            || live.PresentSectionNumber != 0
-            || live.PresentCurrentNextIndicator != 1
-            || live.PresentEventId == 0
-            || live.PresentEventId == target.EventId
-            || live.PresentObservedAt == default
-            || live.PresentObservedAt > now.AddSeconds(5)
-            || now - live.PresentObservedAt > TimeSpan.FromSeconds(30)
-            || live.PresentStart <= target.StartTime
-            || live.PresentEnd <= live.PresentStart
-            || live.PresentStart > now
-            || now - live.PresentStart < TimeSpan.FromSeconds(15)
-            || live.PresentStart >= target.EndTime)
-            return false;
-
-        boundary = live.PresentStart;
-        return true;
-    }
-
     private static EpgEvent CloneEpgEventWithEnd(EpgEvent source, DateTime end)
     {
         return new EpgEvent
@@ -7448,123 +8539,75 @@ private readonly ReservationStore _store;
         };
     }
 
-    private static bool TryReadLiveRecordingEventEvidence(
-        string? runtimeStatsPath,
-        Reservation reservation,
-        DateTime now,
-        out LiveRecordingEventEvidence evidence)
+    private bool IsLivePresentStopHoldActive(RecordingSession session, Reservation reservation, DateTime now, out RecordingProgressDecision evidence)
     {
-        evidence = default!;
-        if (string.IsNullOrWhiteSpace(runtimeStatsPath) || !File.Exists(runtimeStatsPath))
-            return false;
-
-        try
-        {
-            const int maxTailBytes = 64 * 1024;
-            using var stream = new FileStream(runtimeStatsPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            if (stream.Length <= 0) return false;
-
-            var readLength = (int)Math.Min(maxTailBytes, stream.Length);
-            stream.Seek(-readLength, SeekOrigin.End);
-            var buffer = new byte[readLength];
-            var totalRead = 0;
-            while (totalRead < readLength)
-            {
-                var read = stream.Read(buffer, totalRead, readLength - totalRead);
-                if (read <= 0) break;
-                totalRead += read;
-            }
-            if (totalRead <= 0) return false;
-
-            var text = System.Text.Encoding.UTF8.GetString(buffer, 0, totalRead);
-            var lines = text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-            for (var i = lines.Length - 1; i >= 0; i--)
-            {
-                try
-                {
-                    using var doc = JsonDocument.Parse(lines[i]);
-                    var root = doc.RootElement;
-
-                    var nid = (ushort)Math.Clamp(GetJsonInt64(root, "targetOriginalNetworkId"), 0, ushort.MaxValue);
-                    var tsid = (ushort)Math.Clamp(GetJsonInt64(root, "targetTransportStreamId"), 0, ushort.MaxValue);
-                    var sid = (ushort)Math.Clamp(GetJsonInt64(root, "targetServiceId"), 0, ushort.MaxValue);
-                    var eid = (ushort)Math.Clamp(GetJsonInt64(root, "expectedEventId"), 0, ushort.MaxValue);
-                    if (nid != reservation.NetworkId || tsid != reservation.TransportStreamId || sid != reservation.ServiceId || eid != reservation.EventId)
-                        continue;
-
-                    DateTime expectedStart = default;
-                    DateTime expectedEnd = default;
-                    DateTime expectedObservedAt = default;
-                    if (DateTimeOffset.TryParse(GetJsonString(root, "liveExpectedEventStart"), out var expectedStartOffset))
-                        expectedStart = expectedStartOffset.LocalDateTime;
-                    if (DateTimeOffset.TryParse(GetJsonString(root, "liveExpectedEventEnd"), out var expectedEndOffset))
-                        expectedEnd = expectedEndOffset.LocalDateTime;
-                    if (DateTimeOffset.TryParse(GetJsonString(root, "liveExpectedEventObservedAt"), out var expectedObservedOffset))
-                        expectedObservedAt = expectedObservedOffset.LocalDateTime;
-
-                    DateTime presentStart = default;
-                    DateTime presentEnd = default;
-                    DateTime presentObservedAt = default;
-                    if (DateTimeOffset.TryParse(GetJsonString(root, "livePresentEventStart"), out var presentStartOffset))
-                        presentStart = presentStartOffset.LocalDateTime;
-                    if (DateTimeOffset.TryParse(GetJsonString(root, "livePresentEventEnd"), out var presentEndOffset))
-                        presentEnd = presentEndOffset.LocalDateTime;
-                    if (DateTimeOffset.TryParse(GetJsonString(root, "livePresentEventObservedAt"), out var presentObservedOffset))
-                        presentObservedAt = presentObservedOffset.LocalDateTime;
-
-                    evidence = new LiveRecordingEventEvidence(
-                        expectedStart,
-                        expectedEnd,
-                        expectedObservedAt,
-                        (int)GetJsonInt64(root, "liveExpectedEventRunningStatus"),
-                        (int)GetJsonInt64(root, "liveExpectedEventTableId"),
-                        (int)GetJsonInt64(root, "liveExpectedEventSectionNumber"),
-                        (int)GetJsonInt64(root, "liveExpectedEventCurrentNextIndicator"),
-                        (int)GetJsonInt64(root, "livePresentEventId"),
-                        presentStart,
-                        presentEnd,
-                        presentObservedAt,
-                        (int)GetJsonInt64(root, "livePresentEventRunningStatus"),
-                        (int)GetJsonInt64(root, "livePresentEventTableId"),
-                        (int)GetJsonInt64(root, "livePresentEventSectionNumber"),
-                        (int)GetJsonInt64(root, "livePresentEventCurrentNextIndicator"));
-
-                    if (evidence.HasFreshExpectedEvent(now) || evidence.PresentObservedAt != default)
-                        return true;
-                }
-                catch (JsonException)
-                {
-                    // tailの先頭は途中行になり得る。直前の完全なJSONL行を探し続ける。
-                }
-            }
-        }
-        catch
-        {
-            // 録画本線をsidecar読取失敗で止めない。ProgramGuide followと通常停止判定へ安全にフォールバックする。
-        }
-
-        return false;
+        evidence = EvaluateRecordingProgress(session, reservation, now);
+        return evidence.Hold;
     }
 
-    private bool IsLivePresentStopHoldActive(
-        RecordingSession session,
-        Reservation reservation,
-        DateTime now,
-        out LiveRecordingEventEvidence evidence)
+    private RecordingProgressDecision EvaluateRecordingProgress(RecordingSession session, Reservation reservation, DateTime now)
     {
-        if (!TryReadLiveRecordingEventEvidence(session.RuntimeStatsPath, reservation, now, out evidence))
-            return false;
+        if(reservation.Source==ReservationSource.Program || reservation.ServiceId==0 || reservation.EventId==0)
+            return new RecordingProgressDecision(RecordingProgressStatus.Unknown,null,false,false,default,"clock_time_reservation");
 
-        return evidence.IsFreshTargetPresent(reservation, now);
+        lock (session.FollowTimingPublicationGate)
+        {
+            RecordingPfSection? present = null, following = null;
+            try
+            {
+                var path = session.WorkerRuntimeStatsPath;
+                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                var length = (int)Math.Min(65536,stream.Length);stream.Seek(-length,SeekOrigin.End);
+                var bytes = new byte[length];stream.ReadExactly(bytes);
+                var lines = System.Text.Encoding.UTF8.GetString(bytes).Split(new[]{'\r','\n'},StringSplitOptions.RemoveEmptyEntries);
+                for(var i=lines.Length-1;i>=0;i--)
+                {
+                    try
+                    {
+                        using var doc=JsonDocument.Parse(lines[i]);var root=doc.RootElement;
+                        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+                        if(root.TryGetProperty("recordingPresent",out var p)) present=p.Deserialize<RecordingPfSection>(options);
+                        if(root.TryGetProperty("recordingFollowing",out var f)) following=f.Deserialize<RecordingPfSection>(options);
+                        break;
+                    }
+                    catch(JsonException) { }
+                }
+            }
+            catch(IOException) { }
+            catch(ArgumentException) { }
+            catch(UnauthorizedAccessException) { }
+            _recordingProgress.TryGetValue(reservation.Id,out var previous);
+            if(previous is null && session.ChainControl is not null && session.ChainControl.TryGetSegment(reservation.Id,out var persisted))
+                previous=persisted.Progress;
+
+            var result=RecordingEndDecision.Evaluate(reservation.NetworkId,reservation.TransportStreamId,reservation.ServiceId,
+                reservation.EventId,new DateTimeOffset(reservation.StartTime),new DateTimeOffset(now),present,following,previous);
+            if(previous is null || previous.Status!=result.Status || previous.End!=result.End || previous.Hold!=result.Hold)
+                _log.Add("REC_END_DECISION",$"R{reservation.Id}",
+                    $"state={result.Status} reason={result.Reason} event={reservation.NetworkId}/{reservation.TransportStreamId}/{reservation.ServiceId}/{reservation.EventId} " +
+                    $"candidateEnd={result.End:O} hold={result.Hold} observedEnd={result.EndedObservedAt:O} workerRestart=False rule=recording_end_decision_contract");
+            _recordingProgress[reservation.Id]=result;
+            return result;
+        }
     }
 
     private void PruneRecordingTimeFollowEvidence()
     {
+        foreach(var id in _recordingProgress.Keys)
+        {
+            var reservation=_store.GetById(id);
+            if(reservation is null || reservation.Status is ReservationStatus.Completed or ReservationStatus.Cancelled or ReservationStatus.Failed)
+                _recordingProgress.TryRemove(id,out _);
+        }
+
         foreach (var pair in _recordingTimeFollowEvidence)
         {
             var reservation = _store.GetById(pair.Key);
             if (reservation is null || reservation.Status is ReservationStatus.Completed or ReservationStatus.Cancelled or ReservationStatus.Failed)
+            {
                 _recordingTimeFollowEvidence.TryRemove(pair.Key, out _);
+                _recordingProgress.TryRemove(pair.Key, out _);
+            }
         }
     }
 
@@ -7607,7 +8650,7 @@ private readonly ReservationStore _store;
         return result;
     }
 
-    private void FollowScheduledChainMembersFromActiveSession(Reservation activeReservation, RecordingSession session)
+    private bool FollowScheduledChainMembersFromActiveSession(Reservation activeReservation, RecordingSession session)
     {
         // The active reservation may be the chain root (IsUserChain=false). Successor/root identity is
         // authoritative, so do not suppress member follow based on the root row's IsUserChain flag.
@@ -7623,7 +8666,7 @@ private readonly ReservationStore _store;
             .ThenBy(x => x.Id)
             .ToList();
         if (targets.Count == 0)
-            return;
+            return false;
 
         // ACTIVE_CHAIN_SESSION_TIME_FOLLOW_INVARIANT:
         // 未開始memberもPreRecで実観測した時刻証拠より古いProgramGuide投影へ巻き戻さない。
@@ -7647,13 +8690,12 @@ private readonly ReservationStore _store;
             $"result={(updated.Count > 0 ? "UPDATED" : "NO_CHANGE")} root=R{rootId} source=active_recording_session_no_extra_tuner tuner={SafeValue(session.Lease.Name)} pid={session.ProcessId} checked={results.Count} updated={updated.Count} targets=[{string.Join(',', targets.Select(x => $"R{x.Id}"))}] updatedIds=[{string.Join(',', updated.Select(x => $"R{x.ReservationId}"))}] childWorkers=0 extraTunerLease=0 rule=chain_time_follow_single_session_contract");
 
         if (updated.Count == 0)
-            return;
+            return false;
 
         if (session.IsSharedChainCapture)
         {
-            var captureEnd = RefreshContinuousChainControlTimings(session, $"ChainMemberFollow R{activeReservation.Id}");
-            session.UpdatePhysicalCaptureEndTime(captureEnd);
-            session.Lease.UpdatePlannedEndTime(captureEnd, $"ChainMemberFollow R{activeReservation.Id}");
+            TryApplyRecordingFollowTiming(session, activeReservation, session.LogicalSegmentEndTime,
+                $"ChainMemberFollow R{activeReservation.Id}");
         }
 
         _allocationRoute.Run(new ReservationAllocationRouteRequest(
@@ -7668,6 +8710,7 @@ private readonly ReservationStore _store;
             EmitConflictLogs: true,
             ConflictLogCategory: "REC_CHAIN_FOLLOW_ALLOC",
             ConflictLogTitle: $"R{activeReservation.Id}"));
+        return session.IsSharedChainCapture;
     }
 
     private IReadOnlyList<Reservation> GetScheduledDirectChainSuccessors(Reservation predecessor)
@@ -7707,26 +8750,14 @@ private readonly ReservationStore _store;
         foreach (var session in toEnd)
         {
             var reservation = _store.GetById(session.ReservationId);
-            var hasScheduledDirectChainSuccessor = reservation is not null && HasScheduledDirectChainSuccessor(reservation);
             if (reservation is not null
-                && !hasScheduledDirectChainSuccessor
                 && IsLivePresentStopHoldActive(session, reservation, now, out var liveEvidence))
             {
                 _log.Add("REC_STOP_LIVE_PRESENT_HOLD", $"R{session.ReservationId}",
                     $"result=SUPPRESSED service={SafeValue(reservation.ServiceName)} title={ReservationDisplayTitle(reservation.Title)} " +
                     $"now={now:MM/dd HH:mm:ss.fff} logicalSegmentEnd={session.LogicalSegmentEndTime:MM/dd HH:mm:ss} physicalCaptureEnd={session.PhysicalCaptureEndTime:MM/dd HH:mm:ss} tuner={SafeValue(session.Lease.Name)} pid={session.ProcessId} " +
-                    $"presentEventId={liveEvidence.PresentEventId} table=0x{liveEvidence.PresentTableId:X2} section={liveEvidence.PresentSectionNumber} currentNext={liveEvidence.PresentCurrentNextIndicator} runningStatus={liveEvidence.PresentRunningStatus} " +
-                    $"observedAt={liveEvidence.PresentObservedAt:MM/dd HH:mm:ss.fff} ageSec={(now - liveEvidence.PresentObservedAt).TotalSeconds:F1} " +
-                    "reservationMutation=none programGuideMutation=none plannedEndMutation=none leaseMutation=none reason=target_event_still_present_not_formal_time_follow rule=recording_live_present_stop_hold_contract");
+                    $"progress={liveEvidence.Status} reason={liveEvidence.Reason} action=wait_for_common_end_decision rule=recording_end_decision_contract");
                 continue;
-            }
-
-            if (reservation is not null && hasScheduledDirectChainSuccessor)
-            {
-                _log.Add("REC_STOP_LIVE_PRESENT_HOLD", $"R{session.ReservationId}",
-                    $"result=BYPASSED service={SafeValue(reservation.ServiceName)} title={ReservationDisplayTitle(reservation.Title)} " +
-                    $"now={now:MM/dd HH:mm:ss.fff} logicalSegmentEnd={session.LogicalSegmentEndTime:MM/dd HH:mm:ss} physicalCaptureEnd={session.PhysicalCaptureEndTime:MM/dd HH:mm:ss} tuner={SafeValue(session.Lease.Name)} pid={session.ProcessId} " +
-                    "reason=scheduled_direct_chain_successor chainBoundaryPriority=True rule=recording_live_present_stop_hold_contract");
             }
 
             await StopSessionAsync(session, ReservationStatus.Completed);
@@ -7755,6 +8786,24 @@ private readonly ReservationStore _store;
             return;
         }
 
+        // A closed segment's terminal CAS may already be durable while its result is pending.
+        // Retry that projection before entering the normal-stop outbox: a duplicate physical
+        // stop may have no new terminal CAS and must not discard this segment's event.
+        // Do not acquire a fresh stop claim here or bypass the existing retry/admission gates.
+        if (session.IsSharedChainCapture)
+        {
+            try
+            {
+                await ResumePendingContinuousChainResultsAsync(session, new Dictionary<int, int>(),
+                    DateTime.Now, CancellationToken.None, committedOnly: true).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _log.Add("CHAIN_STOP_RESULT_PROJECTION", $"R{session.ReservationId}",
+                    $"result=FAILED errorType={ex.GetType().Name} action=continue_physical_stop_keep_evidence rule=recording_result_projection_contract");
+            }
+        }
+
         using var eventScope = _typedEvents.BeginOutboxScope(out var commitEvents);
         if (!session.TryBeginFinalization())
         {
@@ -7763,574 +8812,585 @@ private readonly ReservationStore _store;
             return;
         }
 
-        var finalizationCompleted = false;
-        Exception? stopFailure = null;
-        long? stoppingDataVersion = null;
-        var lifecycleClaimed = false;
-        var physicalStopStarted = false;
-        var stopGateRequestAt = DateTime.Now;
-        var stopGateKey = !string.IsNullOrWhiteSpace(session.Lease.Name) ? session.Lease.Name : $"DID:{session.Lease.Did}";
-        var stopGate = _stopGatesByTuner.GetOrAdd(stopGateKey, static _ => new SemaphoreSlim(1, 1));
-        await stopGate.WaitAsync();
-        var stopGateWaitMs = (int)(DateTime.Now - stopGateRequestAt).TotalMilliseconds;
+        var completeFinalizationAttempt = session.CaptureFinalizationCompletionSignal();
         try
         {
-            var pid = session.ProcessId;
-            var rid = session.ReservationId;
-            var reservationForEvidence = _store.GetById(rid);
-            string? terminalFailureReason;
-            lock (_sessionGate) _recordingTerminalFailureReasons.TryGetValue(rid, out terminalFailureReason);
+            var finalizationCompleted = false;
+            Exception? stopFailure = null;
+            long? stoppingDataVersion = null;
+            var lifecycleClaimed = false;
+            var physicalStopStarted = false;
+            var stopGateRequestAt = DateTime.Now;
+            var stopGateKey = !string.IsNullOrWhiteSpace(session.Lease.Name) ? session.Lease.Name : $"DID:{session.Lease.Did}";
+            var stopGate = _stopGatesByTuner.GetOrAdd(stopGateKey, static _ => new SemaphoreSlim(1, 1));
+            await stopGate.WaitAsync();
+            var stopGateWaitMs = (int)(DateTime.Now - stopGateRequestAt).TotalMilliseconds;
+            try
+            {
+                var pid = session.ProcessId;
+                var rid = session.ReservationId;
+                var reservationForEvidence = _store.GetById(rid);
+                string? terminalFailureReason;
+                lock (_sessionGate) _recordingTerminalFailureReasons.TryGetValue(rid, out terminalFailureReason);
 
-            // 正常完了は予約時刻を過ぎたという事実だけでは成立させない。
-            // スリープ・休止・長時間停止をまたいだ場合、workerが生存したまま終了処理だけ後刻に走り、
-            // 実TSが開始直後で止まっていてもCompletedになり得る。録画ファイルの最終成長時刻と
-            // 最低限のファイル量を予約尺に照合し、明白な部分録画は共通Failed終端へ落とす。
-            if (finalStatus == ReservationStatus.Completed && reservationForEvidence is not null)
-            {
-                var sessionCompletionEvidence = EvaluateCompletedRecordingSessionEvidence(session, reservationForEvidence);
-                if (!sessionCompletionEvidence.LikelyCompleted)
+                // 正常完了は予約時刻を過ぎたという事実だけでは成立させない。
+                // スリープ・休止・長時間停止をまたいだ場合、workerが生存したまま終了処理だけ後刻に走り、
+                // 実TSが開始直後で止まっていてもCompletedになり得る。録画ファイルの最終成長時刻と
+                // 最低限のファイル量を予約尺に照合し、明白な部分録画は共通Failed終端へ落とす。
+                if (finalStatus == ReservationStatus.Completed && reservationForEvidence is not null)
                 {
-                    finalStatus = ReservationStatus.Failed;
-                    terminalFailureReason = sessionCompletionEvidence.Reason;
-                    lock (_sessionGate)
-                        _recordingTerminalFailureReasons[rid] = sessionCompletionEvidence.Reason;
-                    _log.Add("REC_COMPLETION_EVIDENCE", $"R{rid}",
-                        $"result=FAILED reason={SafeValue(sessionCompletionEvidence.Reason)} service={SafeValue(reservationForEvidence.ServiceName)} " +
-                        $"title={ReservationDisplayTitle(reservationForEvidence.Title)} evidence={SafeValue(sessionCompletionEvidence.Summary)} " +
-                        "action=downgrade_completed_to_failed rule=recording_completion_evidence_contract");
+                    var sessionCompletionEvidence = EvaluateCompletedRecordingSessionEvidence(session, reservationForEvidence);
+                    if (!sessionCompletionEvidence.LikelyCompleted)
+                    {
+                        finalStatus = ReservationStatus.Failed;
+                        terminalFailureReason = sessionCompletionEvidence.Reason;
+                        lock (_sessionGate)
+                            _recordingTerminalFailureReasons[rid] = sessionCompletionEvidence.Reason;
+                        _log.Add("REC_COMPLETION_EVIDENCE", $"R{rid}",
+                            $"result=FAILED reason={SafeValue(sessionCompletionEvidence.Reason)} service={SafeValue(reservationForEvidence.ServiceName)} " +
+                            $"title={ReservationDisplayTitle(reservationForEvidence.Title)} evidence={SafeValue(sessionCompletionEvidence.Summary)} " +
+                            "action=downgrade_completed_to_failed rule=recording_completion_evidence_contract");
+                    }
+                    else
+                    {
+                        _log.Add("REC_COMPLETION_EVIDENCE", $"R{rid}",
+                            $"result=OK service={SafeValue(reservationForEvidence.ServiceName)} title={ReservationDisplayTitle(reservationForEvidence.Title)} " +
+                            $"evidence={SafeValue(sessionCompletionEvidence.Summary)} rule=recording_completion_evidence_contract");
+                    }
                 }
-                else
-                {
-                    _log.Add("REC_COMPLETION_EVIDENCE", $"R{rid}",
-                        $"result=OK service={SafeValue(reservationForEvidence.ServiceName)} title={ReservationDisplayTitle(reservationForEvidence.Title)} " +
-                        $"evidence={SafeValue(sessionCompletionEvidence.Summary)} rule=recording_completion_evidence_contract");
-                }
-            }
 
-            var terminalFailureReasonPart = string.IsNullOrWhiteSpace(terminalFailureReason) ? "terminalFailureReason=-" : $"terminalFailureReason={SafeValue(terminalFailureReason)}";
-            var terminationEvidence = new RecordingTerminationEvidence
-            {
-                RecordingRecoveryChainId = reservationForEvidence?.RecordingRecoveryChainId ?? string.Empty,
-                PowerResumeCycleId = _powerResumeCycleContext.Value ?? string.Empty,
-                TerminationReason = string.IsNullOrWhiteSpace(terminalFailureReason)
-                    ? (finalStatus == ReservationStatus.Completed ? "completed" : "recording_failed")
-                    : terminalFailureReason!,
-                WorkerProcessId = pid,
-                WorkerIdentityResult = processAlreadyGone ? "process_missing" : "owned_process",
-                LastFileGrowthAt = session.LastRecordingFileGrowthAt,
-                LastObservedFileSize = session.LastObservedRecordingFileBytes,
-                StopRequestedAt = DateTime.Now
-            };
-            var lifecycleReservation = _store.GetById(rid);
-            if (preserveRecordingLifecycleForRecovery)
-            {
-                _log.Add("REC_STOP_DECISION", $"R{rid}",
-                    $"result=PRESERVE_RECORDING_FOR_RECOVERY status={SafeValue(lifecycleReservation?.Status.ToString())} dataVersion={lifecycleReservation?.DataVersion.ToString() ?? "-"} finalStatus={finalStatus} operationId={session.OperationId} " +
-                    $"action=physical_owner_cleanup_then_atomic_recovery rule=interrupted_recording_recovery_contract");
-            }
-            else if (lifecycleReservation is not null)
-            {
-                if (lifecycleReservation.Status == ReservationStatus.Recording)
+                var terminalFailureReasonPart = string.IsNullOrWhiteSpace(terminalFailureReason) ? "terminalFailureReason=-" : $"terminalFailureReason={SafeValue(terminalFailureReason)}";
+                var terminationEvidence = new RecordingTerminationEvidence
                 {
-                    var stopClaim = _store.TryBeginRecordingStop(rid, lifecycleReservation.DataVersion);
-                    if (stopClaim.Applied)
+                    RecordingRecoveryChainId = reservationForEvidence?.RecordingRecoveryChainId ?? string.Empty,
+                    PowerResumeCycleId = _powerResumeCycleContext.Value ?? string.Empty,
+                    TerminationReason = string.IsNullOrWhiteSpace(terminalFailureReason)
+                        ? (finalStatus == ReservationStatus.Completed ? "completed" : "recording_failed")
+                        : terminalFailureReason!,
+                    WorkerProcessId = pid,
+                    WorkerIdentityResult = processAlreadyGone ? "process_missing" : "owned_process",
+                    LastFileGrowthAt = session.LastRecordingFileGrowthAt,
+                    LastObservedFileSize = session.LastObservedRecordingFileBytes,
+                    StopRequestedAt = DateTime.Now
+                };
+                var lifecycleReservation = _store.GetById(rid);
+                if (preserveRecordingLifecycleForRecovery)
+                {
+                    _log.Add("REC_STOP_DECISION", $"R{rid}",
+                        $"result=PRESERVE_RECORDING_FOR_RECOVERY status={SafeValue(lifecycleReservation?.Status.ToString())} dataVersion={lifecycleReservation?.DataVersion.ToString() ?? "-"} finalStatus={finalStatus} operationId={session.OperationId} " +
+                        $"action=physical_owner_cleanup_then_atomic_recovery rule=interrupted_recording_recovery_contract");
+                }
+                else if (lifecycleReservation is not null)
+                {
+                    if (lifecycleReservation.Status == ReservationStatus.Recording)
+                    {
+                        var stopClaim = _store.TryBeginRecordingStop(rid, lifecycleReservation.DataVersion);
+                        if (stopClaim.Applied)
+                        {
+                            lifecycleClaimed = true;
+                            stoppingDataVersion = stopClaim.CurrentDataVersion;
+                            _log.Add("REC_STOP_DECISION", $"R{rid}",
+                                $"result=CLAIMED status=Stopping dataVersion={stopClaim.PreviousDataVersion}->{stopClaim.CurrentDataVersion} finalStatus={finalStatus} operationId={session.OperationId} rule=release_contract");
+                        }
+                        else
+                        {
+                            _log.Add("REC_STOP_DECISION", $"R{rid}",
+                                $"result=CLAIM_REJECTED reason={SafeValue(stopClaim.Reason)} expectedStatus=Recording actualStatus={SafeValue(stopClaim.CurrentStatus?.ToString())} expectedVersion={lifecycleReservation.DataVersion} actualVersion={stopClaim.CurrentDataVersion} finalStatus={finalStatus} operationId={session.OperationId} action=continue_physical_owner_cleanup_without_db_overwrite rule=release_contract");
+                        }
+                    }
+                    else if (lifecycleReservation.Status == ReservationStatus.Stopping)
                     {
                         lifecycleClaimed = true;
-                        stoppingDataVersion = stopClaim.CurrentDataVersion;
+                        stoppingDataVersion = lifecycleReservation.DataVersion;
                         _log.Add("REC_STOP_DECISION", $"R{rid}",
-                            $"result=CLAIMED status=Stopping dataVersion={stopClaim.PreviousDataVersion}->{stopClaim.CurrentDataVersion} finalStatus={finalStatus} operationId={session.OperationId} rule=release_contract");
+                            $"result=ALREADY_CLAIMED status=Stopping dataVersion={lifecycleReservation.DataVersion} finalStatus={finalStatus} operationId={session.OperationId} rule=release_contract");
                     }
                     else
                     {
                         _log.Add("REC_STOP_DECISION", $"R{rid}",
-                            $"result=CLAIM_REJECTED reason={SafeValue(stopClaim.Reason)} expectedStatus=Recording actualStatus={SafeValue(stopClaim.CurrentStatus?.ToString())} expectedVersion={lifecycleReservation.DataVersion} actualVersion={stopClaim.CurrentDataVersion} finalStatus={finalStatus} operationId={session.OperationId} action=continue_physical_owner_cleanup_without_db_overwrite rule=release_contract");
+                            $"result=NOT_CLAIMABLE status={lifecycleReservation.Status} dataVersion={lifecycleReservation.DataVersion} finalStatus={finalStatus} operationId={session.OperationId} action=continue_physical_owner_cleanup_without_db_overwrite rule=release_contract");
                     }
                 }
-                else if (lifecycleReservation.Status == ReservationStatus.Stopping)
-                {
-                    lifecycleClaimed = true;
-                    stoppingDataVersion = lifecycleReservation.DataVersion;
-                    _log.Add("REC_STOP_DECISION", $"R{rid}",
-                        $"result=ALREADY_CLAIMED status=Stopping dataVersion={lifecycleReservation.DataVersion} finalStatus={finalStatus} operationId={session.OperationId} rule=release_contract");
-                }
                 else
                 {
                     _log.Add("REC_STOP_DECISION", $"R{rid}",
-                        $"result=NOT_CLAIMABLE status={lifecycleReservation.Status} dataVersion={lifecycleReservation.DataVersion} finalStatus={finalStatus} operationId={session.OperationId} action=continue_physical_owner_cleanup_without_db_overwrite rule=release_contract");
+                        $"result=RESERVATION_MISSING finalStatus={finalStatus} operationId={session.OperationId} action=continue_physical_owner_cleanup_without_db_overwrite rule=release_contract");
                 }
-            }
-            else
-            {
-                _log.Add("REC_STOP_DECISION", $"R{rid}",
-                    $"result=RESERVATION_MISSING finalStatus={finalStatus} operationId={session.OperationId} action=continue_physical_owner_cleanup_without_db_overwrite rule=release_contract");
-            }
 
-            TvTestProcessAuditor.EmitViewingProtectionAudit(
-                _log,
-                "REC_STOP_BEFORE_KILL",
-                $"R{rid}",
-                session.Lease.Did,
-                session.Lease.BonDriverFileName,
-                _tunerPool.GetProtectedViewingDids(),
-                blockOnSameDid: false);
-            _log.Add("PROCESS_OWNERSHIP", $"R{rid}", $"stopTargetPid={pid} ownedByReservation=True ownershipScope=tvair_managed_pid_only recFile={session.RecordingFilePath}");
-            _log.Add("Scheduler", $"R{rid}", $"録画停止開始: PID={pid} finalStatus={finalStatus} stopGate=entered recFile={session.RecordingFilePath}");
+                TvTestProcessAuditor.EmitViewingProtectionAudit(
+                    _log,
+                    "REC_STOP_BEFORE_KILL",
+                    $"R{rid}",
+                    session.Lease.Did,
+                    session.Lease.BonDriverFileName,
+                    _tunerPool.GetProtectedViewingDids(),
+                    blockOnSameDid: false);
+                _log.Add("PROCESS_OWNERSHIP", $"R{rid}", $"stopTargetPid={pid} ownedByReservation=True ownershipScope=tvair_managed_pid_only recFile={session.RecordingFilePath}");
+                _log.Add("Scheduler", $"R{rid}", $"録画停止開始: PID={pid} finalStatus={finalStatus} stopGate=entered recFile={session.RecordingFilePath}");
 
-            using var stopPhase = StopPhaseGate.Enter($"R{rid}", session.Lease.Name,
-                msg => _log.Add("Scheduler", $"R{rid}", msg));
+                using var stopPhase = StopPhaseGate.Enter($"R{rid}", session.Lease.Name,
+                    msg => _log.Add("Scheduler", $"R{rid}", msg));
 
-            var stopReservation = _store.GetById(rid);
-            var stopGroup = stopReservation is not null ? ResolveGroup(stopReservation) : null;
-            var recorderStopTarget = stopReservation is not null && pid > 0;
-            var stopMode = recorderStopTarget ? "TvAIrEpgRecStopSignalThenWait" : "SinglePidExitOnly";
-            _log.Add("REC_STOP_COMMON_ENTER", $"R{rid}",
-                $"mode={stopMode} group={SafeValue(stopGroup)} pid={pid} route={("TvAIrEpgRecOnly")} recorderStopTarget={recorderStopTarget} rule=release_contract");
-            _log.Add("REC_STOP_MODE", $"R{rid}",
-                $"mode={stopMode} reason=release_contract group={SafeValue(stopGroup)} pid={pid} stopTarget={recorderStopTarget} pt3LockDuringStopWait=False timeoutMs={TvAIrEpgRecStopTimeoutMs}");
+                var stopReservation = _store.GetById(rid);
+                var stopGroup = stopReservation is not null ? ResolveGroup(stopReservation) : null;
+                var recorderStopTarget = stopReservation is not null && pid > 0;
+                var stopMode = recorderStopTarget ? "TvAIrEpgRecStopSignalThenWait" : "SinglePidExitOnly";
+                _log.Add("REC_STOP_COMMON_ENTER", $"R{rid}",
+                    $"mode={stopMode} group={SafeValue(stopGroup)} pid={pid} route={("TvAIrEpgRecOnly")} recorderStopTarget={recorderStopTarget} rule=release_contract");
+                _log.Add("REC_STOP_MODE", $"R{rid}",
+                    $"mode={stopMode} reason=release_contract group={SafeValue(stopGroup)} pid={pid} stopTarget={recorderStopTarget} pt3LockDuringStopWait=False timeoutMs={TvAIrEpgRecStopTimeoutMs}");
 
-            // TvAIrEpgRecへstop signalを送り、既にworker消失を確認した経路では停止要求とKillを重ねない。
-            physicalStopStarted = true;
-            var recorderStopSucceeded = processAlreadyGone
-                || await TryStopTvAIrEpgRecProcessAsync(session, rid, TvAIrEpgRecStopTimeoutMs).ConfigureAwait(false);
-            var processExitedWithoutKill = recorderStopSucceeded;
-            terminationEvidence.StopRequestResult = processAlreadyGone
-                ? "process_already_gone"
-                : (recorderStopSucceeded ? "graceful_stop_succeeded" : "graceful_stop_failed");
+                // TvAIrEpgRecへstop signalを送り、既にworker消失を確認した経路では停止要求とKillを重ねない。
+                physicalStopStarted = true;
+                var recorderStopSucceeded = processAlreadyGone
+                    || await TryStopTvAIrEpgRecProcessAsync(session, rid, TvAIrEpgRecStopTimeoutMs).ConfigureAwait(false);
+                var processExitedWithoutKill = recorderStopSucceeded;
+                terminationEvidence.StopRequestResult = processAlreadyGone
+                    ? "process_already_gone"
+                    : (recorderStopSucceeded ? "graceful_stop_succeeded" : "graceful_stop_failed");
 
-            if (!processExitedWithoutKill)
-            {
-                // release_contract: Bridge RecordStop が失敗・無応答、または通常終了待ちで残存した場合だけ、
-                // TvAIr所有PID単体終了へフォールバックする。成功時は Kill を避ける。
-                _log.Add("REC_STOP_SINGLE_PID_EXIT", $"R{rid}",
-                    $"stage=tuner_device_stop_lock_skipped_for_single_pid_fallback pid={pid} lease={session.Lease.Name} reason=do_not_expand_internal_tuner_device_lock_on_timeout_kill status={_tunerPool.GetStatusSummary()} rule=release_contract");
-                _log.Add("REC_STOP_SINGLE_PID_EXIT", $"R{rid}",
-                    $"stage=before_single_pid_exit pid={pid} route={("TvAIrEpgRecOnly")} stopSignalTried={recorderStopTarget} stopSignalSucceeded={recorderStopSucceeded} gracefulExitSucceeded=False treeKillForbidden=True fallback=True");
-                await KillProcessTreeAsync(pid, rid);
-
-                // STOP_TIMEOUT_FALLBACK_DIAGNOSTIC:
-                // TIMEOUT時はlease解放前に対象workerの生存とidentityを観測する。
-                // この観測結果は停止・lease解放・後続開始の分岐条件には使用しない。
-                var fallbackWorkerAlive = IsOwnedRecordingWorkerAlive(session);
-                var fallbackObservedIdentity = TvAirManagedProcessRegistry.CaptureIdentity(pid);
-                var fallbackIdentityMatches = session.WorkerIdentity.IsAvailable
-                    && fallbackObservedIdentity.IsAvailable
-                    && TvAirManagedProcessRegistry.IdentityMatches(session.WorkerIdentity, fallbackObservedIdentity);
-                _log.Add("REC_STOP_SINGLE_PID_EXIT_DIAGNOSTIC", $"R{rid}",
-                    $"stage=after_single_pid_exit_before_lease_release pid={pid} ownedWorkerAlive={fallbackWorkerAlive} " +
-                    $"originalIdentityAvailable={session.WorkerIdentity.IsAvailable} observedIdentityAvailable={fallbackObservedIdentity.IsAvailable} " +
-                    $"identityMatches={fallbackIdentityMatches} observedStartUtc={fallbackObservedIdentity.ProcessStartTimeUtc?.ToString("O") ?? "-"} " +
-                    $"observedPath={SafeValue(fallbackObservedIdentity.ExecutablePath)} leaseReleaseBehavior=unchanged diagnosticOnly=True rule=release_contract");
-
-                terminationEvidence.StopRequestResult = "single_pid_fallback_completed";
-                _log.Add("REC_STOP_SINGLE_PID_EXIT", $"R{rid}",
-                    $"stage=after_single_pid_exit pid={pid} route={("TvAIrEpgRecOnly")} stopSignalTried={recorderStopTarget} stopSignalSucceeded={recorderStopSucceeded} gracefulExitSucceeded=False treeKillForbidden=True fallback=True");
-            }
-            else
-            {
-                _log.Add("REC_STOP_SINGLE_PID_EXIT", $"R{rid}",
-                    $"stage=skipped pid={pid} route={("TvAIrEpgRecOnly")} recorderStopSucceeded=True gracefulExitSucceeded=True reason={(processAlreadyGone ? "process_already_gone" : "no_kill_after_recordstop_ok")}");
-            }
-
-            // RECORDING_PHYSICAL_RELEASE_INVARIANT:
-            // worker終了でBonDriverプロセス所有権が消滅した後、lease解放とgeneration更新へ直結する。
-            // 物理解放証拠の後へ不要な固定settleを追加してTuner再利用を遅らせてはならない。
-            _log.Add("REC_STOP_DEVICE_RELEASE_EVIDENCE", $"R{rid}",
-                $"result=READY fixedWaitMs=0 processExited={processExitedWithoutKill || processAlreadyGone} tuner={SafeValue(session.Lease.Name)} rule=recording_physical_release_contract");
-
-            try
-            {
-                session.Lease.Dispose();
-                terminationEvidence.LeaseReleaseResult = "released";
-            }
-            catch (Exception ex)
-            {
-                terminationEvidence.LeaseReleaseResult = $"failed:{SafeValue(ex.GetType().Name)}";
-                _log.Add("REC_RELEASE_EVIDENCE", $"R{rid}",
-                    $"result=FAILED target=tuner_lease pid={pid} reason={SafeValue(ex.Message)} rule=recording_termination_evidence");
-            }
-            terminationEvidence.TunerStateAfterRelease = _tunerPool.GetStatusSummary();
-            lock (_sessionGate)
-            {
-                _activeSessions.Remove(rid);
-                _recordingTerminalFailureReasons.Remove(rid);
-            }
-            _recordingStartupZeroByteReloadAttempts.TryRemove(rid, out _);
-
-            var verifyReservation = _store.GetById(rid);
-            RecordingTsVerifier.VerificationResult? tsVerification = null;
-            if (verifyReservation is not null && !string.IsNullOrWhiteSpace(session.RecordingFilePath))
-                tsVerification = await RecordingTsVerifier.VerifyAsync(verifyReservation, session.RecordingFilePath, "after_stop_before_release", _log);
-            else if (verifyReservation is null)
-                _log.Add("REC_TS_VERIFY", $"R{rid}", $"stage=after_stop_before_release result=SKIP reason=reservation_not_found path={session.RecordingFilePath}");
-            else
-                _log.Add("REC_TS_VERIFY", $"R{rid}", "stage=after_stop_before_release result=SKIP reason=effective_recording_file_unknown");
-
-            // TVAIREPGREC_RESULT_PUBLICATION_INVARIANT:
-            // TvAIrEpgRec writes ResultPath before process exit. After worker-exit evidence is established,
-            // do not add a second fixed/polling wait for the same result. Missing JSON is recorded as evidence
-            // and the existing TS verification/final-status contract decides the outcome.
-            var recorderOutcome = ReadRecordingWorkerOutcome(session.ResponsePath, session.RuntimeStatsPath);
-            terminationEvidence.ResultFileState = recorderOutcome.ResponseExists
-                ? (recorderOutcome.Success ? "present_success" : "present_failed")
-                : "missing";
-            terminationEvidence.TransportStreamValidation = tsVerification is null
-                ? "not_available"
-                : $"result={tsVerification.Result};verdict={tsVerification.Verdict};readable={tsVerification.ReadableJudgement}";
-            var qualityService = verifyReservation?.ServiceName ?? stopReservation?.ServiceName ?? "-";
-            var qualityTitle = verifyReservation?.Title ?? stopReservation?.Title ?? "-";
-            var completionEvidence = EvaluateRecordingCompletionEvidence(recorderOutcome, tsVerification);
-            var qualityClassification = ClassifyRecordingWorkerQuality(recorderOutcome, tsVerification, completionEvidence);
-            var qualityGroup = verifyReservation is not null ? ResolveGroup(verifyReservation) : (stopReservation is not null ? ResolveGroup(stopReservation) : "-");
-            var qualityContext = BuildActiveRecordingGroupContext(qualityGroup ?? "-");
-            _log.Add("REC_QUALITY_RESULT", $"R{rid}",
-                $"service={SafeValue(qualityService)} title={ReservationTitleDisplayContract.ForLog(qualityTitle, 80)} " +
-                $"qualityClass={qualityClassification.ClassName} severity={qualityClassification.Severity} userMeaning={qualityClassification.UserMeaning} action={qualityClassification.Action} " +
-                $"verdict={SafeValue(recorderOutcome.QualityVerdict)} responseExists={recorderOutcome.ResponseExists} responseSuccess={recorderOutcome.Success} " +
-                $"qualityGroup={SafeValue(qualityContext.Group)} qualityTuner={SafeValue(session.Lease.Name)} qualityDid={SafeValue(session.Lease.Did)} concurrentSameGroupRecordings={qualityContext.Count} concurrentSameGroupTuners={SafeValue(qualityContext.Names)} concurrentSameGroupDids={SafeValue(qualityContext.Dids)} " +
-                $"inputRawDrops={SafeValue(recorderOutcome.RawContinuityDrops)} inputRawCcErrors={SafeValue(recorderOutcome.RawContinuityErrors)} inputRawSyncErrors={SafeValue(recorderOutcome.RawSyncErrors)} inputRawScrambled={SafeValue(recorderOutcome.RawScrambledPackets)} " +
-                $"outputDrops={SafeValue(recorderOutcome.OutputContinuityDrops)} outputCcErrors={SafeValue(recorderOutcome.OutputContinuityErrors)} outputSyncErrors={SafeValue(recorderOutcome.OutputSyncErrors)} outputScrambled={SafeValue(recorderOutcome.OutputScrambledPackets)} outputTargetMediaScrambled={SafeValue(recorderOutcome.OutputTargetMediaScrambledPackets)} " +
-                $"rawLayerMeaning=pre_write_input_observation outputLayerMeaning=recorded_file_integrity runtimeStatsEmitted={SafeValue(recorderOutcome.RuntimeStatsEmitted)} runtimeStatsPath={SafeValue(recorderOutcome.RuntimeStatsPath)} " +
-                $"rule=release_contract");
-            LogRecordingWorkerQualityCorrelation(rid, qualityService, qualityTitle, qualityClassification, recorderOutcome, qualityContext, session.Lease.Name, session.Lease.Did);
-            LogRecordingWorkerRuntimeTimeline(rid, qualityService, qualityTitle, qualityGroup ?? "-", recorderOutcome);
-            if (finalStatus == ReservationStatus.Completed && (!recorderOutcome.ResponseExists || !recorderOutcome.Success))
-            {
-                var service = verifyReservation?.ServiceName ?? stopReservation?.ServiceName ?? "-";
-                var title = verifyReservation?.Title ?? stopReservation?.Title ?? "-";
-                var sourceKind = recorderOutcome.ResponseExists ? "worker_reported_ng" : "worker_response_missing";
-                if (completionEvidence.CanKeepCompleted)
+                if (!processExitedWithoutKill)
                 {
-                    _log.Add("TVAIREPGREC_FINAL_STATUS", $"R{rid}",
-                        $"result=COMPLETED_BY_RECORDING_EVIDENCE source={sourceKind} service={SafeValue(service)} title={TrimForLog(title, 80)} responseExists={recorderOutcome.ResponseExists} responseSuccess={recorderOutcome.Success} finalStatus=Completed " + terminalFailureReasonPart + " " +
-                        $"evidenceResult={completionEvidence.Result} evidenceReason={completionEvidence.Reason} verifyResult={SafeValue(tsVerification?.Result)} verifyVerdict={SafeValue(tsVerification?.Verdict)} verifyReadable={SafeValue(tsVerification?.ReadableJudgement)} " +
-                        $"bytesWritten={recorderOutcome.BytesWritten} packetsWritten={recorderOutcome.PacketsWritten} outputSyncErrors={SafeValue(recorderOutcome.OutputSyncErrors)} outputScrambled={SafeValue(recorderOutcome.OutputScrambledPackets)} outputTargetMediaScrambled={SafeValue(recorderOutcome.OutputTargetMediaScrambledPackets)} outputDrops={SafeValue(recorderOutcome.OutputContinuityDrops)} outputCcErrors={SafeValue(recorderOutcome.OutputContinuityErrors)} response={recorderOutcome.Summary} " +
-                        $"rule=recording_completion_evidence_contract");
+                    // release_contract: Bridge RecordStop が失敗・無応答、または通常終了待ちで残存した場合だけ、
+                    // TvAIr所有PID単体終了へフォールバックする。成功時は Kill を避ける。
+                    _log.Add("REC_STOP_SINGLE_PID_EXIT", $"R{rid}",
+                        $"stage=tuner_device_stop_lock_skipped_for_single_pid_fallback pid={pid} lease={session.Lease.Name} reason=do_not_expand_internal_tuner_device_lock_on_timeout_kill status={_tunerPool.GetStatusSummary()} rule=release_contract");
+                    _log.Add("REC_STOP_SINGLE_PID_EXIT", $"R{rid}",
+                        $"stage=before_single_pid_exit pid={pid} route={("TvAIrEpgRecOnly")} stopSignalTried={recorderStopTarget} stopSignalSucceeded={recorderStopSucceeded} gracefulExitSucceeded=False treeKillForbidden=True fallback=True");
+                    await KillProcessTreeAsync(pid, rid);
+
+                    // STOP_TIMEOUT_FALLBACK_DIAGNOSTIC:
+                    // TIMEOUT時はlease解放前に対象workerの生存とidentityを観測する。
+                    // この観測結果は停止・lease解放・後続開始の分岐条件には使用しない。
+                    var fallbackWorkerAlive = IsOwnedRecordingWorkerAlive(session);
+                    var fallbackObservedIdentity = TvAirManagedProcessRegistry.CaptureIdentity(pid);
+                    var fallbackIdentityMatches = session.WorkerIdentity.IsAvailable
+                        && fallbackObservedIdentity.IsAvailable
+                        && TvAirManagedProcessRegistry.IdentityMatches(session.WorkerIdentity, fallbackObservedIdentity);
+                    _log.Add("REC_STOP_SINGLE_PID_EXIT_DIAGNOSTIC", $"R{rid}",
+                        $"stage=after_single_pid_exit_before_lease_release pid={pid} ownedWorkerAlive={fallbackWorkerAlive} " +
+                        $"originalIdentityAvailable={session.WorkerIdentity.IsAvailable} observedIdentityAvailable={fallbackObservedIdentity.IsAvailable} " +
+                        $"identityMatches={fallbackIdentityMatches} observedStartUtc={fallbackObservedIdentity.ProcessStartTimeUtc?.ToString("O") ?? "-"} " +
+                        $"observedPath={SafeValue(fallbackObservedIdentity.ExecutablePath)} leaseReleaseBehavior=unchanged diagnosticOnly=True rule=release_contract");
+
+                    terminationEvidence.StopRequestResult = "single_pid_fallback_completed";
+                    _log.Add("REC_STOP_SINGLE_PID_EXIT", $"R{rid}",
+                        $"stage=after_single_pid_exit pid={pid} route={("TvAIrEpgRecOnly")} stopSignalTried={recorderStopTarget} stopSignalSucceeded={recorderStopSucceeded} gracefulExitSucceeded=False treeKillForbidden=True fallback=True");
                 }
                 else
                 {
-                    _log.Add("TVAIREPGREC_FINAL_STATUS", $"R{rid}",
-                        $"result=FAILED_BY_RECORDING_EVIDENCE source={sourceKind} service={SafeValue(service)} title={TrimForLog(title, 80)} responseExists={recorderOutcome.ResponseExists} responseSuccess={recorderOutcome.Success} finalStatus=Failed " + terminalFailureReasonPart + " " +
-                        $"evidenceResult={completionEvidence.Result} evidenceReason={completionEvidence.Reason} verifyResult={SafeValue(tsVerification?.Result)} verifyVerdict={SafeValue(tsVerification?.Verdict)} verifyReadable={SafeValue(tsVerification?.ReadableJudgement)} " +
-                        $"bytesWritten={recorderOutcome.BytesWritten} packetsWritten={recorderOutcome.PacketsWritten} outputSyncErrors={SafeValue(recorderOutcome.OutputSyncErrors)} outputScrambled={SafeValue(recorderOutcome.OutputScrambledPackets)} outputTargetMediaScrambled={SafeValue(recorderOutcome.OutputTargetMediaScrambledPackets)} outputDrops={SafeValue(recorderOutcome.OutputContinuityDrops)} outputCcErrors={SafeValue(recorderOutcome.OutputContinuityErrors)} response={recorderOutcome.Summary} " +
-                        $"rule=recording_completion_evidence_contract");
-                    finalStatus = ReservationStatus.Failed;
-                    terminalFailureReason = completionEvidence.Reason;
+                    _log.Add("REC_STOP_SINGLE_PID_EXIT", $"R{rid}",
+                        $"stage=skipped pid={pid} route={("TvAIrEpgRecOnly")} recorderStopSucceeded=True gracefulExitSucceeded=True reason={(processAlreadyGone ? "process_already_gone" : "no_kill_after_recordstop_ok")}");
                 }
-            }
-            else
-            {
-                var service = verifyReservation?.ServiceName ?? stopReservation?.ServiceName ?? "-";
-                var title = verifyReservation?.Title ?? stopReservation?.Title ?? "-";
-                var finalResultKind = recorderOutcome.ResponseExists
-                    ? (recorderOutcome.Success ? "OK_CLEAR_OR_TVAIREPGREC_OK" : "TVAIREPGREC_NG_NON_COMPLETED")
-                    : "NO_RESPONSE_NON_COMPLETED";
-                _log.Add("TVAIREPGREC_FINAL_STATUS", $"R{rid}",
-                    $"result={finalResultKind} service={SafeValue(service)} title={TrimForLog(title, 80)} finalStatus={finalStatus} " + terminalFailureReasonPart + " " +
-                    $"evidenceResult={completionEvidence.Result} evidenceReason={completionEvidence.Reason} verifyResult={SafeValue(tsVerification?.Result)} verifyVerdict={SafeValue(tsVerification?.Verdict)} verifyReadable={SafeValue(tsVerification?.ReadableJudgement)} " +
-                    $"response={recorderOutcome.Summary} rule=recording_completion_evidence_contract");
-            }
 
-            var finalizedReservation = verifyReservation ?? stopReservation ?? _store.GetById(rid);
-            TvAirRecordingResultDto? finalizedResultDto = null;
-            if (finalizedReservation is not null)
-            {
-                static long? ParseQuality(string value) => long.TryParse(value, out var parsed) ? parsed : null;
-                var drop = ParseQuality(recorderOutcome.OutputContinuityDrops);
-                var error = ParseQuality(recorderOutcome.OutputContinuityErrors);
-                var scramble = ParseQuality(recorderOutcome.OutputScrambledPackets);
-                var qualityAvailable = drop.HasValue && error.HasValue && scramble.HasValue;
-                bool? fileCreated = string.IsNullOrWhiteSpace(session.RecordingFilePath)
-                    ? null
-                    : File.Exists(session.RecordingFilePath);
-                var finalizedProgram = finalizedReservation.EventId == 0
-                    ? null
-                    : _programEvents.GetByEventKey(finalizedReservation.NetworkId, finalizedReservation.TransportStreamId, finalizedReservation.ServiceId, finalizedReservation.EventId);
-                var resultDto = new TvAirRecordingResultDto
+                // RECORDING_PHYSICAL_RELEASE_INVARIANT:
+                // worker終了でBonDriverプロセス所有権が消滅した後、lease解放とgeneration更新へ直結する。
+                // 物理解放証拠の後へ不要な固定settleを追加してTuner再利用を遅らせてはならない。
+                _log.Add("REC_STOP_DEVICE_RELEASE_EVIDENCE", $"R{rid}",
+                    $"result=READY fixedWaitMs=0 processExited={processExitedWithoutKill || processAlreadyGone} tuner={SafeValue(session.Lease.Name)} rule=recording_physical_release_contract");
+
+                try
                 {
-                    ReservationId = $"R{rid}",
-                    RecordingId = $"R{rid}",
-                    ServiceName = finalizedReservation.ServiceName,
-                    EventTitle = finalizedReservation.Title,
-                    NetworkId = finalizedReservation.NetworkId,
-                    TransportStreamId = finalizedReservation.TransportStreamId,
-                    ServiceId = finalizedReservation.ServiceId,
-                    EventId = finalizedReservation.EventId,
-                    ScheduledStartTime = new DateTimeOffset(finalizedReservation.ScheduledStartTime ?? finalizedReservation.StartTime),
-                    Genre = finalizedProgram is null ? string.Empty : EpgProjection.GenreLabel(finalizedProgram.Genre, finalizedProgram.GenreCodes),
-                    GenreCodes = finalizedProgram?.GenreCodes ?? string.Empty,
-                    // Final lifecycle timestamps are committed by ReservationStore.TryCompleteRecordingStop.
-                    // Do not stamp a second, pre-CAS ActualEndTime here; the committed reservation
-                    // is applied to the finalized result immediately after the terminal CAS succeeds.
-                    ActualStartTime = finalizedReservation.RecordingStartedAt.HasValue ? new DateTimeOffset(finalizedReservation.RecordingStartedAt.Value) : null,
-                    ActualEndTime = null,
-                    Result = finalStatus.ToString(),
-                    EndReason = finalStatus switch
+                    session.Lease.Dispose();
+                    terminationEvidence.LeaseReleaseResult = "released";
+                }
+                catch (Exception ex)
+                {
+                    terminationEvidence.LeaseReleaseResult = $"failed:{SafeValue(ex.GetType().Name)}";
+                    _log.Add("REC_RELEASE_EVIDENCE", $"R{rid}",
+                        $"result=FAILED target=tuner_lease pid={pid} reason={SafeValue(ex.Message)} rule=recording_termination_evidence");
+                }
+                terminationEvidence.TunerStateAfterRelease = _tunerPool.GetStatusSummary();
+                lock (_sessionGate)
+                {
+                    _activeSessions.Remove(rid);
+                    _recordingTerminalFailureReasons.Remove(rid);
+                }
+                _recordingStartupZeroByteReloadAttempts.TryRemove(rid, out _);
+
+                var verifyReservation = _store.GetById(rid);
+                RecordingTsVerifier.VerificationResult? tsVerification = null;
+                if (verifyReservation is not null && !string.IsNullOrWhiteSpace(session.RecordingFilePath))
+                    tsVerification = await RecordingTsVerifier.VerifyAsync(verifyReservation, session.RecordingFilePath, "after_stop_before_release", _log);
+                else if (verifyReservation is null)
+                    _log.Add("REC_TS_VERIFY", $"R{rid}", $"stage=after_stop_before_release result=SKIP reason=reservation_not_found path={session.RecordingFilePath}");
+                else
+                    _log.Add("REC_TS_VERIFY", $"R{rid}", "stage=after_stop_before_release result=SKIP reason=effective_recording_file_unknown");
+
+                // TVAIREPGREC_RESULT_PUBLICATION_INVARIANT:
+                // TvAIrEpgRec writes ResultPath before process exit. After worker-exit evidence is established,
+                // do not add a second fixed/polling wait for the same result. Missing JSON is recorded as evidence
+                // and the existing TS verification/final-status contract decides the outcome.
+                var recorderOutcome = ReadRecordingWorkerOutcome(session.ResponsePath, session.RuntimeStatsPath);
+                terminationEvidence.ResultFileState = recorderOutcome.ResponseExists
+                    ? (recorderOutcome.Success ? "present_success" : "present_failed")
+                    : "missing";
+                terminationEvidence.TransportStreamValidation = tsVerification is null
+                    ? "not_available"
+                    : $"result={tsVerification.Result};verdict={tsVerification.Verdict};readable={tsVerification.ReadableJudgement}";
+                var qualityService = verifyReservation?.ServiceName ?? stopReservation?.ServiceName ?? "-";
+                var qualityTitle = verifyReservation?.Title ?? stopReservation?.Title ?? "-";
+                var completionEvidence = EvaluateRecordingCompletionEvidence(recorderOutcome, tsVerification);
+                var qualityClassification = ClassifyRecordingWorkerQuality(recorderOutcome, tsVerification, completionEvidence);
+                var qualityGroup = verifyReservation is not null ? ResolveGroup(verifyReservation) : (stopReservation is not null ? ResolveGroup(stopReservation) : "-");
+                var qualityContext = BuildActiveRecordingGroupContext(qualityGroup ?? "-");
+                _log.Add("REC_QUALITY_RESULT", $"R{rid}",
+                    $"service={SafeValue(qualityService)} title={ReservationTitleDisplayContract.ForLog(qualityTitle, 80)} " +
+                    $"qualityClass={qualityClassification.ClassName} severity={qualityClassification.Severity} userMeaning={qualityClassification.UserMeaning} action={qualityClassification.Action} " +
+                    $"verdict={SafeValue(recorderOutcome.QualityVerdict)} responseExists={recorderOutcome.ResponseExists} responseSuccess={recorderOutcome.Success} " +
+                    $"qualityGroup={SafeValue(qualityContext.Group)} qualityTuner={SafeValue(session.Lease.Name)} qualityDid={SafeValue(session.Lease.Did)} concurrentSameGroupRecordings={qualityContext.Count} concurrentSameGroupTuners={SafeValue(qualityContext.Names)} concurrentSameGroupDids={SafeValue(qualityContext.Dids)} " +
+                    $"inputRawDrops={SafeValue(recorderOutcome.RawContinuityDrops)} inputRawCcErrors={SafeValue(recorderOutcome.RawContinuityErrors)} inputRawSyncErrors={SafeValue(recorderOutcome.RawSyncErrors)} inputRawScrambled={SafeValue(recorderOutcome.RawScrambledPackets)} " +
+                    $"outputDrops={SafeValue(recorderOutcome.OutputContinuityDrops)} outputCcErrors={SafeValue(recorderOutcome.OutputContinuityErrors)} outputSyncErrors={SafeValue(recorderOutcome.OutputSyncErrors)} outputScrambled={SafeValue(recorderOutcome.OutputScrambledPackets)} outputTargetMediaScrambled={SafeValue(recorderOutcome.OutputTargetMediaScrambledPackets)} " +
+                    $"rawLayerMeaning=pre_write_input_observation outputLayerMeaning=recorded_file_integrity runtimeStatsEmitted={SafeValue(recorderOutcome.RuntimeStatsEmitted)} runtimeStatsPath={SafeValue(recorderOutcome.RuntimeStatsPath)} " +
+                    $"rule=release_contract");
+                LogRecordingWorkerQualityCorrelation(rid, qualityService, qualityTitle, qualityClassification, recorderOutcome, qualityContext, session.Lease.Name, session.Lease.Did);
+                LogRecordingWorkerRuntimeTimeline(rid, qualityService, qualityTitle, qualityGroup ?? "-", recorderOutcome);
+                if (finalStatus == ReservationStatus.Completed && (!recorderOutcome.ResponseExists || !recorderOutcome.Success))
+                {
+                    var service = verifyReservation?.ServiceName ?? stopReservation?.ServiceName ?? "-";
+                    var title = verifyReservation?.Title ?? stopReservation?.Title ?? "-";
+                    var sourceKind = recorderOutcome.ResponseExists ? "worker_reported_ng" : "worker_response_missing";
+                    if (completionEvidence.CanKeepCompleted)
                     {
-                        ReservationStatus.Completed => "Completed",
-                        ReservationStatus.Cancelled => "UserStopped",
-                        _ when !string.IsNullOrWhiteSpace(terminalFailureReason) => terminalFailureReason!,
-                        _ => "RecordingFailed"
-                    },
-                    FilePath = string.IsNullOrWhiteSpace(session.RecordingFilePath) ? null : session.RecordingFilePath,
-                    FileCreated = fileCreated,
-                    Drop = drop,
-                    Error = error,
-                    Scramble = scramble,
-                    QualityDataAvailable = qualityAvailable,
-                    QualityCompleteness = qualityAvailable ? recorderOutcome.QualityCompleteness : "unavailable",
-                    QualitySource = qualityAvailable ? recorderOutcome.QualitySource : "Unavailable",
-                    ResourceReleaseState = string.IsNullOrWhiteSpace(terminationEvidence.LeaseReleaseResult) ? "unknown" : terminationEvidence.LeaseReleaseResult,
-                    ResultFinalized = true,
-                    Succeeded = finalStatus == ReservationStatus.Completed
-                };
-                finalizedResultDto = resultDto;
-            }
-
-            CleanupTvAIrEpgRecRecordingRuntimeFiles(session, recorderOutcome, rid, finalStatus, tsVerification);
-
-            var stopLifecycleCommitted = false;
-            Reservation? committedReservation = null;
-            if (lifecycleClaimed && stoppingDataVersion.HasValue)
-            {
-                var stopCommit = _store.TryCompleteRecordingStop(rid, stoppingDataVersion.Value, finalStatus, terminalFailureReason);
-                if (!stopCommit.Applied)
-                {
-                    _log.Add("REC_STOP_LIFECYCLE_COMMIT", $"R{rid}",
-                        $"result=REJECTED reason={SafeValue(stopCommit.Reason)} expectedStatus=Stopping actualStatus={SafeValue(stopCommit.CurrentStatus?.ToString())} expectedVersion={stoppingDataVersion.Value} actualVersion={stopCommit.CurrentDataVersion} finalStatus={finalStatus} action=suppress_terminal_projections rule=release_contract");
+                        _log.Add("TVAIREPGREC_FINAL_STATUS", $"R{rid}",
+                            $"result=COMPLETED_BY_RECORDING_EVIDENCE source={sourceKind} service={SafeValue(service)} title={TrimForLog(title, 80)} responseExists={recorderOutcome.ResponseExists} responseSuccess={recorderOutcome.Success} finalStatus=Completed " + terminalFailureReasonPart + " " +
+                            $"evidenceResult={completionEvidence.Result} evidenceReason={completionEvidence.Reason} verifyResult={SafeValue(tsVerification?.Result)} verifyVerdict={SafeValue(tsVerification?.Verdict)} verifyReadable={SafeValue(tsVerification?.ReadableJudgement)} " +
+                            $"bytesWritten={recorderOutcome.BytesWritten} packetsWritten={recorderOutcome.PacketsWritten} outputSyncErrors={SafeValue(recorderOutcome.OutputSyncErrors)} outputScrambled={SafeValue(recorderOutcome.OutputScrambledPackets)} outputTargetMediaScrambled={SafeValue(recorderOutcome.OutputTargetMediaScrambledPackets)} outputDrops={SafeValue(recorderOutcome.OutputContinuityDrops)} outputCcErrors={SafeValue(recorderOutcome.OutputContinuityErrors)} response={recorderOutcome.Summary} " +
+                            $"rule=recording_completion_evidence_contract");
+                    }
+                    else
+                    {
+                        _log.Add("TVAIREPGREC_FINAL_STATUS", $"R{rid}",
+                            $"result=FAILED_BY_RECORDING_EVIDENCE source={sourceKind} service={SafeValue(service)} title={TrimForLog(title, 80)} responseExists={recorderOutcome.ResponseExists} responseSuccess={recorderOutcome.Success} finalStatus=Failed " + terminalFailureReasonPart + " " +
+                            $"evidenceResult={completionEvidence.Result} evidenceReason={completionEvidence.Reason} verifyResult={SafeValue(tsVerification?.Result)} verifyVerdict={SafeValue(tsVerification?.Verdict)} verifyReadable={SafeValue(tsVerification?.ReadableJudgement)} " +
+                            $"bytesWritten={recorderOutcome.BytesWritten} packetsWritten={recorderOutcome.PacketsWritten} outputSyncErrors={SafeValue(recorderOutcome.OutputSyncErrors)} outputScrambled={SafeValue(recorderOutcome.OutputScrambledPackets)} outputTargetMediaScrambled={SafeValue(recorderOutcome.OutputTargetMediaScrambledPackets)} outputDrops={SafeValue(recorderOutcome.OutputContinuityDrops)} outputCcErrors={SafeValue(recorderOutcome.OutputContinuityErrors)} response={recorderOutcome.Summary} " +
+                            $"rule=recording_completion_evidence_contract");
+                        finalStatus = ReservationStatus.Failed;
+                        terminalFailureReason = completionEvidence.Reason;
+                    }
                 }
                 else
                 {
-                    stopLifecycleCommitted = true;
-                    committedReservation = _store.GetById(rid);
-                    if (committedReservation is not null && finalizedResultDto is not null)
-                        finalizedResultDto = ApplyCommittedRecordingLifecycle(finalizedResultDto, committedReservation);
+                    var service = verifyReservation?.ServiceName ?? stopReservation?.ServiceName ?? "-";
+                    var title = verifyReservation?.Title ?? stopReservation?.Title ?? "-";
+                    var finalResultKind = recorderOutcome.ResponseExists
+                        ? (recorderOutcome.Success ? "OK_CLEAR_OR_TVAIREPGREC_OK" : "TVAIREPGREC_NG_NON_COMPLETED")
+                        : "NO_RESPONSE_NON_COMPLETED";
+                    _log.Add("TVAIREPGREC_FINAL_STATUS", $"R{rid}",
+                        $"result={finalResultKind} service={SafeValue(service)} title={TrimForLog(title, 80)} finalStatus={finalStatus} " + terminalFailureReasonPart + " " +
+                        $"evidenceResult={completionEvidence.Result} evidenceReason={completionEvidence.Reason} verifyResult={SafeValue(tsVerification?.Result)} verifyVerdict={SafeValue(tsVerification?.Verdict)} verifyReadable={SafeValue(tsVerification?.ReadableJudgement)} " +
+                        $"response={recorderOutcome.Summary} rule=recording_completion_evidence_contract");
+                }
+
+                var finalizedReservation = verifyReservation ?? stopReservation ?? _store.GetById(rid);
+                TvAirRecordingResultDto? finalizedResultDto = null;
+                if (finalizedReservation is not null)
+                {
+                    static long? ParseQuality(string value) => long.TryParse(value, out var parsed) ? parsed : null;
+                    var drop = ParseQuality(recorderOutcome.OutputContinuityDrops);
+                    var error = ParseQuality(recorderOutcome.OutputContinuityErrors);
+                    var scramble = ParseQuality(recorderOutcome.OutputScrambledPackets);
+                    var qualityAvailable = drop.HasValue && error.HasValue && scramble.HasValue;
+                    bool? fileCreated = string.IsNullOrWhiteSpace(session.RecordingFilePath)
+                        ? null
+                        : File.Exists(session.RecordingFilePath);
+                    var finalizedProgram = finalizedReservation.EventId == 0
+                        ? null
+                        : _programEvents.GetByEventKey(finalizedReservation.NetworkId, finalizedReservation.TransportStreamId, finalizedReservation.ServiceId, finalizedReservation.EventId);
+                    var resultDto = new TvAirRecordingResultDto
+                    {
+                        ReservationId = $"R{rid}",
+                        RecordingId = $"R{rid}",
+                        ServiceName = finalizedReservation.ServiceName,
+                        EventTitle = finalizedReservation.Title,
+                        NetworkId = finalizedReservation.NetworkId,
+                        TransportStreamId = finalizedReservation.TransportStreamId,
+                        ServiceId = finalizedReservation.ServiceId,
+                        EventId = finalizedReservation.EventId,
+                        ScheduledStartTime = new DateTimeOffset(finalizedReservation.ScheduledStartTime ?? finalizedReservation.StartTime),
+                        Genre = finalizedProgram is null ? string.Empty : EpgProjection.GenreLabel(finalizedProgram.Genre, finalizedProgram.GenreCodes),
+                        GenreCodes = finalizedProgram?.GenreCodes ?? string.Empty,
+                        // Final lifecycle timestamps are committed by ReservationStore.TryCompleteRecordingStop.
+                        // Do not stamp a second, pre-CAS ActualEndTime here; the committed reservation
+                        // is applied to the finalized result immediately after the terminal CAS succeeds.
+                        ActualStartTime = finalizedReservation.RecordingStartedAt.HasValue ? new DateTimeOffset(finalizedReservation.RecordingStartedAt.Value) : null,
+                        ActualEndTime = null,
+                        Result = finalStatus.ToString(),
+                        EndReason = finalStatus switch
+                        {
+                            ReservationStatus.Completed => "Completed",
+                            ReservationStatus.Cancelled => "UserStopped",
+                            _ when !string.IsNullOrWhiteSpace(terminalFailureReason) => terminalFailureReason!,
+                            _ => "RecordingFailed"
+                        },
+                        FilePath = string.IsNullOrWhiteSpace(session.RecordingFilePath) ? null : session.RecordingFilePath,
+                        FileCreated = fileCreated,
+                        Drop = drop,
+                        Error = error,
+                        Scramble = scramble,
+                        QualityDataAvailable = qualityAvailable,
+                        QualityCompleteness = qualityAvailable ? recorderOutcome.QualityCompleteness : "unavailable",
+                        QualitySource = qualityAvailable ? recorderOutcome.QualitySource : "Unavailable",
+                        ResourceReleaseState = string.IsNullOrWhiteSpace(terminationEvidence.LeaseReleaseResult) ? "unknown" : terminationEvidence.LeaseReleaseResult,
+                        ResultFinalized = true,
+                        Succeeded = finalStatus == ReservationStatus.Completed
+                    };
+                    finalizedResultDto = resultDto;
+                }
+
+                CleanupTvAIrEpgRecRecordingRuntimeFiles(session, recorderOutcome, rid, finalStatus, tsVerification);
+
+                var stopLifecycleCommitted = false;
+                Reservation? committedReservation = null;
+                if (lifecycleClaimed && stoppingDataVersion.HasValue)
+                {
+                    var stopCommit = _store.TryCompleteRecordingStop(rid, stoppingDataVersion.Value, finalStatus, terminalFailureReason);
+                    if (!stopCommit.Applied)
+                    {
+                        _log.Add("REC_STOP_LIFECYCLE_COMMIT", $"R{rid}",
+                            $"result=REJECTED reason={SafeValue(stopCommit.Reason)} expectedStatus=Stopping actualStatus={SafeValue(stopCommit.CurrentStatus?.ToString())} expectedVersion={stoppingDataVersion.Value} actualVersion={stopCommit.CurrentDataVersion} finalStatus={finalStatus} action=suppress_terminal_projections rule=release_contract");
+                    }
+                    else
+                    {
+                        stopLifecycleCommitted = true;
+                        committedReservation = _store.GetById(rid);
+                        if (committedReservation is not null && finalizedResultDto is not null)
+                            finalizedResultDto = ApplyCommittedRecordingLifecycle(finalizedResultDto, committedReservation);
+                        _log.Add("REC_STOP_LIFECYCLE_COMMIT", $"R{rid}",
+                            $"result=APPLIED status={finalStatus} dataVersion={stopCommit.PreviousDataVersion}->{stopCommit.CurrentDataVersion} rule=release_contract");
+                    }
+                }
+                else
+                {
                     _log.Add("REC_STOP_LIFECYCLE_COMMIT", $"R{rid}",
-                        $"result=APPLIED status={finalStatus} dataVersion={stopCommit.PreviousDataVersion}->{stopCommit.CurrentDataVersion} rule=release_contract");
+                        preserveRecordingLifecycleForRecovery
+                            ? $"result=SKIPPED reason=preserved_for_atomic_recovery finalStatus={finalStatus} action=common_interrupted_recording_recovery rule=interrupted_recording_recovery_contract"
+                            : $"result=SKIPPED reason=stop_lifecycle_not_claimed finalStatus={finalStatus} action=physical_owner_cleanup_only rule=release_contract");
                 }
-            }
-            else
-            {
-                _log.Add("REC_STOP_LIFECYCLE_COMMIT", $"R{rid}",
-                    preserveRecordingLifecycleForRecovery
-                        ? $"result=SKIPPED reason=preserved_for_atomic_recovery finalStatus={finalStatus} action=common_interrupted_recording_recovery rule=interrupted_recording_recovery_contract"
-                        : $"result=SKIPPED reason=stop_lifecycle_not_claimed finalStatus={finalStatus} action=physical_owner_cleanup_only rule=release_contract");
-            }
-            RemoveChainRuntimeSnapshot(rid, "stop_session_finally", finalStatus.ToString());
-            try
-            {
-                TvAirManagedProcessRegistry.Unregister(pid);
-                terminationEvidence.RegistryReleaseResult = "unregistered";
-            }
-            catch (Exception ex)
-            {
-                terminationEvidence.RegistryReleaseResult = $"failed:{SafeValue(ex.GetType().Name)}";
-                _log.Add("REC_RELEASE_EVIDENCE", $"R{rid}",
-                    $"result=FAILED target=managed_process_registry pid={pid} reason={SafeValue(ex.Message)} rule=recording_termination_evidence");
-            }
-            _log.Add("PROCESS_OWNERSHIP", $"R{rid}",
-                $"unregisterManagedPid=True pid={pid} reason=recording_session_finished rule=release_contract");
-
-            // RecordingResultFinalized is the external-read handoff boundary. A normal recording may
-            // publish a finalized result only after the owned worker has stopped, so TvAIrEpgRec can no
-            // longer write or hold the recording file. This guard is deliberately at the common projection
-            // boundary so future stop-path changes cannot accidentally move the event earlier.
-            var finalizedFileReleaseReady = await EnsureRecordingResultFinalizedFileReleaseBoundaryAsync(session, rid, "normal_stop").ConfigureAwait(false);
-            if (!finalizedFileReleaseReady)
-            {
-                finalizedResultDto = null;
-                _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{rid}",
-                    $"result=BLOCKED reason=owned_worker_still_alive path={SafeValue(session.RecordingFilePath)} action=suppress_finalized_result_and_event rule=recording_result_finalized_file_release_contract");
-            }
-
-            if (stopLifecycleCommitted && finalizedResultDto is not null && committedReservation is not null)
-            {
-                // RECORDING_STOP_RESULT_PROJECTION_ISOLATION_INVARIANT:
-                // The reservation terminal CAS is already committed at this point. Result persistence and
-                // typed-event projection are downstream side effects and must not throw the stop lifecycle
-                // back into exception-settle or leave the session finalization state open.
+                RemoveChainRuntimeSnapshot(rid, "stop_session_finally", finalStatus.ToString());
                 try
                 {
-                    var updated = _userEvents.EnrichRecordingResult(finalizedResultDto, terminationEvidence.ToDetails());
-                    _log.Add("REC_STOP_RESULT_PROJECTION", $"R{rid}",
-                        $"target=UserEventLog result={(updated > 0 ? "APPLIED" : "FAILED")} updated={updated} terminalStatusCommitted=True finalStatus={finalStatus} rule=recording_result_projection_contract");
+                    TvAirManagedProcessRegistry.Unregister(pid);
+                    terminationEvidence.RegistryReleaseResult = "unregistered";
                 }
-                catch (Exception projectionEx)
+                catch (Exception ex)
                 {
-                    _log.Add("REC_STOP_RESULT_PROJECTION", $"R{rid}",
-                        $"target=UserEventLog result=FAILED terminalStatusCommitted=True finalStatus={finalStatus} errorType={projectionEx.GetType().Name} error={TrimForLog(projectionEx.Message, 240)} action=continue_remaining_projections rule=recording_result_projection_contract");
+                    terminationEvidence.RegistryReleaseResult = $"failed:{SafeValue(ex.GetType().Name)}";
+                    _log.Add("REC_RELEASE_EVIDENCE", $"R{rid}",
+                        $"result=FAILED target=managed_process_registry pid={pid} reason={SafeValue(ex.Message)} rule=recording_termination_evidence");
+                }
+                _log.Add("PROCESS_OWNERSHIP", $"R{rid}",
+                    $"unregisterManagedPid=True pid={pid} reason=recording_session_finished rule=release_contract");
+
+                // RecordingResultFinalized is the external-read handoff boundary. A normal recording may
+                // publish a finalized result only after the owned worker has stopped, so TvAIrEpgRec can no
+                // longer write or hold the recording file. This guard is deliberately at the common projection
+                // boundary so future stop-path changes cannot accidentally move the event earlier.
+                var finalizedFileReleaseReady = await EnsureRecordingResultFinalizedFileReleaseBoundaryAsync(session, rid, "normal_stop").ConfigureAwait(false);
+                if (!finalizedFileReleaseReady)
+                {
+                    finalizedResultDto = null;
+                    _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{rid}",
+                        $"result=BLOCKED reason=owned_worker_still_alive path={SafeValue(session.RecordingFilePath)} action=suppress_finalized_result_and_event rule=recording_result_finalized_file_release_contract");
                 }
 
-                RecordingResultUpsertOutcome? recordingResultOutcome = null;
-                try
+                if (stopLifecycleCommitted && finalizedResultDto is not null && committedReservation is not null)
                 {
-                    recordingResultOutcome = _recordingResults.Upsert(finalizedResultDto, terminationEvidence);
-                    _log.Add("REC_STOP_RESULT_PROJECTION", $"R{rid}",
-                        $"target=RecordingResultStore result={recordingResultOutcome.Value} terminalStatusCommitted=True finalStatus={finalStatus} rule=recording_result_projection_contract");
-                }
-                catch (Exception projectionEx)
-                {
-                    _log.Add("REC_STOP_RESULT_PROJECTION", $"R{rid}",
-                        $"target=RecordingResultStore result=FAILED terminalStatusCommitted=True finalStatus={finalStatus} errorType={projectionEx.GetType().Name} error={TrimForLog(projectionEx.Message, 240)} action=skip_finalized_event rule=recording_result_projection_contract");
-                }
-
-                if (recordingResultOutcome == RecordingResultUpsertOutcome.AppliedNewFinalized)
-                {
+                    // RECORDING_STOP_RESULT_PROJECTION_ISOLATION_INVARIANT:
+                    // The reservation terminal CAS is already committed at this point. Result persistence and
+                    // typed-event projection are downstream side effects and must not throw the stop lifecycle
+                    // back into exception-settle or leave the session finalization state open.
                     try
                     {
-                        _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{rid}",
-                            $"result=READY source=normal_stop projection=PluginTypedEvent workerReleaseConfirmed=True path={SafeValue(finalizedResultDto.FilePath)} externalReadAllowed={(finalizedResultDto.FileCreated == true && !string.IsNullOrWhiteSpace(finalizedResultDto.FilePath) ? "True" : "NoFile")} rule=recording_result_finalized_file_release_contract");
-                        _typedEvents.Publish(new TvAirEventDto
-                        {
-                            EventType = TvAirEventType.RecordingResultFinalized,
-                            EntityId = $"recording:R{rid}",
-                            EntityVersion = committedReservation.DataVersion,
-                            DataRevision = committedReservation.DataVersion,
-                            ReservationId = $"R{rid}",
-                            ServiceName = committedReservation.ServiceName,
-                            ProgramTitle = committedReservation.Title,
-                            Reservation = PluginTypedEventHub.ToSnapshot(committedReservation),
-                            RecordingResult = finalizedResultDto
-                        });
+                        var updated = _userEvents.EnrichRecordingResult(finalizedResultDto, terminationEvidence.ToDetails());
                         _log.Add("REC_STOP_RESULT_PROJECTION", $"R{rid}",
-                            $"target=PluginTypedEvent result=QUEUED terminalStatusCommitted=True finalStatus={finalStatus} source=AppliedNewFinalized rule=recording_result_finalize_once_contract");
+                            $"target=UserEventLog result={(updated > 0 ? "APPLIED" : "FAILED")} updated={updated} terminalStatusCommitted=True finalStatus={finalStatus} rule=recording_result_projection_contract");
                     }
                     catch (Exception projectionEx)
                     {
                         _log.Add("REC_STOP_RESULT_PROJECTION", $"R{rid}",
-                            $"target=PluginTypedEvent result=FAILED terminalStatusCommitted=True finalStatus={finalStatus} errorType={projectionEx.GetType().Name} error={TrimForLog(projectionEx.Message, 240)} action=keep_other_projections rule=recording_result_projection_contract");
+                            $"target=UserEventLog result=FAILED terminalStatusCommitted=True finalStatus={finalStatus} errorType={projectionEx.GetType().Name} error={TrimForLog(projectionEx.Message, 240)} action=continue_remaining_projections rule=recording_result_projection_contract");
                     }
-                }
-                else
-                {
-                    _log.Add("REC_STOP_RESULT_PROJECTION", $"R{rid}",
-                        $"target=PluginTypedEvent result=SKIPPED reason=recording_result_not_newly_finalized storeOutcome={(recordingResultOutcome?.ToString() ?? "store_failed")} rule=recording_result_finalize_once_contract");
-                }
-            }
 
-            finalizationCompleted = true;
-            if (stopLifecycleCommitted)
-            {
-                commitEvents();
-                _log.Add("PLUGIN_TYPED_EVENT_OUTBOX", $"R{rid}", $"result=COMMITTED operation=RecordingStop finalStatus={finalStatus} rule=typed_event_outbox");
-            }
-            else
-            {
-                _log.Add("PLUGIN_TYPED_EVENT_OUTBOX", $"R{rid}", $"result=DISCARDED operation=RecordingStop finalStatus={finalStatus} reason=reservation_terminal_commit_not_applied rule=typed_event_outbox");
-            }
-            session.MarkFinalized();
-            _log.Add("REC_STOP_COMMON_EXIT", $"R{rid}",
-                $"status={finalStatus} operationId={session.OperationId} pid={pid} tuner={SafeValue(session.Lease.Name)} route={("TvAIrEpgRecOnly")} tunerStatus={_tunerPool.GetStatusSummary()}");
-            _log.Add("Scheduler", $"R{rid}", $"録画終了完了: status={finalStatus} tunerStatus={_tunerPool.GetStatusSummary()}");
-
-            // 録画終了後に競合フラグを再評価（チューナー解放により競合が解消する場合がある）。
-            // 遅延要求の消費前に停止フェーズを終了する。停止中のままConsumeしてから共通ルートを実行すると、
-            // その実行中に到着した別要求が再度deferされ、後続のConsumeがないまま残留するため。
-            if (!suppressPostStopMaintenance)
-            {
-                stopPhase.Dispose();
-                var deferred = StopPhaseGate.ConsumeDeferred();
-                if (deferred.allocationRequest is not null || deferred.wakeRebuild)
-                {
-                    _log.Add("Scheduler", $"R{rid}",
-                        $"STOP_PHASE_CONSUME pendingAlloc={deferred.allocCount} pendingWake={deferred.wakeCount} reason=after_recording_stop_completed");
-                }
-
-                if (deferred.allocationRequest is not null)
-                {
-                    var request = deferred.allocationRequest with
-                    {
-                        ReevaluateAllocations = true,
-                        RefreshWakeTask = true,
-                        BypassStopPhaseGate = true
-                    };
-                    var applied = _allocationRoute.Run(request);
-                    _log.Add("STOP_PHASE_DEFERRED_ROUTE_APPLIED", $"R{rid}",
-                        $"result=OK source={request.Source} action={request.Action} matcher={request.RunKeywordMatcher} syncProgram={request.SyncProgramRuleReservations} reevaluate={request.ReevaluateAllocations} preEpg={request.RefreshPreRecordEpgEntries} wake={request.RefreshWakeTask} changed={applied.ChangedCount} conflictOn={applied.ConflictOnCount} conflictOff={applied.ConflictOffCount} deferredAgain={applied.Deferred} pendingAlloc={deferred.allocCount} pendingWake={deferred.wakeCount} rule=release_contract");
-                }
-                else
-                {
-                    ReevaluateAndLog($"R{rid}終了後", bypassStopPhaseGate: true);
-                }
-
-                TriggerRecordingAfterActionIfNeeded(rid, finalStatus, verifyReservation ?? stopReservation);
-            }
-            else
-            {
-                _log.Add("REC_STOP_BATCH_DEFER", $"R{rid}",
-                    "result=DEFERRED actions=allocation,wake,after_action reason=batch_missing_process_finalize rule=release_contract");
-            }
-        }
-        catch (Exception ex)
-        {
-            stopFailure = ex;
-            throw;
-        }
-        finally
-        {
-            if (!finalizationCompleted)
-            {
-                var exceptionSettleApplied = false;
-                string? committedStopFailureReason = null;
-                if (lifecycleClaimed && stoppingDataVersion.HasValue)
-                {
+                    RecordingResultUpsertOutcome? recordingResultOutcome = null;
                     try
                     {
-                        ReservationLifecycleTransitionResult settle;
-                        if (physicalStopStarted)
-                        {
-                            committedStopFailureReason = BuildRecordingStopExceptionReason(stopFailure);
-                            settle = _store.TryCompleteRecordingStop(
-                                session.ReservationId,
-                                stoppingDataVersion.Value,
-                                ReservationStatus.Failed,
-                                committedStopFailureReason);
-                        }
-                        else
-                        {
-                            settle = _store.TryTransitionLifecycle(
-                                session.ReservationId,
-                                ReservationStatus.Stopping,
-                                stoppingDataVersion.Value,
-                                ReservationStatus.Recording);
-                        }
-                        exceptionSettleApplied = settle.Applied;
-
-                        _log.Add("REC_STOP_EXCEPTION_SETTLE", $"R{session.ReservationId}",
-                            $"result={(settle.Applied ? "APPLIED" : "REJECTED")} action={(physicalStopStarted ? "fail_after_physical_stop_started" : "rollback_before_physical_stop")} reason={SafeValue(settle.Reason)} expectedVersion={stoppingDataVersion.Value} actualVersion={settle.CurrentDataVersion} actualStatus={SafeValue(settle.CurrentStatus?.ToString())} operationId={session.OperationId} rule=release_contract");
+                        recordingResultOutcome = _recordingResults.Upsert(finalizedResultDto, terminationEvidence);
+                        _log.Add("REC_STOP_RESULT_PROJECTION", $"R{rid}",
+                            $"target=RecordingResultStore result={recordingResultOutcome.Value} terminalStatusCommitted=True finalStatus={finalStatus} rule=recording_result_projection_contract");
                     }
-                    catch (Exception settleEx)
+                    catch (Exception projectionEx)
                     {
-                        _log.Add("REC_STOP_EXCEPTION_SETTLE", $"R{session.ReservationId}",
-                            $"result=FAILED action={(physicalStopStarted ? "fail_after_physical_stop_started" : "rollback_before_physical_stop")} errorType={settleEx.GetType().Name} error={TrimForLog(settleEx.Message, 240)} operationId={session.OperationId} rule=release_contract");
+                        _log.Add("REC_STOP_RESULT_PROJECTION", $"R{rid}",
+                            $"target=RecordingResultStore result=FAILED terminalStatusCommitted=True finalStatus={finalStatus} errorType={projectionEx.GetType().Name} error={TrimForLog(projectionEx.Message, 240)} action=skip_finalized_event rule=recording_result_projection_contract");
                     }
-                }
 
-                if (physicalStopStarted && exceptionSettleApplied && stopFailure is not null)
-                {
-                    // Even on stop-exception recovery, never publish RecordingResultFinalized while the
-                    // owned recording worker can still hold/write the file. Force the same file-release
-                    // boundary used by the normal stop path; if it cannot be established, keep the
-                    // reservation terminal failure but suppress the finalized recording projection/event.
-                    var fallbackFileReleaseReady = await EnsureRecordingResultFinalizedFileReleaseBoundaryAsync(
-                        session,
-                        session.ReservationId,
-                        "stop_exception_fallback").ConfigureAwait(false);
-                    if (fallbackFileReleaseReady)
+                    if (recordingResultOutcome == RecordingResultUpsertOutcome.AppliedNewFinalized)
                     {
-                        ProjectStopExceptionFallbackResult(
-                            session,
-                            stopFailure,
-                            committedStopFailureReason ?? BuildRecordingStopExceptionReason(stopFailure));
+                        try
+                        {
+                            _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{rid}",
+                                $"result=READY source=normal_stop projection=PluginTypedEvent workerReleaseConfirmed=True path={SafeValue(finalizedResultDto.FilePath)} externalReadAllowed={(finalizedResultDto.FileCreated == true && !string.IsNullOrWhiteSpace(finalizedResultDto.FilePath) ? "True" : "NoFile")} rule=recording_result_finalized_file_release_contract");
+                            _typedEvents.Publish(new TvAirEventDto
+                            {
+                                EventType = TvAirEventType.RecordingResultFinalized,
+                                EntityId = $"recording:R{rid}",
+                                EntityVersion = committedReservation.DataVersion,
+                                DataRevision = committedReservation.DataVersion,
+                                ReservationId = $"R{rid}",
+                                ServiceName = committedReservation.ServiceName,
+                                ProgramTitle = committedReservation.Title,
+                                Reservation = PluginTypedEventHub.ToSnapshot(committedReservation),
+                                PluginBindings = _store.GetReservationPluginBindings(rid),
+                                RecordingResult = finalizedResultDto
+                            });
+                            _log.Add("REC_STOP_RESULT_PROJECTION", $"R{rid}",
+                                $"target=PluginTypedEvent result=QUEUED terminalStatusCommitted=True finalStatus={finalStatus} source=AppliedNewFinalized rule=recording_result_finalize_once_contract");
+                        }
+                        catch (Exception projectionEx)
+                        {
+                            _log.Add("REC_STOP_RESULT_PROJECTION", $"R{rid}",
+                                $"target=PluginTypedEvent result=FAILED terminalStatusCommitted=True finalStatus={finalStatus} errorType={projectionEx.GetType().Name} error={TrimForLog(projectionEx.Message, 240)} action=keep_other_projections rule=recording_result_projection_contract");
+                        }
                     }
                     else
                     {
-                        _log.Add("REC_STOP_EXCEPTION_RESULT", $"R{session.ReservationId}",
-                            $"target=PluginTypedEvent result=SKIPPED reason=file_release_boundary_not_established path={SafeValue(session.RecordingFilePath)} rule=recording_result_finalized_file_release_contract");
+                        _log.Add("REC_STOP_RESULT_PROJECTION", $"R{rid}",
+                            $"target=PluginTypedEvent result=SKIPPED reason=recording_result_not_newly_finalized storeOutcome={(recordingResultOutcome?.ToString() ?? "store_failed")} rule=recording_result_finalize_once_contract");
                     }
                 }
-                session.CancelFinalization();
+
+                finalizationCompleted = true;
+                if (stopLifecycleCommitted)
+                {
+                    commitEvents();
+                    _log.Add("PLUGIN_TYPED_EVENT_OUTBOX", $"R{rid}", $"result=COMMITTED operation=RecordingStop finalStatus={finalStatus} rule=typed_event_outbox");
+                }
+                else
+                {
+                    _log.Add("PLUGIN_TYPED_EVENT_OUTBOX", $"R{rid}", $"result=DISCARDED operation=RecordingStop finalStatus={finalStatus} reason=reservation_terminal_commit_not_applied rule=typed_event_outbox");
+                }
+                session.MarkFinalized();
+                _log.Add("REC_STOP_COMMON_EXIT", $"R{rid}",
+                    $"status={finalStatus} operationId={session.OperationId} pid={pid} tuner={SafeValue(session.Lease.Name)} route={("TvAIrEpgRecOnly")} tunerStatus={_tunerPool.GetStatusSummary()}");
+                _log.Add("Scheduler", $"R{rid}", $"録画終了完了: status={finalStatus} tunerStatus={_tunerPool.GetStatusSummary()}");
+
+                // 録画終了後に競合フラグを再評価（チューナー解放により競合が解消する場合がある）。
+                // 遅延要求の消費前に停止フェーズを終了する。停止中のままConsumeしてから共通ルートを実行すると、
+                // その実行中に到着した別要求が再度deferされ、後続のConsumeがないまま残留するため。
+                if (!suppressPostStopMaintenance)
+                {
+                    stopPhase.Dispose();
+                    var deferred = StopPhaseGate.ConsumeDeferred();
+                    if (deferred.allocationRequest is not null || deferred.wakeRebuild)
+                    {
+                        _log.Add("Scheduler", $"R{rid}",
+                            $"STOP_PHASE_CONSUME pendingAlloc={deferred.allocCount} pendingWake={deferred.wakeCount} reason=after_recording_stop_completed");
+                    }
+
+                    if (deferred.allocationRequest is not null)
+                    {
+                        var request = deferred.allocationRequest with
+                        {
+                            ReevaluateAllocations = true,
+                            RefreshWakeTask = true,
+                            BypassStopPhaseGate = true
+                        };
+                        var applied = _allocationRoute.Run(request);
+                        _log.Add("STOP_PHASE_DEFERRED_ROUTE_APPLIED", $"R{rid}",
+                            $"result=OK source={request.Source} action={request.Action} matcher={request.RunKeywordMatcher} syncProgram={request.SyncProgramRuleReservations} reevaluate={request.ReevaluateAllocations} preEpg={request.RefreshPreRecordEpgEntries} wake={request.RefreshWakeTask} changed={applied.ChangedCount} conflictOn={applied.ConflictOnCount} conflictOff={applied.ConflictOffCount} deferredAgain={applied.Deferred} pendingAlloc={deferred.allocCount} pendingWake={deferred.wakeCount} rule=release_contract");
+                    }
+                    else
+                    {
+                        ReevaluateAndLog($"R{rid}終了後", bypassStopPhaseGate: true);
+                    }
+
+                    TriggerRecordingAfterActionIfNeeded(rid, finalStatus, verifyReservation ?? stopReservation);
+                }
+                else
+                {
+                    _log.Add("REC_STOP_BATCH_DEFER", $"R{rid}",
+                        "result=DEFERRED actions=allocation,wake,after_action reason=batch_missing_process_finalize rule=release_contract");
+                }
             }
-            stopGate.Release();
+            catch (Exception ex)
+            {
+                stopFailure = ex;
+                throw;
+            }
+            finally
+            {
+                try
+                {
+                    if (!finalizationCompleted)
+                    {
+                        var exceptionSettleApplied = false;
+                        string? committedStopFailureReason = null;
+                        if (lifecycleClaimed && stoppingDataVersion.HasValue)
+                        {
+                            try
+                            {
+                                ReservationLifecycleTransitionResult settle;
+                                if (physicalStopStarted)
+                                {
+                                    committedStopFailureReason = BuildRecordingStopExceptionReason(stopFailure);
+                                    settle = _store.TryCompleteRecordingStop(
+                                        session.ReservationId,
+                                        stoppingDataVersion.Value,
+                                        ReservationStatus.Failed,
+                                        committedStopFailureReason);
+                                }
+                                else
+                                {
+                                    settle = _store.TryTransitionLifecycle(
+                                        session.ReservationId,
+                                        ReservationStatus.Stopping,
+                                        stoppingDataVersion.Value,
+                                        ReservationStatus.Recording);
+                                }
+                                exceptionSettleApplied = settle.Applied;
+
+                                _log.Add("REC_STOP_EXCEPTION_SETTLE", $"R{session.ReservationId}",
+                                    $"result={(settle.Applied ? "APPLIED" : "REJECTED")} action={(physicalStopStarted ? "fail_after_physical_stop_started" : "rollback_before_physical_stop")} reason={SafeValue(settle.Reason)} expectedVersion={stoppingDataVersion.Value} actualVersion={settle.CurrentDataVersion} actualStatus={SafeValue(settle.CurrentStatus?.ToString())} operationId={session.OperationId} rule=release_contract");
+                            }
+                            catch (Exception settleEx)
+                            {
+                                _log.Add("REC_STOP_EXCEPTION_SETTLE", $"R{session.ReservationId}",
+                                    $"result=FAILED action={(physicalStopStarted ? "fail_after_physical_stop_started" : "rollback_before_physical_stop")} errorType={settleEx.GetType().Name} error={TrimForLog(settleEx.Message, 240)} operationId={session.OperationId} rule=release_contract");
+                            }
+                        }
+
+                        if (physicalStopStarted && exceptionSettleApplied && stopFailure is not null)
+                        {
+                            // Even on stop-exception recovery, never publish RecordingResultFinalized while the
+                            // owned recording worker can still hold/write the file. Force the same file-release
+                            // boundary used by the normal stop path; if it cannot be established, keep the
+                            // reservation terminal failure but suppress the finalized recording projection/event.
+                            var fallbackFileReleaseReady = await EnsureRecordingResultFinalizedFileReleaseBoundaryAsync(
+                                session,
+                                session.ReservationId,
+                                "stop_exception_fallback").ConfigureAwait(false);
+                            if (fallbackFileReleaseReady)
+                            {
+                                ProjectStopExceptionFallbackResult(
+                                    session,
+                                    stopFailure,
+                                    committedStopFailureReason ?? BuildRecordingStopExceptionReason(stopFailure));
+                            }
+                            else
+                            {
+                                _log.Add("REC_STOP_EXCEPTION_RESULT", $"R{session.ReservationId}",
+                                    $"target=PluginTypedEvent result=SKIPPED reason=file_release_boundary_not_established path={SafeValue(session.RecordingFilePath)} rule=recording_result_finalized_file_release_contract");
+                            }
+                        }
+                    }
+                }
+                finally { stopGate.Release(); }
+            }
+        }
+        finally
+        {
+            completeFinalizationAttempt();
         }
     }
 
@@ -8882,7 +9942,32 @@ private readonly ReservationStore _store;
         // RECORDING_RUNTIME_EVIDENCE_RETENTION_INVARIANT:
         // TS実体がclearでもworker response欠落はIPC/finalization異常の独立証拠である。
         // ClearEnoughForCompletedは予約終端の救済判断には使えても、runtime evidence削除の根拠にはしない。
-        var keepReason = finalStatus == ReservationStatus.Failed
+        bool pendingChainFinalization;
+        var pendingWithdrawal = false;
+        lock (_sessionGate)
+            pendingChainFinalization = _chainBoundaryExecutions.Values.Any(x =>
+                x.PredecessorId == session.ReservationId && !x.PredecessorResultProjected
+                && (x.PredecessorStoppingVersion.HasValue || x.PredecessorTerminalCommit is not null));
+        // A shared worker can finish under a successor ID while an earlier segment's
+        // persisted stop/result is still pending. Retain the common job/control bundle.
+        try
+        {
+            pendingChainFinalization |= _store.HasPendingContinuousChainStopReceipt()
+                || ReadUnprojectedContinuousChainReservationIds().Count != 0;
+            pendingWithdrawal = _store.LabOpenWithdrawalJournal().HasUnsettledForControl(session.ChainControlPath);
+        }
+        catch
+        {
+            // Failure to establish that evidence is disposable must not block physical stop.
+            pendingChainFinalization = true;
+        }
+        // Physical cleanup may outlive the active-session scan. Keep its retry evidence
+        // until the related results are durable; file retention is not a lifecycle permit.
+        var keepReason = pendingWithdrawal
+            ? "withdrawal_pending_keep_runtime_evidence"
+            : pendingChainFinalization
+            ? "chain_finalization_pending_keep_runtime_evidence"
+            : finalStatus == ReservationStatus.Failed
             ? "recording_failed_keep_runtime_evidence"
             : !outcome.ResponseExists
                 ? "response_missing_keep_runtime_evidence"
@@ -8916,6 +10001,7 @@ private readonly ReservationStore _store;
         var failed = 0;
         foreach (var path in targets)
         {
+            if (_recordingResults?.Files.IsPendingArtifact(path) == true) continue;
             try
             {
                 if (File.Exists(path))
@@ -10871,7 +11957,16 @@ internal sealed record ChainControlSegmentState(
     string ResultPath,
     string RuntimeStatsPath,
     bool CurrentServiceOnly,
-    bool SaveSubtitles);
+    bool SaveSubtitles)
+{
+    public string RecordingFileDeclaration { get; init; } = string.Empty;
+    public DateTime? HoldUntil { get; init; }
+    public RecordingProgressDecision? Progress { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore]
+    public DateTime EffectiveCloseAt => HoldUntil.HasValue && HoldUntil.Value>CloseAt ? HoldUntil.Value : CloseAt;
+}
+
+internal sealed record LabWithdrawalWireRequest(string OperationId,string OwnerSession,string PrepareToken,string Phase,int[] ReservationIds,string ReceiptPath) { public bool HostAbortedDecision { get; init; } public int[] CancelledReservationIds { get; init; } = Array.Empty<int>(); }
 
 internal sealed record ChainControlSnapshot(
     int ChainRootReservationId,
@@ -10879,6 +11974,7 @@ internal sealed record ChainControlSnapshot(
     ChainControlSegmentState[] Segments)
 {
     public int Version { get; init; } = 1;
+    public LabWithdrawalWireRequest[] Withdrawals { get; init; } = Array.Empty<LabWithdrawalWireRequest>();
 }
 
 internal sealed class ChainControlState
@@ -10959,6 +12055,11 @@ internal sealed class ChainControlState
                 return null;
             if (SnapshotEquivalent(snapshot, next))
                 return snapshot;
+            // Each file declaration is durable in its introduction generation. Do not
+            // duplicate historical Binding payloads in every subsequent control snapshot.
+            var previousArtifacts = snapshot.Segments.Select(x => x.ResultPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            next = next with { Segments = next.Segments.Select(x => previousArtifacts.Contains(x.ResultPath)
+                ? x with { RecordingFileDeclaration = string.Empty } : x).ToArray() };
             var nextGeneration = checked(generation + 1);
             if (!Directory.Exists(StorePath))
                 throw new DirectoryNotFoundException($"chain control store not found: {StorePath}");
@@ -10988,7 +12089,14 @@ internal sealed class ChainControlState
         => left.ChainRootReservationId == right.ChainRootReservationId
            && left.ContinuousCapture == right.ContinuousCapture
            && left.Segments.Length == right.Segments.Length
-           && left.Segments.SequenceEqual(right.Segments);
+           && left.Segments.SequenceEqual(right.Segments)
+           && left.Withdrawals.Length==right.Withdrawals.Length
+           && left.Withdrawals.Zip(right.Withdrawals).All(pair=>pair.First.OperationId==pair.Second.OperationId
+               &&pair.First.OwnerSession==pair.Second.OwnerSession&&pair.First.PrepareToken==pair.Second.PrepareToken
+               &&pair.First.Phase==pair.Second.Phase&&pair.First.ReceiptPath==pair.Second.ReceiptPath
+               &&pair.First.HostAbortedDecision==pair.Second.HostAbortedDecision
+               &&pair.First.CancelledReservationIds.SequenceEqual(pair.Second.CancelledReservationIds)
+               &&pair.First.ReservationIds.SequenceEqual(pair.Second.ReservationIds));
 
     private static void WriteGenerationFile(string storePath, long generation, ChainControlSnapshot value)
     {
@@ -11099,6 +12207,13 @@ internal sealed class RecordingSession
     // PlannedEndTime is the currently bound logical reservation/TS-segment end.
     // PhysicalCaptureEndTime is the lifetime of the shared worker/tuner capture across chain segments.
     // File-growth, completion and logical owner transfer must use PlannedEndTime; worker/tuner ownership uses PhysicalCaptureEndTime.
+    public object FollowTimingPublicationGate { get; } = new();
+    private bool followTimingPublicationPending;
+    public bool FollowTimingPublicationPending
+    {
+        get => Volatile.Read(ref followTimingPublicationPending);
+        set => Volatile.Write(ref followTimingPublicationPending, value);
+    }
     public DateTime      PlannedEndTime { get; private set; }
     public DateTime      PhysicalCaptureEndTime { get; private set; }
     public int           PostEndMarginSeconds { get; }
@@ -11108,6 +12223,7 @@ internal sealed class RecordingSession
     public string        StopSignalPath { get; }
     public string        ProgressPath { get; }
     public string        RuntimeStatsPath { get; private set; }
+    public string        WorkerRuntimeStatsPath { get; private set; }
     public string        JobPath { get; }
     public string        ChainControlPath { get; }
     public ChainControlState? ChainControl { get; }
@@ -11121,6 +12237,11 @@ internal sealed class RecordingSession
                 return segment.CloseAt;
             return PlannedEndTime;
         }
+    }
+
+    public void BindWorkerObservationPath(string path)
+    {
+        if (!string.IsNullOrWhiteSpace(path)) WorkerRuntimeStatsPath = path;
     }
 
     public void ActivateSharedChainCapture(int rootReservationId, DateTime capturePlannedEnd, string primaryResultPath, string primaryRuntimeStatsPath)
@@ -11155,6 +12276,7 @@ internal sealed class RecordingSession
         StopSignalPath = stopSignalPath;
         ProgressPath = progressPath;
         RuntimeStatsPath = runtimeStatsPath;
+        WorkerRuntimeStatsPath = runtimeStatsPath;
         JobPath = jobPath;
         ChainControlPath = chainControlPath ?? string.Empty;
         ChainControl = ChainControlState.TryOpen(ChainControlPath, out var openedControl) ? openedControl : null;
@@ -11238,8 +12360,42 @@ internal sealed class RecordingSession
         return true;
     }
 
+    private readonly object finalizationCompletionGate = new();
+    private TaskCompletionSource<bool>? finalizationCompletion;
+
     public bool TryBeginFinalization()
-        => Interlocked.CompareExchange(ref finalizationState, 1, 0) == 0;
+    {
+        lock (finalizationCompletionGate)
+        {
+            if (Interlocked.CompareExchange(ref finalizationState, 1, 0) != 0) return false;
+            finalizationCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            return true;
+        }
+    }
+
+    internal Action CaptureFinalizationCompletionSignal()
+    {
+        lock (finalizationCompletionGate)
+        {
+            var completion = finalizationCompletion
+                ?? throw new InvalidOperationException("Finalization attempt was not claimed.");
+            return () =>
+            {
+                lock (finalizationCompletionGate)
+                {
+                    // A previous owner must not reset a later stop attempt after transfer/retry.
+                    if (ReferenceEquals(finalizationCompletion, completion))
+                        Interlocked.CompareExchange(ref finalizationState, 0, 1);
+                }
+                completion.TrySetResult(true);
+            };
+        }
+    }
+
+    public Task WaitForFinalizationAttemptAsync()
+    {
+        lock (finalizationCompletionGate) return finalizationCompletion?.Task ?? Task.CompletedTask;
+    }
 
     public void MarkFinalized()
         => Interlocked.Exchange(ref finalizationState, 2);

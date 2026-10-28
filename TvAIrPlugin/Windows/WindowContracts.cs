@@ -50,7 +50,9 @@ public sealed record PluginWindowDefinition
     /// <summary>描画後の内容寸法をHost外形へ反映する方針。既定は勝手にサイズ変更しない。</summary>
     public PluginWindowContentSizePolicy ContentSizePolicy { get; init; } = PluginWindowContentSizePolicy.Ignore;
     /// <summary>
-    /// Host-managed refreshでユーザーのviewport/scrollなどHostが所有するinteraction stateを保持する。
+    /// Host-managed refreshで同一表示コンテキストの未送信DOM入力、フォーカス、選択位置、
+    /// 対応する展開状態を一時保持する。再描画後に正規値やフォーム識別値が変われば旧入力は戻さない。
+    /// パスワードとファイル入力は保存対象外。スクロール保持はPreserveScrollで独立指定する。
     /// wave/profile/選択項目などPlugin固有の意味状態はPluginが所有し、Hostは別表示コンテキストへ流用しない。
     /// </summary>
     public bool PreserveInteractionState { get; init; } = true;

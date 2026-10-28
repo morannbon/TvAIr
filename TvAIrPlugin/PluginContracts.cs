@@ -1,4 +1,4 @@
-namespace TvAIrPlugin;
+﻿namespace TvAIrPlugin;
 
 
 /// <summary>プラグイン種別。TvAIr本体は種別に応じて安全な範囲だけ呼び出す。</summary>
@@ -142,7 +142,10 @@ public enum PluginPermission
 
     // Plugin-owned Internet transport (for example WebSocket). The Host owns the user permission
     // and cancellation boundary even when the Plugin owns the protocol client.
-    UseInternetAccess
+    UseInternetAccess,
+
+    // Generic plugin-directed system-sleep inhibition lease, independent of ExternalJobs.
+    UsePowerInhibition
 }
 
 public sealed class PluginChannelQuery

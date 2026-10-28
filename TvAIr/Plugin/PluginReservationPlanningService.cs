@@ -137,7 +137,7 @@ internal sealed class PluginReservationPlanningService
             .ToList();
 
         var result = new List<PluginChainCandidate>();
-        var featureEnabled = _ini.UserChainRecordingEnabled;
+        var featureEnabled = _ini.ManualChainRecordingEnabled;
         foreach (var serviceGroup in reservations
                      .GroupBy(r => (r.NetworkId, r.TransportStreamId, r.ServiceId)))
         {

@@ -56,7 +56,14 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
             {
                 ProviderId = x.ProviderId,
                 DisplayName = x.DisplayName,
-                Operations = x.Operations.Keys.OrderBy(y => y, StringComparer.OrdinalIgnoreCase).ToArray()
+                Operations = x.Operations.Keys.OrderBy(y => y, StringComparer.OrdinalIgnoreCase).ToArray(),
+                OperationDetails = x.Operations.OrderBy(y => y.Key, StringComparer.OrdinalIgnoreCase)
+                    .Select(y => new TvAirExternalLookupOperationDto
+                    {
+                        Operation=y.Key, Parameters=y.Value.Parameters.ToArray(), MaxResponseBytes=y.Value.MaxResponseBytes,
+                        TimeoutMilliseconds=(int)(y.Value.Timeout??DefaultTimeout).TotalMilliseconds,
+                        ResultScope=y.Value.ResultScope, SupportsPagination=false
+                    }).ToArray()
             })
             .OrderBy(x => x.ProviderId, StringComparer.OrdinalIgnoreCase)
             .ToArray();
@@ -112,7 +119,7 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
         if (request is null || string.IsNullOrWhiteSpace(providerId) || string.IsNullOrWhiteSpace(operation))
             return Result(TvAirExternalLookupResultCode.InvalidRequest, providerId, operation, "ProviderId and Operation are required.");
         if (request.Parameters is { Count: > 32 }
-            || (request.Parameters?.Any(x => x.Key.Length > 64 || x.Value.Length > 512) ?? false))
+            || (request.Parameters?.Any(x => x.Key.Length > 64 || x.Value is null || x.Value.Length > 512) ?? false))
             return Result(TvAirExternalLookupResultCode.InvalidRequest, providerId, operation, "Lookup parameters exceed the Host input limit.");
         if (!_providers.TryGetValue(providerId, out var provider))
             return Result(TvAirExternalLookupResultCode.ProviderNotAllowed, providerId, operation, "Provider is not registered by TvAIr Host.");
@@ -233,6 +240,7 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
                         return Result(TvAirExternalLookupResultCode.HttpError, providerId, operation, $"HTTP status {status}.", status, mediaType);
                     }
 
+                    linked.Token.ThrowIfCancellationRequested();
                     _log.Add("PLUGIN_EXTERNAL_LOOKUP", pluginDisplayName,
                         $"result=OK pluginId={Safe(id)} provider={Safe(providerId)} operation={Safe(operation)} status={status} bytes={responseBytes} destination={Safe(provider.DisplayName)} rule=plugin_managed_external_lookup_contract");
                     return new TvAirExternalLookupResultDto
@@ -437,26 +445,44 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
                     ["SearchShow"] = new OperationDefinition
                     {
                         MaxResponseBytes = 512 * 1024,
-                        ValidateParameters = p => RequireOnly(p, new[] { "query" }, new[] { "query" }, ValidateSearchQuery),
+                        Parameters = new[]{new TvAirExternalLookupParameterDto{Name="query",Required=true,Kind=TvAirExternalLookupParameterKind.Text,MinLength=1,MaxLength=160}},
+                        ResultScope = TvAirExternalLookupResultScope.SearchResults,
                         BuildRequest = (p, _) => new ProviderRequestPlan(HttpsUri(TvMazeApiHost, "/search/shows", new Dictionary<string, string> { ["q"] = p["query"].Trim() }))
                     },
                     ["GetEpisodes"] = new OperationDefinition
                     {
                         MaxResponseBytes = 768 * 1024,
-                        ValidateParameters = p => RequirePositiveIdOnly(p, "showId"),
+                        Parameters = new[]{PositiveParameter("showId")},
+                        ResultScope = TvAirExternalLookupResultScope.CompleteCollection,
                         BuildRequest = (p, _) =>
                         {
-                            var showId = p["showId"].Trim();
+                            var showId = CanonicalInteger(p,"showId");
                             return new ProviderRequestPlan(HttpsUri(TvMazeApiHost, $"/shows/{showId}/episodes"));
                         }
+                    },
+                    ["GetSeasons"] = new OperationDefinition
+                    {
+                        MaxResponseBytes = 256 * 1024,
+                        Parameters = new[]{PositiveParameter("showId")},
+                        ResultScope = TvAirExternalLookupResultScope.CompleteCollection,
+                        BuildRequest = (p, _) => new ProviderRequestPlan(HttpsUri(TvMazeApiHost,$"/shows/{CanonicalInteger(p,"showId")}/seasons"))
+                    },
+                    ["GetEpisodeByNumber"] = new OperationDefinition
+                    {
+                        MaxResponseBytes = 128 * 1024,
+                        Parameters = new[]{PositiveParameter("showId"),PositiveParameter("season"),PositiveParameter("number")},
+                        ResultScope = TvAirExternalLookupResultScope.SingleItem,
+                        BuildRequest = (p, _) => new ProviderRequestPlan(HttpsUri(TvMazeApiHost,$"/shows/{CanonicalInteger(p,"showId")}/episodebynumber",
+                            new Dictionary<string,string>{{"season",CanonicalInteger(p,"season")},{"number",CanonicalInteger(p,"number")}}))
                     },
                     ["GetAliases"] = new OperationDefinition
                     {
                         MaxResponseBytes = 256 * 1024,
-                        ValidateParameters = p => RequirePositiveIdOnly(p, "showId"),
+                        Parameters = new[]{PositiveParameter("showId")},
+                        ResultScope = TvAirExternalLookupResultScope.CompleteCollection,
                         BuildRequest = (p, _) =>
                         {
-                            var showId = p["showId"].Trim();
+                            var showId = CanonicalInteger(p,"showId");
                             return new ProviderRequestPlan(HttpsUri(TvMazeApiHost, $"/shows/{showId}/akas"));
                         }
                     }
@@ -473,33 +499,11 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
         return builder.Uri;
     }
 
-    private static string? RequireOnly(IReadOnlyDictionary<string, string> p, IReadOnlyCollection<string> required, IReadOnlyCollection<string> allowed, Func<string, string?>? valueValidator = null)
-    {
-        foreach (var key in p.Keys)
-            if (!allowed.Contains(key, StringComparer.OrdinalIgnoreCase)) return $"Parameter '{key}' is not allowed.";
-        foreach (var key in required)
-            if (!p.TryGetValue(key, out var value) || string.IsNullOrWhiteSpace(value)) return $"Parameter '{key}' is required.";
-        if (valueValidator is not null)
-            foreach (var key in required)
-            {
-                var error = valueValidator(p[key]);
-                if (error is not null) return error;
-            }
-        return null;
-    }
-
-    private static string? ValidateSearchQuery(string value)
-    {
-        var length = value.Trim().Length;
-        return length is < 1 or > 160 ? "Search query must be 1-160 characters." : null;
-    }
-
-    private static string? RequirePositiveIdOnly(IReadOnlyDictionary<string, string> p, string key)
-    {
-        var basic = RequireOnly(p, new[] { key }, new[] { key });
-        if (basic is not null) return basic;
-        return int.TryParse(p[key], out var id) && id > 0 ? null : $"Parameter '{key}' must be a positive integer.";
-    }
+    private static TvAirExternalLookupParameterDto PositiveParameter(string name)
+        => new(){Name=name,Required=true,Kind=TvAirExternalLookupParameterKind.Integer,Minimum=1,Maximum=int.MaxValue};
+    private static string CanonicalInteger(IReadOnlyDictionary<string,string> values,string key)
+        => int.Parse(values[key].Trim(),System.Globalization.NumberStyles.None,System.Globalization.CultureInfo.InvariantCulture)
+            .ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     private static string Safe(string? value)
     {
@@ -535,7 +539,28 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
         public TimeSpan? Timeout { get; init; }
         public HashSet<string> AllowedContentTypes { get; init; } = new(StringComparer.OrdinalIgnoreCase) { "application/json" };
         public required Func<IReadOnlyDictionary<string, string>, string?, ProviderRequestPlan> BuildRequest { get; init; }
-        public Func<IReadOnlyDictionary<string, string>, string?> ValidateParameters { get; init; } = _ => null;
+        public required IReadOnlyList<TvAirExternalLookupParameterDto> Parameters { get; init; }
+        public TvAirExternalLookupResultScope ResultScope { get; init; }
+        public string? ValidateParameters(IReadOnlyDictionary<string,string> values)
+        {
+            foreach(var key in values.Keys)
+                if(!Parameters.Any(p=>string.Equals(p.Name,key,StringComparison.OrdinalIgnoreCase))) return $"Parameter '{key}' is not allowed.";
+            foreach(var parameter in Parameters)
+            {
+                if(!values.TryGetValue(parameter.Name,out var value)||string.IsNullOrWhiteSpace(value))
+                { if(parameter.Required)return $"Parameter '{parameter.Name}' is required.";continue; }
+                value=value.Trim();
+                if(parameter.Kind==TvAirExternalLookupParameterKind.Integer)
+                {
+                    if(!int.TryParse(value,System.Globalization.NumberStyles.None,System.Globalization.CultureInfo.InvariantCulture,out var number)
+                        ||(parameter.Minimum.HasValue&&number<parameter.Minimum.Value)||(parameter.Maximum.HasValue&&number>parameter.Maximum.Value))
+                        return $"Parameter '{parameter.Name}' must be within the advertised integer range.";
+                }
+                else if((parameter.MinLength.HasValue&&value.Length<parameter.MinLength.Value)||(parameter.MaxLength.HasValue&&value.Length>parameter.MaxLength.Value))
+                    return $"Parameter '{parameter.Name}' exceeds the advertised text limit.";
+            }
+            return null;
+        }
     }
 
     internal readonly record struct ProviderRequestPlan(Uri Uri, string? BearerToken = null);

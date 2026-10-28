@@ -49,7 +49,11 @@ public sealed class IniSettingsService
     public string EpgDepth             { get; private set; } = SettingsDefaults.EpgDepth;
     public int    EpgPreRecordMinutes       { get; private set; } = SettingsDefaults.EpgPreRecordMinutes;
     public bool   LaterProgramPriority  { get; private set; } = SettingsDefaults.LaterProgramPriority;
-    public bool   ChainRecordingEnabled      { get; private set; } = SettingsDefaults.ChainRecordingEnabled;
+    public string ChainReservationMode { get; private set; } = ChainModeContract.Disabled;
+    public bool ChainRecordingEnabled { get => ChainReservationMode != ChainModeContract.Disabled;
+        private set => ChainReservationMode = value ? ChainModeContract.Manual : ChainModeContract.Disabled; }
+    public bool ManualChainRecordingEnabled => LaterProgramPriority && ChainReservationMode == ChainModeContract.Manual;
+    public bool AutomaticChainRecordingEnabled => LaterProgramPriority && ChainReservationMode == ChainModeContract.Automatic;
     /// <summary>ユーザー明示チェーン機能の有効状態。</summary>
     public bool   UserChainRecordingEnabled => ChainReservationContract.IsFeatureEnabled(LaterProgramPriority, ChainRecordingEnabled);
     public int    PreStartMarginSeconds { get; private set; } = SettingsDefaults.PreStartMarginSeconds;
@@ -62,6 +66,11 @@ public sealed class IniSettingsService
     /// <summary>TvAIrEpgRec worker をタスクバーに表示する。false の場合はTvAIrトレイ点滅を代表インジケータにする。</summary>
     public bool   ShowTvAIrEpgRecTaskbarIcon { get; private set; } = SettingsDefaults.ShowTvAIrEpgRecTaskbarIcon;
     public bool   StartupEnabled        { get; private set; } = SettingsDefaults.StartupEnabled;
+    private SettingsOsPolicySnapshot osPolicySnapshot = null!;
+    internal SettingsOsPolicySnapshot CaptureOsPolicySnapshot() => Volatile.Read(ref osPolicySnapshot);
+    private void PublishOsPolicySnapshot() => Volatile.Write(ref osPolicySnapshot,
+        new SettingsOsPolicySnapshot(StartupEnabled, NetworkUsageEnabled, NetworkLanAccessEnabled,
+            !string.IsNullOrWhiteSpace(NetworkPasswordEncrypted), Port));
 
     // NETWORK_USAGE_MASTER_INVARIANT
     public bool NetworkUsageEnabled { get; private set; } = SettingsDefaults.NetworkUsageEnabled;
@@ -127,6 +136,7 @@ public sealed class IniSettingsService
 
         CapturePersistedTunerTopologyFromRuntime();
         CapturePersistedHostSettingsFromRuntime();
+        PublishOsPolicySnapshot();
     }
 
     // ── BonDriver一覧取得 ────────────────────────────────────────────
@@ -227,6 +237,7 @@ public sealed class IniSettingsService
                 || key.Equals("WakeMinutesBefore", StringComparison.OrdinalIgnoreCase)
                 || key.Equals("WakeAdditionalSeconds", StringComparison.OrdinalIgnoreCase)
                 || key.Equals("ChainRecordingEnabled", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("ChainReservationMode", StringComparison.OrdinalIgnoreCase)
                 || key.Equals("RecordingAfterAction", StringComparison.OrdinalIgnoreCase)
                 || key.Equals("RecordingAfterActionDelayMinutes", StringComparison.OrdinalIgnoreCase),
             "log" => key.StartsWith("UserLogDetail", StringComparison.OrdinalIgnoreCase),
@@ -327,6 +338,7 @@ public sealed class IniSettingsService
         EpgPreRecordMinutes  = SettingsDefaults.NormalizeEpgPreRecordMinutes(GetInt(dict, "EpgPreRecordMinutes", EpgPreRecordMinutes));
         LaterProgramPriority = GetBool(dict, "LaterProgramPriority", LaterProgramPriority);
         ChainRecordingEnabled     = GetBool(dict, "ChainRecordingEnabled",     ChainRecordingEnabled);
+        ChainReservationMode = ChainModeContract.Normalize(dict.TryGetValue("ChainReservationMode", out var mode) ? mode : null, ChainRecordingEnabled);
         PreStartMarginSeconds = SettingsDefaults.NormalizePreStartMarginSeconds(GetInt(dict, "PreStartMarginSeconds", PreStartMarginSeconds));
         PostEndMarginSeconds  = SettingsDefaults.NormalizePostEndMarginSeconds(GetInt(dict, "PostEndMarginSeconds", PostEndMarginSeconds));
         WakeMinutesBefore     = SettingsDefaults.NormalizeWakeMinutesBefore(GetInt(dict, "WakeMinutesBefore", WakeMinutesBefore));
@@ -707,7 +719,7 @@ public sealed class IniSettingsService
         EpgDepth             = SettingsDefaults.NormalizeEpgDepth(dto.EpgDepth);
         EpgPreRecordMinutes       = SettingsDefaults.NormalizeEpgPreRecordMinutes(dto.EpgPreRecordMinutes);
         LaterProgramPriority  = dto.LaterProgramPriority;
-        ChainRecordingEnabled     = dto.ChainRecordingEnabled;
+        ChainReservationMode = ChainModeContract.Requested(dto.ChainReservationMode, dto.ChainRecordingEnabled, ChainReservationMode);
         PreStartMarginSeconds = SettingsDefaults.NormalizePreStartMarginSeconds(dto.PreStartMarginSeconds);
         PostEndMarginSeconds  = SettingsDefaults.NormalizePostEndMarginSeconds(dto.PostEndMarginSeconds);
         WakeMinutesBefore     = SettingsDefaults.NormalizeWakeMinutesBefore(dto.WakeMinutesBefore);
@@ -842,6 +854,7 @@ public sealed class IniSettingsService
             $"WakeMinutesBefore     = {WakeMinutesBefore}",
             $"WakeAdditionalSeconds = {WakeAdditionalSeconds}",
             $"ChainRecordingEnabled     = {(ChainRecordingEnabled ? "true" : "false")}",
+            $"ChainReservationMode = {ChainReservationMode}",
             $"RecordingAfterAction = {RecordingAfterAction}",
             $"RecordingAfterActionDelayMinutes = {RecordingAfterActionDelayMinutes}",
             "",
@@ -927,6 +940,7 @@ public sealed class IniSettingsService
             DataDirectory = runtimeDataDirectory;
             Port = runtimePort;
         }
+        PublishOsPolicySnapshot();
     }
 
     private void WriteIniAtomically(IReadOnlyCollection<string> lines)
@@ -960,7 +974,7 @@ public sealed class IniSettingsService
         TvTestExecutablePath, BonDriverDirectory, ViewingTvTestExecutablePath,
         GrChannelFilePath, GrChSetFilePath, BscsChannelFilePath, BscsChSetFilePath,
         DataDirectory, SystemTheme, Port, EpgEnabled, EpgHour, EpgMinute, EpgDepth, EpgPreRecordMinutes,
-        LaterProgramPriority, ChainRecordingEnabled,
+        LaterProgramPriority, ChainRecordingEnabled, ChainReservationMode,
         PreStartMarginSeconds, PostEndMarginSeconds, WakeMinutesBefore,
         WakeAdditionalSeconds, UseMinOption, UseNodshowOption,
         ShowTvAIrEpgRecTaskbarIcon, StartupEnabled, NetworkUsageEnabled, NetworkLanAccessEnabled,
@@ -992,6 +1006,7 @@ public sealed class IniSettingsService
         EpgPreRecordMinutes = state.EpgPreRecordMinutes;
         LaterProgramPriority = state.LaterProgramPriority;
         ChainRecordingEnabled = state.ChainRecordingEnabled;
+        ChainReservationMode = state.ChainReservationMode;
         PreStartMarginSeconds = state.PreStartMarginSeconds;
         PostEndMarginSeconds = state.PostEndMarginSeconds;
         WakeMinutesBefore = state.WakeMinutesBefore;
@@ -1034,7 +1049,7 @@ public sealed class IniSettingsService
         string TvTestExecutablePath, string BonDriverDirectory, string ViewingTvTestExecutablePath,
         string GrChannelFilePath, string GrChSetFilePath, string BscsChannelFilePath, string BscsChSetFilePath,
         string DataDirectory, string SystemTheme, int Port, bool EpgEnabled, int EpgHour, int EpgMinute,
-        string EpgDepth, int EpgPreRecordMinutes, bool LaterProgramPriority, bool ChainRecordingEnabled,
+        string EpgDepth, int EpgPreRecordMinutes, bool LaterProgramPriority, bool ChainRecordingEnabled, string ChainReservationMode,
         int PreStartMarginSeconds, int PostEndMarginSeconds,
         int WakeMinutesBefore, int WakeAdditionalSeconds,
         bool UseMinOption, bool UseNodshowOption, bool ShowTvAIrEpgRecTaskbarIcon, bool StartupEnabled,
@@ -1078,6 +1093,7 @@ public sealed class IniSettingsService
         EpgPreRecordMinutes       = EpgPreRecordMinutes,
         LaterProgramPriority  = LaterProgramPriority,
         ChainRecordingEnabled     = ChainRecordingEnabled,
+        ChainReservationMode = ChainReservationMode,
         PreStartMarginSeconds = PreStartMarginSeconds,
         PostEndMarginSeconds  = PostEndMarginSeconds,
         WakeMinutesBefore     = WakeMinutesBefore,
@@ -1151,6 +1167,7 @@ public sealed class IniSettingsService
             EpgPreRecordMinutes = current.EpgPreRecordMinutes,
             LaterProgramPriority = current.LaterProgramPriority,
             ChainRecordingEnabled = current.ChainRecordingEnabled,
+            ChainReservationMode = current.ChainReservationMode,
             PreStartMarginSeconds = current.PreStartMarginSeconds,
             PostEndMarginSeconds = current.PostEndMarginSeconds,
             ShowTvAIrEpgRecTaskbarIcon = current.ShowTvAIrEpgRecTaskbarIcon,
@@ -1473,6 +1490,7 @@ public class IniSettingsValuesDto
     public int    EpgPreRecordMinutes  { get; set; } = SettingsDefaults.EpgPreRecordMinutes;
     public bool   LaterProgramPriority { get; set; } = SettingsDefaults.LaterProgramPriority;
     public bool   ChainRecordingEnabled { get; set; } = SettingsDefaults.ChainRecordingEnabled;
+    public string? ChainReservationMode { get; set; }
     public int    PreStartMarginSeconds { get; set; } = SettingsDefaults.PreStartMarginSeconds;
     public int    PostEndMarginSeconds  { get; set; } = SettingsDefaults.PostEndMarginSeconds;
     public int    WakeMinutesBefore     { get; set; } = SettingsDefaults.WakeMinutesBefore;
@@ -1521,6 +1539,7 @@ public class WebSettingsValuesDto
     public int EpgPreRecordMinutes { get; set; } = SettingsDefaults.EpgPreRecordMinutes;
     public bool LaterProgramPriority { get; set; } = SettingsDefaults.LaterProgramPriority;
     public bool ChainRecordingEnabled { get; set; } = SettingsDefaults.ChainRecordingEnabled;
+    public string? ChainReservationMode { get; set; }
     public int PreStartMarginSeconds { get; set; } = SettingsDefaults.PreStartMarginSeconds;
     public int PostEndMarginSeconds { get; set; } = SettingsDefaults.PostEndMarginSeconds;
     public bool ShowTvAIrEpgRecTaskbarIcon { get; set; } = SettingsDefaults.ShowTvAIrEpgRecTaskbarIcon;

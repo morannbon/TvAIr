@@ -229,6 +229,18 @@ public sealed class ReservationMutationJournal
                 batch.WakePlanVersion = Math.Max(batch.WakePlanVersion, version);
             }
         }
-        Recorded?.Invoke(mutation);
+        // The mutation is already committed. One projection failure must not prevent
+        // later owners (plugin events, power responsibility, operational projections)
+        // from observing it. Preserve the original failure contract after delivery.
+        var subscribers = Recorded;
+        if (subscribers is null) return;
+        Exception? firstFailure = null;
+        foreach (Action<ReservationMutationResult> subscriber in subscribers.GetInvocationList())
+        {
+            try { subscriber(mutation); }
+            catch (Exception ex) { firstFailure ??= ex; }
+        }
+        if (firstFailure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(firstFailure).Throw();
     }
 }

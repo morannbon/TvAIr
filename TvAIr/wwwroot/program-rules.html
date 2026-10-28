@@ -6,21 +6,21 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>自動検索予約リスト — TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.13"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.13"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.14"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.14"/>
 
-<link href="/tvair-ui-foundation.css?v=1.2.13" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.13" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.13" rel="stylesheet"/>
-<link href="/tvair-list-module.css?v=1.2.13" rel="stylesheet"/>
-<link href="/tvair-program-rules.css?v=1.2.13" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.13" rel="stylesheet"/>
-<link href="/tvair-settings-host.css?v=1.2.13" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-program-rules.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.14" rel="stylesheet"/>
 
-<script src="/tvair-theme.js?v=1.2.13"></script>
-<script src="/tvair-page-view-state.js?v=1.2.13"></script>
-<script src="/tvair-action-button-state.js?v=1.2.13"></script>
-<script src="/tvair-search-enter.js?v=1.2.13"></script>
+<script src="/tvair-theme.js?v=1.2.14"></script>
+<script src="/tvair-page-view-state.js?v=1.2.14"></script>
+<script src="/tvair-action-button-state.js?v=1.2.14"></script>
+<script src="/tvair-search-enter.js?v=1.2.14"></script>
 
 
 
@@ -107,12 +107,6 @@
 </div>
 </div>
 <div class="panel">
-<div class="panel-title">状態</div>
-<div class="row">
-<label class="check"><input checked="" id="enabled" type="checkbox"/> 有効</label>
-</div>
-</div>
-<div class="panel">
 <div class="panel-title">録画オプション</div>
 <div class="row">
 <label class="check"><input checked="" id="record-current-service-only" type="checkbox"/> 現在のサービスのみ保存する</label>
@@ -120,12 +114,18 @@
 </div>
 <div class="note mt6">TVTestの共通録画設定を変えず、この検索ルールから作る予約だけ録画内容を使い分けられます。</div>
 </div>
-<div class="panel">
+<div class="panel" id="manual-chain-option-panel" hidden style="display:none">
 <div class="panel-title">チェーン予約</div>
 <div class="row">
 <label class="check"><input id="auto-chain-reservations" type="checkbox"/> 同じ条件で同局の連続番組を自動でチェーン予約にする</label>
 </div>
 <div class="note mt6" id="auto-chain-note">このルールで作成した同じ局の予約で、前の番組の終了時刻と次の番組の開始時刻が一致する場合にチェーン予約を組みます。</div>
+</div>
+<div class="panel" id="plugin-selection-panel" hidden style="display:none">
+<div class="panel-title">Plugin</div>
+<div class="row"><label class="check"><input id="plugin-selection-enabled" type="checkbox" onchange="syncPluginSelectionEnabled()"/> EncodeBridgeを使用する</label></div>
+<div class="mt6"><label for="plugin-selection-option">変換プロファイル</label><select id="plugin-selection-option" class="input"></select></div>
+<div class="note mt6">選択したプロファイルはこのルールの新規予約に紐付きます。変換内容はEncodeBridge側で管理します。</div>
 </div>
 <div class="panel full">
 <div class="panel-title">ジャンル</div>
@@ -199,7 +199,7 @@ const GENRES=[
   {code:'4',label:'音楽'},{code:'5',label:'バラエティー'},{code:'6',label:'映画'},{code:'7',label:'アニメ/特撮'},
   {code:'8',label:'ドキュメンタリー'},{code:'9',label:'劇場/公演'},{code:'A',label:'趣味/教育'},{code:'B',label:'福祉'}
 ];
-let rules=[]; let channels=[]; let lastPreviewCount=0; let chainFeatureAvailable=false;
+let rules=[]; let channels=[]; let lastPreviewCount=0; let chainFeatureAvailable=false; let chainConfiguredMode="unknown"; let chainSettingsLoadGeneration=0;
 let ruleLoadGeneration=0; const ruleToggleInFlight=new Set(); const ruleToggleActionState=new Map();
 function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function setToolbarButtonsDisabled(disabled){['import-btn','export-btn'].forEach(id=>{const btn=document.getElementById(id); if(btn) btn.disabled=disabled;});}
@@ -349,11 +349,69 @@ function getSelectedValues(sel){return [...sel.options].filter(x=>x.selected).ma
 function setSelectedValues(sel, values){const set=new Set((values||[]).map(String)); [...sel.options].forEach(o=>o.selected=set.has(String(o.value))); syncTargetServiceSelectionState(sel)}
 function getCheckedValues(container){return [...container.querySelectorAll('input:checked')].map(x=>x.value)}
 function setCheckedValues(container, values){const set=new Set(values); [...container.querySelectorAll('input')].forEach(x=>x.checked=set.has(x.value)); bindChoiceChipLabels(container)}
-function clearForm(){document.getElementById('rule-id').value=''; document.getElementById('pattern').value=''; document.getElementById('exclude-pattern').value=''; document.getElementById('enabled').checked=true; document.getElementById('record-current-service-only').checked=true; document.getElementById('record-subtitles').checked=true; document.getElementById('auto-chain-reservations').checked=false; document.getElementById('use-regex').checked=false; document.getElementById('search-title').checked=true; document.getElementById('search-outline').checked=false; document.getElementById('search-detail').checked=false; document.getElementById('search-cast').checked=false; setSelectedValues(document.getElementById('target-services'), channels.map(channelServiceKey)); setCheckedValues(document.getElementById('genre-wrap'), []); setCheckedValues(document.getElementById('days-wrap'), []); document.getElementById('use-time-range').checked=false; document.getElementById('start-time').value='00:00'; document.getElementById('end-time').value='23:30'; syncTimeEnabled(); syncRegexMode(); syncAutoChainAvailability();}
+let pluginSelectionFeature = null;
+let pluginSelectionRequest = 0;
+function normalizePluginBindings(entries){
+  return Array.isArray(entries) ? entries.filter(x=>x && typeof x==='object').map(x=>({
+    pluginId:x.pluginId ?? x.PluginId, featureId:x.featureId ?? x.FeatureId, selectionId:x.selectionId ?? x.SelectionId
+  })) : [];
+}
+function syncPluginSelectionEnabled(){
+  document.getElementById('plugin-selection-option').disabled=!document.getElementById('plugin-selection-enabled').checked;
+}
+async function refreshPluginSelection(){
+  const gen=++pluginSelectionRequest;
+  const rid=Number(document.getElementById('rule-id').value);
+  const saved=(rid ? rules.find(r=>r.id===rid)?.pluginBindingJson : null)||'[]';
+  let bindings=[];
+  try{bindings=normalizePluginBindings(JSON.parse(saved));}catch(_){bindings=[];}
+  const current=bindings.find(x=>x.pluginId==='encodebridge' && x.featureId==='encode-profile');
+  const panel=document.getElementById('plugin-selection-panel');
+  panel.hidden=true;panel.style.display='none';
+  pluginSelectionFeature=null;
+  try{
+    const res=await fetch('/api/plugin-selection-features',{cache:'no-store'});
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    const features=await res.json();
+    if(gen!==pluginSelectionRequest || !document.getElementById('modal-overlay').classList.contains('open')) return;
+    const feature=Array.isArray(features) && features.find(f=>f.pluginId==='encodebridge' && f.featureId==='encode-profile' && f.enabled===true);
+    if(!feature) return;
+    const select=document.getElementById('plugin-selection-option');
+    select.replaceChildren();
+    for(const item of (feature.options||[])){
+      const opt=document.createElement('option'); opt.value=item.selectionId;opt.textContent=item.displayName;select.appendChild(opt);
+    }
+    if(current && ![...select.options].some(x=>x.value===current.selectionId)){
+      const missing=document.createElement('option');missing.value=current.selectionId;missing.textContent='（登録済みプロファイルが見つかりません）';select.appendChild(missing);
+    }
+    if(current) select.value=current.selectionId;
+    const checkbox=document.getElementById('plugin-selection-enabled');
+    checkbox.checked=!!current;
+    checkbox.disabled=!select.options.length;
+    syncPluginSelectionEnabled();
+    pluginSelectionFeature=feature;
+    panel.hidden=false;panel.style.display='';
+  }catch(err){console.warn('PLUGIN_SELECTION_CATALOG_UNAVAILABLE',err);}
+}
+function collectPluginBindings(){
+  const rid=Number(document.getElementById('rule-id').value);
+  const existing=(rid ? rules.find(x=>x.id===rid)?.pluginBindingJson : null)||'[]';
+  // Plugin unavailable or card hidden: retain the old persisted binding verbatim.
+  if(!pluginSelectionFeature) return existing;
+  let entries=[];
+  try{entries=normalizePluginBindings(JSON.parse(existing));}catch(_){entries=[];}
+  entries=entries.filter(x=>!(x.pluginId==='encodebridge' && x.featureId==='encode-profile'));
+  if(document.getElementById('plugin-selection-enabled').checked){
+    const value=document.getElementById('plugin-selection-option').value;
+    if(value) entries.push({pluginId:'encodebridge',featureId:'encode-profile',selectionId:value});
+  }
+  return JSON.stringify(entries);
+}
+function clearForm(){++pluginSelectionRequest;pluginSelectionFeature=null;document.getElementById('plugin-selection-panel').hidden=true;document.getElementById('plugin-selection-panel').style.display='none';document.getElementById('rule-id').value=''; document.getElementById('pattern').value=''; document.getElementById('exclude-pattern').value=''; document.getElementById('record-current-service-only').checked=true; document.getElementById('record-subtitles').checked=true; document.getElementById('auto-chain-reservations').checked=false; document.getElementById('use-regex').checked=false; document.getElementById('search-title').checked=true; document.getElementById('search-outline').checked=false; document.getElementById('search-detail').checked=false; document.getElementById('search-cast').checked=false; setSelectedValues(document.getElementById('target-services'), channels.map(channelServiceKey)); setCheckedValues(document.getElementById('genre-wrap'), []); setCheckedValues(document.getElementById('days-wrap'), []); document.getElementById('use-time-range').checked=false; document.getElementById('start-time').value='00:00'; document.getElementById('end-time').value='23:30'; syncTimeEnabled(); syncRegexMode(); syncAutoChainAvailability();}
 function resetPreview(){lastPreviewCount=0; document.getElementById('preview-summary').textContent='右側に保存前検索の結果を表示します。'; document.getElementById('preview-sub').textContent='条件を入力して左下の「検索」を押してください。'; document.getElementById('preview-empty').style.display='block'; document.getElementById('preview-table').style.display='none'; document.getElementById('preview-body').innerHTML=''; document.getElementById('save-button').textContent=document.getElementById('rule-id').value?'更新':'ルール作成';}
-function openCreate(){clearForm(); document.getElementById('modal-title').textContent='自動検索予約ルール追加'; document.getElementById('save-button').textContent='ルール作成'; resetPreview(); document.getElementById('modal-overlay').classList.add('open'); document.getElementById('pattern').focus();}
-function openEdit(id){const r=rules.find(x=>x.id===id); if(!r) return; clearForm(); document.getElementById('modal-title').textContent='自動検索予約ルール編集'; document.getElementById('rule-id').value=r.id; document.getElementById('pattern').value=r.pattern||''; document.getElementById('exclude-pattern').value=r.excludePattern||''; document.getElementById('enabled').checked=!!r.enabled; document.getElementById('record-current-service-only').checked=(r.recordCurrentServiceOnly!==false); document.getElementById('record-subtitles').checked=(r.recordSubtitles!==false); document.getElementById('auto-chain-reservations').checked=(r.autoChainReservations===true); document.getElementById('use-regex').checked=(r.useRegex!==false); document.getElementById('search-title').checked=!!r.searchTitle; document.getElementById('search-outline').checked=!!r.searchOutline; document.getElementById('search-detail').checked=!!r.searchDetail; document.getElementById('search-cast').checked=!!r.searchCast; setSelectedValues(document.getElementById('target-services'), r.useAllChannels ? channels.map(channelServiceKey) : normalizeRuleServiceValues(r.targetServices)); setCheckedValues(document.getElementById('genre-wrap'), (r.targetGenres||'').split(',').filter(Boolean)); setCheckedValues(document.getElementById('days-wrap'), (r.targetDays||'').split(',').filter(Boolean)); document.getElementById('use-time-range').checked=!!r.useTimeRange; document.getElementById('start-time').value=r.startTime||'00:00'; document.getElementById('end-time').value=r.endTime||'23:30'; syncTimeEnabled(); syncRegexMode(); syncAutoChainAvailability(); resetPreview(); document.getElementById('modal-overlay').classList.add('open');}
-function closeModal(){document.getElementById('modal-overlay').classList.remove('open');}
+function openCreate(){clearForm(); document.getElementById('modal-title').textContent='自動検索予約ルール追加'; document.getElementById('save-button').textContent='ルール作成'; resetPreview(); document.getElementById('modal-overlay').classList.add('open'); document.getElementById('pattern').focus();void refreshPluginSelection();}
+function openEdit(id){const r=rules.find(x=>x.id===id); if(!r) return; clearForm(); document.getElementById('modal-title').textContent='自動検索予約ルール編集'; document.getElementById('rule-id').value=r.id; document.getElementById('pattern').value=r.pattern||''; document.getElementById('exclude-pattern').value=r.excludePattern||''; document.getElementById('record-current-service-only').checked=(r.recordCurrentServiceOnly!==false); document.getElementById('record-subtitles').checked=(r.recordSubtitles!==false); document.getElementById('auto-chain-reservations').checked=(r.autoChainReservations===true); document.getElementById('use-regex').checked=(r.useRegex!==false); document.getElementById('search-title').checked=!!r.searchTitle; document.getElementById('search-outline').checked=!!r.searchOutline; document.getElementById('search-detail').checked=!!r.searchDetail; document.getElementById('search-cast').checked=!!r.searchCast; setSelectedValues(document.getElementById('target-services'), r.useAllChannels ? channels.map(channelServiceKey) : normalizeRuleServiceValues(r.targetServices)); setCheckedValues(document.getElementById('genre-wrap'), (r.targetGenres||'').split(',').filter(Boolean)); setCheckedValues(document.getElementById('days-wrap'), (r.targetDays||'').split(',').filter(Boolean)); document.getElementById('use-time-range').checked=!!r.useTimeRange; document.getElementById('start-time').value=r.startTime||'00:00'; document.getElementById('end-time').value=r.endTime||'23:30'; syncTimeEnabled(); syncRegexMode(); syncAutoChainAvailability(); resetPreview(); document.getElementById('modal-overlay').classList.add('open');void refreshPluginSelection();}
+function closeModal(){++pluginSelectionRequest;document.getElementById('modal-overlay').classList.remove('open');}
 function selectAllChannels(){setSelectedValues(document.getElementById('target-services'), channels.map(channelServiceKey))}
 function clearAllChannels(){setSelectedValues(document.getElementById('target-services'), [])}
 function syncTimeEnabled(){const on=document.getElementById('use-time-range').checked; document.getElementById('start-time').disabled=!on; document.getElementById('end-time').disabled=!on; document.querySelectorAll('#days-wrap input').forEach(x=>x.disabled=!on); bindChoiceChipLabels(document.getElementById('days-wrap')); syncChoiceChipLabel(document.querySelector('label[for=use-time-range]')||document.getElementById('use-time-range')?.closest('.tvair-check-chip'))}
@@ -367,15 +425,20 @@ function syncRegexMode(){
     : '通常検索として一致した番組を対象外にします。詳しい書き方はヘルプで確認してください。';
 }
 async function loadChainFeatureAvailability(){
+  const generation=++chainSettingsLoadGeneration;
+  chainFeatureAvailable=false;chainConfiguredMode="unknown";syncAutoChainAvailability();
   try{
     const res=await fetch('/api/settings',{cache:'no-store'});
     if(!res.ok) throw new Error(`HTTP ${res.status}`);
     const d=await res.json();
-    chainFeatureAvailable=d && d.laterProgramPriority===true && d.chainRecordingEnabled===true;
+    if(generation!==chainSettingsLoadGeneration) return;
+    chainConfiguredMode=d.chainReservationMode || (d.chainRecordingEnabled===true?"manual":"disabled");
+    chainFeatureAvailable=d && d.laterProgramPriority===true && chainConfiguredMode==="manual";
   }catch(_){
+    if(generation!==chainSettingsLoadGeneration) return;
     chainFeatureAvailable=false;
   }
-  syncAutoChainAvailability();
+  if(generation===chainSettingsLoadGeneration) syncAutoChainAvailability();
 }
 function syncAutoChainAvailability(){
   const cb=document.getElementById('auto-chain-reservations');
@@ -384,9 +447,9 @@ function syncAutoChainAvailability(){
   cb.disabled=!chainFeatureAvailable;
   note.textContent=chainFeatureAvailable
     ? 'このルールで作成した同じ局の予約で、前の番組の終了時刻と次の番組の開始時刻が一致する場合にチェーン予約を組みます。'
-    : '設定 > 録画で「後番組を優先する」と「チェーン予約を実行する」の両方を有効にすると使用できます。保存済みの選択は保持されます。';
+    : '設定 > 録画で「後番組を優先する」とチェーン予約の「手動」を選ぶと使用できます。保存済みの選択は保持されます。';
   const panel=cb.closest('.panel');
-  if(panel) panel.style.opacity=chainFeatureAvailable?'1':'0.58';
+  if(panel){panel.hidden=chainConfiguredMode!=='manual';panel.style.display=chainConfiguredMode!=='manual'?'none':'';panel.style.opacity=chainFeatureAvailable?'1':'0.58';}
 }
 
 function bindRulePageActions(){
@@ -403,10 +466,12 @@ function bindRulePageActions(){
 function collectRule(){return {
   pattern:document.getElementById('pattern').value.trim(),
   excludePattern:document.getElementById('exclude-pattern').value.trim(),
-  enabled:document.getElementById('enabled').checked,
+  // Preserve the list toggle state while editing; new rules default to enabled.
+  enabled:(()=>{const id=Number(document.getElementById('rule-id').value); return id ? (rules.find(x=>x.id===id)?.enabled===true) : true;})(),
   recordCurrentServiceOnly:document.getElementById('record-current-service-only').checked,
   recordSubtitles:document.getElementById('record-subtitles').checked,
   autoChainReservations:document.getElementById('auto-chain-reservations').checked,
+  pluginBindingJson:collectPluginBindings(),
   useRegex:document.getElementById('use-regex').checked,
   searchTitle:document.getElementById('search-title').checked,
   searchOutline:document.getElementById('search-outline').checked,
@@ -463,6 +528,7 @@ async function moveRule(index, delta, btn){
 }
 
 document.addEventListener('keydown',e=>{if(e.key==='Escape') closeModal();}); document.getElementById('modal-overlay').addEventListener('click',e=>{if(e.target===document.getElementById('modal-overlay')) closeModal();});
+window.addEventListener('tvair-settings-saved',()=>{ void loadChainFeatureAvailability(); });
 buildGenreChecks(); buildDayChecks(); buildTimeOptions(); syncTimeEnabled(); syncRegexMode(); bindRulePageActions();
 if(window.TvAIrPageViewState) TvAIrPageViewState.register({key:'program-rules',root:()=>document.getElementById('page-scroll')});
 Promise.all([loadChannels(), loadRules(), loadChainFeatureAvailability()])
@@ -473,10 +539,10 @@ Promise.all([loadChannels(), loadRules(), loadChainFeatureAvailability()])
 
 </script>
 
-<script src="/tvair-notification.js?v=1.2.13"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.13"></script>
-<script src="/tvair-settings-host.js?v=1.2.13"></script>
-<script src="/tvair-menu-spine.js?v=1.2.13"></script>
+<script src="/tvair-notification.js?v=1.2.14"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.14"></script>
+<script src="/tvair-settings-host.js?v=1.2.14"></script>
+<script src="/tvair-menu-spine.js?v=1.2.14"></script>
 </body>
 </html>
 

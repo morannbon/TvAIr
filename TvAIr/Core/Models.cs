@@ -1,4 +1,4 @@
-namespace TvAIr.Core;
+﻿namespace TvAIr.Core;
 
 // ─── EPGイベント ─────────────────────────────────────────────────
 
@@ -98,6 +98,9 @@ public static class ReservationIntentContract
 
 public sealed class Reservation
 {
+    // All fields are values or immutable strings; detach queued intent from its caller.
+    internal Reservation SnapshotForChainRequest() => (Reservation)MemberwiseClone();
+
     public int Id { get; set; }
     public ushort NetworkId { get; set; }
     public ushort TransportStreamId { get; set; }
@@ -219,6 +222,8 @@ public sealed class KeywordRule
     /// チェーンの競合優先度・取消・復帰・録画境界の契約は一切変更しない。
     /// </summary>
     public bool AutoChainReservations { get; set; } = false;
+    /// <summary>Generic Plugin selection IDs. No Plugin-specific settings are stored by Host.</summary>
+    public string PluginBindingJson { get; set; } = "[]";
 
     public bool Enabled { get; set; } = true;
     public DateTime CreatedAt { get; set; }
@@ -341,4 +346,13 @@ public sealed class KeywordRuleImportPayload
     public int Version { get; set; } = 1;
     public DateTime ExportedAt { get; set; } = DateTime.Now;
     public List<KeywordRule> Rules { get; set; } = new();
+}
+
+// ProgramGuide live-view is a Viewer operation, not a recording reservation.
+public sealed class LiveProgramViewerRequest
+{
+    public int EventId { get; set; } = -1;
+    public int NetworkId { get; set; }
+    public int TransportStreamId { get; set; }
+    public int ServiceId { get; set; }
 }
