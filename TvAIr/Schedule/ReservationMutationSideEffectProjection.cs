@@ -104,7 +104,7 @@ public sealed class ReservationMutationSideEffectProjection : IDisposable
 
         journal.MarkWakePlanHandled(version);
         log.Add("RESERVATION_MUTATION_PROJECTION", "WakeOwner",
-            $"result=HANDLED_AFTER_REBUILD version={version} handledVersion={journal.WakePlanHandledVersion} reason={reason} owner=task_scheduler_deferred_wake rule=allocation_mutation_wake_owner_contract");
+            $"result=HANDLED_AFTER_REBUILD version={version} handledVersion={journal.WakePlanHandledVersion} reason={reason} owner=task_scheduler_apply_success rule=allocation_mutation_wake_owner_contract");
     }
 
     private static bool AffectsScheduledEpgPlan(ReservationMutationResult mutation)
@@ -180,10 +180,9 @@ public sealed class ReservationMutationSideEffectProjection : IDisposable
                 return;
             }
 
-            taskScheduler.RequestWakeTaskRefreshSoon(source, action, TimeSpan.FromSeconds(1));
-            journal.MarkWakePlanHandled(version);
+            taskScheduler.RequestWakeTaskRefreshSoon(source, action, TimeSpan.FromSeconds(1), version);
             log.Add("RESERVATION_MUTATION_PROJECTION", "WakeFallback",
-                $"result=APPLIED version={version} handledVersion={journal.WakePlanHandledVersion} reason=no_allocation_route_consumed_mutation rule=allocation_mutation_wake_owner_contract");
+                $"result=REQUESTED version={version} handledVersion={journal.WakePlanHandledVersion} reason=no_allocation_route_consumed_mutation rule=allocation_mutation_wake_owner_contract");
         }
         catch (OperationCanceledException)
         {

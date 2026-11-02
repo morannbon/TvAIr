@@ -1,4 +1,4 @@
-using Microsoft.Data.Sqlite;
+﻿using Microsoft.Data.Sqlite;
 using TvAIr.Core;
 
 namespace TvAIr.Epg;
@@ -396,7 +396,12 @@ public sealed class EpgStore
                     select.Transaction = tx;
                     select.CommandText = $"""
                         SELECT network_id, transport_stream_id, service_id, event_id, start_time, end_time
-                        FROM epg_events
+                        FROM (
+                            SELECT network_id,transport_stream_id,service_id,event_id,start_time,end_time FROM epg_events
+                            UNION
+                            SELECT network_id,transport_stream_id,service_id,event_id,start_time,end_time FROM reservations
+                            WHERE status='scheduled' AND source IN ('manual','keywordsearch','keyword') AND event_id<>0
+                        )
                         WHERE network_id = $nid
                           AND transport_stream_id = $tsid
                           AND service_id = $sid

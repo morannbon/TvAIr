@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk.Web">
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
     <Platforms>AnyCPU;x86;x64</Platforms>
@@ -144,6 +144,8 @@
   </Target>
 
   <ItemGroup>
+    <Compile Include="..\Shared\RecordingOutputPaths.cs" Link="Shared\RecordingOutputPaths.cs" />
+    <Compile Include="..\Shared\DiskRelayPolicy.cs" Link="Shared\DiskRelayPolicy.cs" />
     <Compile Include="..\Shared\RecordingPfObservation.cs" Link="Shared\RecordingPfObservation.cs" />
     <Compile Include="..\Shared\EitEventGroupContract.cs" Link="Shared\EitEventGroupContract.cs" />
     <Compile Include="..\Shared\WorkerPresentationPolicy.cs" Link="Shared\WorkerPresentationPolicy.cs" />

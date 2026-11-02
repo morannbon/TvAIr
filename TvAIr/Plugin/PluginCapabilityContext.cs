@@ -2136,7 +2136,8 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
                 AppDirectory = appDirectory,
                 DataDirectory = dataDirectory,
                 PluginDataDirectory = pluginDataDirectory,
-                PluginsDirectory = pluginsDirectory
+                PluginsDirectory = pluginsDirectory,
+                TvTestPluginsDirectory = ini.TvTestPluginsDirectory
             };
         }
     }

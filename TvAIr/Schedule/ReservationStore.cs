@@ -5432,7 +5432,7 @@ WHERE id = $id
     /// 指定した録画用チューナーの定時EPG行だけを削除する。録画前EPG確認は対象外。
     /// 可動枠がskip/cancel/failで当日利用されない場合の予約一覧投影整理に使用する。
     /// </summary>
-    public int DeleteScheduledDailyEpgEntriesForTuner(string tunerName)
+    public int DeleteScheduledDailyEpgEntriesForTuner(string tunerName, DateTime? date = null)
     {
         if (string.IsNullOrWhiteSpace(tunerName)) return 0;
         using var con = db.Open();
@@ -5443,9 +5443,11 @@ WHERE id = $id
               AND status = 'scheduled'
               AND source_rule_id IS NULL
               AND reservation_intent = '{ReservationIntentContract.SystemDailyEpgStorageValue}'
-              AND tuner_name = $tuner;
+              AND tuner_name = $tuner
+              AND ($date IS NULL OR substr(start_time, 1, 10) = $date);
             """;
         cmd.Parameters.AddWithValue("$tuner", tunerName);
+        cmd.Parameters.AddWithValue("$date", (object?)date?.ToString("yyyy-MM-dd") ?? DBNull.Value);
         return cmd.ExecuteNonQuery();
     }
 
@@ -9335,26 +9337,21 @@ WHERE id = $id
                         .Select(r => r.SnapshotForChainRequest()).ToArray()),
                         Array.AsReadOnly(group.Select(r => r.Id).ToArray()), 0, 0, string.Empty), KeepRule: true));
         }
+        var retiredReservationIds = new HashSet<int>();
         if (retiredEvents is not null)
         {
-            // A running PreRec protects its parent even when that parent survives
-            // the retirement but belongs to the same chain as a removed segment.
             protectedIds = protectedIds.Concat(initial.Values.Where(r => r.Source == ReservationSource.Epg
                 && r.Intent == ReservationIntent.SystemPreRecordEpg && r.SourceRuleId.HasValue
                 && (protectedIds.Contains(r.Id) || r.Status is ReservationStatus.Starting or ReservationStatus.Recording
                     || HasOpenRecordingRuntime(r))).Select(r => r.SourceRuleId!.Value)).ToHashSet();
             var retired = retiredEvents.Select(e => (e.NetworkId, e.TransportStreamId, e.ServiceId,
                 e.EventId, e.Start, e.End)).ToHashSet();
-            var candidates = initial.Values.Where(r => r.Source == ReservationSource.Keyword
-                && r.Status == ReservationStatus.Scheduled && r.SourceRuleId.HasValue
-                && retired.Contains((r.NetworkId, r.TransportStreamId, r.ServiceId,
-                    r.EventId, r.StartTime, r.EndTime)));
-            operations = candidates.GroupBy(r => r.SourceRuleId!.Value)
-                .ToDictionary(group => group.Key, group => new KeywordRuleMutation(null,
-                    new KeywordRuleReconcilePlan(Array.AsReadOnly(initial.Values.Where(r => r.Source == ReservationSource.Keyword
-                        && r.Status == ReservationStatus.Scheduled && r.SourceRuleId == group.Key)
-                        .Select(r => r.SnapshotForChainRequest()).ToArray()),
-                        Array.AsReadOnly(group.Select(r => r.Id).ToArray()), 0, 0, string.Empty), KeepRule: true));
+            // Event-bound reservations share the same disappearance authority. Explicit
+            // time slots and internal EPG tasks are not event reservations.
+            retiredReservationIds = initial.Values.Where(r => r.Status == ReservationStatus.Scheduled
+                && r.Source is ReservationSource.Manual or ReservationSource.KeywordSearch or ReservationSource.Keyword
+                && r.EventId != 0 && retired.Contains((r.NetworkId, r.TransportStreamId, r.ServiceId,
+                    r.EventId, r.StartTime, r.EndTime))).Select(r => r.Id).ToHashSet();
         }
         PreparedKeywordMutation Reject(string reason) => new(new(false, reason, beforeCount, beforeCount, Array.Empty<int>()));
         if (expectedRules is not null
@@ -9362,7 +9359,7 @@ WHERE id = $id
             return Reject("import_rules_changed");
         var scheduled = initial.Values.Where(r => r.Source == ReservationSource.Keyword
             && r.SourceRuleId is int owner && operations.ContainsKey(owner) && r.Status == ReservationStatus.Scheduled).ToArray();
-        var targets = new HashSet<int>();
+        var targets = new HashSet<int>(retiredReservationIds);
         foreach (var pair in operations)
         {
             var ruleId = pair.Key;
@@ -9424,8 +9421,8 @@ WHERE id = $id
         foreach (var id in targets)
         {
             using var delete = con.CreateCommand(); delete.Transaction = tx;
-            delete.CommandText = "DELETE FROM reservations WHERE id=$id AND source='keyword' AND source_rule_id=$rule AND status='scheduled' AND data_version=$version";
-            delete.Parameters.AddWithValue("$id", id); delete.Parameters.AddWithValue("$rule", initial[id].SourceRuleId!.Value);
+            delete.CommandText = "DELETE FROM reservations WHERE id=$id AND source=$source AND status='scheduled' AND data_version=$version";
+            delete.Parameters.AddWithValue("$id", id); delete.Parameters.AddWithValue("$source", initial[id].Source.ToString().ToLowerInvariant());
             delete.Parameters.AddWithValue("$version", initial[id].DataVersion);
             if (delete.ExecuteNonQuery() != 1) return Reject("reservation_cas_rejected");
         }

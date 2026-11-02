@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 
 <html lang="ja">
 <head>
@@ -6,24 +6,25 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.14"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.14"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.15"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.15"/>
 
-<link href="/tvair-ui-foundation.css?v=1.2.14" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.14" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.14" rel="stylesheet"/>
-<link href="/tvair-epg-panel.css?v=1.2.14" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.14" rel="stylesheet"/>
-<link href="/tvair-settings-host.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.2.15" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.15" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.15" rel="stylesheet"/>
+<link href="/tvair-epg-panel.css?v=1.2.15" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.15" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.15" rel="stylesheet"/>
 
-<script src="/tvair-theme.js?v=1.2.14"></script>
-<script src="/tvair-guide-read-request.js?v=1.2.14"></script>
-<script src="/tvair-page-view-state.js?v=1.2.14"></script>
-<script src="/tvair-action-button-state.js?v=1.2.14"></script>
-<script src="/tvair-reservation-cancel-request.js?v=1.2.14"></script>
-<script src="/tvair-reservation-action-state.js?v=1.2.14"></script>
-<script>var TVA_IR_UI_VERSION="1.2.14";</script>
-<script src="/genre-shared.js?v=1.2.14"></script>
+<script src="/tvair-theme.js?v=1.2.15"></script>
+<script src="/tvair-guide-read-request.js?v=1.2.15"></script>
+<script src="/tvair-page-view-state.js?v=1.2.15"></script>
+<script src="/tvair-action-button-state.js?v=1.2.15"></script>
+<script src="/tvair-reservation-cancel-request.js?v=1.2.15"></script>
+<script src="/tvair-reservation-action-state.js?v=1.2.15"></script>
+<script>var TVA_IR_UI_VERSION="1.2.15";</script>
+<script src="/genre-shared.js?v=1.2.15"></script>
+<script src="/tvair-japanese-holidays.js?v=1.2.15"></script>
 
 
 
@@ -160,7 +161,7 @@ body.tvair-guide-page button.tvair-guide-pan.tvair-guide-floating-action.is-pres
 <button id="cfg-close" onclick="hideCfgModal()">✕</button>
 </div>
 <div id="cfg-firstrun-banner">
-      ⚠ TvAIr.ini が見つかりませんでした。初回起動時は設定を入力して保存してください。
+      初回起動です。設定を入力して保存してください。
     </div>
 <div id="cfg-layout">
 <div id="cfg-tabs">
@@ -193,7 +194,7 @@ body.tvair-guide-page button.tvair-guide-pan.tvair-guide-floating-action.is-pres
 <span class="cfg-slider-value" id="cfg-epg-depth-label">中（180秒）</span>
 </div>
 <div class="cfg-slider-labels"><span>浅 120秒</span><span>中 180秒</span><span>深 240秒</span><span>最深 300秒</span></div>
-<div class="cfg-note" id="cfg-epg-depth-lock-note" style="display:none">EPG取得中は変更できません。完了後に変更できます。</div>
+<div class="cfg-note" id="cfg-epg-depth-lock-note" style="display:none">EPG取得中は変更できません。</div>
 </div>
 <div class="cfg-row">
 <label class="ui-checkbox-inline"><input class="ui-check-inline" id="cfg-epg-prerecord-enabled" type="checkbox"/> 録画前EPG確認を有効にする</label>
@@ -205,7 +206,6 @@ body.tvair-guide-page button.tvair-guide-pan.tvair-guide-floating-action.is-pres
 <span class="cfg-slider-value" id="cfg-epg-prerecord-label">-</span>
 </div>
 <div class="cfg-slider-labels"><span>5分</span><span>10分</span><span>15分</span><span>20分</span></div>
-<div class="cfg-note">開始時刻が近い場合は録画を優先します。</div>
 </div>
 </div>
 <div class="cfg-section">
@@ -217,7 +217,6 @@ body.tvair-guide-page button.tvair-guide-pan.tvair-guide-floating-action.is-pres
 <button class="cfg-browse" onclick="browseFile('folder','cfg-data-dir',this)">参照...</button>
 </div>
 <div class="cfg-note" id="cfg-data-dir-currentview"></div>
-<div class="cfg-note">番組情報や予約などの保存場所です。通常は変更不要です。変更はTvAIrの再起動後に反映されます。</div>
 </div>
 <div class="cfg-row">
 <label class="ui-checkbox-inline"><input class="ui-check-inline" id="cfg-startup-enabled" type="checkbox"/> Windowsへのログイン時にTvAIrを自動起動する</label>
@@ -242,14 +241,12 @@ body.tvair-guide-page button.tvair-guide-pan.tvair-guide-floating-action.is-pres
 <div class="cfg-panel" id="cfg-panel-network">
 <div class="cfg-section">
 <div class="cfg-section-title cfg-network-master-title"><span>ネットワーク</span><label class="cfg-network-master-toggle"><span id="cfg-network-usage-label">ネットワーク利用OFF</span><input id="cfg-network-usage-enabled" type="checkbox"/><span class="cfg-network-master-switch" aria-hidden="true"></span></label></div>
-<div class="cfg-note">ネットワーク利用OFFの間は、インターネット・LAN通信を行わず、LANからの接続も受け付けません。進行中の通信も停止します。</div>
 </div>
 <div id="cfg-network-dependent">
 <div class="cfg-section">
 <div class="cfg-row">
 <label>ポート番号</label>
 <input id="cfg-port" type="number"/>
-<div class="cfg-note">ポート番号の変更はTvAIrの再起動後に反映されます。</div>
 </div>
 <div class="cfg-row">
 <label class="ui-checkbox-inline"><input class="ui-check-inline" id="cfg-network-lan-enabled" type="checkbox"/> LANからの接続を許可する</label>
@@ -266,7 +263,6 @@ body.tvair-guide-page button.tvair-guide-pan.tvair-guide-floating-action.is-pres
 </div>
 <div class="cfg-section">
 <div class="cfg-section-title">プラグインのインターネット接続</div>
-<div class="cfg-note">初期値は不許可です。許可したプラグインだけが、TvAIrを通じて必要な外部情報を取得できます。許可をOFFにすると進行中の通信も停止します。</div>
 <div id="cfg-plugin-internet-list" class="cfg-checkbox-stack"><div class="cfg-note">読み込み中...</div></div>
 </div>
 </div>
@@ -274,7 +270,6 @@ body.tvair-guide-page button.tvair-guide-pan.tvair-guide-floating-action.is-pres
 <div class="cfg-panel" id="cfg-panel-tvtest">
 <div class="cfg-section">
 <div class="cfg-section-title">TVTest</div>
-<div class="cfg-note">使用するTVTestとBonDriverの場所、チャンネル設定ファイルを指定します。</div>
 <div class="cfg-row">
 <label>TVTest.exe のフルパス</label>
 <div class="cfg-input-wrap">
@@ -289,6 +284,13 @@ body.tvair-guide-page button.tvair-guide-pan.tvair-guide-floating-action.is-pres
 <button class="cfg-browse" onclick="browseFile('exe','cfg-viewing-tvtest-path',this)">参照...</button>
 </div>
 
+</div>
+<div class="cfg-row">
+<label>連携するTVTestプラグインフォルダ</label>
+<div class="cfg-input-wrap">
+<input autocapitalize="off" autocomplete="off" id="cfg-tvtest-plugins-dir" spellcheck="false" type="text"/>
+<button class="cfg-browse" onclick="browseFile('folder','cfg-tvtest-plugins-dir',this)">参照...</button>
+</div>
 </div>
 <div class="cfg-row">
 <label>BonDriver フォルダ</label>
@@ -326,7 +328,6 @@ body.tvair-guide-page button.tvair-guide-pan.tvair-guide-floating-action.is-pres
 <button class="cfg-browse" onclick="browseFile('chset','cfg-bscs-chset',this)">参照...</button>
 <button class="cfg-browse" type="button" onclick="document.getElementById('cfg-bscs-chset').value=''">ChSetを使わない</button>
 </div>
-<div class="cfg-note">ChSet.txtがない環境では空欄にします。選択したBonDriverのDLL名と同名のch2をBonDriverフォルダ、次にTVTestフォルダから探します。ChSet.txtの使用有無を切り替えたら保存後にTvAIrを再起動してください。</div>
 
 </div>
 </div>
@@ -340,7 +341,6 @@ body.tvair-guide-page button.tvair-guide-pan.tvair-guide-floating-action.is-pres
 <input class="ui-input-w90" id="cfg-tuner-count" min="0" step="1" type="number"/>
 <button class="cfg-browse" id="cfg-tuner-apply-count" onclick="applyTunerCount()" type="button">設定欄を作成</button>
 </div>
-<div class="cfg-note">録画用と視聴用を合わせたチューナー枠の数を入力し「設定欄を作成」を押してください。</div>
 </div>
 <div class="cfg-tuner-table-scroll" tabindex="0" aria-label="チューナー設定一覧。幅が足りない場合は横にスクロールできます。">
 <table id="cfg-tuner-table">
@@ -363,11 +363,8 @@ body.tvair-guide-page button.tvair-guide-pan.tvair-guide-floating-action.is-pres
 <tbody id="cfg-tuner-tbody"></tbody>
 </table>
 </div>
-<div class="cfg-note">各枠で使用するBonDriverと放送波、用途を選択してください。ケーブルテレビ用のBonDriverは「CATV」を選択します。「地デジ/BS/CS」は1つのBonDriverで複数の放送波を扱う構成で使用します。</div>
 
 
-<div class="cfg-note">録画用は予約録画・EPG取得・録画前EPG確認に使用します。視聴用は対応プラグインからの視聴に使用します。</div>
-<div class="cfg-note">BonDriverが未設定のチューナーは使用されません。</div>
 
 </div>
 </div>
@@ -397,7 +394,6 @@ body.tvair-guide-page button.tvair-guide-pan.tvair-guide-floating-action.is-pres
 <option value="sleep">スリープ</option>
 <option value="shutdown">シャットダウン</option>
 </select>
-<div class="cfg-note">録画失敗や手動停止では実行しません。</div>
 </div>
 <div class="cfg-row">
 <label>録画終了後アクション待機</label>
@@ -425,7 +421,6 @@ body.tvair-guide-page button.tvair-guide-pan.tvair-guide-floating-action.is-pres
 <div class="cfg-section-title">ユーザーログ</div>
 <div class="cfg-row">
 <label class="ui-checkbox-inline"><input class="ui-check-inline" id="cfg-user-log-detail-enabled" type="checkbox"/> 詳細表示</label>
-<div class="cfg-note">下の項目から追加表示する情報を選べます。</div>
 </div>
 </div>
 <div class="cfg-section" id="cfg-user-log-detail-section">
@@ -438,7 +433,6 @@ body.tvair-guide-page button.tvair-guide-pan.tvair-guide-floating-action.is-pres
 <label class="ui-checkbox-inline"><input class="ui-check-inline cfg-user-log-detail" id="cfg-user-log-detail-state-change" type="checkbox"/> 状態変化</label>
 <label class="ui-checkbox-inline"><input class="ui-check-inline cfg-user-log-detail" id="cfg-user-log-detail-end-or-failure-reason" type="checkbox"/> 終了・失敗理由</label>
 </div>
-<div class="cfg-note">録画品質：ドロップ数・エラー数・スクランブル数　状態変化：予約や録画の状態変更　終了・失敗理由：正常終了・手動停止・録画失敗など</div>
 </div>
 </div>
 </div>
@@ -454,7 +448,6 @@ body.tvair-guide-page button.tvair-guide-pan.tvair-guide-floating-action.is-pres
 </div>
 <div class="cfg-display-section">
 <div class="cfg-section-title">番組表ジャンル色</div>
-<div class="cfg-note">ライトとダークは別々に保存されます。</div>
 <div class="cfg-genre-current-head">
 <div class="cfg-genre-current-title" id="cfg-genre-current-title">ジャンル色</div>
 
@@ -535,9 +528,9 @@ body.tvair-guide-page button.tvair-guide-pan.tvair-guide-floating-action.is-pres
 </div>
 </div>
 </div>
-<script src="/tvair-notification.js?v=1.2.14"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.14"></script>
-<script src="/tvair-epg-widget.js?v=1.2.14"></script>
+<script src="/tvair-notification.js?v=1.2.15"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.15"></script>
+<script src="/tvair-epg-widget.js?v=1.2.15"></script>
 <script>
 const PROGRAM_GUIDE_GEOMETRY=Object.freeze({
   dayStartHour:4,
@@ -1130,16 +1123,14 @@ function buildDateNav(){
   const range=ProgramGuideDateState.refreshBounds();
   const today=new Date(range.minDate+"T00:00:00");
   const DOW=["日","月","火","水","木","金","土"];
-  // 祝日セット（外部拡張から window.tvairHolidays = new Set([...]) で注入）
-  const HOLIDAYS = window.tvairHolidays instanceof Set ? window.tvairHolidays : new Set();
   for(let i=0;i<ProgramGuideDateState.DISPLAY_DAY_COUNT;i++){
     const d=new Date(today);
     d.setDate(d.getDate()+i);
     const ds=d.getFullYear()+"-"+p2(d.getMonth()+1)+"-"+p2(d.getDate());
     const dow=d.getDay();
     const isSat=dow===6;
-    const isSunHol=dow===0||HOLIDAYS.has(ds);
-    const dowCls=isSat?"dow-sat":isSunHol?"dow-sun":"";
+    const isSunHol=dow===0||window.TvAIrJapaneseHolidays.has(ds);
+    const dowCls=isSunHol?"dow-sun":isSat?"dow-sat":"";
     const dowSpan=`<span${dowCls?` class="${dowCls}"`:""}>${DOW[dow]}</span>`;
     const datePart=p2(d.getMonth()+1)+"/"+p2(d.getDate())+"（"+dowSpan+"）";
     const labelHtml=i===0?"今日 "+datePart:datePart;
@@ -5081,7 +5072,7 @@ function completeCfgSave(){
   hideCfgModal();
 }
 window.TvAIrSettingsModule = window.TvAIrSettingsModule || {
-  version:'1.2.14',
+  version:'1.2.15',
   open:()=>showCfgModal(),
   close:()=>hideCfgModal(),
   contract:'single-settings-module-web-modal-basis'
@@ -5446,18 +5437,7 @@ function updateRecordingOptionState(){
   }
   if(row) row.classList.toggle('cfg-disabled', !later);
   const note=document.getElementById('cfg-chain-note');
-  if(note){
-    const descriptions={
-      disabled:'チェーン予約を利用しません。各番組を通常予約として録画します。',
-      manual:'番組表のチェーンボタンから連続する番組を追加します。自動検索予約でもルールごとにチェーン予約を設定できます。方式を切り替えても作成済みチェーンは残り、以後の自動結合を止めます。(C)は先頭番組を除く2番組目から最後まで表示します。',
-      automatic:'同じ局で終了時刻と次の開始時刻が一致する予約を自動でチェーンにします。予約した順番や予約方法は問いません。方式を切り替えても作成済みチェーンは残ります。以前からある単独予約も結合対象になります。(C)はチェーンを構成する先頭番組から最後まで全てに表示します。'
-    };
-    const mode=chain?.value;
-    const enabledMode=later && (mode==='manual' || mode==='automatic');
-    note.textContent=(later ? '' : '「後番組を優先する」を選ぶと設定できます。')
-      +(later ? (descriptions[mode] || descriptions.disabled) : '')
-      +(enabledMode ? '受信を止めずに録画し、番組ごとに別のTSファイルへ保存します。' : '');
-  }
+  if(note) note.textContent=later ? '' : '後番組優先で設定できます。';
 }
 async function loadWakeStatus(){
   const dot=document.getElementById('wake-status-dot');
@@ -5774,6 +5754,7 @@ async function loadCfg(){
     applyThemeLinkedGenrePalette(window._cfgThemeGenrePalettes, currentGenreTheme());
     renderGenreColorSettings(window._cfgThemeGenrePalettes);
     const suppressInitial = d.isFirstRun === true;
+    document.getElementById('cfg-tvtest-plugins-dir').value=d.tvTestPluginsDirectory||'';
     document.getElementById('cfg-tvtest-path').value=suppressInitial ? '' : (d.tvTestExecutablePath||'');
     document.getElementById('cfg-viewing-tvtest-path').value=suppressInitial ? '' : (d.viewingTvTestExecutablePath||'');
     document.getElementById('cfg-bondriver-dir').value=suppressInitial ? '' : (d.bonDriverDirectory||'');
@@ -5928,6 +5909,7 @@ async function saveCfgCore(){
   catch(e){ showCfgDialog('設定の取得に失敗しました。'); return; }
   const dto={
     systemTheme:selectedTheme,
+    tvTestPluginsDirectory: document.getElementById('cfg-tvtest-plugins-dir').value || '',
     tvTestExecutablePath: document.getElementById('cfg-tvtest-path').value || '',
     viewingTvTestExecutablePath: document.getElementById('cfg-viewing-tvtest-path').value || '',
     bonDriverDirectory: document.getElementById('cfg-bondriver-dir').value || '',
@@ -6123,8 +6105,8 @@ if(!tvairSettingsFrameMode){
   bindGuideTopOperationUi();
 }
 </script>
-<script src="/tvair-settings-host.js?v=1.2.14"></script>
-<script src="/tvair-menu-spine.js?v=1.2.14"></script>
+<script src="/tvair-settings-host.js?v=1.2.15"></script>
+<script src="/tvair-menu-spine.js?v=1.2.15"></script>
 <script>
 (function(){
   try{
@@ -6138,6 +6120,7 @@ if(!tvairSettingsFrameMode){
 </script>
 </body>
 </html>
+
 
 
 

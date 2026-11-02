@@ -60,7 +60,7 @@ public sealed class ReservationPresentationService
                 .OrderBy(r => r.StartTime)
                 .ThenBy(r => ResolveRecordingTunerOrder(projection.RecordingTuners, projection.PriorityNames.TryGetValue(r.Id, out var priority) ? priority : r.TunerName))
                 .ThenBy(r => r.Id));
-            return BuildPresentationItems(visible, projection.PriorityNames);
+            return BuildPresentationItems(visible, projection.PriorityNames, projection.PendingDailyIds);
         }
         catch (Exception ex)
         {
@@ -119,7 +119,7 @@ public sealed class ReservationPresentationService
             return new SystemEpgVisibleProjection(recordingTuners, Array.Empty<Reservation>(), new Dictionary<int, string>());
 
         var now = DateTime.Now;
-        var preRecordEnabled = _ini.EpgPreRecordMinutes > 0;
+        var preRecordEnabled = SystemEpgResponsibilityPlanService.IsPreRecordEnabled(_ini);
         var dailyEnabled = _ini.EpgEnabled;
         if (!preRecordEnabled && !dailyEnabled)
             return new SystemEpgVisibleProjection(recordingTuners, Array.Empty<Reservation>(), new Dictionary<int, string>());
@@ -162,6 +162,7 @@ public sealed class ReservationPresentationService
             // Presentation層で設定時刻・深度・局数から仮想枠を再計算しない。
             dailyRowsByTuner = activeSystemRows
                 .Where(IsDailyEpgRow)
+                .Where(r => plan.Daily is { IsPending: false } daily && r.StartTime == daily.Start && r.EndTime == daily.End)
                 .Where(r => !string.IsNullOrWhiteSpace(r.TunerName))
                 .GroupBy(r => r.TunerName!, StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
@@ -169,6 +170,7 @@ public sealed class ReservationPresentationService
 
         var visibleRows = new List<Reservation>();
         var priorityNames = new Dictionary<int, string>();
+        var pendingDailyIds = new HashSet<int>();
 
         // RESERVATION_LIST_SYSTEM_EPG_NEXT_RESPONSIBILITY:
         // SystemEpgResponsibilityPlanを各録画Tunerの「次のSystem EPG責務」の正本とする。
@@ -197,6 +199,20 @@ public sealed class ReservationPresentationService
                 next = SelectVisibleDailyEpg(dailyRows);
             }
 
+            if (next is null && dailyEnabled && dailyFallbackTuners.Contains(tuner.Name)
+                && plan.Daily is { IsPending: true } pending)
+            {
+                // Display-only responsibility: never persist a fictional executable interval.
+                var id = -10000 - recordingTuners.ToList().FindIndex(t => t.Name == tuner.Name);
+                next = new Reservation
+                {
+                    Id = id, Source = ReservationSource.Epg, Intent = ReservationIntent.SystemDailyEpg,
+                    Status = ReservationStatus.Scheduled, IsEnabled = true, TunerName = tuner.Name,
+                    StartTime = pending.CanonicalStart, EndTime = pending.CanonicalStart,
+                    Title = $"定時EPG：取得枠なし・保留中（期限{pending.Deadline:HH:mm}）"
+                };
+                pendingDailyIds.Add(id);
+            }
             if (next is null)
                 continue;
 
@@ -204,7 +220,7 @@ public sealed class ReservationPresentationService
             priorityNames[next.Id] = tuner.Name;
         }
 
-        return new SystemEpgVisibleProjection(recordingTuners, visibleRows, priorityNames);
+        return new SystemEpgVisibleProjection(recordingTuners, visibleRows, priorityNames, pendingDailyIds);
     }
 
     private static Reservation? SelectVisibleDailyEpg(IEnumerable<Reservation> rows)
@@ -248,9 +264,10 @@ public sealed class ReservationPresentationService
     private sealed record SystemEpgVisibleProjection(
         IReadOnlyList<TunerProfile> RecordingTuners,
         IReadOnlyList<Reservation> Rows,
-        IReadOnlyDictionary<int, string> PriorityNames);
+        IReadOnlyDictionary<int, string> PriorityNames,
+        IReadOnlySet<int>? PendingDailyIds = null);
 
-    private IReadOnlyList<ReservationPresentationItem> BuildPresentationItems(IReadOnlyList<Reservation> reservations, IReadOnlyDictionary<int, string>? priorityOverrides = null)
+    private IReadOnlyList<ReservationPresentationItem> BuildPresentationItems(IReadOnlyList<Reservation> reservations, IReadOnlyDictionary<int, string>? priorityOverrides = null, IReadOnlySet<int>? pendingDailyIds = null)
     {
         var chainMap = BuildChainMap(_store.GetChainPredecessorsForPresentation(), _ini.ChainReservationMode);
         var items = new List<ReservationPresentationItem>(reservations.Count);
@@ -263,6 +280,7 @@ public sealed class ReservationPresentationService
             {
                 chainMap.TryGetValue(r.Id, out var chainInfo);
 
+                var pendingDaily = pendingDailyIds?.Contains(r.Id) == true;
                 var sourceLabel = ReservationOriginClassifier.GetUserSourceLabel(r);
                 var serviceOperational = serviceAccessSnapshot.IsOperationalForRecording(r, recordingTuners);
                 var serviceAccessReason = serviceOperational ? string.Empty : serviceAccessSnapshot.GetRejectReason(r);
@@ -298,7 +316,8 @@ public sealed class ReservationPresentationService
                     Source = r.Source.ToString().ToLowerInvariant(),
                     StatusKind = r.Status,
                     SourceKind = r.Source,
-                    SystemEpgKind = IsPreRecordEpgRow(r) ? "pre-record-epg" : IsDailyEpgRow(r) ? "daily-epg" : string.Empty,
+                    IsSystemEpgPending = pendingDaily,
+                    SystemEpgKind = pendingDaily ? "daily-epg-pending" : IsPreRecordEpgRow(r) ? "pre-record-epg" : IsDailyEpgRow(r) ? "daily-epg" : string.Empty,
                     SourceLabel = sourceLabel,
                     DisplayStatusLabel = displayStatusLabel,
                     ChannelArgument = r.ChannelArgument ?? string.Empty,
@@ -546,6 +565,7 @@ public sealed class ReservationPresentationItem
     internal ReservationStatus StatusKind { get; set; }
     internal ReservationSource SourceKind { get; set; }
     /// <summary>System EPG行の表示種別。内部ReservationIntentをUIへ直接公開せず、表示に必要な分類だけを投影する。</summary>
+    public bool IsSystemEpgPending { get; set; }
     public string SystemEpgKind { get; set; } = "";
     public string SourceLabel { get; set; } = "";
     public string DisplayStatusLabel { get; set; } = "";

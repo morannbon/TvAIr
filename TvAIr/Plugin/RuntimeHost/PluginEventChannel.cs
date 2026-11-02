@@ -33,7 +33,9 @@ internal sealed class PluginEventChannel : ITvAirPluginEventsApi, IDisposable
         TvAirEventType parsed = default;
         if (!isRuntimeConnected)
         {
-            if (!Enum.TryParse(request.EventType, true, out parsed))
+            // Enum.TryParse accepts any numeric value, including undefined ones.
+            // Reject those before allocating a per-type replay buffer and subscription.
+            if (!Enum.TryParse(request.EventType, true, out parsed) || !Enum.IsDefined(parsed))
                 throw new ArgumentOutOfRangeException(nameof(request.EventType), $"Unsupported event type: {request.EventType}");
         }
 

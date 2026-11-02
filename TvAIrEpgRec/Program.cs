@@ -10,6 +10,7 @@ using System.Text.Json.Serialization;
 using TvAIrEpgRec.CommonTsRoute;
 using TvAIr.Epg.Shared;
 using TvAIr.Workers;
+using TvAIr.Storage;
 
 namespace TvAIrEpgRec;
 
@@ -684,6 +685,7 @@ internal static class Program
             RecordStopSignalPath = string.Equals(mode, "record", StringComparison.OrdinalIgnoreCase) || IsEpgLikeMode(mode)
                 ? FirstNonEmptyOrNull(job?.CancelSignalPath, parsed.Get("stop-signal"), parsed.Get("stopSignalPath"), parsed.Get("cancel"))
                 : null,
+            TvTestPluginsDirectory = job?.TvTestPluginsDirectory,
             ChainControlPath = string.Equals(mode, "record", StringComparison.OrdinalIgnoreCase)
                 ? FirstNonEmptyOrNull(job?.ChainControlPath, parsed.Get("chain-control"), parsed.Get("chainControlPath"))
                 : null,
@@ -1438,6 +1440,7 @@ internal sealed class TvAIrEpgRecJob
     public string? BonDriver { get; set; }
     public string? BonDriverPath { get; set; }
     public string? TvTestExecutablePath { get; set; }
+    public string? TvTestPluginsDirectory { get; set; }
     public string? ChannelsPath { get; set; }
     public string? OutputPath { get; set; }
     public string? ResultPath { get; set; }
@@ -1478,6 +1481,7 @@ internal sealed class EpgChannelJob
 internal sealed class RecordingJob
 {
     public int ReservationId { get; set; }
+    public string? RecordingFileDeclaration { get; set; }
     public string? ServiceName { get; set; }
     public string? Title { get; set; }
     public DateTime StartTime { get; set; }
@@ -1512,6 +1516,7 @@ internal sealed class ChainRecordingControl
 internal sealed class ChainRecordingSegment
 {
     public int ReservationId { get; set; }
+    public string? RecordingFileDeclaration { get; set; }
     public string? ServiceName { get; set; }
     public string? Title { get; set; }
     public bool Enabled { get; set; } = true;
@@ -1675,6 +1680,7 @@ internal sealed class TsReadProbeSummary
     public bool RecordWriteEnabled { get; set; }
     public string? RecordOutputPath { get; set; }
     public string? RecordStopSignalPath { get; set; }
+    public string? TvTestPluginsDirectory { get; set; }
     public string? ChainControlPath { get; set; }
     public RecordingJob? Recording { get; set; }
     public int RecordReservationId { get; set; }
@@ -2565,7 +2571,7 @@ internal static class BonDriverNativeProbe
             };
 
             public ChainRecordingSegment Segment { get; private set; }
-            public FileStream Stream { get; }
+            public RelayRecordingOutput Stream { get; }
             public TransportQualityState Quality { get; } = new();
             public long TargetMediaScrambledPackets { get; private set; }
             public long BytesWritten { get; private set; }
@@ -2578,13 +2584,13 @@ internal static class BonDriverNativeProbe
             private bool patWritten;
             private readonly Dictionary<int, int> filteredPmtNextContinuity = new();
 
-            public SegmentSink(ChainRecordingSegment segment)
+            public SegmentSink(ChainRecordingSegment segment, string? controlDirectory, DiskRelayPolicy? policy, Func<string, Task> log)
             {
                 Segment = segment;
                 var path = Path.GetFullPath(segment.OutputPath ?? string.Empty);
                 var parent = Path.GetDirectoryName(path);
                 if (!string.IsNullOrWhiteSpace(parent)) Directory.CreateDirectory(parent);
-                Stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.ReadWrite, 4 * 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                Stream = new RelayRecordingOutput(path, segment.RecordingFileDeclaration, controlDirectory, policy, log, readQuality: () => new PhysicalOutputQuality(Quality.ContinuityDrops, Quality.ContinuityErrors, Quality.SyncErrors, Quality.ScrambledPackets, TargetMediaScrambledPackets));
             }
 
             public void UpdateDefinition(ChainRecordingSegment segment)
@@ -2640,8 +2646,8 @@ internal static class BonDriverNativeProbe
                     }
                     if (output.Length == 0) return;
 
+                    await Stream.WriteAsync(output, summary.RecordTargetStreamPids).ConfigureAwait(false);
                     ObserveBuffer(output, summary.RecordTargetStreamPids);
-                    await Stream.WriteAsync(output).ConfigureAwait(false);
                     BytesWritten += output.Length;
                     ChunksWritten++;
                 }
@@ -2770,7 +2776,6 @@ internal static class BonDriverNativeProbe
                 if (Closed) return;
                 Closed = true;
                 EndedAt = DateTime.Now;
-                await Stream.FlushAsync().ConfigureAwait(false);
                 await Stream.DisposeAsync().ConfigureAwait(false);
                 AppendRuntime(final: true);
                 if (string.IsNullOrWhiteSpace(Segment.ResultPath)) return;
@@ -2824,7 +2829,9 @@ internal static class BonDriverNativeProbe
             }
         }
 
-        private FileStream? stream;
+        private RelayRecordingOutput? stream;
+        private DiskRelayPolicy? relayPolicy;
+        private Func<string, Task> relayLog = _ => Task.CompletedTask;
         private TsReadProbeSummary? outputSummary;
         private readonly RecordingJob recording;
         private readonly string? chainControlPath;
@@ -2945,7 +2952,7 @@ internal static class BonDriverNativeProbe
             this.chainControlPath = chainControlPath;
         }
 
-        public FileStream? Stream => stream;
+        
         public bool PrimaryWritable => stream is not null && !primaryClosed;
 
         public static async Task<RecordOutputContext?> OpenAsync(TsReadProbeSummary summary, Func<string, string, Task> progress)
@@ -2961,9 +2968,24 @@ internal static class BonDriverNativeProbe
             }
 
             var context = new RecordOutputContext(summary.Recording, summary.ChainControlPath);
-            await context.OpenCoreAsync(summary, progress).ConfigureAwait(false);
-            await context.RefreshChainControlAsync(summary, progress, force: true).ConfigureAwait(false);
-            return context;
+            context.relayPolicy = DiskRelayPolicy.Load(summary.TvTestPluginsDirectory ?? "", out var relayStatus);
+            context.relayLog = message => progress("disk_relay", message);
+            await progress("disk_relay_settings", $"result={relayStatus} folder={summary.TvTestPluginsDirectory} dllExecuted=False").ConfigureAwait(false);
+            try
+            {
+                await context.OpenCoreAsync(summary, progress).ConfigureAwait(false);
+                await context.RefreshChainControlAsync(summary, progress, force: true).ConfigureAwait(false);
+                return context;
+            }
+            catch (Exception openError)
+            {
+                try { await context.DisposeAsync().ConfigureAwait(false); }
+                catch (Exception closeError)
+                {
+                    throw new AggregateException("Recording output open and cleanup failed.", openError, closeError);
+                }
+                throw;
+            }
         }
 
         private async Task OpenCoreAsync(TsReadProbeSummary summary, Func<string, string, Task> progress)
@@ -2974,7 +2996,7 @@ internal static class BonDriverNativeProbe
             var parent = Path.GetDirectoryName(path);
             if (!string.IsNullOrWhiteSpace(parent)) Directory.CreateDirectory(parent);
 
-            stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.ReadWrite, 4 * 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            stream = new RelayRecordingOutput(path, recording.RecordingFileDeclaration, chainControlPath, relayPolicy, relayLog, readQuality: () => new PhysicalOutputQuality(summary.OutputContinuityDrops, summary.OutputContinuityErrors, summary.OutputSyncErrors, summary.OutputScrambledLikePackets, summary.OutputTargetMediaScrambledPackets));
             summary.RecordOutputOpened = true;
             summary.RecordOutputPath = path;
             summary.RecordReservationId = recording.ReservationId;
@@ -3044,7 +3066,7 @@ internal static class BonDriverNativeProbe
                 if (now < segment.OpenAt || now >= segment.EffectiveCloseAt) continue;
                 try
                 {
-                    var sink = new SegmentSink(segment);
+                    var sink = new SegmentSink(segment, chainControlPath, relayPolicy, relayLog);
                     chainSinks[segment.ReservationId] = sink;
                     WorkerPresentation.RecordingOpened(segment);
                     await progress("chain_capture_sink_open", $"result=OK reservation=R{segment.ReservationId} openAt={segment.OpenAt:yyyy-MM-dd HH:mm:ss.fff} closeAt={segment.CloseAt:yyyy-MM-dd HH:mm:ss.fff} path={segment.OutputPath} capturePid={Environment.ProcessId} physicalRetune=False rule=chain_continuous_capture_contract").ConfigureAwait(false);
@@ -3146,11 +3168,11 @@ internal static class BonDriverNativeProbe
                 now = DateTime.Now;
                 if (primaryCloseAt.HasValue && now < primaryCloseAt.Value)
                     return;
-                await stream.FlushAsync().ConfigureAwait(false);
-                await stream.DisposeAsync().ConfigureAwait(false);
+                var closing = stream;
                 stream = null;
                 primaryClosed = true;
-                WorkerPresentation.RecordingClosed(recording.ReservationId);
+                try { await closing.DisposeAsync().ConfigureAwait(false); }
+                finally { WorkerPresentation.RecordingClosed(recording.ReservationId); }
                 await WritePrimarySegmentResultAsync(summary, "segment_close_time_reached").ConfigureAwait(false);
                 await progress("chain_capture_primary_sink_close", $"result=OK reservation=R{recording.ReservationId} closeAt={primaryCloseAt.Value:yyyy-MM-dd HH:mm:ss.fff} bytes={summary.RecordBytesWritten} packets={summary.OutputPacketsAnalyzed} drops={summary.OutputContinuityDrops} cc={summary.OutputContinuityErrors} sync={summary.OutputSyncErrors} scramble={summary.OutputScrambledLikePackets} targetScramble={summary.OutputTargetMediaScrambledPackets} captureContinues={chainSinks.Any(pair => !pair.Value.Closed)} physicalRetune=False rule=chain_continuous_capture_contract").ConfigureAwait(false);
             }
@@ -3180,7 +3202,7 @@ internal static class BonDriverNativeProbe
             var primaryBytes = 0;
             if (stream is not null && !primaryClosed)
             {
-                await stream.WriteAsync(primaryBuffer).ConfigureAwait(false);
+                await stream.WriteAsync(primaryBuffer, summary.RecordTargetStreamPids).ConfigureAwait(false);
                 primaryBytes = primaryBuffer.Length;
             }
             foreach (var sink in chainSinks.Values)
@@ -3204,25 +3226,32 @@ internal static class BonDriverNativeProbe
 
         public async ValueTask DisposeAsync()
         {
+            List<Exception>? failures = null;
             if (stream is not null)
             {
-                await stream.FlushAsync().ConfigureAwait(false);
-                await stream.DisposeAsync().ConfigureAwait(false);
+                var closing = stream;
                 stream = null;
                 primaryClosed = true;
-                WorkerPresentation.RecordingClosed(recording.ReservationId);
-                // Use the same post-dispose proof as a chain boundary. Ordinary stop and
-                // partial/manual stop must not lose their independent physical-file evidence.
-                if (outputSummary is not null)
-                    await WritePrimarySegmentResultAsync(outputSummary, "recording_sink_disposed").ConfigureAwait(false);
+                try
+                {
+                    await closing.DisposeAsync().ConfigureAwait(false);
+                    // A success proof must follow successful physical-file cleanup.
+                    if (outputSummary is not null)
+                        await WritePrimarySegmentResultAsync(outputSummary, "recording_sink_disposed").ConfigureAwait(false);
+                }
+                catch (Exception ex) { (failures ??= new()).Add(ex); }
+                finally { WorkerPresentation.RecordingClosed(recording.ReservationId); }
             }
             foreach (var pair in chainSinks)
             {
                 if (!pair.Value.Closed)
                     WorkerPresentation.RecordingClosed(pair.Key);
-                await pair.Value.DisposeAsync().ConfigureAwait(false);
+                try { await pair.Value.DisposeAsync().ConfigureAwait(false); }
+                catch (Exception ex) { (failures ??= new()).Add(ex); }
             }
             chainSinks.Clear();
+            if (failures is not null)
+                throw new AggregateException("Recording output cleanup failed.", failures);
         }
     }
 

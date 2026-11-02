@@ -17,15 +17,15 @@ public static class EpgProjection
     public static string ExtendedText(EpgEvent e)
     {
         var cell = ProgramGuideCellTextDecoder.Decode(e);
-        return FirstNonEmpty(cell.Detail, cell.Items);
+        return ProgramEventTextPreference.FirstNonEmpty(cell.Detail, cell.Items);
     }
 
     public static string GenreCodes(EpgEvent e)
-        => FirstNonEmpty(e.GenreCodes);
+        => ProgramEventTextPreference.FirstNonEmpty(e.GenreCodes);
 
     public static string GenreLabel(string? genre, string? genreCodes)
     {
-        var explicitGenre = FirstNonEmpty(genre);
+        var explicitGenre = ProgramEventTextPreference.FirstNonEmpty(genre);
         if (explicitGenre.Length > 0) return explicitGenre;
 
         var first = string.IsNullOrWhiteSpace(genreCodes)
@@ -49,15 +49,5 @@ public static class EpgProjection
             'B' => "福祉",
             _ => "その他"
         };
-    }
-
-    private static string FirstNonEmpty(params string?[] values)
-    {
-        foreach (var v in values)
-        {
-            var t = (v ?? string.Empty).Trim();
-            if (t.Length > 0) return t;
-        }
-        return string.Empty;
     }
 }

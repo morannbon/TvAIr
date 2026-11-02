@@ -65,35 +65,9 @@ public static class TvTestRecordFileNameTemplateResolver
         template = string.Empty;
         evidence = string.Empty;
 
-        if (string.IsNullOrWhiteSpace(tvTestExecutablePath))
-        {
-            evidence = "tvtest_executable_empty key=RecordFileName";
+        if (!TvTestIniExactKeyReader.TryResolveLocation(
+            tvTestExecutablePath, "RecordFileName", out _, out var iniPath, out evidence))
             return false;
-        }
-
-        string tvTestDir;
-        try
-        {
-            tvTestDir = Path.GetDirectoryName(Path.GetFullPath(tvTestExecutablePath)) ?? string.Empty;
-        }
-        catch (Exception ex)
-        {
-            evidence = $"tvtest_executable_invalid type={ex.GetType().Name} message={Trim(ex.Message, 160)} key=RecordFileName";
-            return false;
-        }
-
-        if (string.IsNullOrWhiteSpace(tvTestDir))
-        {
-            evidence = "tvtest_directory_empty key=RecordFileName";
-            return false;
-        }
-
-        var iniPath = Path.Combine(tvTestDir, "TVTest.ini");
-        if (!File.Exists(iniPath))
-        {
-            evidence = $"tvtest_ini_not_found ini={iniPath} key=RecordFileName";
-            return false;
-        }
 
         string? section = null;
         string? rawValue = null;
@@ -101,32 +75,12 @@ public static class TvTestRecordFileNameTemplateResolver
 
         try
         {
-            var lines = File.ReadAllLines(iniPath);
-            for (var i = 0; i < lines.Length; i++)
-            {
-                var raw = lines[i].Trim();
-                if (raw.Length == 0 || raw.StartsWith(';') || raw.StartsWith('#')) continue;
-
-                if (raw.StartsWith('[') && raw.EndsWith(']') && raw.Length > 2)
-                {
-                    section = raw[1..^1].Trim();
-                    continue;
-                }
-
-                var eq = raw.IndexOf('=');
-                if (eq <= 0) continue;
-
-                var key = raw[..eq].Trim();
-                if (!string.Equals(key, "RecordFileName", StringComparison.OrdinalIgnoreCase)) continue;
-
-                rawValue = raw[(eq + 1)..].Trim();
-                lineNumber = i + 1;
-                break;
-            }
+            TvTestIniExactKeyReader.TryReadFirst(iniPath, "RecordFileName",
+                out section, out rawValue, out lineNumber);
         }
         catch (Exception ex)
         {
-            evidence = $"tvtest_ini_read_error ini={iniPath} type={ex.GetType().Name} message={Trim(ex.Message, 160)} key=RecordFileName";
+            evidence = $"tvtest_ini_read_error ini={iniPath} type={ex.GetType().Name} message={TvTestIniExactKeyReader.TrimErrorMessage(ex.Message, 160)} key=RecordFileName";
             return false;
         }
 
@@ -163,6 +117,4 @@ public static class TvTestRecordFileNameTemplateResolver
     private static string Safe(string? value)
         => string.IsNullOrWhiteSpace(value) ? "-" : value.Trim().Replace("\r", " ").Replace("\n", " ");
 
-    private static string Trim(string value, int max)
-        => string.IsNullOrEmpty(value) || value.Length <= max ? value : value[..max];
 }

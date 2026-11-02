@@ -215,6 +215,7 @@ public sealed class SettingsChangeApplicationService
 
     private static IniSettingsUpdateDto MergeWebRequest(IniSettingsDto current, WebSettingsUpdateDto requested) => new()
     {
+        TvTestPluginsDirectory = requested.TvTestPluginsDirectory,
         TvTestExecutablePath = requested.TvTestExecutablePath,
         BonDriverDirectory = requested.BonDriverDirectory,
         ViewingTvTestExecutablePath = requested.ViewingTvTestExecutablePath,
@@ -503,6 +504,8 @@ public sealed class SettingsChangeApplicationService
             IniSettingsService.BuildThemeGenrePaletteSignature(before.ThemeGenrePalettes),
             IniSettingsService.BuildThemeGenrePaletteSignature(after.ThemeGenrePalettes));
 
+        if (!EqualsPath(before.TvTestPluginsDirectory, after.TvTestPluginsDirectory))
+            changedAreas.Add("TvTestPluginPaths");
         if (tunerTopologyChanged) changedAreas.Add("TunerTopology");
         if (channelMapChanged) changedAreas.Add("ChannelMap");
         if (networkAccessChanged) changedAreas.Add("NetworkAccess");
@@ -721,7 +724,8 @@ public sealed class SettingsChangeApplicationService
 
     private static bool HasPersistedDifference(IniSettingsDto current, IniSettingsUpdateDto requested)
     {
-        if (!EqualsPath(current.TvTestExecutablePath, requested.TvTestExecutablePath) ||
+        if (!EqualsPath(current.TvTestPluginsDirectory, requested.TvTestPluginsDirectory) ||
+            !EqualsPath(current.TvTestExecutablePath, requested.TvTestExecutablePath) ||
             !EqualsPath(current.ViewingTvTestExecutablePath, requested.ViewingTvTestExecutablePath) ||
             !EqualsPath(current.BonDriverDirectory, requested.BonDriverDirectory) ||
             !EqualsPath(current.GrChannelFilePath, requested.GrChannelFilePath) ||

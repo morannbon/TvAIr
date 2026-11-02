@@ -39,7 +39,7 @@ public sealed class TimedTextStreamStore
             list.AddLast(normalized);
             while (list.Count > PerGroupLimit) list.RemoveFirst();
             _global.AddLast(normalized);
-            while (_global.Count > GlobalLimit) _global.RemoveFirst();
+            while (_global.Count > GlobalLimit) RemoveGlobalItemLocked(_global.First!);
             _receivedCounts.TryGetValue(key, out var current);
             _receivedCounts[key] = total = current + 1;
             queued = list.Count;
@@ -76,20 +76,43 @@ public sealed class TimedTextStreamStore
 
     public void PruneOlderThan(TimeSpan age)
     {
-        var threshold=DateTimeOffset.Now-age;
-        lock(_sync)
+        var threshold = DateTimeOffset.Now - age;
+        lock (_sync)
         {
-            while(_global.First is { Value.OccurredAt: var at } && at<threshold) _global.RemoveFirst();
-            foreach(var key in _byGroup.Keys.ToList())
+            // Broadcast timestamps may arrive out of order. A front-only prune leaves
+            // expired items behind a newer one, including in the group index.
+            // All group entries originate in _global, so prune only the retention owner.
+            for (var node = _global.First; node is not null;)
             {
-                var list=_byGroup[key];
-                while(list.First is { Value.OccurredAt: var at } && at<threshold) list.RemoveFirst();
-                if(list.Count==0)
-                {
-                    _byGroup.Remove(key);
-                    _receivedCounts.Remove(key);
-                }
+                var next = node.Next;
+                if (node.Value.OccurredAt < threshold) RemoveGlobalItemLocked(node);
+                node = next;
             }
+        }
+    }
+
+    // _global owns retention. Both capacity eviction and age expiry must remove
+    // the exact same item from the group index and release an empty group's counter.
+    // The group's 300-item cap may already have evicted this instance. Caller holds _sync.
+    private void RemoveGlobalItemLocked(LinkedListNode<TvAirTimedTextItemDto> node)
+    {
+        var item = node.Value;
+        _global.Remove(node);
+
+        var key = GroupKey(item.StreamId, item.GroupId);
+        if (!_byGroup.TryGetValue(key, out var group)) return;
+
+        for (var member = group.First; member is not null; member = member.Next)
+        {
+            if (!ReferenceEquals(member.Value, item)) continue;
+            group.Remove(member);
+            break;
+        }
+
+        if (group.Count == 0)
+        {
+            _byGroup.Remove(key);
+            _receivedCounts.Remove(key);
         }
     }
 

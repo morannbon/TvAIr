@@ -103,9 +103,9 @@ public sealed class DbProgramEventSource : IProgramEventSource
         // Searchable DB projection fields preserve the descriptor semantics exactly.
         // Display fallbacks must never bleed Items/other description columns into Outline/Detail,
         // otherwise a checkbox can search data belonging to another checkbox.
-        var title = FirstNonEmpty(cell.Title, e.Title);
-        var shortText = FirstNonEmpty(cell.Outline);
-        var extendedText = FirstNonEmpty(cell.Detail);
+        var title = ProgramEventTextPreference.FirstNonEmpty(cell.Title, e.Title);
+        var shortText = ProgramEventTextPreference.FirstNonEmpty(cell.Outline);
+        var extendedText = ProgramEventTextPreference.FirstNonEmpty(cell.Detail);
         var key = ProjectedEventKey.FromDb(e);
         return new ProjectedProgramEvent
         {
@@ -176,15 +176,4 @@ public sealed class DbProgramEventSource : IProgramEventSource
             }
         });
     }
-
-    private static string FirstNonEmpty(params string?[] values)
-    {
-        foreach (var value in values)
-        {
-            var text = (value ?? string.Empty).Trim();
-            if (text.Length > 0) return text;
-        }
-        return string.Empty;
-    }
-
 }

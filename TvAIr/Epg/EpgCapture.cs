@@ -1783,7 +1783,7 @@ public sealed class EpgCapture
         bool preTuneKeepWorkerUntilSafetyCeiling = false,
         PreRecordProbeExecutionContract? preRecordExecutionContract = null)
     {
-        var exe = ResolveTvAIrEpgRecPath();
+        var exe = TvAIrWorkerExecutableLocator.Resolve();
         if (string.IsNullOrWhiteSpace(exe) || !File.Exists(exe))
         {
             return new EpgWorkerLaunchResult(false, 0, "TvAIrEpgRec.exe が見つかりません。", null, null, null);
@@ -1940,18 +1940,6 @@ public sealed class EpgCapture
             if (File.Exists(candidate)) return candidate;
         }
         return bonDriverFileName;
-    }
-
-    private static string? ResolveTvAIrEpgRecPath()
-    {
-        var candidates = new[]
-        {
-            Path.Combine(AppContext.BaseDirectory, "TvAIrEpgRec.exe"),
-            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "TvAIrEpgRec", "TvAIrEpgRec.exe")),
-            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "TvAIrEpgRec", "bin", "Release", "net8.0-windows", "TvAIrEpgRec.exe")),
-            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "TvAIrEpgRec", "bin", "Debug", "net8.0-windows", "TvAIrEpgRec.exe")),
-        };
-        return candidates.FirstOrDefault(File.Exists);
     }
 
     private void RequestTvAIrEpgRecStopSignalOnly(EpgWorkerLaunchResult launch, string workerName, TsGroup group, string reason)
@@ -4259,7 +4247,7 @@ public sealed class EpgCapture
             {
                 Log("EPG_VERSION_SWITCH_SECTION_IGNORED", $"TS{group.TsId}",
                     $"purpose={purpose} group={group.Group} ignoredSections={epg.IgnoredVersionSwitchEitSectionCount} ignoredBasicSchedule={epg.IgnoredBasicScheduleVersionSwitchEitSectionCount} " +
-                    $"snapshot=first_current_version_per_service_table action=defer_new_version_to_next_capture " +
+                    $"snapshot=current_successor_version_per_service_table action=reject_unordered_version_keep_retirement_blocked " +
                     $"rule=eit_capture_snapshot_version_contract");
             }
 
@@ -4443,7 +4431,7 @@ public sealed class EpgCapture
                 $"result=RAW_COMMITTED purpose={purpose} imported={upsertedCount} action=resume_promotion_without_epg_rewrite rule=epg_import_commit_contract");
             if (staleStats.RetiredEvents.Count > 0)
                 Log("EPG_AUTHORITY_RESERVATION_RECONCILE", $"TS{group.TsId}",
-                    $"result=OK purpose={purpose} group={group.Group} retiredEvents={staleStats.RetiredEvents.Count} removedScheduledKeyword={retiredKeywordReservations} source=common_allocation_route rule=epg_authority_reservation_reconcile_contract");
+                    $"result=OK purpose={purpose} group={group.Group} retiredEvents={staleStats.RetiredEvents.Count} removedScheduledEventReservations={retiredKeywordReservations} source=common_allocation_route rule=epg_authority_reservation_reconcile_contract");
 
 #if TVAIR_DEVELOPER_DIAGNOSTICS
             if (rawEvents.Count > 0)
@@ -4521,7 +4509,7 @@ public sealed class EpgCapture
             Log("EPG_STALE_EVENT_RETIRE_CONTRACT", $"TS{group.TsId}",
                 $"result={(staleRetireEligible ? "OK" : "SKIPPED_INCOMPLETE_CAPTURE")} purpose={purpose} group={group.Group} services={staleStats.Services} capturedIncoming={rawEvents.Count} basicScheduleAuthorityIncoming={staleAuthorityEvents.Count} retireIncoming={staleStats.IncomingEvents} deleted={staleStats.DeletedRows} " +
                 $"authoritySids=[{string.Join(",", staleAuthoritySidSet.OrderBy(x => x))}] nonAuthorityObservedSids=[{string.Join(",", nonAuthorityObservedSids)}] scopeStart={staleScopeStart} scopeEnd={staleScopeEnd} blockReasons=[{string.Join(",", staleRetireBlockReasons)}] incompleteSectionSample=[{string.Join(",", incompleteSectionSample)}] " +
-                $"policy=delete_only_overlapping_current_authoritative_basic_schedule_event authorityTables=0x50-0x57 preserveAuthority=basic_schedule_identity_only supplementaryTables=0x4E,0x58-0x5F supplementaryExistenceVeto=none otherScheduleExistenceVeto=none retiredKeyword={retiredKeywordReservations} upsertPartialCapture=allowed titleSynthesis=none bodyToTitlePromotion=none reservationTitleBorrow=none startupDbClear=none dbSchemaMutation=none rule=release_contract");
+                $"policy=delete_only_overlapping_current_authoritative_basic_schedule_event authorityTables=0x50-0x57 preserveAuthority=basic_schedule_identity_only supplementaryTables=0x4E,0x58-0x5F supplementaryExistenceVeto=none otherScheduleExistenceVeto=none retiredEventReservations={retiredKeywordReservations} upsertPartialCapture=allowed titleSynthesis=none bodyToTitlePromotion=none reservationTitleBorrow=none startupDbClear=none dbSchemaMutation=none rule=release_contract");
 
             var normalizedTitlePresentCount = rawEvents.Count(e => !string.IsNullOrWhiteSpace(e.Title));
             var normalizedTitleBlankCount = Math.Max(0, rawEvents.Count - normalizedTitlePresentCount);
@@ -5380,10 +5368,10 @@ public sealed class EpgCapture
 
             var beforeExt = canonical.RawExtendedEventDescriptorHex;
             var beforeLoop = canonical.RawDescriptorLoopHex;
-            canonical.RawExtendedEventDescriptorHex = MergeRawHex(canonical.RawExtendedEventDescriptorHex, body.RawExtendedEventDescriptorHex);
-            canonical.RawDescriptorLoopHex = MergeRawHex(canonical.RawDescriptorLoopHex, body.RawDescriptorLoopHex);
-            canonical.RawContentDescriptorHex = MergeRawHex(canonical.RawContentDescriptorHex, body.RawContentDescriptorHex);
-            canonical.RawShortEventDescriptorHex = MergeRawHex(canonical.RawShortEventDescriptorHex, title.RawShortEventDescriptorHex);
+            canonical.RawExtendedEventDescriptorHex = RawEitDescriptorHex.Merge(canonical.RawExtendedEventDescriptorHex, body.RawExtendedEventDescriptorHex);
+            canonical.RawDescriptorLoopHex = RawEitDescriptorHex.Merge(canonical.RawDescriptorLoopHex, body.RawDescriptorLoopHex);
+            canonical.RawContentDescriptorHex = RawEitDescriptorHex.Merge(canonical.RawContentDescriptorHex, body.RawContentDescriptorHex);
+            canonical.RawShortEventDescriptorHex = RawEitDescriptorHex.Merge(canonical.RawShortEventDescriptorHex, title.RawShortEventDescriptorHex);
             if (canonical.RawDescriptorLoopHex == beforeLoop)
             {
                 // no-op marker only for the audit counters below
@@ -5504,57 +5492,17 @@ public sealed class EpgCapture
             VersionNumber = shortDescriptorOnlyDonor ? body.VersionNumber : title.VersionNumber,
             RawDescriptorLoopHex = shortDescriptorOnlyDonor
                 ? body.RawDescriptorLoopHex
-                : MergeRawHex(title.RawDescriptorLoopHex, body.RawDescriptorLoopHex),
+                : RawEitDescriptorHex.Merge(title.RawDescriptorLoopHex, body.RawDescriptorLoopHex),
             RawShortEventDescriptorHex = title.RawShortEventDescriptorHex,
             RawExtendedEventDescriptorHex = body.RawExtendedEventDescriptorHex,
             RawContentDescriptorHex = shortDescriptorOnlyDonor
                 ? body.RawContentDescriptorHex
-                : MergeRawHex(title.RawContentDescriptorHex, body.RawContentDescriptorHex),
+                : RawEitDescriptorHex.Merge(title.RawContentDescriptorHex, body.RawContentDescriptorHex),
             DurationSeconds = body.DurationSeconds,
             Start = body.Start,
             End = body.End,
             UpdatedAt = body.UpdatedAt
         };
-    }
-
-    private static string MergeRawHex(string? left, string? right)
-    {
-        if (string.IsNullOrWhiteSpace(left)) return NormalizeRawHexSequence(right);
-        if (string.IsNullOrWhiteSpace(right)) return NormalizeRawHexSequence(left);
-
-        var tokens = new List<string>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        AddRawHexTokens(tokens, seen, left);
-        AddRawHexTokens(tokens, seen, right);
-        return string.Join(";", tokens);
-    }
-
-    private static string NormalizeRawHexSequence(string? raw)
-    {
-        if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
-        var tokens = new List<string>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        AddRawHexTokens(tokens, seen, raw);
-        return string.Join(";", tokens);
-    }
-
-    private static void AddRawHexTokens(List<string> tokens, HashSet<string> seen, string? raw)
-    {
-        if (string.IsNullOrWhiteSpace(raw)) return;
-        foreach (var token in raw.Split(new[] { ';', ',', '|', '\r', '\n', '\t', ' ' }, StringSplitOptions.RemoveEmptyEntries))
-        {
-            var normalized = NormalizeRawHexToken(token);
-            if (normalized.Length == 0) continue;
-            if (seen.Add(normalized)) tokens.Add(normalized);
-        }
-    }
-
-    private static string NormalizeRawHexToken(string? raw)
-    {
-        if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
-        var hex = new string(raw.Where(Uri.IsHexDigit).ToArray()).ToUpperInvariant();
-        if (hex.Length < 2) return string.Empty;
-        return (hex.Length & 1) == 1 ? hex[..^1] : hex;
     }
 
     private void LogStrictTitleBodyCanonicalMergeContract(

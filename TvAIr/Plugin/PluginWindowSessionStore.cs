@@ -459,7 +459,7 @@ public sealed class PluginWindowSessionStore
     public PluginWindowPlacementPersistenceUpdateResult SetPlacementPersistence(string pluginId, string windowDefinitionId, bool rememberPlacement, bool clearSavedPlacement)
     {
         var normalizedPluginId = PluginIdentity.Normalize(pluginId);
-        var normalizedDefinitionId = NormalizeWindowDefinitionId(windowDefinitionId);
+        var normalizedDefinitionId = PluginWindowDefinitionIdentity.Normalize(windowDefinitionId);
         if (string.IsNullOrWhiteSpace(normalizedDefinitionId))
             return new PluginWindowPlacementPersistenceUpdateResult(false, false, false, "invalid_window_definition_id");
 
@@ -493,7 +493,7 @@ public sealed class PluginWindowSessionStore
 
     public PluginWindowPlacementPersistencePolicy? GetPlacementPersistence(string pluginId, string windowDefinitionId)
     {
-        return _placementStore.GetPolicy(PluginIdentity.Normalize(pluginId), NormalizeWindowDefinitionId(windowDefinitionId));
+        return _placementStore.GetPolicy(PluginIdentity.Normalize(pluginId), PluginWindowDefinitionIdentity.Normalize(windowDefinitionId));
     }
 
     private PluginWindowSavedState? GetSavedStateNoLock(string reuseKey)
@@ -549,7 +549,7 @@ public sealed class PluginWindowSessionStore
         => HasPayload(request, keys);
 
     public static string BuildReuseKey(string pluginId, string routeSegment) => $"{PluginIdentity.Normalize(pluginId)}+{NormalizeRoute(routeSegment)}";
-    public static string BuildPlacementPolicyKey(string pluginId, string windowDefinitionId) => $"{PluginIdentity.Normalize(pluginId)}+{NormalizeWindowDefinitionId(windowDefinitionId)}";
+    public static string BuildPlacementPolicyKey(string pluginId, string windowDefinitionId) => $"{PluginIdentity.Normalize(pluginId)}+{PluginWindowDefinitionIdentity.Normalize(windowDefinitionId)}";
 
     private static int ResolveDimension(int requested, int? saved, int fallback)
     {
@@ -565,14 +565,8 @@ public sealed class PluginWindowSessionStore
 
     private static string ResolveWindowDefinitionId(string? value, string routeSegment)
     {
-        var normalized = NormalizeWindowDefinitionId(value);
-        return normalized.Length > 0 ? normalized : NormalizeWindowDefinitionId(routeSegment);
-    }
-
-    private static string NormalizeWindowDefinitionId(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
-        return new string(value.Trim().Where(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_' or '.').ToArray());
+        var normalized = PluginWindowDefinitionIdentity.Normalize(value);
+        return normalized.Length > 0 ? normalized : PluginWindowDefinitionIdentity.Normalize(routeSegment);
     }
 
     private static string NormalizeWindowId(string? value)

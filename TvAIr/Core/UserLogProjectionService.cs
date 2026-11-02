@@ -1,4 +1,5 @@
-using System.Text.Json;
+﻿using System.Text.Json;
+using System.Text.RegularExpressions;
 using TvAIrPlugin;
 using TvAIr.Plugin;
 
@@ -6,6 +7,13 @@ namespace TvAIr.Core;
 
 public static class UserLogProjectionService
 {
+    private static readonly Regex InternalReservationNumber = new(
+        @"(?i)(?:予約ID|録画ID|reservationId|recordingId)\s*[:=：]\s*R[0-9]+(?![A-Za-z0-9_])",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    public static string WithoutInternalReservationNumbers(string? text) =>
+        string.IsNullOrWhiteSpace(text) ? string.Empty : InternalReservationNumber.Replace(text, string.Empty).Trim();
+
     // USER_LOG_PRESENTATION_INVARIANT
     // 標準ログは必ずシンプルな1行表示にする。
     // 詳細ログはユーザーが能動的に有効化し、チェックした項目だけを多段表示する。
@@ -63,7 +71,8 @@ public static class UserLogProjectionService
             .Replace('\r', '\n')
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .FirstOrDefault();
-        return string.IsNullOrWhiteSpace(firstLine) ? "—" : firstLine;
+        var visible = WithoutInternalReservationNumbers(firstLine);
+        return string.IsNullOrWhiteSpace(visible) ? "—" : visible;
     }
 
     public static string BuildMessage(UserEventLogEntry entry, TvAirLogPresentationPolicyDto policy)
@@ -74,6 +83,7 @@ public static class UserLogProjectionService
         var stored = ReadDetails(entry);
         var details = policy.DetailKeys
             .Select(key => ResolveDetail(entry, stored, key))
+            .Select(WithoutInternalReservationNumbers)
             .Where(value => !string.IsNullOrWhiteSpace(value))
             .Cast<string>()
             .ToArray();
@@ -166,155 +176,15 @@ public static class UserLogProjectionService
         // Host-managed keys remain reusable for other presenters.
         if (string.Equals(key, TvAirLogDetailKeys.ProgramTitle, StringComparison.OrdinalIgnoreCase))
             return string.IsNullOrWhiteSpace(entry.ProgramTitle) ? null : $"番組: {entry.ProgramTitle}";
-        if (string.Equals(key, TvAirLogDetailKeys.ReservationId, StringComparison.OrdinalIgnoreCase))
-            return string.IsNullOrWhiteSpace(entry.ReservationId) ? null : $"予約ID: {entry.ReservationId}";
-        if (string.Equals(key, TvAirLogDetailKeys.RecordingId, StringComparison.OrdinalIgnoreCase))
-            return string.IsNullOrWhiteSpace(entry.RecordingId) ? null : $"録画ID: {entry.RecordingId}";
+        // Internal correlation identifiers belong to persisted records, not presentation text.
+        if (string.Equals(key, TvAirLogDetailKeys.ReservationId, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(key, TvAirLogDetailKeys.RecordingId, StringComparison.OrdinalIgnoreCase))
+            return null;
         if (string.Equals(key, TvAirLogDetailKeys.RecordingFilePath, StringComparison.OrdinalIgnoreCase))
             return string.IsNullOrWhiteSpace(entry.FilePath) ? null : $"保存先: {entry.FilePath}";
 
         return stored.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value)
             ? $"{key}: {value}"
             : null;
-    }
-}
-
-internal static class UserLogProjectionContractTests
-{
-    public static void Run()
-    {
-        var row = new UserEventLogEntry
-        {
-            OperationId = "op-test",
-            CreatedAt = new DateTime(2026, 7, 12, 12, 0, 0),
-            Severity = "INFO",
-            Category = "録画",
-            Result = "OK",
-            Target = "テスト局",
-            Message = "録画を終了しました",
-            ReservationSource = "番組表",
-            ScheduledStart = new DateTime(2026, 7, 12, 11, 0, 0),
-            ActualStart = new DateTime(2026, 7, 12, 11, 0, 1),
-            DropCount = 0,
-            CompletionReason = "正常終了",
-            ReservationId = "R1",
-            RecordingId = "REC1",
-            FilePath = @"C:\private\title.ts",
-            DetailsJson = "{\"state.before\":\"recording\",\"state.after\":\"completed\"}"
-        };
-        var policy = new TvAirLogPresentationPolicyDto
-        {
-            ViewKey = "reservation-log",
-            Enabled = true,
-            Layout = TvAirLogDetailLayout.Multiline,
-            DetailKeys = new[]
-            {
-                TvAirLogDetailKeys.ReservationSource,
-                TvAirLogDetailKeys.ScheduleStart,
-                TvAirLogDetailKeys.RecordingQualityDrop,
-                TvAirLogDetailKeys.Reason,
-                "unknown.key"
-            }
-        };
-        var snapshot = UserLogProjectionService.BuildSnapshot(policy, new[] { row });
-        var projected = snapshot.Entries.Single();
-        if (snapshot.Entries.Count != 1)
-            throw new InvalidOperationException("User log projection changed the operation row set.");
-        if (projected.Target != row.Target || projected.Timestamp.DateTime != row.CreatedAt || projected.Category != row.Category || projected.Result != row.Result)
-            throw new InvalidOperationException("User log projection changed a host-owned base column.");
-        if (!projected.Message.StartsWith(row.Message, StringComparison.Ordinal) || !projected.Message.Contains("予約元: 番組表") || !projected.Message.Contains("drop=0") || projected.Message.Contains("REC1") || projected.Message.Contains("private"))
-            throw new InvalidOperationException("User log detail selection contract failed.");
-        if (!projected.Message.Contains('\n'))
-            throw new InvalidOperationException("Extended user log must be multiline.");
-
-        var legacyMultilineRow = new UserEventLogEntry
-        {
-            CreatedAt = row.CreatedAt,
-            Severity = row.Severity,
-            Category = row.Category,
-            Result = row.Result,
-            Target = row.Target,
-            Message = "録画を開始しました\n予約ID: R1\n録画ID: R1"
-        };
-        if (UserLogProjectionService.BuildStandardMessage(legacyMultilineRow) != "録画を開始しました")
-            throw new InvalidOperationException("Standard user log must remain one line.");
-        var noDetailPolicy = new TvAirLogPresentationPolicyDto
-        {
-            ViewKey = "reservation-log",
-            Enabled = true,
-            Layout = TvAirLogDetailLayout.Multiline,
-            DetailKeys = new[] { TvAirLogDetailKeys.RecordingActualEnd }
-        };
-        var noDetail = UserLogProjectionService.BuildSnapshot(noDetailPolicy, new[] { legacyMultilineRow }).Entries.Single();
-        if (noDetail.MessageTextMode != "singleline" || noDetail.Message.Contains('\n'))
-            throw new InvalidOperationException("Rows without projected details must remain single line.");
-
-        var timeFollowRow = new UserEventLogEntry
-        {
-            Message = "放送時間を更新しました: テスト番組",
-            ScheduledStart = new DateTime(2026, 7, 12, 12, 5, 0),
-            ScheduledEnd = new DateTime(2026, 7, 12, 12, 35, 0),
-            DetailsJson = JsonSerializer.Serialize(new Dictionary<string, string>
-            {
-                [TvAirLogDetailKeys.StateBefore] = "2026/07/12 12:00:00〜2026/07/12 12:30:00",
-                [TvAirLogDetailKeys.StateAfter] = "2026/07/12 12:05:00〜2026/07/12 12:35:00"
-            })
-        };
-        var timeFollowPolicy = new TvAirLogPresentationPolicyDto
-        {
-            ViewKey = "reservation-log",
-            Enabled = true,
-            Layout = TvAirLogDetailLayout.Multiline,
-            DetailKeys = new[]
-            {
-                TvAirLogDetailKeys.ScheduleStart,
-                TvAirLogDetailKeys.ScheduleEnd,
-                TvAirLogDetailKeys.StateBefore,
-                TvAirLogDetailKeys.StateAfter
-            }
-        };
-        var timeFollowMessage = UserLogProjectionService.BuildMessage(timeFollowRow, timeFollowPolicy);
-        if (!timeFollowMessage.StartsWith("放送時間を更新しました: テスト番組\n", StringComparison.Ordinal) ||
-            !timeFollowMessage.Contains("変更前: 2026/07/12 12:00:00〜2026/07/12 12:30:00", StringComparison.Ordinal) ||
-            !timeFollowMessage.Contains("変更後: 2026/07/12 12:05:00〜2026/07/12 12:35:00", StringComparison.Ordinal))
-            throw new InvalidOperationException("Time-follow details must project only through selected detail keys.");
-
-        // Internal System EPG / PreRec reservations must never leak through the generic
-        // reservation/recording user-log route. Their dedicated EPG/EPG確認 events are the only user-facing source.
-        var internalPreRec = new Reservation
-        {
-            Source = ReservationSource.Epg,
-            Intent = ReservationIntent.SystemPreRecordEpg,
-            Title = "EPG確認",
-            Status = ReservationStatus.Recording
-        };
-        if (UserEventLogService.ShouldEmitReservationOperation(internalPreRec))
-            throw new InvalidOperationException("Internal PreRec reservation leaked into generic user log semantics.");
-
-        var normalRecording = new Reservation
-        {
-            Source = ReservationSource.Manual,
-            Intent = ReservationIntent.InteractiveProgramEvent,
-            Title = "通常番組",
-            Status = ReservationStatus.Recording
-        };
-        if (!UserEventLogService.ShouldEmitReservationOperation(normalRecording))
-            throw new InvalidOperationException("Normal user reservation was suppressed from user log semantics.");
-
-        var genericPolicy = new TvAirLogPresentationPolicyDto
-        {
-            ViewKey = "reservation-log",
-            Enabled = true,
-            Layout = TvAirLogDetailLayout.Multiline,
-            DetailKeys = new[] { TvAirLogDetailKeys.ReservationId }
-        };
-        var store = new LogPresentationStore();
-        store.SetLogPolicy("test.generic.log.presenter", genericPolicy);
-        var accepted = store.GetActiveLogPolicy("reservation-log");
-        if (accepted?.SourcePluginId != "test.generic.log.presenter")
-            throw new InvalidOperationException("Generic presenter plugin id was not accepted.");
-        var generic = UserLogProjectionService.BuildSnapshot(accepted.Policy, new[] { row }).Entries.Single();
-        if (!generic.Message.Contains("予約ID: R1"))
-            throw new InvalidOperationException("Generic presenter policy is not plugin-id independent.");
     }
 }

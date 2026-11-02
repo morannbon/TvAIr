@@ -1,4 +1,4 @@
-using TvAIr.Epg.Shared;
+﻿using TvAIr.Epg.Shared;
 
 namespace TvAIr.Epg;
 
@@ -168,10 +168,9 @@ internal sealed class EitSectionReader
             return false;
         }
 
-        // A single capture must represent one coherent current-version snapshot per
-        // network/transport/service/table. If the broadcaster switches version during this capture,
-        // do not merge old/new descriptors into the same event accumulator. The
-        // first accepted current version remains authoritative until the next capture.
+        // One current generation per service/subtable owns both event projection and
+        // section completeness. Replace an observed successor instead of freezing the
+        // first version for the entire capture.
         var snapshotKey = (networkId, transportStreamId, serviceId, tableId);
         if (!captureSnapshotVersions.TryGetValue(snapshotKey, out var snapshotVersion))
         {
@@ -179,9 +178,17 @@ internal sealed class EitSectionReader
         }
         else if (snapshotVersion != versionNumber)
         {
-            ignoredVersionSwitchEitSectionCount++;
-            if (EitTableContract.IsActualBasicSchedule(tableId)) ignoredBasicScheduleVersionSwitchEitSectionCount++;
-            return false;
+            // ARIB STD-B10: a changed subtable increments its five-bit version,
+            // including 31 -> 0. Do not mix contributions from different versions.
+            // A non-successor cannot establish ordering; keep retirement blocked.
+            if (versionNumber != ((snapshotVersion + 1) & 0x1F))
+            {
+                ignoredVersionSwitchEitSectionCount++;
+                if (EitTableContract.IsActualBasicSchedule(tableId)) ignoredBasicScheduleVersionSwitchEitSectionCount++;
+                return false;
+            }
+            ReplaceSnapshotSubtable(networkId, transportStreamId, serviceId, tableId);
+            captureSnapshotVersions[snapshotKey] = versionNumber;
         }
 
         var trackResult = TrackSection(networkId, transportStreamId, serviceId, tableId, versionNumber, sectionNumber, lastSectionNumber, segmentLastSectionNumber, lastTableId);
@@ -267,18 +274,18 @@ internal sealed class EitSectionReader
                 {
                     foundShort = true;
                     shortDescriptorCount++;
-                    rawShortEventDescriptorHex = MergeRawHex(rawShortEventDescriptorHex, Hex(section.Slice(descriptorPos, 2 + len)));
+                    rawShortEventDescriptorHex = RawEitDescriptorHex.Merge(rawShortEventDescriptorHex, Hex(section.Slice(descriptorPos, 2 + len)));
                     var decodedShort = AddShortDecode(section, networkId, transportStreamId, serviceId, eventId, tableId, sectionNumber, lastSectionNumber, descLoopLength, descriptorPos, len);
                     EnsureEvent(networkId, transportStreamId, serviceId, eventId, tableId, sectionNumber, versionNumber, start, duration, decodedShort.Title, decodedShort.Text, string.Empty, genreCodes, decodedShort.DecodeRoute, decodedShort.DecodeStatus, decodedShort.BoundaryStatus, descriptorLoopHex, rawShortEventDescriptorHex, rawExtendedEventDescriptorHex, rawContentDescriptorHex);
                 }
                 else if (tag == 0x4E)
                 {
-                    rawExtendedEventDescriptorHex = MergeRawHex(rawExtendedEventDescriptorHex, Hex(section.Slice(descriptorPos, 2 + len)));
+                    rawExtendedEventDescriptorHex = RawEitDescriptorHex.Merge(rawExtendedEventDescriptorHex, Hex(section.Slice(descriptorPos, 2 + len)));
                     EnsureEvent(networkId, transportStreamId, serviceId, eventId, tableId, sectionNumber, versionNumber, start, duration, string.Empty, string.Empty, string.Empty, genreCodes, "none", "not_attempted", "extended_descriptor_raw_only", descriptorLoopHex, rawShortEventDescriptorHex, rawExtendedEventDescriptorHex, rawContentDescriptorHex);
                 }
                 else if (tag == 0x54)
                 {
-                    rawContentDescriptorHex = MergeRawHex(rawContentDescriptorHex, Hex(section.Slice(descriptorPos, 2 + len)));
+                    rawContentDescriptorHex = RawEitDescriptorHex.Merge(rawContentDescriptorHex, Hex(section.Slice(descriptorPos, 2 + len)));
                     genreCodes = MergeGenreCodes(genreCodes, ReadContentDescriptorGenreCodes(section, descriptorPos, len));
                     if (!string.IsNullOrEmpty(genreCodes))
                     {
@@ -342,7 +349,7 @@ internal sealed class EitSectionReader
         static int RawBytes(string raw) => string.IsNullOrWhiteSpace(raw)
             ? 0
             : raw.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries)
-                .Select(x => NormalizeRawHexToken(x).Length / 2)
+                .Select(x => RawEitDescriptorHex.NormalizeToken(x).Length / 2)
                 .Sum();
 
         return events.Values
@@ -446,6 +453,24 @@ internal sealed class EitSectionReader
             .ToArray();
     }
 
+    private void ReplaceSnapshotSubtable(ushort nid, ushort tsid, ushort sid, byte table)
+    {
+        // Rebuild from retained raw sections, through the same decoder. Removing only
+        // events would leave descriptors contributed by the retired generation behind.
+        var retained = rawSections.Where(s => s.NetworkId != nid || s.TransportStreamId != tsid
+            || s.ServiceId != sid || s.TableId != table).Select(s => s.Section).ToArray();
+        sections.Clear(); captureSnapshotVersions.Clear(); events.Clear(); rawSections.Clear();
+        eventObservations.Clear(); rejectedEventHeaders.Clear();
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+        titleDecodes.Clear();
+#endif
+        rejectedEventHeaderCount = rejectedBasicScheduleEventHeaderCount = 0;
+        toleratedSameVersionScheduleMetadataDriftCount = 0;
+        rawSectionShortResolverApplied = commonResolverApplied = false;
+        commonEventCount = commonResolvedCount = commonUnresolvedCount = 0;
+        foreach (var section in retained) TryRead(section);
+    }
+
     private DecodedShortEvent AddShortDecode(ReadOnlySpan<byte> section, ushort nid, ushort tsid, ushort sid, ushort eid, byte tableId, byte sectionNumber, byte lastSectionNumber, int descriptorLoopLength, int descriptorOffset, int descriptorLength)
     {
 #if TVAIR_DEVELOPER_DIAGNOSTICS
@@ -547,7 +572,7 @@ internal sealed class EitSectionReader
                 foundShort = true;
                 shortDescriptorCount++;
                 descriptorRecoveryCount++;
-                rawShortEventDescriptorHex = MergeRawHex(rawShortEventDescriptorHex, Hex(section.Slice(pos, 2 + len)));
+                rawShortEventDescriptorHex = RawEitDescriptorHex.Merge(rawShortEventDescriptorHex, Hex(section.Slice(pos, 2 + len)));
                 var decodedShort = AddShortDecode(section, nid, tsid, sid, eid, tableId, sectionNumber, lastSectionNumber, descriptorLoopLength, pos, len);
                 EnsureEvent(nid, tsid, sid, eid, tableId, sectionNumber, versionNumber, start, durationSeconds, decodedShort.Title, decodedShort.Text, string.Empty, genreCodes, decodedShort.DecodeRoute, decodedShort.DecodeStatus, "descriptor_tail_recovered_0x4D", descriptorLoopHex, rawShortEventDescriptorHex, rawExtendedEventDescriptorHex, rawContentDescriptorHex);
                 pos = next;
@@ -557,7 +582,7 @@ internal sealed class EitSectionReader
             if (tag == 0x4E && IsPlausibleExtendedEventDescriptor(section, pos, len))
             {
                 descriptorRecoveryCount++;
-                rawExtendedEventDescriptorHex = MergeRawHex(rawExtendedEventDescriptorHex, Hex(section.Slice(pos, 2 + len)));
+                rawExtendedEventDescriptorHex = RawEitDescriptorHex.Merge(rawExtendedEventDescriptorHex, Hex(section.Slice(pos, 2 + len)));
                 EnsureEvent(nid, tsid, sid, eid, tableId, sectionNumber, versionNumber, start, durationSeconds, string.Empty, string.Empty, string.Empty, genreCodes, "none", "not_attempted", "descriptor_tail_recovered_0x4E", descriptorLoopHex, rawShortEventDescriptorHex, rawExtendedEventDescriptorHex, rawContentDescriptorHex);
                 pos = next;
                 continue;
@@ -734,10 +759,10 @@ internal sealed class EitSectionReader
         {
             ev.Description = description ?? string.Empty;
         }
-        ev.RawDescriptorLoopHex = MergeRawHex(ev.RawDescriptorLoopHex, rawDescriptorLoopHex);
-        ev.RawShortEventDescriptorHex = MergeRawHex(ev.RawShortEventDescriptorHex, rawShortEventDescriptorHex);
-        ev.RawExtendedEventDescriptorHex = MergeRawHex(ev.RawExtendedEventDescriptorHex, rawExtendedEventDescriptorHex);
-        ev.RawContentDescriptorHex = MergeRawHex(ev.RawContentDescriptorHex, rawContentDescriptorHex);
+        ev.RawDescriptorLoopHex = RawEitDescriptorHex.Merge(ev.RawDescriptorLoopHex, rawDescriptorLoopHex);
+        ev.RawShortEventDescriptorHex = RawEitDescriptorHex.Merge(ev.RawShortEventDescriptorHex, rawShortEventDescriptorHex);
+        ev.RawExtendedEventDescriptorHex = RawEitDescriptorHex.Merge(ev.RawExtendedEventDescriptorHex, rawExtendedEventDescriptorHex);
+        ev.RawContentDescriptorHex = RawEitDescriptorHex.Merge(ev.RawContentDescriptorHex, rawContentDescriptorHex);
         var normalizedGenreCodes = NormalizeGenreCodes(genreCodes);
         if (!string.IsNullOrEmpty(normalizedGenreCodes))
         {
@@ -769,8 +794,8 @@ internal sealed class EitSectionReader
                 continue;
             }
 
-            ev.RawShortEventDescriptorHex = MergeRawHex(ev.RawShortEventDescriptorHex, hit.RawShortEventDescriptorHex);
-            ev.RawDescriptorLoopHex = MergeRawHex(ev.RawDescriptorLoopHex, hit.RawDescriptorLoopHex);
+            ev.RawShortEventDescriptorHex = RawEitDescriptorHex.Merge(ev.RawShortEventDescriptorHex, hit.RawShortEventDescriptorHex);
+            ev.RawDescriptorLoopHex = RawEitDescriptorHex.Merge(ev.RawDescriptorLoopHex, hit.RawDescriptorLoopHex);
             if (!string.IsNullOrEmpty(hit.DecodedTitle) || string.IsNullOrEmpty(ev.Title))
             {
                 ev.Title = hit.DecodedTitle;
@@ -947,9 +972,9 @@ internal sealed class EitSectionReader
             target.TitleDecodeRoute = "event_group_common:" + donor.TitleDecodeRoute;
             target.TitleDecodeStatus = donor.TitleDecodeStatus;
             target.BoundaryStatus = "common_resolved";
-            target.RawShortEventDescriptorHex = MergeRawHex(target.RawShortEventDescriptorHex, donor.RawShortEventDescriptorHex);
-            target.RawExtendedEventDescriptorHex = MergeRawHex(target.RawExtendedEventDescriptorHex, donor.RawExtendedEventDescriptorHex);
-            target.RawContentDescriptorHex = MergeRawHex(target.RawContentDescriptorHex, donor.RawContentDescriptorHex);
+            target.RawShortEventDescriptorHex = RawEitDescriptorHex.Merge(target.RawShortEventDescriptorHex, donor.RawShortEventDescriptorHex);
+            target.RawExtendedEventDescriptorHex = RawEitDescriptorHex.Merge(target.RawExtendedEventDescriptorHex, donor.RawExtendedEventDescriptorHex);
+            target.RawContentDescriptorHex = RawEitDescriptorHex.Merge(target.RawContentDescriptorHex, donor.RawContentDescriptorHex);
             commonResolvedCount++;
         }
     }
@@ -971,47 +996,6 @@ internal sealed class EitSectionReader
     }
 
     private static string Hex(ReadOnlySpan<byte> bytes) => bytes.Length == 0 ? string.Empty : Convert.ToHexString(bytes);
-
-    private static string MergeRawHex(string? left, string? right)
-    {
-        if (string.IsNullOrWhiteSpace(left)) return NormalizeRawHexSequence(right);
-        if (string.IsNullOrWhiteSpace(right)) return NormalizeRawHexSequence(left);
-
-        var tokens = new List<string>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        AddRawHexTokens(tokens, seen, left);
-        AddRawHexTokens(tokens, seen, right);
-        return string.Join(";", tokens);
-    }
-
-    private static string NormalizeRawHexSequence(string? raw)
-    {
-        if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
-        var tokens = new List<string>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        AddRawHexTokens(tokens, seen, raw);
-        return string.Join(";", tokens);
-    }
-
-    private static void AddRawHexTokens(List<string> tokens, HashSet<string> seen, string? raw)
-    {
-        if (string.IsNullOrWhiteSpace(raw)) return;
-        foreach (var token in raw.Split(new[] { ';', ',', '|', '\r', '\n', '\t', ' ' }, StringSplitOptions.RemoveEmptyEntries))
-        {
-            var normalized = NormalizeRawHexToken(token);
-            if (normalized.Length == 0) continue;
-            if (seen.Add(normalized)) tokens.Add(normalized);
-        }
-    }
-
-    private static string NormalizeRawHexToken(string? raw)
-    {
-        if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
-        var hex = new string(raw.Where(Uri.IsHexDigit).ToArray()).ToUpperInvariant();
-        if (hex.Length < 2) return string.Empty;
-        return (hex.Length & 1) == 1 ? hex[..^1] : hex;
-    }
-
 
     private static string ReadContentDescriptorGenreCodes(ReadOnlySpan<byte> section, int descriptorOffset, int descriptorLength)
     {

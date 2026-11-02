@@ -1213,11 +1213,12 @@ private readonly ReservationStore _store;
 
             var fi = new FileInfo(path);
             var observedLastGrowth = session.LastRecordingFileGrowthAt;
-            var fileLastWrite = fi.LastWriteTime;
+            var fileLastWrite = session.RecordingFiles.Max(file => File.GetLastWriteTime(file));
             var effectiveLastGrowth = fileLastWrite > observedLastGrowth ? fileLastWrite : observedLastGrowth;
             var reachedPlannedEnd = effectiveLastGrowth >= evidenceExpectedEnd.AddSeconds(-90);
-            var sizeViable = fi.Length >= minViableBytes;
-            var summary = $"file={Path.GetFileName(path)} bytes={fi.Length} lastWrite={fileLastWrite:yyyy-MM-dd HH:mm:ss} " +
+            var totalBytes = session.RecordingFiles.Sum(file => new FileInfo(file).Length);
+            var sizeViable = totalBytes >= minViableBytes;
+            var summary = $"file={Path.GetFileName(path)} bytes={totalBytes} lastWrite={fileLastWrite:yyyy-MM-dd HH:mm:ss} " +
                 $"sessionLastGrowth={observedLastGrowth:yyyy-MM-dd HH:mm:ss} effectiveLastGrowth={effectiveLastGrowth:yyyy-MM-dd HH:mm:ss} " +
                 $"plannedEnd={session.PlannedEndTime:yyyy-MM-dd HH:mm:ss} evidenceExpectedEnd={evidenceExpectedEnd:yyyy-MM-dd HH:mm:ss} expectedEndSource=planned_end reachedEnd={reachedPlannedEnd} expectedSeconds={(int)expectedSeconds} " +
                 $"minViableBytes={minViableBytes} sizeViable={sizeViable}";
@@ -1245,7 +1246,8 @@ private readonly ReservationStore _store;
     {
         try
         {
-            if (!TvTestRecordingDirectoryResolver.TryResolve(_ini.TvTestExecutablePath, out var directory, out _))
+            var knownOutputs = _recordingResults.Files.KnownOutputPaths("R" + r.Id);
+            if (!TvTestRecordingDirectoryResolver.TryResolve(_ini.TvTestExecutablePath, out var directory, out _) && knownOutputs.Count == 0)
                 return PastEndedRecordingFileEvidence.NotCompleted("folder_unresolved");
 
             // INTERRUPTED_RECORDING_FILE_LINEAGE_TIME_INVARIANT:
@@ -1254,8 +1256,8 @@ private readonly ReservationStore _store;
             // ここだけ Immediate/Program の RecordingStartedAt を再計算すると、(1)/(2)... 系列を見失う。
             var namingPolicy = ResolveRecordingWorkerFileNameTimePolicy(r, r.RecordingStartedAt ?? r.StartTime);
             var expectedName = BuildRecordingWorkerFileName(r, namingPolicy.BaseTime).FileName;
-            var candidates = new List<string>();
-            if (Directory.Exists(directory))
+            var candidates = knownOutputs.ToList();
+            if (candidates.Count == 0 && Directory.Exists(directory))
             {
                 // INTERRUPTED_RECORDING_FILE_LINEAGE_INVARIANT:
                 // 自動再開は同じTVTest命名正本から (1)/(2)... を生成するため、exactだけを優先すると
@@ -1268,6 +1270,9 @@ private readonly ReservationStore _store;
 
             if (candidates.Count == 0)
                 return PastEndedRecordingFileEvidence.NotCompleted($"no_file expected={expectedName}");
+
+            if (knownOutputs.Any(path => !File.Exists(path)))
+                return PastEndedRecordingFileEvidence.NotCompleted("declared_physical_file_missing");
 
             var bestPath = candidates
                 .Select(path =>
@@ -1295,9 +1300,10 @@ private readonly ReservationStore _store;
             var expectedSeconds = Math.Max(1, (r.EndTime - r.StartTime).TotalSeconds);
             var reachedEndByLastWrite = bestPath.Length > 0 && bestPath.LastWriteTime >= r.EndTime.AddSeconds(-90);
             var minViableBytes = CalculateMinimumViableCompletedRecordingBytes(expectedSeconds);
-            var sizeViable = bestPath.Length >= minViableBytes;
+            var totalBytes = knownOutputs.Count == 0 ? bestPath.Length : knownOutputs.Sum(path => new FileInfo(path).Length);
+            var sizeViable = totalBytes >= minViableBytes;
             var likelyCompleted = reachedEndByLastWrite && sizeViable;
-            var summary = $"file={Path.GetFileName(bestPath.Path)} bytes={bestPath.Length} lastWrite={bestPath.LastWriteTime:yyyy-MM-dd HH:mm:ss} reachedEnd={reachedEndByLastWrite} minViableBytes={minViableBytes} sizeViable={sizeViable}";
+            var summary = $"file={Path.GetFileName(bestPath.Path)} bytes={totalBytes} lastWrite={bestPath.LastWriteTime:yyyy-MM-dd HH:mm:ss} reachedEnd={reachedEndByLastWrite} minViableBytes={minViableBytes} sizeViable={sizeViable}";
             return likelyCompleted
                 ? PastEndedRecordingFileEvidence.Completed(summary)
                 : PastEndedRecordingFileEvidence.NotCompleted(summary);
@@ -1477,7 +1483,7 @@ private readonly ReservationStore _store;
         var result = new List<StartupRecordingWorkerCandidate>();
         try
         {
-            var expectedExe = ResolveTvAIrEpgRecPath();
+            var expectedExe = TvAIrWorkerExecutableLocator.Resolve();
             var workDir = Path.Combine(AppContext.BaseDirectory, "runtime", "tvairepgrec-production-recording");
             var jobFiles = Directory.Exists(workDir)
                 ? Directory.EnumerateFiles(workDir, "record_job_R*.json").Select(Path.GetFullPath).ToList()
@@ -2644,8 +2650,13 @@ private readonly ReservationStore _store;
     private static bool IsPreRecordEpgEntry(Reservation r)
         => r.SourceRuleId.HasValue && ReservationIntentContract.IsPreRecordEpg(r);
 
+    internal IReadOnlySet<int> GetActivePreRecordParentIds()
+        => _activePreRecordEpgEntries.Keys.Select(id => _store.GetById(id))
+            .Where(r => r?.SourceRuleId is not null).Select(r => r!.SourceRuleId!.Value).ToHashSet();
+
     private Task RunDuePreRecordEpgEntriesAsync(DateTime now, CancellationToken ct)
     {
+        if (!SystemEpgResponsibilityPlanService.IsPreRecordEnabled(_ini)) return Task.CompletedTask;
         var candidates = _store.GetByStatus(ReservationStatus.Scheduled)
             .Where(r => r.Source == ReservationSource.Epg)
             .Where(r => r.IsEnabled)
@@ -2679,6 +2690,7 @@ private readonly ReservationStore _store;
         foreach (var originalPlan in plans.OrderBy(p => p.Epg.StartTime).ThenBy(p => p.DueStart).ThenBy(p => p.Epg.Id))
         {
             ct.ThrowIfCancellationRequested();
+            if (!SystemEpgResponsibilityPlanService.IsPreRecordEnabled(_ini)) break;
             var schedulerSystemNow = DateTime.Now;
             var schedulerNow = _broadcastTimeReference.GetEffectivePreRecordNow(schedulerSystemNow, out _);
             var probeEnd = schedulerNow.AddSeconds(originalPlan.ProbeCeilingSeconds);
@@ -2709,6 +2721,7 @@ private readonly ReservationStore _store;
 
     private PreRecordEpgPlan? TryBuildPreRecordEpgPlan(Reservation epg, DateTime now)
     {
+        if (!SystemEpgResponsibilityPlanService.IsPreRecordEnabled(_ini)) return null;
         if (epg.EndTime <= now)
         {
             _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
@@ -2833,6 +2846,9 @@ private readonly ReservationStore _store;
         var admissionLeaseHandedOff = false;
         try
         {
+            // A queued launch has not started the worker yet. OFF cancels this
+            // unstarted attempt; already running probes retain their owner lifecycle.
+            if (!SystemEpgResponsibilityPlanService.IsPreRecordEnabled(_ini)) return;
             // PRE_RECORD_EPG_EXECUTION_DEADLINE_INVARIANT:
             // Freeze one execution deadline at the Scheduler -> EpgCapture handoff. The Scheduler no longer
             // creates a second CancelAfter deadline while EpgCapture/worker compute another duration.
@@ -4628,7 +4644,7 @@ private readonly ReservationStore _store;
                 $"TvAIrEpgRec用BonDriverが見つかりません。path={bonDriverPath}");
         }
 
-        var epgRecExe = ResolveTvAIrEpgRecPath();
+        var epgRecExe = TvAIrWorkerExecutableLocator.Resolve();
         if (string.IsNullOrWhiteSpace(epgRecExe) || !File.Exists(epgRecExe))
         {
             return new RecordingWorkerStartResult(false, 0, string.Empty, 0, string.Empty, string.Empty, string.Empty, string.Empty, string.Empty,
@@ -4780,6 +4796,7 @@ private readonly ReservationStore _store;
             bonDriver = lease.BonDriverFileName,
             bonDriverPath,
             tvTestExecutablePath = _ini.TvTestExecutablePath ?? string.Empty,
+            tvTestPluginsDirectory = _ini.TvTestPluginsDirectory,
             outputPath,
             resultPath = responsePath,
             progressPath,
@@ -4791,6 +4808,7 @@ private readonly ReservationStore _store;
             recording = new
             {
                 reservationId = r.Id,
+                recordingFileDeclaration = chainSegments[0].RecordingFileDeclaration,
                 serviceName = r.ServiceName ?? string.Empty,
                 title = r.Title ?? string.Empty,
                 startTime = r.StartTime,
@@ -5469,20 +5487,6 @@ private readonly ReservationStore _store;
     }
 
 
-    private static string? ResolveTvAIrEpgRecPath()
-    {
-        var candidates = new[]
-        {
-            Path.Combine(AppContext.BaseDirectory, "TvAIrEpgRec.exe"),
-            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "TvAIrEpgRec", "TvAIrEpgRec.exe")),
-            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "TvAIrEpgRec", "bin", "Release", "net8.0-windows", "TvAIrEpgRec.exe")),
-            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "TvAIrEpgRec", "bin", "Debug", "net8.0-windows", "TvAIrEpgRec.exe")),
-            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "TvAIrEpgRec", "bin", "Release", "net8.0", "TvAIrEpgRec.exe")),
-            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "TvAIrEpgRec", "bin", "Debug", "net8.0", "TvAIrEpgRec.exe")),
-        };
-        return candidates.FirstOrDefault(File.Exists);
-    }
-
     private static RecordingFileNameTimePolicy ResolveRecordingWorkerFileNameTimePolicy(Reservation r, DateTime actualRecordingStartTime)
     {
         // INTERRUPTED_RECORDING_RECOVERY_FILENAME_INVARIANT:
@@ -5778,7 +5782,7 @@ private readonly ReservationStore _store;
             Did = did,
             BonDriverFileName = bonDriver,
             WorkerProcessId = session.ProcessId,
-            OutputPath = session.RecordingFilePath,
+            OutputPath = session.PlannedRecordingFilePath,
             SegmentStartTime = current.StartTime,
             SegmentEndTime = current.EndTime,
             PlannedEndTime = session.PlannedEndTime,
@@ -6819,11 +6823,13 @@ private readonly ReservationStore _store;
             boundaryExecution.PredecessorStoppingVersion = stoppingVersion;
         }
 
+        var physicalFiles = TvAIr.Storage.RecordingOutputPaths.Read(segment.OutputPath, session.ChainControlPath);
+        var physicalOutputPath = physicalFiles.LastOrDefault() ?? segment.OutputPath;
         var outcome = ReadRecordingWorkerOutcome(segment.ResultPath, segment.RuntimeStatsPath);
         RecordingTsVerifier.VerificationResult? verify = null;
         try
         {
-            verify = await RecordingTsVerifier.VerifyAsync(reservation, segment.OutputPath, "shared_capture_segment_close", _log).ConfigureAwait(false);
+            verify = await VerifyOutputFilesAsync(reservation, physicalFiles, "shared_capture_segment_close").ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -6927,9 +6933,9 @@ private readonly ReservationStore _store;
         }
         catch { }
         RecordingResultUpsertOutcome? upsert = null;
-        try { upsert = _recordingResults.Upsert(result, termination); } catch { }
-        if (upsert is null) return false; // Keep the committed receipt and artifacts for projection retry.
         beforeExternalPublication?.Invoke();
+        try { upsert = StageAndStoreRecordingResult(committed,result,termination); } catch { }
+        if (upsert is null) return false; // Keep the committed receipt and artifacts for projection retry.
         if (upsert == RecordingResultUpsertOutcome.AppliedNewFinalized)
         {
             try
@@ -6937,19 +6943,7 @@ private readonly ReservationStore _store;
                 using var eventScope = _typedEvents.BeginOutboxScope(out var commitEvents);
                 _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{rid}",
                     $"result=READY source={(context.SharedCaptureContinues ? "shared_chain_segment" : "stored_chain_segment")} projection=PluginTypedEvent segmentSinkReleased=True sharedWorkerContinues={context.SharedCaptureContinues} path={SafeValue(result.FilePath)} externalReadAllowed={(result.FileCreated == true && !string.IsNullOrWhiteSpace(result.FilePath) ? "True" : "NoFile")} rule=recording_result_finalized_file_release_contract");
-                _typedEvents.Publish(new TvAirEventDto
-                {
-                    EventType = TvAirEventType.RecordingResultFinalized,
-                    EntityId = $"recording:R{rid}",
-                    EntityVersion = committed.DataVersion,
-                    DataRevision = committed.DataVersion,
-                    ReservationId = $"R{rid}",
-                    ServiceName = committed.ServiceName,
-                    ProgramTitle = committed.Title,
-                    Reservation = PluginTypedEventHub.ToSnapshot(committed),
-                    PluginBindings = _store.GetReservationPluginBindings(rid),
-                    RecordingResult = result
-                });
+                _log.Add("RECORDING_RESULT_PUBLICATION", "Pending", "result=DURABLY_STAGED owner=recording_file_catalog rule=recording_file_publication_contract");
                 commitEvents();
             }
             catch { }
@@ -8002,7 +7996,7 @@ private readonly ReservationStore _store;
             {
                 var fi = new FileInfo(session.RecordingFilePath);
                 exists = true;
-                bytes = fi.Length;
+                bytes = session.RecordingFiles.Sum(path => new FileInfo(path).Length);
             }
         }
         catch (Exception ex)
@@ -8941,6 +8935,9 @@ private readonly ReservationStore _store;
                     $"mode={stopMode} reason=release_contract group={SafeValue(stopGroup)} pid={pid} stopTarget={recorderStopTarget} pt3LockDuringStopWait=False timeoutMs={TvAIrEpgRecStopTimeoutMs}");
 
                 // TvAIrEpgRecへstop signalを送り、既にworker消失を確認した経路では停止要求とKillを重ねない。
+                bool manualStop;
+                lock (_sessionGate) manualStop = _manualStopRequests.Contains(rid);
+                if (manualStop) _recordingResults.Files.MarkManualStop(session.JobPath,session.PlannedRecordingFilePath);
                 physicalStopStarted = true;
                 var recorderStopSucceeded = processAlreadyGone
                     || await TryStopTvAIrEpgRecProcessAsync(session, rid, TvAIrEpgRecStopTimeoutMs).ConfigureAwait(false);
@@ -9011,7 +9008,7 @@ private readonly ReservationStore _store;
                 var verifyReservation = _store.GetById(rid);
                 RecordingTsVerifier.VerificationResult? tsVerification = null;
                 if (verifyReservation is not null && !string.IsNullOrWhiteSpace(session.RecordingFilePath))
-                    tsVerification = await RecordingTsVerifier.VerifyAsync(verifyReservation, session.RecordingFilePath, "after_stop_before_release", _log);
+                    tsVerification = await VerifyOutputFilesAsync(verifyReservation, session.RecordingFiles, "after_stop_before_release");
                 else if (verifyReservation is null)
                     _log.Add("REC_TS_VERIFY", $"R{rid}", $"stage=after_stop_before_release result=SKIP reason=reservation_not_found path={session.RecordingFilePath}");
                 else
@@ -9215,7 +9212,7 @@ private readonly ReservationStore _store;
                     RecordingResultUpsertOutcome? recordingResultOutcome = null;
                     try
                     {
-                        recordingResultOutcome = _recordingResults.Upsert(finalizedResultDto, terminationEvidence);
+                        recordingResultOutcome = StageAndStoreRecordingResult(committedReservation,finalizedResultDto,terminationEvidence);
                         _log.Add("REC_STOP_RESULT_PROJECTION", $"R{rid}",
                             $"target=RecordingResultStore result={recordingResultOutcome.Value} terminalStatusCommitted=True finalStatus={finalStatus} rule=recording_result_projection_contract");
                     }
@@ -9231,21 +9228,9 @@ private readonly ReservationStore _store;
                         {
                             _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{rid}",
                                 $"result=READY source=normal_stop projection=PluginTypedEvent workerReleaseConfirmed=True path={SafeValue(finalizedResultDto.FilePath)} externalReadAllowed={(finalizedResultDto.FileCreated == true && !string.IsNullOrWhiteSpace(finalizedResultDto.FilePath) ? "True" : "NoFile")} rule=recording_result_finalized_file_release_contract");
-                            _typedEvents.Publish(new TvAirEventDto
-                            {
-                                EventType = TvAirEventType.RecordingResultFinalized,
-                                EntityId = $"recording:R{rid}",
-                                EntityVersion = committedReservation.DataVersion,
-                                DataRevision = committedReservation.DataVersion,
-                                ReservationId = $"R{rid}",
-                                ServiceName = committedReservation.ServiceName,
-                                ProgramTitle = committedReservation.Title,
-                                Reservation = PluginTypedEventHub.ToSnapshot(committedReservation),
-                                PluginBindings = _store.GetReservationPluginBindings(rid),
-                                RecordingResult = finalizedResultDto
-                            });
+                            _log.Add("RECORDING_RESULT_PUBLICATION", "Pending", "result=DURABLY_STAGED owner=recording_file_catalog rule=recording_file_publication_contract");
                             _log.Add("REC_STOP_RESULT_PROJECTION", $"R{rid}",
-                                $"target=PluginTypedEvent result=QUEUED terminalStatusCommitted=True finalStatus={finalStatus} source=AppliedNewFinalized rule=recording_result_finalize_once_contract");
+                                $"target=PluginTypedEvent result=PERSISTED_PENDING_FILE_CATALOG terminalStatusCommitted=True finalStatus={finalStatus} source=AppliedNewFinalized rule=recording_result_finalize_once_contract");
                         }
                         catch (Exception projectionEx)
                         {
@@ -9396,6 +9381,27 @@ private readonly ReservationStore _store;
 
 
     // RECORDING_RESULT_FINALIZED_FILE_RELEASE_INVARIANT:
+    private RecordingResultUpsertOutcome StageAndStoreRecordingResult(Reservation reservation,
+        TvAirRecordingResultDto result,RecordingTerminationEvidence evidence)
+    {
+        // Commit termination evidence before the background publisher can observe this result.
+        // A failed save still stages delivery; a crash between save and staging is recovered
+        // from the file catalog plus the committed legacy result.
+        try { return _recordingResults.Upsert(result,evidence); }
+        finally
+        {
+        _recordingResults.Files.StageFinalizedEvent(new TvAirEventDto
+        {
+            EventType=TvAirEventType.RecordingResultFinalized,
+            EntityId="recording:"+result.ReservationId,
+            EntityVersion=reservation.DataVersion,DataRevision=reservation.DataVersion,
+            ReservationId=result.ReservationId,ServiceName=reservation.ServiceName,
+            ProgramTitle=reservation.Title,Reservation=PluginTypedEventHub.ToSnapshot(reservation),
+            PluginBindings=_store.GetReservationPluginBindings(reservation.Id),RecordingResult=result
+        });
+        }
+    }
+
     // RecordingResultFinalized is both the terminal-result notification and the external file-read
     // handoff. For ordinary/exception stop paths, the owned TvAIrEpgRec process must no longer be
     // alive before ResultFinalized=true is persisted or the typed event is published.
@@ -9511,7 +9517,7 @@ private readonly ReservationStore _store;
         RecordingResultUpsertOutcome? recordingResultOutcome = null;
         try
         {
-            recordingResultOutcome = _recordingResults.Upsert(result, evidence);
+            recordingResultOutcome = StageAndStoreRecordingResult(reservation,result,evidence);
             _log.Add("REC_STOP_EXCEPTION_RESULT", $"R{rid}",
                 $"target=RecordingResultStore result={recordingResultOutcome.Value} rule=recording_result_projection_contract");
         }
@@ -9528,18 +9534,7 @@ private readonly ReservationStore _store;
                 using var eventScope = _typedEvents.BeginOutboxScope(out var commitEvents);
                 _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{rid}",
                     $"result=READY source=stop_exception_fallback projection=PluginTypedEvent workerReleaseConfirmed=True path={SafeValue(result.FilePath)} externalReadAllowed={(result.FileCreated == true && !string.IsNullOrWhiteSpace(result.FilePath) ? "True" : "NoFile")} rule=recording_result_finalized_file_release_contract");
-                _typedEvents.Publish(new TvAirEventDto
-                {
-                    EventType = TvAirEventType.RecordingResultFinalized,
-                    EntityId = $"recording:R{rid}",
-                    EntityVersion = reservation.DataVersion,
-                    DataRevision = reservation.DataVersion,
-                    ReservationId = $"R{rid}",
-                    ServiceName = reservation.ServiceName,
-                    ProgramTitle = reservation.Title,
-                    Reservation = PluginTypedEventHub.ToSnapshot(reservation),
-                    RecordingResult = result
-                });
+                _log.Add("RECORDING_RESULT_PUBLICATION", "Pending", "result=DURABLY_STAGED owner=recording_file_catalog rule=recording_file_publication_contract");
                 commitEvents();
                 _log.Add("REC_STOP_EXCEPTION_RESULT", $"R{rid}",
                     "target=PluginTypedEvent result=COMMITTED source=AppliedNewFinalized rule=recording_result_finalize_once_contract");
@@ -11017,17 +11012,30 @@ private readonly ReservationStore _store;
         return $"{core} /nid {networkId} /tsid {transportStreamId} /sid {serviceId}";
     }
 
+    private async Task<RecordingTsVerifier.VerificationResult> VerifyOutputFilesAsync(Reservation reservation,
+        IReadOnlyList<string> files, string stage)
+    {
+        RecordingTsVerifier.VerificationResult? last = null;
+        foreach (var file in files)
+        {
+            last = await RecordingTsVerifier.VerifyAsync(reservation, file, stage, _log).ConfigureAwait(false);
+            if (!last.ClearEnoughForCompleted) return last;
+        }
+        return last ?? new(stage,"FILE_MISSING","FILE_MISSING","Unknown",false,"No physical output declaration");
+    }
+
     private InterruptedRecordingFileProbe ProbeInterruptedRecordingFile(Reservation r)
     {
         try
         {
-            if (!TvTestRecordingDirectoryResolver.TryResolve(_ini.TvTestExecutablePath, out var directory, out var evidence))
+            var knownOutputs = _recordingResults.Files.KnownOutputPaths("R" + r.Id);
+            if (!TvTestRecordingDirectoryResolver.TryResolve(_ini.TvTestExecutablePath, out var directory, out var evidence) && knownOutputs.Count == 0)
                 return new InterruptedRecordingFileProbe(false, $"result=folder_unresolved evidence={TrimForLog(evidence, 420)} rule=release_contract");
 
             var namingPolicy = ResolveRecordingWorkerFileNameTimePolicy(r, r.RecordingStartedAt ?? r.StartTime);
             var expectedName = BuildRecordingWorkerFileName(r, namingPolicy.BaseTime).FileName;
-            var candidates = new List<string>();
-            if (Directory.Exists(directory))
+            var candidates = knownOutputs.ToList();
+            if (candidates.Count == 0 && Directory.Exists(directory))
             {
                 // INTERRUPTED_RECORDING_FILE_LINEAGE_INVARIANT:
                 // 自動再開は同じTVTest命名正本から (1)/(2)... を生成するため、exactだけを優先すると
@@ -11075,6 +11083,18 @@ private readonly ReservationStore _store;
             return string.Empty;
         }
 
+        var diskRelay = TvAIr.Storage.DiskRelayPolicy.Load(_ini.TvTestPluginsDirectory, out var relayStatus);
+        if (diskRelay is not null)
+        {
+            var free = TvAIr.Storage.DiskRelayPolicy.AvailableBytes(directory);
+            if (free.HasValue && free.Value <= diskRelay.LowFreeSpaceBytes)
+            {
+                var cursor = 0;
+                var alternate = diskRelay.SelectNext(ref cursor);
+                _log.Add("DISK_RELAY", "InitialFolder", $"result={(alternate is null ? "NO_ELIGIBLE_FOLDER" : "SELECTED")} service={r.ServiceName} title={r.Title} from={directory} to={alternate ?? directory} thresholdBytes={diskRelay.LowFreeSpaceBytes}");
+                if (alternate is not null) directory = alternate;
+            }
+        }
         _log.Add("RECORD_FOLDER_RESOLVE", $"R{r.Id}", $"result=OK folder={directory} evidence={TrimForLog(evidence, 420)}");
         _log.Add("RECORD_FILE_PATH_BUILD", $"R{r.Id}", "result=OK reason=tvairepgrec_uses_recordfilename_ini source=TVTest.RecordFileName route=TvAIrEpgRecTemplateBuild rule=recordfilename_ini_template");
         return directory;
@@ -12055,11 +12075,8 @@ internal sealed class ChainControlState
                 return null;
             if (SnapshotEquivalent(snapshot, next))
                 return snapshot;
-            // Each file declaration is durable in its introduction generation. Do not
-            // duplicate historical Binding payloads in every subsequent control snapshot.
-            var previousArtifacts = snapshot.Segments.Select(x => x.ResultPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            next = next with { Segments = next.Segments.Select(x => previousArtifacts.Contains(x.ResultPath)
-                ? x with { RecordingFileDeclaration = string.Empty } : x).ToArray() };
+            // The worker reads only the latest generation, including when a future sink
+            // first opens. Each snapshot must retain that sink's immutable declaration.
             var nextGeneration = checked(generation + 1);
             if (!Directory.Exists(StorePath))
                 throw new DirectoryNotFoundException($"chain control store not found: {StorePath}");
@@ -12218,7 +12235,32 @@ internal sealed class RecordingSession
     public DateTime      PhysicalCaptureEndTime { get; private set; }
     public int           PostEndMarginSeconds { get; }
     public TunerLease    Lease          { get; }
-    public string        RecordingFilePath { get; private set; }
+    private string plannedRecordingFilePath = "";
+    private IReadOnlyList<string> knownRecordingFiles = Array.Empty<string>();
+    public string PlannedRecordingFilePath
+    {
+        get => plannedRecordingFilePath;
+        private set { plannedRecordingFilePath = value; knownRecordingFiles = Array.Empty<string>(); }
+    }
+    public IReadOnlyList<string> RecordingFiles
+    {
+        get
+        {
+            try
+            {
+                var current = TvAIr.Storage.RecordingOutputPaths.Read(PlannedRecordingFilePath, ChainControlPath);
+                // The catalog may retire the control after terminal commit. Retain the last
+                // observed lineage in this live session, rather than reverting to a missing plan path.
+                var retired = current.Count == 1 && SameOutputPath(current[0], PlannedRecordingFilePath)
+                    && knownRecordingFiles.Any(x => !SameOutputPath(x, PlannedRecordingFilePath));
+                if (!retired && current.Count != 0) knownRecordingFiles = current;
+            }
+            catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException) { }
+            return knownRecordingFiles.Count != 0 ? knownRecordingFiles : new[] { PlannedRecordingFilePath };
+        }
+    }
+    private static bool SameOutputPath(string a, string b) => string.Equals(a,b,StringComparison.OrdinalIgnoreCase);
+    public string RecordingFilePath => RecordingFiles.LastOrDefault() ?? PlannedRecordingFilePath;
     public string        ResponsePath { get; private set; }
     public string        StopSignalPath { get; }
     public string        ProgressPath { get; }
@@ -12271,7 +12313,7 @@ internal sealed class RecordingSession
             : plannedEndTime;
         PostEndMarginSeconds = SettingsDefaults.NormalizePostEndMarginSeconds(postEndMarginSeconds);
         Lease          = lease;
-        RecordingFilePath = recordingFilePath;
+        PlannedRecordingFilePath = recordingFilePath;
         ResponsePath = responsePath;
         StopSignalPath = stopSignalPath;
         ProgressPath = progressPath;
@@ -12425,7 +12467,7 @@ internal sealed class RecordingSession
         PlannedEndTime = plannedEndTime;
         if (plannedEndTime > PhysicalCaptureEndTime)
             PhysicalCaptureEndTime = plannedEndTime;
-        RecordingFilePath = recordingFilePath;
+        PlannedRecordingFilePath = recordingFilePath;
         ResponsePath = responsePath;
         RuntimeStatsPath = runtimeStatsPath;
         RecordingFileGrowthWatchStartedAt = DateTime.Now;

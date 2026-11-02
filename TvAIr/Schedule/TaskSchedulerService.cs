@@ -1,4 +1,4 @@
-// Windows Task Scheduler には起床時刻スロットだけを登録する。
+﻿// Windows Task Scheduler には起床時刻スロットだけを登録する。
 // 予約・EPG・チェーン等の意味は WakeCoverage としてTvAIr内部に保持し、起床後は各共通経路で再評価する。
 // Wake計画は世代単位で差分適用し、現行世代の必要タスクを保護したまま旧世代・余剰タスクを整理する。
 // 登録結果は実体を再読取して検証し、資格情報方式が使えない場合だけ対話トークン方式へ限定フォールバックする。
@@ -73,6 +73,7 @@ public sealed class TaskSchedulerService
     private bool _wakeRebuildPending;
     private string _wakeRebuildPendingReason = string.Empty;
     private int _wakeRebuildPendingCount;
+    private long _wakeRebuildPendingVersion;
 
     public TaskSchedulerService(
         ReservationStore   store,
@@ -101,16 +102,28 @@ public sealed class TaskSchedulerService
         UpdateWakeTaskCore("direct");
     }
 
-    private bool UpdateWakeTaskCore(string triggerReason)
+    // A reservation mutation is complete only when its Wake plan was actually applied.
+    // Deferred / concurrent requests retain their version until the same completion event fires.
+    public bool TryUpdateWakeTaskForMutation(long wakePlanVersion, string source, string action)
+    {
+        var reason = $"source={source} action={action}";
+        var applied = UpdateWakeTaskCore($"immediate:{reason}", wakePlanVersion);
+        if (!applied && wakePlanVersion > 0)
+            RequeueDeferredWakeRefresh(reason, 1, wakePlanVersion);
+        return applied;
+    }
+
+    private bool UpdateWakeTaskCore(string triggerReason, long wakePlanVersion = 0)
     {
         if (!System.Threading.Monitor.TryEnter(_wakeUpdateGate))
         {
-            var pendingCount = MarkWakeRebuildPending(triggerReason);
+            var pendingCount = MarkWakeRebuildPending(triggerReason, wakePlanVersion);
             _log.Add("TaskScheduler", "WAKE_REBUILD_PENDING_COALESCED",
                 $"reason=already-running latest={CompactOneLine(triggerReason)} pendingCount={pendingCount} action=run_latest_after_current rule=release_contract");
             return false;
         }
 
+        var applied = false;
         try
         {
         if (StopPhaseGate.TryDeferWakeRebuild("TaskSchedulerService.UpdateWakeTask", msg => _log.Add("TaskScheduler", "StopPhase", msg)))
@@ -129,8 +142,16 @@ public sealed class TaskSchedulerService
                     "TaskUserName または TaskPasswordEncrypted が未設定のため Wake タスクは作成しません。Password ログオン方式の資格情報設定が必要です。");
                 _missingCredentialLogged = true;
             }
-            _lastPlanSignature = "";
-            return true;
+            _lastPlanSignature = null;
+            // No Wake is required when the current desired plan is empty.
+            // Otherwise preserve the mutation version until credentials are configured.
+            var withoutCredentials = BuildDesiredTasks(DateTime.Now, emitAudit: false);
+            if (withoutCredentials.Count == 0)
+            {
+                var generation = ResolveDesiredWakeGeneration(withoutCredentials);
+                applied = WriteActiveWakePlan(generation, withoutCredentials);
+            }
+            return applied;
         }
 
         _missingCredentialLogged = false;
@@ -194,6 +215,7 @@ public sealed class TaskSchedulerService
         {
             _log.Add("TaskScheduler", "Wake",
                 $"Wakeタスク再構築省略: reason=plan-hash-nochange fast=true desired={desired.Count} next={nextDesiredText} rule=wake_log_polish_quality_wording_noise_reduce");
+            applied = true;
             return true;
         }
 
@@ -242,6 +264,7 @@ public sealed class TaskSchedulerService
             _lastFullValidationUtc = DateTime.UtcNow;
             _log.Add("TaskScheduler", "Wake",
                 $"Wakeタスク再構築省略: reason=nochange contractValidated=true managed={existing.Count} desired={desired.Count} next={nextDesiredText} rule=wake_log_polish_quality_wording_noise_reduce");
+            applied = true;
             return true;
         }
 
@@ -267,10 +290,14 @@ public sealed class TaskSchedulerService
         if (desired.Count == 0)
         {
             _log.Add("TaskScheduler", "Wake", $"対象予約なし。Wakeタスク差分適用完了: class=summary deleted={deletedCount} deleteFailed={deleteFailedCount} registered=0 kept=0 rule=wake_log_polish_quality_wording_noise_reduce");
-            _lastPlanSignature = deleteFailedCount == 0 ? "" : null;
-            if (deleteFailedCount == 0)
+            applied = WriteActiveWakePlan(desiredGeneration, desired);
+            _lastPlanSignature = applied ? planSignature : null;
+            if (applied)
+            {
+                CleanupStaleWakeSlotTasksAfterSuccessfulApply(desiredGeneration, desiredNames, reason: "post_register_success");
                 _lastFullValidationUtc = DateTime.UtcNow;
-            return true;
+            }
+            return applied;
         }
 
         var registerNames = missingDesired
@@ -366,41 +393,70 @@ public sealed class TaskSchedulerService
                 $"result=WARNING deleteFailed={deleteFailedCount} failed=0 desired={desired.Count} kept={keptCount} registered={successCount} risk=stale_wake_task_may_remain recording_blocking=False sleep_resume_desired_tasks_preserved=True action=retry_on_next_validation_or_manual_cleanup_or_manual_cleanup rule=release_contract");
         }
 
-        _lastPlanSignature = failedCount == 0 ? planSignature : null;
-        if (failedCount == 0)
+        // Desired registration failures and the active-plan projection are both blocking.
+        // Stale-task cleanup failures are intentionally nonblocking (current Wake is preserved).
+        if (failedCount == 0 && WriteActiveWakePlan(desiredGeneration, desired))
         {
-            WriteActiveWakePlan(desiredGeneration, desired);
             CleanupStaleWakeSlotTasksAfterSuccessfulApply(desiredGeneration, desiredNames, reason: "post_register_success");
             AuditWakePostCleanupConvergence(desiredGeneration, desiredNames, preCleanupUnexpectedCount: unexpectedExisting.Count, reason: "post_register_success");
             _lastFullValidationUtc = DateTime.UtcNow;
+            _lastPlanSignature = planSignature;
+            applied = true;
         }
+        else
+        {
+            _lastPlanSignature = null;
+        }
+        }
+        catch (Exception ex)
+        {
+            _lastPlanSignature = null;
+            _log.Add("TaskScheduler", "WAKE_APPLY_FAILED",
+                $"result=FAILED reason={CompactOneLine(triggerReason)} error={CompactOneLine(ex.Message)} action=retry rule=release_contract");
         }
         finally
         {
             System.Threading.Monitor.Exit(_wakeUpdateGate);
-            if (TryConsumeWakeRebuildPending(out var pendingReason, out var pendingCount))
+            if (applied && wakePlanVersion > 0)
+                NotifyWakeRefreshCompleted(wakePlanVersion, triggerReason);
+            if (TryConsumeWakeRebuildPending(out var pendingReason, out var pendingCount, out var pendingVersion))
             {
                 _log.Add("TaskScheduler", "WAKE_REBUILD_PENDING_FLUSHED",
-                    $"latest={CompactOneLine(pendingReason)} mergedRequests={pendingCount} action=run_once rule=release_contract");
-                UpdateWakeTaskCore($"pending_flush:{pendingReason}");
+                    $"latest={CompactOneLine(pendingReason)} mergedRequests={pendingCount} wakePlanVersion={pendingVersion} action=run_once rule=release_contract");
+                if (!UpdateWakeTaskCore($"pending_flush:{pendingReason}", pendingVersion) && pendingVersion > 0)
+                    RequeueDeferredWakeRefresh(pendingReason, pendingCount, pendingVersion);
             }
         }
 
-        return true;
+        return applied;
     }
 
-    private int MarkWakeRebuildPending(string reason)
+    private void NotifyWakeRefreshCompleted(long wakePlanVersion, string reason)
+    {
+        try
+        {
+            WakeRefreshCompleted?.Invoke(wakePlanVersion, reason);
+        }
+        catch (Exception ex)
+        {
+            _log.Add("TaskScheduler", "WAKE_COMPLETION_NOTIFICATION_FAILED",
+                $"version={wakePlanVersion} reason={CompactOneLine(reason)} error={CompactOneLine(ex.Message)} rule=release_contract");
+        }
+    }
+
+    private int MarkWakeRebuildPending(string reason, long wakePlanVersion)
     {
         lock (_wakePendingGate)
         {
             _wakeRebuildPending = true;
             _wakeRebuildPendingReason = reason;
             _wakeRebuildPendingCount++;
+            _wakeRebuildPendingVersion = Math.Max(_wakeRebuildPendingVersion, wakePlanVersion);
             return _wakeRebuildPendingCount;
         }
     }
 
-    private bool TryConsumeWakeRebuildPending(out string reason, out int count)
+    private bool TryConsumeWakeRebuildPending(out string reason, out int count, out long wakePlanVersion)
     {
         lock (_wakePendingGate)
         {
@@ -408,15 +464,32 @@ public sealed class TaskSchedulerService
             {
                 reason = string.Empty;
                 count = 0;
+                wakePlanVersion = 0;
                 return false;
             }
 
             reason = _wakeRebuildPendingReason;
             count = _wakeRebuildPendingCount;
+            wakePlanVersion = _wakeRebuildPendingVersion;
             _wakeRebuildPending = false;
             _wakeRebuildPendingReason = string.Empty;
             _wakeRebuildPendingCount = 0;
+            _wakeRebuildPendingVersion = 0;
             return true;
+        }
+    }
+
+    // Keep the earliest bounded deadline and the latest unacknowledged mutation version.
+    // Failed Windows registrations must not turn into per-tick schtasks retry storms.
+    private void RequeueDeferredWakeRefresh(string reason, int count, long wakePlanVersion)
+    {
+        lock (_deferredWakeGate)
+        {
+            if (_deferredWakeDueUtc == DateTime.MinValue)
+                _deferredWakeDueUtc = DateTime.UtcNow.AddMinutes(1);
+            _deferredWakeReason = reason;
+            _deferredWakeRequestCount += Math.Max(1, count);
+            _deferredWakePlanVersion = Math.Max(_deferredWakePlanVersion, wakePlanVersion);
         }
     }
 
@@ -487,23 +560,8 @@ public sealed class TaskSchedulerService
         _log.Add("TaskScheduler", "WakeCoalesce",
             $"Wakeタスク再構築を即時実行: {reason} reason=near-wake next={nextWake.When:MM/dd HH:mm:ss} task={nextWake.Name} kind={nextWake.Kind} res={FormatWakeReservationId(nextWake.ReservationId)} delaySec={(int)Math.Max(0, nextDelay.TotalSeconds)} requestedDelayMs={(int)requestedDelay.TotalMilliseconds} clearedDeferredRequests={clearedRequests} action=update_now rule=release_contract");
 
-        if (UpdateWakeTaskCore($"near-wake:{reason}"))
-        {
-            if (completionWakePlanVersion > 0)
-                WakeRefreshCompleted?.Invoke(completionWakePlanVersion, $"near-wake:{reason}");
-            return true;
-        }
-
-        // 別Wake再構築またはstop-phaseで即時適用できなかった場合は、
-        // requestを失わず短い有界遅延へ戻す。
-        lock (_deferredWakeGate)
-        {
-            if (_deferredWakeDueUtc == DateTime.MinValue)
-                _deferredWakeDueUtc = DateTime.UtcNow.AddSeconds(1);
-            _deferredWakeReason = reason;
-            _deferredWakeRequestCount += Math.Max(1, clearedRequests + 1);
-            _deferredWakePlanVersion = Math.Max(_deferredWakePlanVersion, completionWakePlanVersion);
-        }
+        if (!UpdateWakeTaskCore($"near-wake:{reason}", completionWakePlanVersion))
+            RequeueDeferredWakeRefresh(reason, clearedRequests + 1, completionWakePlanVersion);
         return true;
     }
 
@@ -537,21 +595,11 @@ public sealed class TaskSchedulerService
 
         _log.Add("TaskScheduler", "WakeCoalesce",
             $"Wakeタスク有界集約を実行: {reason} mergedRequests={count} wakePlanVersion={wakePlanVersion} duePolicy=first_request_fixed rule=release_contract");
-        if (!UpdateWakeTaskCore($"deferred:{reason}"))
+        if (!UpdateWakeTaskCore($"deferred:{reason}", wakePlanVersion))
         {
-            lock (_deferredWakeGate)
-            {
-                if (_deferredWakeDueUtc == DateTime.MinValue)
-                    _deferredWakeDueUtc = DateTime.UtcNow.AddSeconds(1);
-                _deferredWakeReason = reason;
-                _deferredWakeRequestCount += Math.Max(1, count);
-                _deferredWakePlanVersion = Math.Max(_deferredWakePlanVersion, wakePlanVersion);
-            }
+            RequeueDeferredWakeRefresh(reason, count, wakePlanVersion);
             return false;
         }
-
-        if (wakePlanVersion > 0)
-            WakeRefreshCompleted?.Invoke(wakePlanVersion, $"deferred:{reason}");
         return true;
     }
 
@@ -630,9 +678,20 @@ public sealed class TaskSchedulerService
         return Math.Max(WakeSlotControlTaskCount, recordingTunerCount * 2 + WakeSlotControlTaskCount);
     }
 
+    private IReadOnlyList<(Reservation Parent, DateTime Start)> GetPreRecordWakeTargets(DateTime now)
+    {
+        var targets = new List<(Reservation, DateTime)>();
+        foreach (var responsibility in _epgScheduler.GetPreRecordWakeResponsibilities(now))
+        {
+            var parent = _store.GetById(responsibility.ParentReservationId);
+            if (parent is not null && responsibility.Start > now)
+                targets.Add((parent, responsibility.Start));
+        }
+        return targets;
+    }
+
     public PowerActionWakeProtectionBoundary? GetNextPowerActionWakeProtectionBoundary(DateTime now)
     {
-        var preRecMin = SettingsDefaults.ResolveEnabledEpgPreRecordMinutes(_ini.EpgPreRecordMinutes);
         var preStartSeconds = Math.Max(0, _ini.PreStartMarginSeconds);
         var wakeAdditionalSeconds = Math.Max(0, _ini.WakeAdditionalSeconds);
         var candidates = new List<PowerActionWakeProtectionBoundary>();
@@ -655,18 +714,13 @@ public sealed class TaskSchedulerService
             candidates.Add(new PowerActionWakeProtectionBoundary(
                 "REC", recordingWakeAt, reservation.StartTime, reservation.Id, reservation.Title));
 
-            if (_ini.EpgPreRecordMinutes > 0
-                && !reservation.IsUserChain
-                && (reservation.Source == ReservationSource.Manual
-                    || reservation.Source == ReservationSource.KeywordSearch
-                    || reservation.Source == ReservationSource.Keyword))
-            {
-                var preRecordWakeAt = reservation.StartTime
-                    .AddMinutes(-preRecMin)
-                    .AddSeconds(-wakeAdditionalSeconds);
-                candidates.Add(new PowerActionWakeProtectionBoundary(
-                    "PRE_EPG", preRecordWakeAt, reservation.StartTime, reservation.Id, reservation.Title));
-            }
+        }
+
+        foreach (var target in GetPreRecordWakeTargets(now))
+        {
+            candidates.Add(new PowerActionWakeProtectionBoundary("PRE_EPG",
+                target.Start.AddSeconds(-wakeAdditionalSeconds), target.Parent.StartTime,
+                target.Parent.Id, target.Parent.Title));
         }
 
         foreach (var scheduledAt in _epgScheduler.GetScheduledDailyWakeStarts(now))
@@ -706,7 +760,6 @@ public sealed class TaskSchedulerService
             .Where(r => !string.IsNullOrWhiteSpace(r.TunerName))
             .ToList();
 
-        var preRecMin = SettingsDefaults.ResolveEnabledEpgPreRecordMinutes(_ini.EpgPreRecordMinutes);
         var preMarSec  = Math.Max(0, _ini.PreStartMarginSeconds);
         var wakeAddSec = Math.Max(0, _ini.WakeAdditionalSeconds);
 
@@ -758,16 +811,10 @@ public sealed class TaskSchedulerService
             var wakeRec = r.StartTime.AddSeconds(-preMarSec).AddSeconds(-wakeAddSec);
             AddCoverage("REC", wakeRec, r);
 
-            if (_ini.EpgPreRecordMinutes > 0
-                && !r.IsUserChain
-                && (r.Source == ReservationSource.Manual
-                    || r.Source == ReservationSource.KeywordSearch
-                    || r.Source == ReservationSource.Keyword))
-            {
-                var wakeEpg = r.StartTime.AddMinutes(-preRecMin).AddSeconds(-wakeAddSec);
-                AddCoverage("PRE_EPG", wakeEpg, r);
-            }
         }
+
+        foreach (var target in GetPreRecordWakeTargets(now))
+            AddCoverage("PRE_EPG", target.Start.AddSeconds(-wakeAddSec), target.Parent);
 
         foreach (var scheduledAt in _epgScheduler.GetScheduledDailyWakeStarts(now))
         {
@@ -1622,7 +1669,7 @@ public sealed class TaskSchedulerService
         return Path.Combine(dir, "wake-active-slots.txt");
     }
 
-    private void WriteActiveWakePlan(string generation, IReadOnlyCollection<WakeTaskSpec> desired)
+    private bool WriteActiveWakePlan(string generation, IReadOnlyCollection<WakeTaskSpec> desired)
     {
         try
         {
@@ -1640,8 +1687,14 @@ public sealed class TaskSchedulerService
 
             var coverageFile = ActiveWakeCoverageFilePath();
             File.WriteAllLines(coverageFile, _lastWakeCoverageLines, Encoding.UTF8);
+            return true;
         }
-        catch { }
+        catch (Exception ex)
+        {
+            _log.Add("TaskScheduler", "WAKE_ACTIVE_PLAN_FAILED",
+                $"result=FAILED error={CompactOneLine(ex.Message)} action=retry rule=release_contract");
+            return false;
+        }
     }
 
     private static string ActiveWakeCoverageFilePath()

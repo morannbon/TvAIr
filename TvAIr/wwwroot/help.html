@@ -1,18 +1,18 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <!-- release_contract: distributable help must be environment-independent. Examples may use only abstract tokens created for documentation. Never reuse real user rules, names, programme titles, station names, dates, episode numbers, search strings, viewing/recording preferences, or locally observed data. -->
 <html lang="ja">
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
 <title>TvAIr ヘルプ</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.14"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.14"/>
-<link href="/tvair-ui-foundation.css?v=1.2.14" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.14" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.14" rel="stylesheet"/>
-<link href="/tvair-help.css?v=1.2.14" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.14" rel="stylesheet"/>
-<script src="/tvair-theme.js?v=1.2.14"></script>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.15"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.15"/>
+<link href="/tvair-ui-foundation.css?v=1.2.15" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.15" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.15" rel="stylesheet"/>
+<link href="/tvair-help.css?v=1.2.15" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.15" rel="stylesheet"/>
+<script src="/tvair-theme.js?v=1.2.15"></script>
 </head>
 <body class="tvair-non-program-page tvair-page-width-wide tvair-help-page">
 <header class="help-window-bar" aria-label="ヘルプ見出し">
@@ -37,19 +37,20 @@
       <header class="help-section-head"><p class="help-kicker">全般</p><h1>全般</h1></header>
       <div class="help-group">
         <h2>EPG取得</h2>
-        <article class="setting-card"><h3>定時EPG取得を有効にする</h3><p>毎日、指定した時刻を基準に番組情報を自動取得します。</p></article>
-        <article class="setting-card"><h3>定時EPG取得時刻</h3><p>定時EPG取得の基準時刻を設定します。録画予約と重なる場合は、最大3時間まで取得開始を後ろへ移動します。3時間以内に必要な取得時間を確保できない場合、その日の定時EPG取得は行わず、翌日の定時EPG取得へ進みます。</p></article>
-        <article class="setting-card"><h3>取得深度</h3><p>EPG取得で、1回の取得先に使用する取得時間を選びます。EPG取得中は変更できません。</p><p><strong>浅（120秒）</strong>：取得時間を短くします。</p><p><strong>中（180秒）</strong>：通常の取得時間です。</p><p><strong>深（240秒）</strong>：取得時間を長くして番組情報の収集を待ちます。</p><p><strong>最深（300秒）</strong>：最も長く収集を待ちます。全体の取得完了まで時間がかかります。取得できる情報の範囲は放送局と受信状況にも依存します。</p></article>
-        <article class="setting-card"><h3>録画前EPG確認を有効にする</h3><p>録画前に番組情報を確認し、番組の開始・終了時刻の変更に追従します。</p></article>
-        <article class="setting-card"><h3>録画前EPG確認（時間追従）</h3><p>録画開始の5・10・15・20分前から選択し、番組情報を確認するタイミングを設定します。開始時刻が近い場合は録画を優先します。</p></article>
+        <article class="setting-card"><h3>定時EPG取得を有効にする</h3><p>指定した時刻を基準に毎日番組情報を取得します。</p></article>
+        <article class="setting-card"><h3>定時EPG取得時刻</h3><p>指定時刻から3時間以内に取得を終えられる空き時間へ配置します。開始・終了時刻は予約一覧に表示します。</p><p>取得枠がなければ期限まで保留します。確保できない場合は当日分をスキップして翌日分へ進みます。</p></article>
+        <article class="setting-card"><h3>定時EPGの保留と録画前確認</h3><p>取得枠がない担当チューナーには「取得枠なし・保留中」と期限を表示します。表示位置は定時EPGの設定時刻です。</p><p>定時EPGの保留中も録画前確認は行います。両方が有効な場合は放送波ごとに3時間以内の対象予約を優先します。なければ先頭の未確認予約を対象にします。残りのチューナーは定時EPGを担当します。</p></article>
+        <article class="setting-card"><h3>取得深度</h3><p>1か所の取得先に使う時間を選びます。EPG取得中は変更できません。</p><p>浅：120秒／中：180秒／深：240秒／最深：300秒</p><p>長くすると情報の収集を待てます。取得範囲は放送局や受信状況によります。</p></article>
+        <article class="setting-card"><h3>録画前EPG確認を有効にする</h3><p>録画前に番組情報を確認します。番組の開始・終了時刻の変更に追従します。</p></article>
+        <article class="setting-card"><h3>録画前EPG確認（時間追従）</h3><p>確認を始める時刻を録画開始の5・10・15・20分前から選びます。開始時刻が近い場合は録画を優先します。</p></article>
       </div>
       <div class="help-group">
         <h2>その他</h2>
-        <article class="setting-card"><h3>dataフォルダ</h3><p>番組情報や予約などの保存場所です。通常は変更不要です。変更はTvAIrの再起動後に反映されます。</p></article>
-        <article class="setting-card"><h3>Windowsへのログイン時にTvAIrを自動起動する</h3><p>現在のユーザーがWindowsへログインしたときにTvAIrを自動起動します。予約録画や定時EPG取得を常時運用する場合に使用します。</p></article>
-        <article class="setting-card"><h3>WindowsログインID</h3><p>予約録画や定時EPG取得に合わせてWindowsを復帰させるためのタスク設定で使用します。</p></article>
-        <article class="setting-card"><h3>Windowsログインパスワード</h3><p>WindowsログインIDに対応するパスワードです。スリープ復帰用のタスク設定に使用します。</p></article>
-        <article class="setting-card"><h3>スリープ復帰</h3><p>予約録画や定時EPG取得に合わせたWindowsの復帰準備状態を表示します。</p></article>
+        <article class="setting-card"><h3>dataフォルダ</h3><p>番組情報や予約の保存先です。通常は変更不要です。変更は再起動後に反映します。</p></article>
+        <article class="setting-card"><h3>Windowsへのログイン時にTvAIrを自動起動する</h3><p>現在のユーザーがWindowsへログインしたときにTvAIrを起動します。</p></article>
+        <article class="setting-card"><h3>WindowsログインID</h3><p>予約録画や定時EPGに合わせてWindowsを復帰させるタスクで使います。</p></article>
+        <article class="setting-card"><h3>Windowsログインパスワード</h3><p>WindowsログインIDに対応するパスワードです。復帰用タスクに使います。</p></article>
+        <article class="setting-card"><h3>スリープ復帰</h3><p>予約録画や定時EPGに向けたWindowsの復帰準備状況を表示します。</p></article>
       </div>
     </section>
 
@@ -57,16 +58,16 @@
       <header class="help-section-head"><p class="help-kicker">ネットワーク</p><h1>ネットワーク</h1></header>
       <div class="help-group">
         <h2>ネットワーク</h2>
-        <article class="setting-card"><h3>ネットワーク利用</h3><p>TvAIrのネットワーク利用全体を切り替えます。初期状態はOFFです。</p><p>ネットワーク利用OFFの間は、インターネット・LAN通信を行わず、LANからの接続も受け付けません。関連する設定は操作できず、進行中の通信も停止します。ONに戻すと保存済みの設定に従って利用可否を再評価します。</p></article>
-        <article class="setting-card"><h3>ポート番号</h3><p>TvAIrが使用するポート番号です。他のアプリと重複する場合に変更します。変更はTvAIrの再起動後に反映されます。</p></article>
-        <article class="setting-card"><h3>LANからの接続を許可する</h3><p>同じLAN内の別端末からTvAIrへ接続する場合に有効にします。「ネットワーク利用」がONの場合だけ利用できます。</p></article>
-        <article class="setting-card"><h3>セッション有効時間（分）</h3><p>接続用パスワードで認証した状態を維持する時間です。短くすると再認証が増えます。</p></article>
-        <article class="setting-card"><h3>接続用パスワード</h3><p>LAN内の別端末からTvAIrへ接続する際の認証に使用するパスワードです。12文字以上で設定してください。英字・数字・記号などの文字種に必須条件はありません。大文字と小文字は区別されます。</p></article>
+        <article class="setting-card"><h3>ネットワーク利用</h3><p>TvAIrのネットワーク利用を切り替えます。初期状態はOFFです。</p><p>OFFではインターネット・LAN通信とLANからの接続を停止します。関連設定も操作できません。ONに戻すと保存済み設定に従って再評価します。</p></article>
+        <article class="setting-card"><h3>ポート番号</h3><p>TvAIrが使うポート番号です。他のアプリと重複する場合に変更します。変更は再起動後に反映します。</p></article>
+        <article class="setting-card"><h3>LANからの接続を許可する</h3><p>同じLAN内の別端末から接続するときに有効にします。「ネットワーク利用」がONの場合だけ使えます。</p></article>
+        <article class="setting-card"><h3>セッション有効時間（分）</h3><p>認証状態を維持する時間です。短くすると再認証が増えます。</p></article>
+        <article class="setting-card"><h3>接続用パスワード</h3><p>LAN接続の認証に使います。12文字以上で設定してください。文字種の制限はなく大文字と小文字は区別します。</p></article>
       </div>
       <div class="help-group">
         <h2>プラグインのインターネット接続</h2>
-        <article class="setting-card"><h3>プラグインごとの利用許可</h3><p>インターネット接続に対応したプラグインごとに、インターネット通信を許可します。初期状態は不許可です。</p><p>「ネットワーク利用」がONで、対象プラグインの許可もONの場合だけ利用できます。許可をOFFにすると、そのプラグインの進行中の外部通信も停止します。</p></article>
-        <article class="setting-card"><h3>利用できる外部情報サービス</h3><p>インターネットから番組情報などを補うプラグインでは、利用できるサービス名を表示します。該当するプラグインがない場合は表示されません。</p></article>
+        <article class="setting-card"><h3>プラグインごとの利用許可</h3><p>対応プラグインのインターネット通信を個別に許可します。初期状態は不許可です。</p><p>「ネットワーク利用」と対象プラグインの許可が両方ONの場合に使えます。許可をOFFにすると進行中の外部通信も停止します。</p></article>
+        <article class="setting-card"><h3>利用できる外部情報サービス</h3><p>対応プラグインが利用できる外部サービス名を表示します。対象プラグインがない場合は表示しません。</p></article>
       </div>
     </section>
 
@@ -74,19 +75,20 @@
       <header class="help-section-head"><p class="help-kicker">TVTest</p><h1>TVTest</h1></header>
       <div class="help-group">
         <h2>TVTest</h2>
-        <article class="setting-card"><h3>TVTest.exe のフルパス</h3><p>録画設定やチャンネル情報を参照する基準となるTVTest.exeを指定します。視聴用を別に指定しない場合は視聴にも使用します。</p></article>
-        <article class="setting-card"><h3>視聴用TVTest.exe のフルパス</h3><p>視聴専用のTVTestを別に使用する場合に指定します。指定しない場合は、「TVTest.exe のフルパス」で設定した基準となるTVTestを視聴にも使用します。</p></article>
+        <article class="setting-card"><h3>TVTest.exe のフルパス</h3><p>録画設定やチャンネル情報の参照元となるTVTest.exeを指定します。視聴用を別に指定しなければ視聴にも使います。</p></article>
+        <article class="setting-card"><h3>連携するTVTestプラグインフォルダ</h3><p>TVTestプラグインの設定フォルダを指定します。対応する連携機能が共通で使い、設定の重複入力を省きます。</p><p>設定の変更はTVTest側で行います。空欄では読み込みません。反映時期は連携機能ごとに異なります。</p><p>設定ファイルだけを読み取り、TVTest用プラグインDLLは実行しません。</p></article>
+        <article class="setting-card"><h3>視聴用TVTest.exe のフルパス</h3><p>視聴用のTVTest.exeを指定します。空欄では基準となるTVTest.exeを使います。</p></article>
         <article class="setting-card"><h3>BonDriver フォルダ</h3><p>使用するBonDriver.dllの保存フォルダを指定します。</p></article>
         <article class="setting-card"><h3>地上波 ch2 ファイルパス</h3><p>地上波の局一覧・有効状態・表示順を読み込むch2ファイルを指定します。</p></article>
-        <article class="setting-card"><h3>地上波 ChSet.txt ファイルパス（任意）</h3><p>使用中のBonDriverに対応する地上波の選局情報を補うファイルです。ファイルがない環境では空欄にできます。</p></article>
+        <article class="setting-card"><h3>地上波 ChSet.txt ファイルパス（任意）</h3><p>地上波の選局情報を補うファイルを指定します。使用するBonDriverに対応したものを選びます。ファイルがなければ空欄にします。</p></article>
         <article class="setting-card"><h3>BS/CS ch2 ファイルパス</h3><p>BS/CSの局一覧・有効状態・表示順を読み込むch2ファイルを指定します。</p></article>
-        <article class="setting-card"><h3>BS/CS ChSet.txt ファイルパス（任意）</h3><p>使用中のBonDriverに対応するBS/CSの選局情報を補うファイルです。ファイルがない環境では空欄にできます。</p></article>
+        <article class="setting-card"><h3>BS/CS ChSet.txt ファイルパス（任意）</h3><p>BS/CSの選局情報を補うファイルを指定します。使用するBonDriverに対応したものを選びます。ファイルがなければ空欄にします。</p></article>
       </div>
       <div class="help-group">
         <h2>ChSet.txtがない環境とチャンネル情報の更新</h2>
-        <article class="setting-card"><h3>BonDriver名に対応するch2</h3><p>ChSet.txtを空欄にすると、選択したBonDriverのDLL名をch2に置き換えたファイルを探します。BonDriverフォルダを先に確認し、次に基準となるTVTestのフォルダを確認します。CATV用のBonDriverも同じ方法でch2を読み込みます。</p></article>
+        <article class="setting-card"><h3>BonDriver名に対応するch2</h3><p>ChSet.txtが空欄の場合はBonDriverのDLL名に対応するch2を探します。BonDriverフォルダを先に確認します。次に基準となるTVTestのフォルダを確認します。CATV用も同じ方法です。</p></article>
         <article class="setting-card"><h3>設定の切り替え</h3><p>ChSet.txtの使用有無を切り替えたら保存後にTvAIrを再起動してください。</p></article>
-        <article class="setting-card"><h3>再スキャンと局の移動</h3><p>TVTestでチャンネルを再スキャンしてch2を更新すると、次のチャンネル読込で局名や選局情報へ反映します。録画中の選局先を途中で変更する動作ではありません。</p><p>局の識別番号（ONID・TSID・SID）が変わった場合はEPGを再取得して既存予約を確認してください。旧番号の予約は自動移行しません。</p></article>
+        <article class="setting-card"><h3>再スキャンと局の移動</h3><p>TVTestでch2を更新すると次のチャンネル読込で反映します。録画中の選局先は変更しません。</p><p>局の識別番号（ONID・TSID・SID）が変わった場合はEPGを再取得してください。既存予約も確認してください。旧番号の予約は自動移行しません。</p></article>
       </div>
     </section>
 
@@ -95,11 +97,11 @@
       <div class="help-group">
         <h2>チューナー</h2>
         <article class="setting-card"><h3>チューナー本数</h3><p>録画用と視聴用を合わせた枠数を入力して「設定欄を作成」を押します。</p></article>
-        <article class="setting-card"><h3>チューナー名</h3><p>各枠を見分けるために自動設定される名前です。予約リストやログなどに表示されます。</p></article>
-        <article class="setting-card"><h3>BonDriver</h3><p>その枠で使用するBonDriverを指定します。</p></article>
-        <article class="setting-card"><h3>放送波</h3><p>使用するBonDriverが対応する放送波を設定します。</p><p>地上波専用のBonDriverは<strong>地上波</strong>、BS/CS専用のBonDriverは<strong>BS/CS</strong>を選択します。</p><p><strong>CATV</strong>はケーブルテレビ用のBonDriverで使用します。再送信された地上波・BS・CSもそのBonDriverのch2に従って扱います。</p><p><strong>地デジ/BS/CS</strong>は、1つのBonDriverで複数の放送波を扱う構成で使用します。既に動作している設定は引き続き利用できます。</p></article>
-        <article class="setting-card"><h3>用途</h3><p><strong>録画用</strong>は、予約録画、EPG取得、録画前EPG確認に使用します。</p><p><strong>視聴用</strong>は、AIrConなどの対応プラグインからTVTestで視聴する際に使用します。</p><p>録画用と視聴用を分けることで、視聴中の選局操作と録画処理を分離できます。</p></article>
-        <article class="setting-card"><h3>番組表からの視聴</h3><p>AIrConを導入・有効化し、視聴操作とプラグイン画面の利用を許可してください。対象局を受信できる視聴用チューナーとTVTestの設定がある場合、放送中の番組に「視聴」を表示します。設定のない放送波には表示しません。</p><p>必要に応じてAIrConとTVTestを起動して選局します。同じ視聴先で動作中のTVTestは再利用します。</p><p>TvAIrを終了・再起動しても、視聴中のTVTestは終了しません。再起動後の視聴操作では新しいTVTestを起動します。「視聴停止」を選んだ場合は、その操作対象のTVTestを終了します。</p></article>
+        <article class="setting-card"><h3>チューナー名</h3><p>枠ごとに自動設定される名前です。予約リストやログに表示します。</p></article>
+        <article class="setting-card"><h3>BonDriver</h3><p>各枠で使うBonDriverを選びます。未設定の枠は使いません。</p></article>
+        <article class="setting-card"><h3>放送波</h3><p>BonDriverに対応する放送波を選びます。</p><p>地上波専用は「地上波」、BS/CS専用は「BS/CS」を選びます。ケーブルテレビ用は「CATV」です。再送信の局もそのBonDriverのch2に従います。</p><p>1つのBonDriverで複数の放送波を扱う場合は「地デジ/BS/CS」を選びます。</p></article>
+        <article class="setting-card"><h3>用途</h3><p>「録画用」は予約録画・EPG取得・録画前確認に使います。</p><p>「視聴用」は対応プラグインからTVTestで視聴するときに使います。録画用と分けると視聴中の選局が録画に影響しません。</p></article>
+        <article class="setting-card"><h3>番組表からの視聴</h3><p>AIrConの導入・有効化が必要です。視聴操作とプラグイン画面の利用を許可してください。</p><p>対象局に対応する視聴用チューナーとTVTestの設定が必要です。設定済みの放送波だけ放送中の番組に「視聴」を表示します。</p><p>必要に応じてAIrConとTVTestを起動して選局します。同じ視聴先で起動中のTVTestは再利用します。</p><p>TvAIrを終了・再起動しても視聴中のTVTestは終了しません。再起動後の視聴操作では新しいTVTestを起動します。「視聴停止」は操作対象のTVTestを終了します。</p></article>
         <article class="setting-card"><h3>操作</h3><p>行内の「削除」でそのチューナー枠を削除します。枠数の変更には上部の「設定欄を作成」を使用します。</p></article>
       </div>
     </section>
@@ -108,40 +110,40 @@
       <header class="help-section-head"><p class="help-kicker">録画</p><h1>録画</h1></header>
       <div class="help-group">
         <h2>録画</h2>
-        <article class="setting-card"><h3>録画・EPG処理のタスクバーアイコンを表示する</h3><p>録画と通常のEPG取得で処理中のアイコンを表示します。録画前EPG確認では表示しません。変更は次に起動する処理から適用されます。</p></article>
-        <article class="setting-card"><h3>録画開始マージン（秒前）</h3><p>番組の開始時刻より何秒前から録画を開始するかを設定します。</p></article>
-        <article class="setting-card"><h3>録画終了マージン（秒後）</h3><p>番組の終了時刻から何秒後まで録画を続けるかを設定します。</p></article>
-        <article class="setting-card"><h3>録画終了後アクション</h3><p>最後に残っている録画が正常完了した後の動作を「何もしない」「スリープ」「シャットダウン」から選びます。手動停止や録画失敗では実行しません。</p><p>実行1分前になると確認画面を表示します。「中止」でその回の動作を取り消し、「今すぐ実行」で直ちに実行できます。確認画面を閉じた場合も中止します。</p><p>待機中または確認中に新しい録画、EPG取得、視聴などが始まった場合は実行しません。</p></article>
-        <article class="setting-card"><h3>録画終了後アクション待機</h3><p>最後に残っている録画が正常完了してから、録画終了後アクションを実行するまでの待機時間を設定します。</p></article>
-        <article class="setting-card"><h3>前番組優先（デフォルト）</h3><p>同じチューナーで前後の録画時間が重なる場合に前の番組を優先します。</p><p>録画マージンが重なる場合は前の番組の終了側を優先します。</p></article>
-        <article class="setting-card"><h3>後番組を優先する</h3><p>同じチューナーで前後の録画時間が重なる場合に後の番組を優先します。</p><p>録画マージンが重なる場合は後の番組の開始側を優先します。</p><p>「後番組を優先する」を選ぶとチェーン予約の方式を設定できます。</p></article>
-        <article class="setting-card"><h3>チェーン予約</h3><p>「後番組を優先する」を選んだ場合に方式を設定できます。</p><p>同じ局の連続番組を番組境界で受信を止めずに録画します。重なる録画マージンも各番組の別TSファイルへ保存します。チェーン予約は予約リストで「(C)」と表示します。手動では先頭番組を除く2番組目から最後まで、自動では先頭番組から最後まで全てに表示します。単独予約には表示しません。</p><p>「手動（チェーンボタン有り）」では番組表のチェーンボタンを使います。自動検索予約のチェーン指定も手動方式で利用できます。</p><p>「自動（チェーンボタン無し）」では予約元や追加順を問わず同じ局で終了・開始時刻が一致する予約をつなぎます。チェーンボタンと自動検索予約の手動用オプションは表示しません。</p><p>自動方式で予約を取り消すと指定した番組だけを取り消します。先頭の取消では残る後続、末尾の取消では残る前段のチェーンを維持します。途中の番組を取り消すと前後のチェーンを分割し、単独になった予約は通常予約へ戻ります。手動方式の後続一括取消とは異なります。</p><p>手動・自動の切替では作成済みチェーンを解除しません。切替後の結合判断に選択した方式を使います。自動では以前からある単独予約も結合対象になります。手動へ変えると以後の自動結合を止めます。チェーンを作った時点の方式は保持せず、(C)の表示と予約取消は現在選択中の方式に従います。</p><p>「無効」にすると未開始部分を通常予約へ戻します。録画中の接続は設定変更だけでは中断しません。前番組優先へ変えても選択した方式は保持し、後番組優先へ戻すと復元します。</p></article>
+        <article class="setting-card"><h3>録画・EPG処理のタスクバーアイコンを表示する</h3><p>録画と通常EPG取得の処理中にアイコンを表示します。録画前確認では表示しません。変更は次に起動する処理から反映します。</p></article>
+        <article class="setting-card"><h3>録画開始マージン（秒前）</h3><p>番組開始の何秒前から録画するかを設定します。</p></article>
+        <article class="setting-card"><h3>録画終了マージン（秒後）</h3><p>番組終了の何秒後まで録画するかを設定します。</p></article>
+        <article class="setting-card"><h3>録画終了後アクション</h3><p>最後の録画が正常完了した後の動作を選びます。「何もしない」「スリープ」「シャットダウン」があります。手動停止や録画失敗では実行しません。</p><p>実行1分前に確認画面を表示します。「中止」か画面を閉じる操作で取り消します。「今すぐ実行」で直ちに実行します。</p><p>待機中や確認中に録画・EPG取得・視聴などが始まると実行しません。</p></article>
+        <article class="setting-card"><h3>録画終了後アクション待機</h3><p>最後の録画が正常完了してからアクションを実行するまでの時間です。</p></article>
+        <article class="setting-card"><h3>前番組優先（デフォルト）</h3><p>同じチューナーで録画時間が重なる場合は前の番組を優先します。録画マージンも前番組の終了側を優先します。</p></article>
+        <article class="setting-card"><h3>後番組を優先する</h3><p>同じチューナーで録画時間が重なる場合は後の番組を優先します。録画マージンも後番組の開始側を優先します。チェーン予約の方式も設定できます。</p></article>
+        <article class="setting-card"><h3>チェーン予約</h3><p>後番組優先の場合に利用できます。同じ局の連続番組を受信を止めずに録画します。重なるマージンも番組ごとのTSへ保存します。</p><p>手動方式は番組表のチェーンボタンで追加します。自動検索予約のチェーン指定も使えます。(C)は2番組目から末尾まで表示します。</p><p>自動方式は同じ局で終了・開始時刻が一致する予約をつなぎます。予約元や追加順は問いません。(C)は先頭から末尾まで表示します。単独予約には表示しません。チェーンボタンと手動用の自動検索オプションは表示しません。</p><p>自動方式の予約取消は指定番組だけが対象です。先頭・末尾の取消では残りの接続を維持します。途中の取消では前後を分割します。単独になった予約は通常予約へ戻ります。手動方式では後続も一括で取り消します。</p><p>方式を切り替えても既存チェーンは解除しません。以後の結合は選択中の方式に従います。自動方式では既存の単独予約も対象です。手動方式に変えると自動結合を止めます。作成時の方式は保持しません。(C)表示と予約取消は現在の方式に従います。</p><p>無効にすると未開始部分を通常予約へ戻します。録画中の接続は中断しません。前番組優先に変えても方式の選択は保持します。後番組優先へ戻すと復元します。</p></article>
       </div>
     </section>
 
     <section class="help-section" id="help-keyword">
-      <header class="help-section-head"><p class="help-kicker">自動検索予約</p><h1>自動検索予約と正規表現</h1><p>検索条件の組み立て方と、正規表現を使用する場合の書き方を説明します。</p></header>
+      <header class="help-section-head"><p class="help-kicker">自動検索予約</p><h1>自動検索予約と正規表現</h1><p>検索条件と正規表現の書き方を説明します。</p></header>
       <div class="help-group">
         <h2>検索対象</h2>
-        <article class="setting-card"><h3>キーワードと除外キーワード</h3><p>「キーワード」に一致した番組を候補にし、「除外キーワード」に一致した番組は候補から外します。検索対象は「タイトル」「概要」「詳細」「出演者」から選択できます。初期状態ではタイトルだけを検索します。</p><p>正規表現を使用しない場合は、<code>;</code> がAND、<code>|</code> がOR、<code>()</code> がグループです。例: <code>語A;語B</code> は「語A」と「語B」の両方を含む条件、<code>語A|語B</code> はどちらかを含む条件です。</p></article>
-        <article class="setting-card"><h3>正規表現を使用</h3><p>チェックすると、キーワードと除外キーワードを.NETの正規表現として評価します。大文字と小文字は区別しません。TvAIrは検索文字列と番組情報を正規化して照合するため、半角・全角などの互換文字は同じものとして一致する場合があります。</p><p>検索対象に複数の項目を選んだ場合、1本の正規表現は各項目へ個別に照合されます。1本の正規表現がタイトルから概要へまたがって一致することはありません。</p></article>
+        <article class="setting-card"><h3>キーワードと除外キーワード</h3><p>キーワードに一致した番組を候補にします。除外キーワードに一致した番組は対象外です。検索対象はタイトル・概要・詳細・出演者から選びます。初期状態はタイトルだけです。</p><p>正規表現OFFでは <code>;</code> がAND、<code>|</code> がORです。<code>()</code> で条件をまとめます。<code>語A;語B</code> は両方を含む条件です。<code>語A|語B</code> はどちらかを含む条件です。</p></article>
+        <article class="setting-card"><h3>正規表現を使用</h3><p>ONではキーワードと除外キーワードを.NETの正規表現で照合します。大文字と小文字は区別しません。半角・全角などの互換文字も正規化して照合します。</p><p>複数の検索項目は個別に照合します。1本の正規表現がタイトルと概要をまたいで一致することはありません。</p></article>
       </div>
       <div class="help-group">
         <h2>正規表現の基本</h2>
         <article class="setting-card"><h3>文字列を含む</h3><p><code>語A</code> と書くと「語A」を含む検索対象に一致します。</p></article>
-        <article class="setting-card"><h3>OR（どちらかを含む）</h3><p><code>語A|語B</code> は「語A」または「語B」に一致します。範囲をまとめるときは <code>()</code> を使い、<code>(語A|語B)語C</code> のように書けます。</p></article>
-        <article class="setting-card"><h3>AND（両方を含む）</h3><p>正規表現では先読みを使います。順番を問わず語Aと語Bの両方を含める場合は <code>(?=.*語A)(?=.*語B).*</code> と書きます。</p></article>
-        <article class="setting-card"><h3>順番が決まっているAND</h3><p>語Aの後に語Bが現れることが分かっている場合は <code>語A.*語B</code> と書けます。順番が逆になる可能性がある場合は先読みを使ってください。</p></article>
-        <article class="setting-card"><h3>数字</h3><p><code>\d</code> は数字1文字、<code>\d+</code> は1文字以上の連続した数字に一致します。</p></article>
-        <article class="setting-card"><h3>任意の文字列</h3><p><code>.*</code> は0文字以上の任意の文字列です。例: <code>語A.*語B</code> は「語A」の後に任意の文字列があり、その後に「語B」が現れる場合に一致します。</p></article>
-        <article class="setting-card"><h3>角括弧や記号を文字として検索</h3><p><code>. ^ $ * + ? { } [ ] \ | ( )</code> などは正規表現で特別な意味を持ちます。文字そのものを検索するときは <code>\</code> でエスケープします。例: <code>\[ABC\]</code> は「[ABC]」という文字列に一致します。</p></article>
+        <article class="setting-card"><h3>OR（どちらかを含む）</h3><p><code>語A|語B</code> は「語A」か「語B」に一致します。<code>()</code> でまとめると <code>(語A|語B)語C</code> のように書けます。</p></article>
+        <article class="setting-card"><h3>AND（両方を含む）</h3><p>順番を問わず両方を含めるには先読みを使います。<code>(?=.*語A)(?=.*語B).*</code> と書きます。</p></article>
+        <article class="setting-card"><h3>順番が決まっているAND</h3><p>語Aの後に語Bが現れる場合は <code>語A.*語B</code> と書きます。順番を問わない場合は先読みを使います。</p></article>
+        <article class="setting-card"><h3>数字</h3><p><code>\d</code> は数字1文字に一致します。<code>\d+</code> は1文字以上の連続した数字に一致します。</p></article>
+        <article class="setting-card"><h3>任意の文字列</h3><p><code>.*</code> は0文字以上の任意の文字列です。<code>語A.*語B</code> は語Aの後に語Bが現れる条件です。間に別の文字列があっても一致します。</p></article>
+        <article class="setting-card"><h3>角括弧や記号を文字として検索</h3><p><code>. ^ $ * + ? { } [ ] \ | ( )</code> は特別な意味を持つ記号です。文字として検索するときは直前に <code>\</code> を付けます。<code>\[ABC\]</code> は「[ABC]」に一致します。</p></article>
       </div>
       <div class="help-group">
         <h2>TvAIrでの正規表現の扱い</h2>
-        <article class="setting-card"><h3>セミコロンは正規表現の区切り</h3><p>正規表現ONでは <code>;</code> で区切った各部分を別々の正規表現として扱い、いずれか1つが一致するとキーワード条件に一致します。正規表現ONでAND条件を作る目的には <code>;</code> を使わず、<code>(?=.*語A)(?=.*語B).*</code> のような先読みを使用してください。</p></article>
-        <article class="setting-card"><h3>除外条件</h3><p>除外キーワードも同じ正規表現規則で評価します。除外欄のいずれかの正規表現に一致した番組は対象外になります。否定条件を複雑な1本の正規表現へ詰め込むより、除外欄を使用する方が確認しやすくなります。</p></article>
-        <article class="setting-card"><h3>半角・全角</h3><p>TvAIrは互換文字の正規化を行ってからも照合します。たとえば <code>ABC123</code> と <code>ＡＢＣ１２３</code> のような互換文字は、正規化後に同等として照合されます。</p></article>
-        <article class="setting-card"><h3>広すぎる条件に注意</h3><p><code>.*</code> だけの条件はほぼすべての文字列に一致します。保存前の検索結果で対象番組を確認し、必要な語や対象チャンネル、ジャンル、曜日、時間帯を組み合わせてください。</p></article>
+        <article class="setting-card"><h3>セミコロンは正規表現の区切り</h3><p>正規表現ONでは <code>;</code> で区切ったいずれかの式が一致すると対象になります。AND条件には使いません。両方を含む条件は <code>(?=.*語A)(?=.*語B).*</code> と書きます。</p></article>
+        <article class="setting-card"><h3>除外条件</h3><p>除外キーワードも同じ規則で照合します。いずれかの式が一致すると対象外です。除外条件は除外欄へ分けて書くと確認しやすくなります。</p></article>
+        <article class="setting-card"><h3>半角・全角</h3><p><code>ABC123</code> と <code>ＡＢＣ１２３</code> などの互換文字は正規化して照合します。</p></article>
+        <article class="setting-card"><h3>広すぎる条件に注意</h3><p><code>.*</code> だけではほぼすべての文字列に一致します。保存前に検索結果を確認してください。必要な語とチャンネル・ジャンル・曜日・時間帯で絞り込みます。</p></article>
       </div>
       <div class="help-group">
         <h2>よく使う形</h2>
@@ -159,16 +161,16 @@
       <header class="help-section-head"><p class="help-kicker">ログ</p><h1>ログ</h1></header>
       <div class="help-group">
         <h2>ユーザーログ</h2>
-        <article class="setting-card"><h3>詳細表示</h3><p>有効にすると、下の項目からログに追加して表示する情報を選択できます。無効の場合は通常の確認に必要な内容だけを表示します。</p></article>
+        <article class="setting-card"><h3>詳細表示</h3><p>ログに追加する情報を下の項目から選べます。OFFでは通常の確認に必要な内容だけを表示します。</p></article>
       </div>
       <div class="help-group">
         <h2>詳細表示する情報</h2>
-        <article class="setting-card"><h3>予約元</h3><p>番組表、自動検索、プラグインなど、予約が登録された経路を表示します。</p></article>
+        <article class="setting-card"><h3>予約元</h3><p>番組表・自動検索・プラグインなどの予約経路を表示します。</p></article>
         <article class="setting-card"><h3>予定時刻</h3><p>予約に設定された開始時刻と終了時刻を表示します。</p></article>
         <article class="setting-card"><h3>実録画時刻</h3><p>実際に録画を開始した時刻と終了した時刻を表示します。</p></article>
-        <article class="setting-card"><h3>録画品質</h3><p>録画結果に記録されたドロップ数、CCエラー数、スクランブル数などを表示します。</p></article>
-        <article class="setting-card"><h3>状態変化</h3><p>予約の追加・取消・有効化・無効化、録画開始・録画完了などの状態変化を表示します。</p></article>
-        <article class="setting-card"><h3>終了・失敗理由</h3><p>録画の正常終了、手動停止、失敗など、録画が終了した理由を表示します。</p></article>
+        <article class="setting-card"><h3>録画品質</h3><p>ドロップ数・CCエラー数・スクランブル数などを表示します。</p></article>
+        <article class="setting-card"><h3>状態変化</h3><p>予約の追加・取消・有効化・無効化や録画開始・完了を表示します。</p></article>
+        <article class="setting-card"><h3>終了・失敗理由</h3><p>正常終了・手動停止・失敗などの終了理由を表示します。</p></article>
       </div>
     </section>
 
@@ -182,7 +184,7 @@
       </div>
       <div class="help-group">
         <h2>番組表ジャンル色</h2>
-        <article class="setting-card"><p>現在選択されているテーマで使用する、番組表のジャンル色を変更します。</p><p>ライトテーマとダークテーマの設定は、それぞれ個別に保存されます。</p></article>
+        <article class="setting-card"><p>現在のテーマの番組表ジャンル色を変更します。</p><p>ライトとダークの設定は別々に保存します。</p></article>
         <article class="setting-card"><h3>標準に戻す</h3><p>現在選択されているテーマのジャンル色を標準設定に戻します。</p></article>
       </div>
     </section>
@@ -206,9 +208,10 @@
   if(window.self !== window.top){ document.body.classList.add('in-modal'); }
 })();
 </script>
-<script src="/tvair-settings-host.js?v=1.2.14"></script>
-<script src="/tvair-notification.js?v=1.2.14"></script>
+<script src="/tvair-settings-host.js?v=1.2.15"></script>
+<script src="/tvair-notification.js?v=1.2.15"></script>
 </body>
 </html>
+
 
 

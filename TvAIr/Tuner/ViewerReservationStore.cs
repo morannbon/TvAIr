@@ -49,8 +49,8 @@ public sealed class ViewerReservationStore
         var projected = _programEvents.GetByEventKey(nid, tsid, sid, eventId);
         if (projected is null)
             return Fail("eventIdentityNotFound", "The selected program can no longer be resolved by exact Event identity.");
-        var canonicalStart = ToOffset(projected.Start);
-        var canonicalEnd = ToOffset(projected.End);
+        var canonicalStart = ViewerReservationValueContract.ToOffset(projected.Start);
+        var canonicalEnd = ViewerReservationValueContract.ToOffset(projected.End);
         if (canonicalStart <= now)
             return Fail("scheduledStartNotFuture", "The selected program is no longer in the future.");
         if (canonicalStart - now > MaxFutureHorizon)
@@ -89,7 +89,7 @@ public sealed class ViewerReservationStore
             _rows[id] = row;
             SaveUnsafe();
             _log.Add("VIEWER_RESERVATION_STORE", owner,
-                $"result=CREATED reservationId={id} viewerProfile={Safe(profile)} nid={nid} tsid={tsid} sid={sid} eventId={row.EventId} scheduledStart={row.ScheduledStart:O} rule=viewer_reservation_contract");
+                $"result=CREATED reservationId={id} viewerProfile={ViewerReservationValueContract.SafeLogValue(profile)} nid={nid} tsid={tsid} sid={sid} eventId={row.EventId} scheduledStart={row.ScheduledStart:O} rule=viewer_reservation_contract");
             return Ok(row);
         }
     }
@@ -149,8 +149,8 @@ public sealed class ViewerReservationStore
             if (!_rows.TryGetValue(id, out var row) || row.State != ViewerReservationState.Scheduled) return ViewerReservationFollowResult.None;
             if (projected.NetworkId != row.NetworkId || projected.TransportStreamId != row.TransportStreamId || projected.ServiceId != row.ServiceId || projected.EventId != row.EventId)
                 return ViewerReservationFollowResult.None;
-            var projectedStart = ToOffset(projected.Start);
-            var projectedEnd = ToOffset(projected.End);
+            var projectedStart = ViewerReservationValueContract.ToOffset(projected.Start);
+            var projectedEnd = ViewerReservationValueContract.ToOffset(projected.End);
             if (projectedEnd <= projectedStart)
             {
                 row.State = ViewerReservationState.Failed;
@@ -241,7 +241,7 @@ public sealed class ViewerReservationStore
         }
         catch (Exception ex)
         {
-            _log.Add("VIEWER_RESERVATION_STORE_LOAD", "Host", $"result=FAILED filePreserved=True reason={Safe(ex.Message)} rule=viewer_reservation_contract");
+            _log.Add("VIEWER_RESERVATION_STORE_LOAD", "Host", $"result=FAILED filePreserved=True reason={ViewerReservationValueContract.SafeLogValue(ex.Message)} rule=viewer_reservation_contract");
             return new(StringComparer.OrdinalIgnoreCase);
         }
     }
@@ -261,16 +261,6 @@ public sealed class ViewerReservationStore
         nid = tsid = sid = 0;
         if (networkId is <= 0 or > ushort.MaxValue || transportStreamId is <= 0 or > ushort.MaxValue || serviceId is <= 0 or > ushort.MaxValue) return false;
         nid = (ushort)networkId; tsid = (ushort)transportStreamId; sid = (ushort)serviceId; return true;
-    }
-    private static DateTimeOffset ToOffset(DateTime value)
-        => value.Kind == DateTimeKind.Unspecified
-            ? new DateTimeOffset(DateTime.SpecifyKind(value, DateTimeKind.Local))
-            : new DateTimeOffset(value);
-
-    private static string Safe(string? value)
-    {
-        var text = string.IsNullOrWhiteSpace(value) ? "-" : value.Replace('\r',' ').Replace('\n',' ').Trim();
-        return text.Length <= 160 ? text : text[..160];
     }
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
 }

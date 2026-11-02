@@ -83,7 +83,7 @@ public sealed class TvTestLauncher
 
 
     /// <summary>TvAIr管理の視聴用TVTest/LIVETestを、汎用Viewer API契約として可視起動する。</summary>
-    public LaunchResult StartViewer(string ownershipId, string bonDriverFileName, string did, string tunerGroup, string channelArgument, bool preserveViewerWindowState = false, string? viewerActivation = null, ViewerWindowStateSnapshot? restoreWindowState = null)
+    public LaunchResult StartViewer(string ownershipId, string bonDriverFileName, string did, string tunerGroup, string channelArgument, bool preserveViewerWindowState = false, string? viewerActivation = null, ViewerWindowStateSnapshot? restoreWindowState = null, ushort? serviceId = null)
     {
         // Viewer must pass the configured BonDriver file name, not an absolute path.
         // TVTest treats the /d token as viewer state; absolute paths can leak a TvAIr-owned
@@ -93,14 +93,17 @@ public sealed class TvTestLauncher
             viewerBonDriver = (bonDriverFileName ?? string.Empty).Trim();
         var didArg = string.IsNullOrWhiteSpace(did) ? string.Empty : $" /DID {did}";
         var exe = !string.IsNullOrWhiteSpace(_ini.ViewingTvTestExecutablePath) ? _ini.ViewingTvTestExecutablePath : _ini.TvTestExecutablePath;
-        var viewerChannelArgument = BuildViewerLaunchChannelArgument(channelArgument, grFallbackFromCh: true);
+        var viewerChannelArgument = TvTestViewerChannelArgument.Build(channelArgument, serviceId);
         if (string.IsNullOrWhiteSpace(viewerChannelArgument))
-            viewerChannelArgument = RemoveNonLaunchIdentityAndSilentArguments(channelArgument);
+        {
+            _log.Add("VIEWER_PROCESS_START_FAILED", "Viewer", "reason=channel_route_unavailable rule=viewer_session_contract");
+            return new LaunchResult(false, 0, "TVTest channel route is unavailable.", ErrorCode: "channel_route_unavailable");
+        }
         var args = NormalizeArgumentWhitespace($"/d \"{viewerBonDriver}\"{didArg} {viewerChannelArgument}");
         var workingDirectory = Path.GetDirectoryName(exe) ?? string.Empty;
 
         _log.Add("VIEWER_TVTEST_ARGUMENT", "Viewer",
-            $"selected=chspaceChiSid exeName={SafeLog(Path.GetFileName(exe))} workingDirectory=omitted bonDriver={SafeLog(bonDriverFileName)} bonDriverPath=omitted did={SafeLog(did)} finalArguments={SafeLog(CompactViewerCommandLineForAudit(args))} sourceChannelArgument={SafeLog(channelArgument)} silent=False sidInInitialLaunch={(!string.IsNullOrWhiteSpace(GetCommandTokenValue(viewerChannelArgument, "/sid"))).ToString()} identityArgsInInitialLaunch=sid_only copyCommand=omitted preserveViewerWindowState={preserveViewerWindowState} viewerActivation={SafeLog(viewerActivation)} restoreWindowStateRequested={(restoreWindowState?.Captured == true)} rule=release_contract");
+            $"exeName={SafeLog(Path.GetFileName(exe))} workingDirectory=omitted bonDriver={SafeLog(bonDriverFileName)} bonDriverPath=omitted did={SafeLog(did)} finalArguments={SafeLog(CompactViewerCommandLineForAudit(args))} sourceChannelArgument={SafeLog(channelArgument)} silent=False copyCommand=omitted preserveViewerWindowState={preserveViewerWindowState} viewerActivation={SafeLog(viewerActivation)} restoreWindowStateRequested={(restoreWindowState?.Captured == true)} rule=release_contract");
 
         var result = LaunchViewerCore(exe, args, tunerGroup, preserveViewerWindowState, viewerActivation, restoreWindowState);
         if (result.Success && result.ProcessId > 0)
@@ -112,7 +115,7 @@ public sealed class TvTestLauncher
     /// TvAIrが所有する既存Viewerへ、TVTest自身の通常single-task契約で選局要求を渡す。
     /// 対象はViewer Profileから解決済みのBonDriver/DIDで一意に決まり、前面化やHWND直送は行わない。
     /// </summary>
-    public LaunchResult RetuneExistingViewer(string ownershipId, int existingProcessId, string bonDriverFileName, string did, string channelArgument, bool preserveViewerWindowState = false, string? viewerActivation = null)
+    public LaunchResult RetuneExistingViewer(string ownershipId, int existingProcessId, string bonDriverFileName, string did, string channelArgument, bool preserveViewerWindowState = false, string? viewerActivation = null, ushort? serviceId = null)
     {
         if (existingProcessId <= 0)
         {
@@ -144,9 +147,13 @@ public sealed class TvTestLauncher
             if (string.IsNullOrWhiteSpace(viewerBonDriver))
                 viewerBonDriver = (bonDriverFileName ?? string.Empty).Trim();
             var didArg = string.IsNullOrWhiteSpace(did) ? string.Empty : $" /DID {did}";
-            var viewerChannelArgument = BuildViewerLaunchChannelArgument(channelArgument, grFallbackFromCh: true);
+            var viewerChannelArgument = TvTestViewerChannelArgument.Build(channelArgument, serviceId);
             if (string.IsNullOrWhiteSpace(viewerChannelArgument))
-                viewerChannelArgument = RemoveNonLaunchIdentityAndSilentArguments(channelArgument);
+            {
+                _log.Add("VIEWER_RETUNE_EXISTING", "Viewer",
+                    $"result=FAILED method=pid_targeted_tvtest_interprocess existingPid={existingProcessId} leaseId={SafeLog(ownershipId)} reason=channel_route_unavailable processRestarted=False rule=viewer_session_contract");
+                return new LaunchResult(false, existingProcessId, "TVTest channel route is unavailable.", ErrorCode: "channel_route_unavailable");
+            }
 
             // TVTest official single-task receiver consumes the original command-line body.
             // The target HWND is already resolved from the owned PID, so /s and global target discovery are unnecessary.
@@ -309,84 +316,6 @@ public sealed class TvTestLauncher
         }
     }
 
-
-    private static string RemoveNonLaunchIdentityAndSilentArguments(string args)
-    {
-        // /nid and /tsid are audit identity fields for TvAIr. /sid is a TVTest launch selector and must be preserved.
-        return RemoveCommandToken(RemoveCommandToken(RemoveCommandToken(args, "/silent"), "/nid"), "/tsid");
-    }
-
-    private static string BuildViewerLaunchChannelArgument(string channelArgument, bool grFallbackFromCh)
-    {
-        var sid = GetCommandTokenValue(channelArgument, "/sid");
-        var sidArg = string.IsNullOrWhiteSpace(sid) ? string.Empty : $" /sid {sid}";
-        var chspace = GetCommandTokenValue(channelArgument, "/chspace");
-        var chi = GetCommandTokenValue(channelArgument, "/chi");
-        if (!string.IsNullOrWhiteSpace(chspace) && !string.IsNullOrWhiteSpace(chi))
-            return NormalizeArgumentWhitespace($"/chspace {chspace} /chi {chi}{sidArg}");
-
-        if (grFallbackFromCh)
-        {
-            var ch = GetCommandTokenValue(channelArgument, "/ch");
-            if (!string.IsNullOrWhiteSpace(ch))
-                return NormalizeArgumentWhitespace($"/chspace 0 /chi {ch}{sidArg}");
-        }
-
-        return string.Empty;
-    }
-
-    private static string? GetCommandTokenValue(string args, string token)
-    {
-        var tokens = SplitCommandLineLoose(args);
-        for (var i = 0; i < tokens.Count; i++)
-        {
-            if (string.Equals(tokens[i], token, StringComparison.OrdinalIgnoreCase))
-                return i + 1 < tokens.Count ? tokens[i + 1] : null;
-        }
-        return null;
-    }
-
-    private static string RemoveCommandToken(string args, string token)
-    {
-        var tokens = SplitCommandLineLoose(args);
-        var kept = new List<string>();
-        for (var i = 0; i < tokens.Count; i++)
-        {
-            if (string.Equals(tokens[i], token, StringComparison.OrdinalIgnoreCase))
-            {
-                if (i + 1 < tokens.Count && !tokens[i + 1].StartsWith("/", StringComparison.Ordinal)) i++;
-                continue;
-            }
-            kept.Add(QuoteArgumentIfNeeded(tokens[i]));
-        }
-        return NormalizeArgumentWhitespace(string.Join(" ", kept));
-    }
-
-    private static List<string> SplitCommandLineLoose(string args)
-    {
-        var result = new List<string>();
-        if (string.IsNullOrWhiteSpace(args)) return result;
-        var current = new System.Text.StringBuilder();
-        var inQuote = false;
-        foreach (var ch in args)
-        {
-            if (ch == '"') { inQuote = !inQuote; continue; }
-            if (char.IsWhiteSpace(ch) && !inQuote)
-            {
-                if (current.Length > 0) { result.Add(current.ToString()); current.Clear(); }
-                continue;
-            }
-            current.Append(ch);
-        }
-        if (current.Length > 0) result.Add(current.ToString());
-        return result;
-    }
-
-    private static string QuoteArgumentIfNeeded(string value)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return "\"\"";
-        return value.Any(char.IsWhiteSpace) ? "\"" + value.Replace("\"", "\\\"") + "\"" : value;
-    }
 
     private static string NormalizeArgumentWhitespace(string value)
         => string.Join(" ", (value ?? string.Empty).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));

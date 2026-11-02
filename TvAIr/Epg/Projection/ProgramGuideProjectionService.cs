@@ -572,22 +572,22 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
 
     private static ProjectedProgramEvent OverlayDbEvent(ProjectedProgramEvent db, ExternalEpgEvent external)
     {
-        var dbTitle = FirstNonEmpty(db.Title);
-        var overlayTitle = FirstNonEmpty(external.Title);
-        var dbShortText = FirstNonEmpty(db.ShortText);
-        var overlayShortText = FirstNonEmpty(external.ShortText);
-        var dbExtendedText = FirstNonEmpty(db.ExtendedText);
+        var dbTitle = ProgramEventTextPreference.FirstNonEmpty(db.Title);
+        var overlayTitle = ProgramEventTextPreference.FirstNonEmpty(external.Title);
+        var dbShortText = ProgramEventTextPreference.FirstNonEmpty(db.ShortText);
+        var overlayShortText = ProgramEventTextPreference.FirstNonEmpty(external.ShortText);
+        var dbExtendedText = ProgramEventTextPreference.FirstNonEmpty(db.ExtendedText);
         // Keep Detail and ExtendedItems as independent semantic fields.  Presentation may choose
         // its own fallback, but auto-search must not inherit a display fallback as source data.
-        var overlayExtendedText = FirstNonEmpty(external.ExtendedText);
+        var overlayExtendedText = ProgramEventTextPreference.FirstNonEmpty(external.ExtendedText);
 
         // DbWithOverlay keeps TvAIr DB as the identity and title authority.
         // Overlay text is used only when the corresponding DB display field is empty.
-        var title = FirstNonEmpty(dbTitle, overlayTitle);
-        var shortText = FirstNonEmpty(dbShortText, overlayShortText);
-        var extendedText = FirstNonEmpty(dbExtendedText, overlayExtendedText);
+        var title = ProgramEventTextPreference.FirstNonEmpty(dbTitle, overlayTitle);
+        var shortText = ProgramEventTextPreference.FirstNonEmpty(dbShortText, overlayShortText);
+        var extendedText = ProgramEventTextPreference.FirstNonEmpty(dbExtendedText, overlayExtendedText);
         var projectedItems = db.ExtendedItems.Length > 0 ? db.ExtendedItems : external.ExtendedItems;
-        var presentationExtendedText = FirstNonEmpty(extendedText, projectedItems);
+        var presentationExtendedText = ProgramEventTextPreference.FirstNonEmpty(extendedText, projectedItems);
         var cellText = BuildCellText(title, shortText, presentationExtendedText);
 
         return new ProjectedProgramEvent
@@ -603,15 +603,15 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
             DurationSeconds = db.DurationSeconds,
             CanonicalStart = db.Start,
             CanonicalEnd = db.End,
-            ServiceName = FirstNonEmpty(db.ServiceName, external.ServiceName),
+            ServiceName = ProgramEventTextPreference.FirstNonEmpty(db.ServiceName, external.ServiceName),
             Title = title,
             ShortText = shortText,
             ExtendedText = extendedText,
             ExtendedItems = projectedItems,
             UpdatedAt = db.UpdatedAt != default ? db.UpdatedAt : external.UpdatedAt,
             CellText = cellText,
-            Genre = FirstNonEmpty(db.Genre, external.Genre),
-            GenreCodes = FirstNonEmpty(db.GenreCodes, external.GenreCodes),
+            Genre = ProgramEventTextPreference.FirstNonEmpty(db.Genre, external.Genre),
+            GenreCodes = ProgramEventTextPreference.FirstNonEmpty(db.GenreCodes, external.GenreCodes),
             DbEventExists = true,
             DbEvent = db.DbEvent,
             DbTableId = db.DbTableId,
@@ -636,7 +636,7 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
     private static ProjectedProgramEvent ToOverlayOnly(ExternalEpgEvent external)
     {
         var key = ProjectedEventKey.FromExternal(external);
-        var extendedText = FirstNonEmpty(external.ExtendedText);
+        var extendedText = ProgramEventTextPreference.FirstNonEmpty(external.ExtendedText);
         return new ProjectedProgramEvent
         {
             Key = key,
@@ -656,7 +656,7 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
             ExtendedText = extendedText,
             ExtendedItems = external.ExtendedItems ?? string.Empty,
             UpdatedAt = external.UpdatedAt,
-            CellText = BuildCellText(external.Title, external.ShortText, FirstNonEmpty(extendedText, external.ExtendedItems)),
+            CellText = BuildCellText(external.Title, external.ShortText, ProgramEventTextPreference.FirstNonEmpty(extendedText, external.ExtendedItems)),
             Genre = external.Genre ?? string.Empty,
             GenreCodes = external.GenreCodes ?? string.Empty,
             DbEventExists = false,
@@ -682,15 +682,6 @@ public sealed class ProgramGuideProjectionService : IProgramEventSource
     private static string BuildCellText(params string?[] parts)
         => string.Join("\n", parts.Select(v => (v ?? string.Empty).Trim()).Where(v => v.Length > 0));
 
-    private static string FirstNonEmpty(params string?[] values)
-    {
-        foreach (var value in values)
-        {
-            var text = (value ?? string.Empty).Trim();
-            if (text.Length > 0) return text;
-        }
-        return string.Empty;
-    }
     private sealed record FullMergedSnapshot(
         long DbRevision,
         long ExternalRevision,

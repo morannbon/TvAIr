@@ -50,7 +50,7 @@ public sealed class ViewerReservationScheduler : BackgroundService
             try { RunOnce(); }
             catch (Exception ex)
             {
-                _log.Add("VIEWER_RESERVATION_SCHEDULER", "Host", $"result=ERROR error={Safe(ex.GetType().Name)}:{Safe(ex.Message)} action=continue_next_tick rule=viewer_reservation_contract");
+                _log.Add("VIEWER_RESERVATION_SCHEDULER", "Host", $"result=ERROR error={ViewerReservationValueContract.SafeLogValue(ex.GetType().Name)}:{ViewerReservationValueContract.SafeLogValue(ex.Message)} action=continue_next_tick rule=viewer_reservation_contract");
             }
 
             try { await Task.Delay(PollInterval, stoppingToken).ConfigureAwait(false); }
@@ -80,14 +80,14 @@ public sealed class ViewerReservationScheduler : BackgroundService
                 {
                     PublishChanged(follow.FailedReservation, "Failed", operationId: null, follow.Message);
                     _log.Add("VIEWER_RESERVATION_TIME_FOLLOW", follow.FailedReservation.OwnerPluginId,
-                        $"result=FAILED reservationId={follow.FailedReservation.ReservationId} viewerProfile={Safe(follow.FailedReservation.ViewerProfileId)} errorCode={Safe(follow.FailedReservation.FailureReason)} message={Safe(follow.Message)} retry=False rule=viewer_reservation_contract");
+                        $"result=FAILED reservationId={follow.FailedReservation.ReservationId} viewerProfile={ViewerReservationValueContract.SafeLogValue(follow.FailedReservation.ViewerProfileId)} errorCode={ViewerReservationValueContract.SafeLogValue(follow.FailedReservation.FailureReason)} message={ViewerReservationValueContract.SafeLogValue(follow.Message)} retry=False rule=viewer_reservation_contract");
                 }
                 else if (follow.UpdatedReservation is not null)
                 {
                     var updated = follow.UpdatedReservation;
                     PublishChanged(updated, "Updated", operationId: null);
                     _log.Add("VIEWER_RESERVATION_TIME_FOLLOW", updated.OwnerPluginId,
-                        $"result=UPDATED reservationId={updated.ReservationId} viewerProfile={Safe(updated.ViewerProfileId)} nid={updated.NetworkId} tsid={updated.TransportStreamId} sid={updated.ServiceId} eventId={updated.EventId} scheduledStart={updated.ScheduledStart:O} scheduledEnd={(updated.ScheduledEnd.HasValue ? updated.ScheduledEnd.Value.ToString("O") : "-")} rule=viewer_reservation_contract");
+                        $"result=UPDATED reservationId={updated.ReservationId} viewerProfile={ViewerReservationValueContract.SafeLogValue(updated.ViewerProfileId)} nid={updated.NetworkId} tsid={updated.TransportStreamId} sid={updated.ServiceId} eventId={updated.EventId} scheduledStart={updated.ScheduledStart:O} scheduledEnd={(updated.ScheduledEnd.HasValue ? updated.ScheduledEnd.Value.ToString("O") : "-")} rule=viewer_reservation_contract");
                 }
             }
             scheduled = _store.ListScheduled();
@@ -117,7 +117,7 @@ public sealed class ViewerReservationScheduler : BackgroundService
             return;
         }
 
-        var projectedStart = ToOffset(projected.Start);
+        var projectedStart = ViewerReservationValueContract.ToOffset(projected.Start);
         var projectedEnd = projected.DurationSeconds > 0 ? projectedStart.AddSeconds(projected.DurationSeconds) : row.ScheduledEnd;
         if (projectedStart != row.ScheduledStart || projectedEnd != row.ScheduledEnd)
         {
@@ -171,7 +171,7 @@ public sealed class ViewerReservationScheduler : BackgroundService
         if (completed is null) return;
         PublishChanged(completed, "Completed", operationId);
         _log.Add("VIEWER_RESERVATION_EXECUTION", completed.OwnerPluginId,
-            $"result=COMPLETED reservationId={completed.ReservationId} viewerProfile={Safe(completed.ViewerProfileId)} executionAt={executionAt:O} scheduledStart={completed.ScheduledStart:O} viewerSession={Safe(operation.ViewerSessionId)} generation={operation.Generation} nid={completed.NetworkId} tsid={completed.TransportStreamId} sid={completed.ServiceId} eventId={completed.EventId} completion=viewer_operation_success retry=False rule=viewer_reservation_contract");
+            $"result=COMPLETED reservationId={completed.ReservationId} viewerProfile={ViewerReservationValueContract.SafeLogValue(completed.ViewerProfileId)} executionAt={executionAt:O} scheduledStart={completed.ScheduledStart:O} viewerSession={ViewerReservationValueContract.SafeLogValue(operation.ViewerSessionId)} generation={operation.Generation} nid={completed.NetworkId} tsid={completed.TransportStreamId} sid={completed.ServiceId} eventId={completed.EventId} completion=viewer_operation_success retry=False rule=viewer_reservation_contract");
     }
 
     private void Fail(ViewerReservationRecord row, string code, string message, string? operationId = null)
@@ -180,7 +180,7 @@ public sealed class ViewerReservationScheduler : BackgroundService
         if (failed is null) return;
         PublishChanged(failed, "Failed", operationId, message);
         _log.Add("VIEWER_RESERVATION_EXECUTION", failed.OwnerPluginId,
-            $"result=FAILED reservationId={failed.ReservationId} viewerProfile={Safe(failed.ViewerProfileId)} errorCode={Safe(code)} message={Safe(message)} retry=False rule=viewer_reservation_contract");
+            $"result=FAILED reservationId={failed.ReservationId} viewerProfile={ViewerReservationValueContract.SafeLogValue(failed.ViewerProfileId)} errorCode={ViewerReservationValueContract.SafeLogValue(code)} message={ViewerReservationValueContract.SafeLogValue(message)} retry=False rule=viewer_reservation_contract");
     }
 
     public void PublishCreated(ViewerReservationRecord row) => PublishChanged(row, "Added", null);
@@ -206,16 +206,5 @@ public sealed class ViewerReservationScheduler : BackgroundService
                 ["displayTargetAfterSuccess"] = row.State == ViewerReservationState.Completed ? "plugin_may_select_completed_profile" : "none"
             }
         });
-    }
-
-    private static DateTimeOffset ToOffset(DateTime value)
-        => value.Kind == DateTimeKind.Unspecified
-            ? new DateTimeOffset(DateTime.SpecifyKind(value, DateTimeKind.Local))
-            : new DateTimeOffset(value);
-
-    private static string Safe(string? value)
-    {
-        var text = string.IsNullOrWhiteSpace(value) ? "-" : value.Replace('\r', ' ').Replace('\n', ' ').Trim();
-        return text.Length <= 160 ? text : text[..160];
     }
 }

@@ -1982,11 +1982,14 @@ public sealed class UserEventLogService
         foreach (var e in selected)
         {
             body.AppendLine($"[{e.CreatedAt:yyyy/MM/dd HH:mm:ss}] {SanitizeReportValue(e.Severity)} {SanitizeReportValue(e.Category)}/{SanitizeReportValue(e.Result)}");
-            AppendReportLine(body, "内容", SanitizeReportValue(UserLogProjectionService.BuildStandardMessage(e)));
+            var reportMessage = SanitizeReportValue(UserLogProjectionService.BuildStandardMessage(e));
+            AppendReportLine(body, "内容", reportMessage);
             AppendReportLine(body, "放送局", SanitizeReportValue(e.ServiceName));
+            var reportTitle = SanitizeReportValue(e.ProgramTitle);
+            if (!string.IsNullOrWhiteSpace(reportTitle) &&
+                !reportMessage.Contains(reportTitle, StringComparison.Ordinal))
+                AppendReportLine(body, "番組", reportTitle);
             AppendReportLine(body, "予約元", SanitizeReportValue(e.ReservationSource));
-            AppendReportLine(body, "予約ID", SanitizeReportValue(e.ReservationId));
-            AppendReportLine(body, "録画ID", string.Equals(e.RecordingId, e.ReservationId, StringComparison.OrdinalIgnoreCase) ? null : SanitizeReportValue(e.RecordingId));
             AppendReportLine(body, "予定時刻", FormatReportRange(e.ScheduledStart, e.ScheduledEnd));
             AppendReportLine(body, "実録画時刻", FormatReportRange(e.ActualStart, e.ActualEnd));
             AppendReportLine(body, "録画品質", FormatReportQuality(e));
@@ -2128,7 +2131,8 @@ public sealed class UserEventLogService
         v = Regex.Replace(v, @"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", "<email>");
         v = Regex.Replace(v, @"\b(?:\d{1,3}\.){3}\d{1,3}\b", "<ip>");
         v = Regex.Replace(v, @"(?i)(user(name)?|account|pcname|computername)=([^;\s]+)", "$1=<private>");
-        return v;
+        // Preserve correlation in the stored event; only remove internal reservation numbers from the copied text.
+        return UserLogProjectionService.WithoutInternalReservationNumbers(v);
     }
 
     private static void AppendReportLine(StringBuilder sb, string label, string? value)

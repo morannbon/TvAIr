@@ -9,7 +9,8 @@ internal sealed class ExpiredKeywordRuleDeletionCommand(DateOnly today) : Reserv
     internal override bool IsRejected => Result is { Applied: false };
     internal override bool RetainIfUnexecuted => Result is null;
     internal override string? DeferredReason => Result is null ? "keyword_expiry_runtime_unavailable" : null;
-    internal override bool RequiresRuleRefreshAfterCommit => Result is { Applied: true };
+    internal override bool RequiresRuleRefreshAfterCommit => Result is { Applied: true } result
+        && (result.BeforeCount != result.AfterCount || result.RemovedIds.Count > 0);
     internal override void PrepareSchedulerContext(ReservationScheduler value) => scheduler = value;
     internal override void Apply(ReservationStore store, bool featureEnabled,
         ReservationProjectionMetadataStore? metadataStore = null)

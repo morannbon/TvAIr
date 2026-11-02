@@ -230,6 +230,7 @@ public sealed class EpgScheduler : BackgroundService
                     updatedAt);
                 dailyRunStateStore.Save(next);
                 currentDailyRunState = next;
+                systemEpgResponsibilityPlan.UpdateDailyState(next);
                 return true;
             }
 
@@ -256,6 +257,7 @@ public sealed class EpgScheduler : BackgroundService
             };
             dailyRunStateStore.Save(nextState);
             currentDailyRunState = nextState;
+            systemEpgResponsibilityPlan.UpdateDailyState(nextState);
             return true;
         }
     }
@@ -299,6 +301,7 @@ public sealed class EpgScheduler : BackgroundService
             var next = current with { State = DailyEpgRunPhase.Running, UpdatedAt = updatedAt };
             dailyRunStateStore.Save(next);
             currentDailyRunState = next;
+            systemEpgResponsibilityPlan.UpdateDailyState(next);
             committedState = next;
             rejectReason = string.Empty;
             return true;
@@ -315,6 +318,7 @@ public sealed class EpgScheduler : BackgroundService
             var next = current with { State = DailyEpgRunPhase.Finalizing, UpdatedAt = updatedAt };
             dailyRunStateStore.Save(next);
             currentDailyRunState = next;
+            systemEpgResponsibilityPlan.UpdateDailyState(next);
         }
     }
 
@@ -331,6 +335,7 @@ public sealed class EpgScheduler : BackgroundService
             var next = current with { State = DailyEpgRunPhase.Failed, UpdatedAt = updatedAt };
             dailyRunStateStore.Save(next);
             currentDailyRunState = next;
+            systemEpgResponsibilityPlan.UpdateDailyState(next);
         }
     }
 
@@ -347,6 +352,7 @@ public sealed class EpgScheduler : BackgroundService
             var next = current with { State = DailyEpgRunPhase.Expired, UpdatedAt = updatedAt };
             dailyRunStateStore.Save(next);
             currentDailyRunState = next;
+            systemEpgResponsibilityPlan.UpdateDailyState(next);
         }
     }
 
@@ -428,6 +434,7 @@ public sealed class EpgScheduler : BackgroundService
         }
 
         lock (dailyRunStateGate) currentDailyRunState = loaded;
+        if (loaded is not null) systemEpgResponsibilityPlan.UpdateDailyState(loaded);
         if (loaded is null) return;
 
         if (loaded.State == DailyEpgRunPhase.Running)
@@ -486,6 +493,7 @@ public sealed class EpgScheduler : BackgroundService
             };
             dailyRunStateStore.Save(next);
             currentDailyRunState = next;
+            systemEpgResponsibilityPlan.UpdateDailyState(next);
         }
     }
 
@@ -556,6 +564,7 @@ public sealed class EpgScheduler : BackgroundService
                 };
                 dailyRunStateStore.Save(next);
                 currentDailyRunState = next;
+                systemEpgResponsibilityPlan.UpdateDailyState(next);
             }
 
             try
@@ -1543,14 +1552,15 @@ public sealed class EpgScheduler : BackgroundService
                 group => GetScheduledRecordingTuners(group).Where(t => NormalizeEpgScheduleGroup(t.Group) == group).ToArray(),
                 StringComparer.OrdinalIgnoreCase);
 
-        if (state.State is not (DailyEpgRunPhase.Planned or DailyEpgRunPhase.Running))
+        if (state.State is not (DailyEpgRunPhase.Planned or DailyEpgRunPhase.Running)
+            || state.Placement == DailyEpgPlacementState.Unplaced)
         {
             foreach (var tuner in recordingTunersByGroup.Values
                          .SelectMany(x => x)
                          .GroupBy(t => t.Name, StringComparer.OrdinalIgnoreCase)
                          .Select(g => g.First()))
             {
-                changed += reservationStore.DeleteScheduledDailyEpgEntriesForTuner(tuner.Name);
+                changed += reservationStore.DeleteScheduledDailyEpgEntriesForTuner(tuner.Name, state.Date);
             }
         }
         else
@@ -1574,6 +1584,7 @@ public sealed class EpgScheduler : BackgroundService
             }
         }
 
+        systemEpgResponsibilityPlan.UpdateDailyState(state);
         if (refreshAllocationRoute && changed > 0)
             ReevaluateAndLog("EpgDailyProjection", refreshWakeTask: true);
         return changed;
@@ -2661,6 +2672,9 @@ public sealed class EpgScheduler : BackgroundService
     /// - 視聴用Tunerは使用しない。実行時に録画用Tunerの空きがなければ明示例外として実行しない。
     /// - 現在のTuner空きや同一局録画中といった再構築時点の一過性状態で、将来の確認予約を生成抑止しない。
     /// </summary>
+    internal IReadOnlyList<SystemEpgPreRecordResponsibility> GetPreRecordWakeResponsibilities(DateTime now)
+        => systemEpgResponsibilityPlan.Build(reservationStore.GetAll(), now).PreRecordResponsibilities;
+
     public bool RefreshPreRecordEpgEntries()
     {
         try
@@ -2676,7 +2690,8 @@ public sealed class EpgScheduler : BackgroundService
 
     private bool UpsertPreRecordEpgEntries()
     {
-        if (ini.EpgPreRecordMinutes <= 0) return false;
+        if (!SystemEpgResponsibilityPlanService.IsPreRecordEnabled(ini))
+            return reservationStore.DeleteScheduledPreRecordEpgEntriesExceptParents(allocationRoute.GetActivePreRecordParentIds()) > 0;
 
         var preRecordRouteMutationCount = 0;
         var protectedViewingTuners = tunerProfiles

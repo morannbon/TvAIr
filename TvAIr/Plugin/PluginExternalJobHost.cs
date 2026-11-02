@@ -155,7 +155,7 @@ internal sealed class PluginExternalJobHost : IDisposable
         List<JobEntry> active;
         lock (gate)
         {
-            active = jobs.Values.Where(x => SameOwner(x, owner) && !x.IsTerminal).ToList();
+            active = jobs.Values.Where(x => SameOwner(x, owner) && !x.Completion.Task.IsCompleted).ToList();
             foreach (var entry in active)
             {
                 entry.CancelRequested = true;
@@ -320,9 +320,12 @@ internal sealed class PluginExternalJobHost : IDisposable
             try
             {
                 if (publishTerminal) Publish(entry);
+            }
+            finally
+            {
+                entry.Completion.TrySetResult();
                 PruneTerminalHistory(entry.PluginId);
             }
-            finally { entry.Completion.TrySetResult(); }
         }
     }
 
@@ -340,19 +343,31 @@ internal sealed class PluginExternalJobHost : IDisposable
     private void Publish(JobEntry entry)
     {
         var dto = entry.ToDto();
-        events.Publish(new TvAirEventDto
+        // Event delivery is a projection, not the process-lifetime owner.  A disposed
+        // or failed event outbox must not strand an accepted queued job, abort a
+        // running process, or skip plugin-shutdown cancellation and its wait.
+        try
         {
-            EventType = TvAirEventType.ExternalJobChanged,
-            EntityId = $"external-job:{dto.JobId}",
-            SourceOwnerId = entry.PluginId,
-            ChangeKind = dto.StateCode.ToString(),
-            ExternalJob = dto,
-            Details = new Dictionary<string, string>
+            events.Publish(new TvAirEventDto
             {
-                ["jobId"] = dto.JobId,
-                ["state"] = dto.StateCode.ToString()
-            }
-        });
+                EventType = TvAirEventType.ExternalJobChanged,
+                EntityId = $"external-job:{dto.JobId}",
+                SourceOwnerId = entry.PluginId,
+                ChangeKind = dto.StateCode.ToString(),
+                ExternalJob = dto,
+                Details = new Dictionary<string, string>
+                {
+                    ["jobId"] = dto.JobId,
+                    ["state"] = dto.StateCode.ToString()
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            log.Add("PLUGIN_EXTERNAL_JOB_EVENT", entry.PluginId,
+                $"jobId={dto.JobId} state={dto.StateCode} result=DELIVERY_FAILED errorType={ex.GetType().Name} rule=plugin_external_job_host_contract");
+        }
+
         log.Add("PLUGIN_EXTERNAL_JOB", entry.PluginId,
             $"jobId={dto.JobId} state={dto.StateCode} accepted={dto.Accepted} kind={dto.Kind} exitCode={(dto.ExitCode?.ToString() ?? "-")} failureCode={(dto.FailureCode ?? "-")} rule=plugin_external_job_host_contract");
     }
@@ -375,7 +390,7 @@ internal sealed class PluginExternalJobHost : IDisposable
     private void PruneTerminalHistoryLocked(string pluginId)
     {
         var stale = jobs.Values
-            .Where(x => SameOwner(x, pluginId) && x.IsTerminal)
+            .Where(x => SameOwner(x, pluginId) && x.IsTerminal && x.Completion.Task.IsCompleted)
             .OrderByDescending(x => x.FinishedAt ?? x.QueuedAt)
             .ThenByDescending(x => x.QueuedAt)
             .Skip(MaxTerminalJobsPerPlugin)

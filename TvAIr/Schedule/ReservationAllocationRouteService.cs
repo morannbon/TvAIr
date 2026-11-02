@@ -558,11 +558,10 @@ public sealed class ReservationAllocationRouteService
                     if (_pendingRequest is not null && firstRequest.StopPreparationBarrier is null)
                     {
                         currentRequest = _pendingRequest;
-                        aggregateRequest = currentRequest;
+                        // The prior cycles are already committed but not yet projected.
+                        // Late arrivals join the same batch, just like SingleFlightNext.
+                        aggregateRequest = MergeRequests(aggregateRequest, currentRequest);
                         _pendingRequest = null;
-                        latestAllocationResult = null;
-                        aggregateConflictChanges.Clear();
-                        aggregateAllocationRowChanges.Clear();
                         continue;
                     }
 
@@ -654,6 +653,8 @@ public sealed class ReservationAllocationRouteService
 
         List<(int Id, string ServiceName, string Title, bool Conflicted)> changes = new();
         List<AllocationCommittedRowChange> rowChanges = new();
+        var committedConflictChanges = new Dictionary<int, AggregateConflictChange>();
+        var committedRowChanges = new Dictionary<int, AggregateAllocationRowChange>();
         long allocationGeneration = 0;
         bool retryRequired = false;
         string allocationReason = request.StopPreparationBarrier is not null
@@ -732,6 +733,11 @@ public sealed class ReservationAllocationRouteService
         if (wantsKeywordRefresh && !deferredKeywordRefresh)
         {
             var matcher = Resolve<KeywordMatcher>();
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+            if (matcher is not null)
+                _log.Add("KEYWORD_MATCH_REQUEST", "CommonRoute",
+                    $"requestId={Guid.NewGuid():N} source={request.Source} action={request.Action} explicitRefresh={request.RunKeywordMatcher} committedRefresh={committedRuleRefresh} scope={(request.RunKeywordMatcher || committedRuleRefresh ? "full" : "incremental")} evaluations={(request.RunKeywordMatcher || committedRuleRefresh ? 1 : incrementalCommands!.Length)} commands=[{string.Join(',', request.TopologyCommands?.Select(c => c.GetType().Name) ?? Enumerable.Empty<string>())}] rule=keyword_match_request_origin");
+#endif
             if (request.RunKeywordMatcher || committedRuleRefresh) matcher?.RunMatching();
             else foreach (var events in incrementalCommands!) matcher?.RunMatching(events!);
         }
@@ -877,6 +883,8 @@ public sealed class ReservationAllocationRouteService
             var evaluation = EvaluateWithSingleRetry(effectiveLater, continuousChainPlanning, configuredChainFeature, request);
             changes = evaluation.Changes.ToList();
             rowChanges = evaluation.RowChanges.ToList();
+            AccumulateConflictChanges(committedConflictChanges, changes);
+            AccumulateAllocationRowChanges(committedRowChanges, rowChanges);
             allocationGeneration = evaluation.AllocationGeneration;
             retryRequired = evaluation.RetryRequired;
             allocationReason = evaluation.Reason;
@@ -899,6 +907,8 @@ public sealed class ReservationAllocationRouteService
                 var finalEvaluation = EvaluateWithSingleRetry(effectiveLater, continuousChainPlanning, configuredChainFeature, request);
                 changes = finalEvaluation.Changes.ToList();
                 rowChanges = finalEvaluation.RowChanges.ToList();
+                AccumulateConflictChanges(committedConflictChanges, changes);
+                AccumulateAllocationRowChanges(committedRowChanges, rowChanges);
                 allocationGeneration = finalEvaluation.AllocationGeneration;
                 retryRequired = finalEvaluation.RetryRequired;
                 allocationReason = finalEvaluation.Reason;
@@ -920,11 +930,17 @@ public sealed class ReservationAllocationRouteService
             RetryRequired: retryRequired,
             Reason: allocationReason);
 
+        // A PreRec refresh can cause another committed evaluation in this cycle.
+        // Project the net change across every commit, not only the last evaluation.
+        var cycle = new CycleResult(result, changes, rowChanges, request.ReevaluateAllocations,
+            deferredKeywordRefresh, deferredProgramSync, chainPending, promotionPending, promotionAttempted);
+        var committedCycle = BuildEffectiveFinalCycle(cycle, null, committedConflictChanges, committedRowChanges);
+        result = committedCycle.Result;
+
         _log.Add("ALLOC_TRACE", "CycleExit",
             $"[ALLOC] source={request.Source} action={request.Action} stage=core_cycle_exit changed={result.ChangedCount} on={result.ConflictOnCount} off={result.ConflictOffCount} allocationGeneration={result.AllocationGeneration} retryRequired={result.RetryRequired} reason={result.Reason} elapsedMs={(int)(DateTime.Now - startedAt).TotalMilliseconds} tunerStatusBefore={tunerStatusBefore} tunerStatusAfter={_tunerPool.GetStatusSummary()}");
 
-        return new CycleResult(result, changes, rowChanges, request.ReevaluateAllocations,
-            deferredKeywordRefresh, deferredProgramSync, chainPending, promotionPending, promotionAttempted);
+        return cycle with { Result = result, Changes = committedCycle.Changes, RowChanges = committedCycle.RowChanges };
     }
 
     private static void AccumulateConflictChanges(
@@ -1126,7 +1142,6 @@ public sealed class ReservationAllocationRouteService
 
         if (request.RefreshWakeTask)
         {
-            var wakeHandled = false;
             try
             {
                 var taskScheduler = Resolve<TaskSchedulerService>();
@@ -1156,10 +1171,10 @@ public sealed class ReservationAllocationRouteService
                     }
                     else
                     {
-                        taskScheduler.UpdateWakeTask();
+                        var applied = taskScheduler.TryUpdateWakeTaskForMutation(
+                            wakeRefreshSnapshotVersion, request.Source, request.Action);
                         _log.Add("ALLOC_ROUTE", "Wake",
-                            $"source={request.Source} action={request.Action} result=APPLIED mode=immediate owner=reservation_allocation_route rule=allocation_mutation_wake_owner_contract");
-                        wakeHandled = true;
+                            $"source={request.Source} action={request.Action} result={(applied ? "APPLIED" : "PENDING_RETRY")} mode=immediate owner=reservation_allocation_route rule=allocation_mutation_wake_owner_contract");
                     }
                 }
             }
@@ -1169,14 +1184,6 @@ public sealed class ReservationAllocationRouteService
                     $"source={request.Source} action={request.Action} result=FAILED error={ex.Message} owner=reservation_allocation_route rule=allocation_mutation_wake_owner_contract");
             }
 
-            if (wakeHandled && mutationJournal is not null)
-            {
-                // claim時に固定した世代だけを完了扱いにする。実行中に増えた後続Mutationは処理済みにしない。
-                if (wakeRefreshSnapshotVersion > 0)
-                    mutationJournal.MarkWakePlanHandled(wakeRefreshSnapshotVersion);
-                _log.Add("ALLOC_ROUTE", "WakeOwner",
-                    $"source={request.Source} action={request.Action} claimedVersion={wakeRefreshSnapshotVersion} handledVersion={wakeRefreshSnapshotVersion} projectionVersion={allocationProjection.WakePlanVersion} globalHandledVersion={mutationJournal.WakePlanHandledVersion} owner=reservation_allocation_route rule=allocation_mutation_wake_owner_contract");
-            }
         }
 
         if (request.EmitConflictLogs)
@@ -1290,6 +1297,9 @@ public sealed class ReservationAllocationRouteService
             _ini.PreStartMarginSeconds);
     }
 
+
+    internal IReadOnlySet<int> GetActivePreRecordParentIds()
+        => Resolve<ReservationScheduler>()?.GetActivePreRecordParentIds() ?? new HashSet<int>();
 
     private T? Resolve<T>() where T : class
         => _serviceProvider.GetService<T>();

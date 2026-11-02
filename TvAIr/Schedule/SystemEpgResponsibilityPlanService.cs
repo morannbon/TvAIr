@@ -1,4 +1,4 @@
-using TvAIr.Core;
+﻿using TvAIr.Core;
 using TvAIr.Epg;
 using TvAIr.Tuner;
 using TvAIr.Channel;
@@ -27,11 +27,44 @@ namespace TvAIr.Schedule;
 /// - 責務完了後は次責務を再評価する。通常PreRec完了はその波の順次サーチを前進させ、
 ///   Daily terminalはDailyを持っていた優先度群が同時に次責務へ進む。全体を一旦Dailyへ収束させる設計にはしない。
 /// - PreRec OFF / Daily ON時は全録画優先度をDaily表示fallbackとする。両方OFFならSystem EPG表示責務なし。
+/// - ④: Daily未配置なら①/②を再評価し、残る優先枠はDaily保留責務を持つ。保留は取得区間ではない。
 /// - Daily lifecycle / 実行計画 / 永続SystemDailyEpg行はEpgSchedulerの正本を維持する。
 /// </summary>
 public sealed class SystemEpgResponsibilityPlanService
 {
+    public static bool IsPreRecordEnabled(IniSettingsService settings) => settings.EpgPreRecordMinutes > 0;
+
+    private readonly object _dailyGate = new();
+    private readonly Dictionary<DateTime, DailyEpgRunState> _dailyStates = new();
     private readonly IniSettingsService _ini;
+
+    // EpgScheduler alone plans/commits Daily. Responsibility selection consumes that same state.
+    internal void UpdateDailyState(DailyEpgRunState state)
+    {
+        lock (_dailyGate)
+        {
+            foreach (var date in _dailyStates.Keys.Where(d => d < DateTime.Today || d > DateTime.Today.AddDays(1)).ToArray())
+                _dailyStates.Remove(date);
+            _dailyStates[state.Date.Date] = state;
+        }
+    }
+
+    private SystemEpgDailyResponsibility? GetDailyResponsibility(DateTime now)
+    {
+        if (!_ini.EpgEnabled) return null;
+        lock (_dailyGate)
+        {
+            var state = _dailyStates.Values
+                .Where(s => s.Date.Date >= now.Date && s.Config.Enabled
+                    && s.Config.CanonicalHour == _ini.EpgHour && s.Config.CanonicalMinute == _ini.EpgMinute
+                    && s.Config.Depth == SettingsDefaults.NormalizeEpgDepth(_ini.EpgDepth)
+                    && s.State is DailyEpgRunPhase.Planned or DailyEpgRunPhase.Running)
+                .OrderBy(s => s.Date).FirstOrDefault();
+            if (state is null) return null;
+            var pending = state.Placement == DailyEpgPlacementState.Unplaced;
+            return new(state.CanonicalStart, state.PlannedStart, state.PlannedEnd, state.MovementDeadline, pending);
+        }
+    }
     private readonly IReadOnlyList<TunerProfile> _tunerProfiles;
     private readonly ChannelServiceAccessPolicy _serviceAccess;
 
@@ -57,15 +90,16 @@ public sealed class SystemEpgResponsibilityPlanService
             .ThenBy(t => t.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        var nextDailyStart = ResolveNextDailyStart(now);
+        var daily = GetDailyResponsibility(now);
+        var nextDailyStart = daily?.Start ?? ResolveNextDailyStart(now);
         if (recordingTuners.Count == 0)
             return new SystemEpgResponsibilityPlan(
                 Array.Empty<SystemEpgPreRecordResponsibility>(),
                 recordingTuners,
                 nextDailyStart,
-                Array.Empty<string>());
+                Array.Empty<string>(), daily);
 
-        if (_ini.EpgPreRecordMinutes <= 0)
+        if (!IsPreRecordEnabled(_ini))
         {
             var allDailyFallbackTuners = _ini.EpgEnabled
                 ? recordingTuners.Select(t => t.Name).ToArray()
@@ -74,7 +108,7 @@ public sealed class SystemEpgResponsibilityPlanService
                 Array.Empty<SystemEpgPreRecordResponsibility>(),
                 recordingTuners,
                 nextDailyStart,
-                allDailyFallbackTuners);
+                allDailyFallbackTuners, daily);
         }
 
         var preMin = SettingsDefaults.ResolveEnabledEpgPreRecordMinutes(_ini.EpgPreRecordMinutes);
@@ -96,9 +130,10 @@ public sealed class SystemEpgResponsibilityPlanService
             .Select(r => r.SourceRuleId!.Value)
             .ToHashSet();
 
-        var activeDailyRowsByPriority = _ini.EpgEnabled
+        var activeDailyRowsByPriority = daily is { IsPending: false }
             ? reservations
                 .Where(IsDailyEpgRow)
+                .Where(r => r.StartTime == daily.Start && r.EndTime == daily.End)
                 .Where(r => r.Status is ReservationStatus.Scheduled or ReservationStatus.Recording)
                 .Where(r => r.EndTime > now)
                 .Where(r => !string.IsNullOrWhiteSpace(r.TunerName))
@@ -144,7 +179,7 @@ public sealed class SystemEpgResponsibilityPlanService
                 Array.Empty<SystemEpgPreRecordResponsibility>(),
                 recordingTuners,
                 nextDailyStart,
-                noCandidateDailyFallbackTuners);
+                noCandidateDailyFallbackTuners, daily);
         }
 
         var channelSnapshot = _serviceAccess.Capture();
@@ -248,7 +283,7 @@ public sealed class SystemEpgResponsibilityPlanService
                 .ToList(),
             recordingTuners,
             nextDailyStart,
-            dailyFallbackTuners);
+            dailyFallbackTuners, daily);
     }
 
     private static bool CanOwnPreRecordBeforeDaily(
@@ -273,7 +308,7 @@ public sealed class SystemEpgResponsibilityPlanService
 
     public DateTime? ResolveNextStage1Boundary(IReadOnlyList<Reservation> reservations, DateTime now)
     {
-        if (_ini.EpgPreRecordMinutes <= 0)
+        if (!IsPreRecordEnabled(_ini))
             return null;
 
         var completedParents = reservations
@@ -353,7 +388,8 @@ public sealed record SystemEpgResponsibilityPlan(
     IReadOnlyList<SystemEpgPreRecordResponsibility> PreRecordResponsibilities,
     IReadOnlyList<TunerProfile> RecordingTuners,
     DateTime? NextDailyStart,
-    IReadOnlyList<string> DailyFallbackTunerNames)
+    IReadOnlyList<string> DailyFallbackTunerNames,
+    SystemEpgDailyResponsibility? Daily = null)
 {
     public IReadOnlySet<int> ParentIds
         => PreRecordResponsibilities.Select(x => x.ParentReservationId).ToHashSet();
@@ -368,3 +404,7 @@ public sealed record SystemEpgPreRecordResponsibility(
     DateTime Start,
     DateTime End,
     string PriorityName);
+
+/// <summary>Read-only projection of EpgScheduler's committed Daily plan; pending is never an execution interval.</summary>
+public sealed record SystemEpgDailyResponsibility(
+    DateTime CanonicalStart, DateTime? Start, DateTime? End, DateTime Deadline, bool IsPending);

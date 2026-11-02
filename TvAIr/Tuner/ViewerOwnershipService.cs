@@ -46,7 +46,8 @@ public sealed class ViewerOwnershipService
             channelArgument,
             preserveViewerWindowState,
             viewerActivation,
-            restoreWindowState);
+            restoreWindowState,
+            serviceId);
         if (!launch.Success)
         {
             var released = _leases.Release(ownershipId, "viewer_start_launch_failed");
@@ -120,7 +121,8 @@ public sealed class ViewerOwnershipService
             did,
             channelArgument,
             preserveViewerWindowState,
-            viewerActivation);
+            viewerActivation,
+            serviceId);
         if (!retune.Success)
         {
             _log.Add("VIEWER_OWNERSHIP_RETUNE", "Viewer",

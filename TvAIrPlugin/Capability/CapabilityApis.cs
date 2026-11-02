@@ -1523,6 +1523,13 @@ public sealed class TvAirPathSettingsDto
     public string DataDirectory { get; init; } = string.Empty;
     public string PluginDataDirectory { get; init; } = string.Empty;
     public string PluginsDirectory { get; init; } = string.Empty;
+    /// <summary>
+    /// SDK/Host Contract 1.1.19. User-selected TVTest plugin settings directory.
+    /// Empty means not configured: do not discover another installation or load TVTest DLLs.
+    /// Requires ReadSafePaths. Existing PluginsDirectory remains the TvAIr plugin directory.
+    /// </summary>
+    public string TvTestPluginsDirectory { get; init; } = string.Empty;
+
 }
 
 

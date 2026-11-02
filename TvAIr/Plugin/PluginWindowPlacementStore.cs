@@ -32,7 +32,7 @@ public sealed class PluginWindowPlacementStore
     public PluginWindowPlacementPersistencePolicy? GetPolicy(string pluginId, string windowDefinitionId)
     {
         var normalizedPluginId = PluginIdentity.Normalize(pluginId);
-        var normalizedDefinitionId = NormalizeWindowDefinitionId(windowDefinitionId);
+        var normalizedDefinitionId = PluginWindowDefinitionIdentity.Normalize(windowDefinitionId);
         if (normalizedPluginId.Length == 0 || normalizedDefinitionId.Length == 0) return null;
 
         lock (_gate)
@@ -46,7 +46,7 @@ public sealed class PluginWindowPlacementStore
     public PluginWindowPlacementResolve GetPlacement(string pluginId, string windowDefinitionId, PluginWindowSizeReference expectedSizeReference)
     {
         var normalizedPluginId = PluginIdentity.Normalize(pluginId);
-        var normalizedDefinitionId = NormalizeWindowDefinitionId(windowDefinitionId);
+        var normalizedDefinitionId = PluginWindowDefinitionIdentity.Normalize(windowDefinitionId);
         if (normalizedPluginId.Length == 0 || normalizedDefinitionId.Length == 0)
             return new(null, "window_definition_default");
 
@@ -81,7 +81,7 @@ public sealed class PluginWindowPlacementStore
     public PluginWindowPlacementStoreUpdate SetPolicy(string pluginId, string windowDefinitionId, bool rememberPlacement, bool clearSavedPlacement)
     {
         var normalizedPluginId = PluginIdentity.Normalize(pluginId);
-        var normalizedDefinitionId = NormalizeWindowDefinitionId(windowDefinitionId);
+        var normalizedDefinitionId = PluginWindowDefinitionIdentity.Normalize(windowDefinitionId);
         if (normalizedPluginId.Length == 0 || normalizedDefinitionId.Length == 0)
             return new(false, false, false, "invalid_window_definition_id");
 
@@ -109,7 +109,7 @@ public sealed class PluginWindowPlacementStore
         if (state.IsMinimized || state.Width <= 0 || state.Height <= 0) return true;
 
         var normalizedPluginId = PluginIdentity.Normalize(pluginId);
-        var normalizedDefinitionId = NormalizeWindowDefinitionId(windowDefinitionId);
+        var normalizedDefinitionId = PluginWindowDefinitionIdentity.Normalize(windowDefinitionId);
         if (normalizedPluginId.Length == 0 || normalizedDefinitionId.Length == 0)
         {
             failureReason = "invalid_window_definition_id";
@@ -286,12 +286,6 @@ public sealed class PluginWindowPlacementStore
         WriteIndented = true,
         PropertyNameCaseInsensitive = true
     };
-
-    private static string NormalizeWindowDefinitionId(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
-        return new string(value.Trim().Where(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_' or '.').ToArray());
-    }
 
     private static string Safe(string? value)
     {

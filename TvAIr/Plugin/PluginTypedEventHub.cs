@@ -34,6 +34,7 @@ public sealed class PluginTypedEventHub : IDisposable
     // callback内で自身のSystemRequired保持を取得できるため、TvAIr側はこの完了通知より先に
     // 録画由来Power Requestを解放してはならない。Plugin公開APIではなくHost内部通知である。
     internal event Action<TvAirEventDto>? DispatchCompleted;
+    internal event Action<TvAirEventDto,int>? DispatchSettled;
 
     public PluginTypedEventHub(LogRepository log, ReservationMutationJournal reservationMutations, ChannelFileLoader channelLoader)
     {
@@ -256,6 +257,10 @@ public sealed class PluginTypedEventHub : IDisposable
             }
         }
         log.Add("PLUGIN_TYPED_EVENT_DISPATCH", dto.EventType.ToString(), $"eventInstanceId={dto.EventInstanceId} entityId={dto.EntityId ?? "-"} occurredAt={dto.OccurredAt:O} sequence={dto.Sequence} subscriberCount={targets.Length} deliveredCount={delivered} failedCount={failed} pluginIds={Safe(string.Join(",", targets.Select(x => x.PluginId).Distinct(StringComparer.OrdinalIgnoreCase)))} payloadReservation={dto.Reservation is not null} payloadBefore={dto.BeforeReservation is not null} payloadAfter={dto.AfterReservation is not null} rule=typed_event_outbox");
+        if (DispatchSettled is { } settled)
+            foreach (Action<TvAirEventDto,int> listener in settled.GetInvocationList())
+                try { listener(dto,failed); }
+                catch (Exception ex) { log.Add("PLUGIN_TYPED_EVENT_INTERNAL", "DispatchSettled", $"result=FAILED errorType={ex.GetType().Name}"); }
         NotifyDispatchCompleted(dto);
     }
 

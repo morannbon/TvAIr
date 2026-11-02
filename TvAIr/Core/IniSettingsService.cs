@@ -33,6 +33,7 @@ public sealed class IniSettingsService
 
     // ── 設定値（読み込み後に公開） ──────────────────────────────────
     public string TvTestExecutablePath { get; private set; } = "";
+    public string TvTestPluginsDirectory { get; private set; } = "";
     public string BonDriverDirectory   { get; private set; } = "";
     public string ViewingTvTestExecutablePath { get; private set; } = "";
     public string GrChannelFilePath    { get; private set; } = "";
@@ -210,7 +211,8 @@ public sealed class IniSettingsService
 
         return section.Trim().ToLowerInvariant() switch
         {
-            "tvtest" => key.Equals("TvTestExecutablePath", StringComparison.OrdinalIgnoreCase)
+            "tvtest" => key.Equals("TvTestPluginsDirectory", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("TvTestExecutablePath", StringComparison.OrdinalIgnoreCase)
                 || key.Equals("BonDriverDirectory", StringComparison.OrdinalIgnoreCase)
                 || key.Equals("ViewingTvTestExecutablePath", StringComparison.OrdinalIgnoreCase),
             "channel" => key.Equals("GrChannelFilePath", StringComparison.OrdinalIgnoreCase)
@@ -319,6 +321,7 @@ public sealed class IniSettingsService
         EnsureCurrentSettingsSchema(dict);
 
         TvTestExecutablePath = NormalizePathValue(Get(dict, "TvTestExecutablePath", TvTestExecutablePath));
+        TvTestPluginsDirectory = NormalizePathValue(Get(dict, "TvTestPluginsDirectory", ""));
         BonDriverDirectory   = NormalizePathValue(Get(dict, "BonDriverDirectory",   BonDriverDirectory));
         ViewingTvTestExecutablePath = NormalizePathValue(Get(dict, "ViewingTvTestExecutablePath", ViewingTvTestExecutablePath));
         GrChannelFilePath    = NormalizePathValue(Get(dict, "GrChannelFilePath",    GrChannelFilePath));
@@ -704,6 +707,7 @@ public sealed class IniSettingsService
         // 差分判定と永続化で同じ正規化を使う。前後空白・不要な末尾区切りだけの入力を、
         // 別項目の保存に便乗してINIへ書き戻してはならない。ドライブ/共有ルートは保持する。
         TvTestExecutablePath = NormalizePathValue(dto.TvTestExecutablePath);
+        TvTestPluginsDirectory = NormalizePathValue(dto.TvTestPluginsDirectory);
         BonDriverDirectory   = NormalizePathValue(dto.BonDriverDirectory);
         ViewingTvTestExecutablePath = NormalizePathValue(dto.ViewingTvTestExecutablePath);
         GrChannelFilePath    = NormalizePathValue(dto.GrChannelFilePath);
@@ -804,6 +808,7 @@ public sealed class IniSettingsService
             "",
             "[TvTest]",
             $"TvTestExecutablePath = {TvTestExecutablePath}",
+            $"TvTestPluginsDirectory = {TvTestPluginsDirectory}",
             $"BonDriverDirectory   = {BonDriverDirectory}",
             $"ViewingTvTestExecutablePath = {ViewingTvTestExecutablePath}",
             "",
@@ -971,7 +976,7 @@ public sealed class IniSettingsService
     }
 
     private SaveState CaptureSaveState() => new(
-        TvTestExecutablePath, BonDriverDirectory, ViewingTvTestExecutablePath,
+        TvTestPluginsDirectory, TvTestExecutablePath, BonDriverDirectory, ViewingTvTestExecutablePath,
         GrChannelFilePath, GrChSetFilePath, BscsChannelFilePath, BscsChSetFilePath,
         DataDirectory, SystemTheme, Port, EpgEnabled, EpgHour, EpgMinute, EpgDepth, EpgPreRecordMinutes,
         LaterProgramPriority, ChainRecordingEnabled, ChainReservationMode,
@@ -989,6 +994,7 @@ public sealed class IniSettingsService
 
     private void RestoreSaveState(SaveState state)
     {
+        TvTestPluginsDirectory = state.TvTestPluginsDirectory;
         TvTestExecutablePath = state.TvTestExecutablePath;
         BonDriverDirectory = state.BonDriverDirectory;
         ViewingTvTestExecutablePath = state.ViewingTvTestExecutablePath;
@@ -1046,7 +1052,7 @@ public sealed class IniSettingsService
     }
 
     private sealed record SaveState(
-        string TvTestExecutablePath, string BonDriverDirectory, string ViewingTvTestExecutablePath,
+        string TvTestPluginsDirectory, string TvTestExecutablePath, string BonDriverDirectory, string ViewingTvTestExecutablePath,
         string GrChannelFilePath, string GrChSetFilePath, string BscsChannelFilePath, string BscsChSetFilePath,
         string DataDirectory, string SystemTheme, int Port, bool EpgEnabled, int EpgHour, int EpgMinute,
         string EpgDepth, int EpgPreRecordMinutes, bool LaterProgramPriority, bool ChainRecordingEnabled, string ChainReservationMode,
@@ -1075,6 +1081,7 @@ public sealed class IniSettingsService
 
     public IniSettingsDto ToDto() => new()
     {
+        TvTestPluginsDirectory = TvTestPluginsDirectory,
         TvTestExecutablePath = _persistedTvTestExecutablePath,
         BonDriverDirectory   = _persistedBonDriverDirectory,
         ViewingTvTestExecutablePath = _persistedViewingTvTestExecutablePath,
@@ -1150,6 +1157,7 @@ public sealed class IniSettingsService
         var current = ToDto();
         return new WebSettingsDto
         {
+            TvTestPluginsDirectory = current.TvTestPluginsDirectory,
             TvTestExecutablePath = current.TvTestExecutablePath,
             BonDriverDirectory = current.BonDriverDirectory,
             ViewingTvTestExecutablePath = current.ViewingTvTestExecutablePath,
@@ -1473,6 +1481,7 @@ public sealed class TunerProfileDto
 /// <summary>設定の読取／保存で共有する永続化値。書込み命令や表示補助値は含めない。</summary>
 public class IniSettingsValuesDto
 {
+    public string TvTestPluginsDirectory { get; set; } = "";
     public string TvTestExecutablePath { get; set; } = "";
     public string BonDriverDirectory   { get; set; } = "";
     public string ViewingTvTestExecutablePath { get; set; } = "";
@@ -1522,6 +1531,7 @@ public class IniSettingsValuesDto
 /// <summary>Web設定画面が表示・編集する永続化値。画面にない内部設定は含めない。</summary>
 public class WebSettingsValuesDto
 {
+    public string TvTestPluginsDirectory { get; set; } = "";
     public string TvTestExecutablePath { get; set; } = "";
     public string BonDriverDirectory { get; set; } = "";
     public string ViewingTvTestExecutablePath { get; set; } = "";

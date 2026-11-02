@@ -5,26 +5,26 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>予約リスト — TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.14"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.14"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.15"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.15"/>
 
-<link href="/tvair-ui-foundation.css?v=1.2.14" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.14" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.14" rel="stylesheet"/>
-<link href="/tvair-list-module.css?v=1.2.14" rel="stylesheet"/>
-<link href="/tvair-reservations.css?v=1.2.14" rel="stylesheet"/>
-<link href="/tvair-user-log.css?v=1.2.14" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.14" rel="stylesheet"/>
-<link href="/tvair-settings-host.css?v=1.2.14" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.2.15" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.15" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.15" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.2.15" rel="stylesheet"/>
+<link href="/tvair-reservations.css?v=1.2.15" rel="stylesheet"/>
+<link href="/tvair-user-log.css?v=1.2.15" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.15" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.15" rel="stylesheet"/>
 
-<script src="/tvair-theme.js?v=1.2.14"></script>
-<script src="/tvair-page-view-state.js?v=1.2.14"></script>
-<script src="/tvair-action-button-state.js?v=1.2.14"></script>
-<script src="/tvair-reservation-cancel-request.js?v=1.2.14"></script>
-<script src="/tvair-reservation-action-state.js?v=1.2.14"></script>
-<script src="/tvair-program-time-action.js?v=1.2.14"></script>
-<script src="/genre-shared.js?v=1.2.14"></script>
-<script src="/tvair-user-log.js?v=1.2.14"></script>
+<script src="/tvair-theme.js?v=1.2.15"></script>
+<script src="/tvair-page-view-state.js?v=1.2.15"></script>
+<script src="/tvair-action-button-state.js?v=1.2.15"></script>
+<script src="/tvair-reservation-cancel-request.js?v=1.2.15"></script>
+<script src="/tvair-reservation-action-state.js?v=1.2.15"></script>
+<script src="/tvair-program-time-action.js?v=1.2.15"></script>
+<script src="/genre-shared.js?v=1.2.15"></script>
+<script src="/tvair-user-log.js?v=1.2.15"></script>
 
 
 
@@ -1338,7 +1338,7 @@ function buildReservationRowPresentation(r, options){
     rowAttr,
     genreClass,
     dateText: fmtDate(r.startTime),
-    timeText: fmtTime(r.startTime, r.endTime),
+    timeText: r.isSystemEpgPending === true ? fmtTime(r.startTime, r.startTime).split("〜")[0] : fmtTime(r.startTime, r.endTime),
     serviceText: esc(getDisplayServiceName(r)),
     titleText: esc(buildDisplayTitle(r)),
     sourceText: esc(r.displayStatusLabel || r.sourceLabel || '—')
@@ -1874,11 +1874,12 @@ document.addEventListener('DOMContentLoaded', ()=>{
 });
 
 </script>
-<script src="/tvair-notification.js?v=1.2.14"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.14"></script>
-<script src="/tvair-settings-host.js?v=1.2.14"></script>
-<script src="/tvair-menu-spine.js?v=1.2.14"></script>
+<script src="/tvair-notification.js?v=1.2.15"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.15"></script>
+<script src="/tvair-settings-host.js?v=1.2.15"></script>
+<script src="/tvair-menu-spine.js?v=1.2.15"></script>
 </body>
 </html>
+
 
 

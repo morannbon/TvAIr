@@ -25,6 +25,7 @@ public sealed class RecordingFileCatalog
     public string PendingControlDirectory { get; }
     private int controlOffset;
     internal CancellationToken StopToken { get; set; }
+    private readonly SemaphoreSlim workAvailable = new(0, 1);
     public RecordingFileCatalog(Database database, LogRepository log, Func<string,TvAirRecordingResultDto?>? legacyResult = null)
     {
         this.log = log;
@@ -60,6 +61,14 @@ public sealed class RecordingFileCatalog
                 state INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(store_path,file_id));
             CREATE INDEX IF NOT EXISTS control_pending ON control_inputs(state,file_id);
             CREATE INDEX IF NOT EXISTS control_file ON control_inputs(file_id);
+            CREATE TABLE IF NOT EXISTS file_stop_intents(job_path TEXT NOT NULL, file_path TEXT NOT NULL, requested_at TEXT NOT NULL,
+                PRIMARY KEY(job_path,file_path));
+            CREATE TABLE IF NOT EXISTS file_publications(publication_key TEXT PRIMARY KEY,
+                file_path TEXT NOT NULL, reservation_id TEXT NOT NULL, payload TEXT NOT NULL,
+                delivered INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS released_declarations(file_id TEXT PRIMARY KEY, declaration TEXT NOT NULL);
+            INSERT OR IGNORE INTO catalog_meta(key,value)
+                SELECT 'publication_baseline_sequence',CAST(COALESCE(MAX(sequence),0) AS TEXT) FROM released_files;
             """;
         cmd.ExecuteNonQuery();
         schemaReady=true;
@@ -79,7 +88,8 @@ public sealed class RecordingFileCatalog
             reservation.RecordingRecoveryChainId ?? "",reservation.Source.ToString(),
             reservation.Title ?? "",reservation.ServiceName ?? "",Path.GetFullPath(outputPath),
             artifact,Path.GetFullPath(runtimeStatsPath),Path.GetFullPath(jobPath),
-            process.Id,process.StartTime.ToUniversalTime().Ticks,bindings.ToArray());
+            process.Id,process.StartTime.ToUniversalTime().Ticks,bindings.ToArray(),
+            reservation.ScheduledStartTime ?? reservation.StartTime,reservation.EndTime);
         return JsonSerializer.Serialize(manifest,Json);
     }
     public void Register(Reservation reservation, string outputPath, string resultPath,
@@ -118,6 +128,19 @@ public sealed class RecordingFileCatalog
             try
             {
                 using var c=Open();
+                // Relay declarations share the original control's lifetime and catalog authority.
+                var relayDirectory=Path.Combine(store,"relay");
+                if(Directory.Exists(relayDirectory))
+                foreach(var intent in Directory.EnumerateFiles(relayDirectory,"*.json"))
+                {
+                    var relayJson=File.ReadAllText(intent);
+                    var relay=JsonSerializer.Deserialize<RecordingFileManifest>(relayJson,Json)!;
+                    if(!relay.DiskRelayPart || !Path.IsPathFullyQualified(relay.OutputPath))
+                        throw new InvalidDataException("Invalid relay declaration.");
+                    using var add=c.CreateCommand();
+                    add.CommandText="INSERT OR IGNORE INTO control_inputs(store_path,file_id,declaration,state) VALUES($store,$id,$data,CASE WHEN EXISTS(SELECT 1 FROM released_files WHERE file_id=$id) THEN 1 ELSE 0 END)";
+                    add.Parameters.AddWithValue("$store",store);add.Parameters.AddWithValue("$id",relay.FileId);add.Parameters.AddWithValue("$data",relayJson);add.ExecuteNonQuery();
+                }
                 long generation;
                 using(var read=c.CreateCommand())
                 { read.CommandText="SELECT generation FROM control_scan WHERE store_path=$store";read.Parameters.AddWithValue("$store",store);generation=Convert.ToInt64(read.ExecuteScalar()??0L); }
@@ -134,6 +157,11 @@ public sealed class RecordingFileCatalog
                     {
                         if(!segment.TryGetProperty("recordingFileDeclaration",out var raw)||string.IsNullOrWhiteSpace(raw.GetString()))continue;
                         var json=raw.GetString()!;var m=JsonSerializer.Deserialize<RecordingFileManifest>(json,Json)!;
+                        using(var keep=c.CreateCommand())
+                        {
+                            keep.Transaction=tx;keep.CommandText="INSERT OR IGNORE INTO released_declarations(file_id,declaration) SELECT $id,$data WHERE EXISTS(SELECT 1 FROM released_files WHERE file_id=$id)";
+                            keep.Parameters.AddWithValue("$id",m.FileId);keep.Parameters.AddWithValue("$data",json);keep.ExecuteNonQuery();
+                        }
                         using var add=c.CreateCommand();add.Transaction=tx;
                         add.CommandText="INSERT OR IGNORE INTO control_inputs(store_path,file_id,declaration,state) VALUES($store,$id,$data,CASE WHEN EXISTS(SELECT 1 FROM released_files WHERE file_id=$id) THEN 1 ELSE 0 END)";
                         add.Parameters.AddWithValue("$store",store);add.Parameters.AddWithValue("$id",m.FileId);add.Parameters.AddWithValue("$data",json);add.ExecuteNonQuery();
@@ -282,7 +310,21 @@ public sealed class RecordingFileCatalog
                 using var connection=Open();using var tx=connection.BeginTransaction();using var save=connection.CreateCommand();save.Transaction=tx;
                 save.CommandText="INSERT INTO released_files(file_id,job_path,payload) VALUES($id,$job,$payload) ON CONFLICT(file_id) DO NOTHING; UPDATE control_inputs SET state=1 WHERE file_id=$id";
                 save.Parameters.AddWithValue("$id",m.FileId);save.Parameters.AddWithValue("$job",m.JobPath);save.Parameters.AddWithValue("$payload",JsonSerializer.Serialize(result,Json));
-                save.ExecuteNonQuery();tx.Commit();
+                save.ExecuteNonQuery();
+                var retainedManifest=m;
+                if(File.Exists(CloseProofPath(m)))
+                {
+                    using var proof=JsonDocument.Parse(File.ReadAllText(CloseProofPath(m)));
+                    if(proof.RootElement.TryGetProperty("result",out var body) && body.TryGetProperty("message",out var kind)
+                        && kind.GetString()=="disk_relay_file_result")
+                        retainedManifest=m with {PhysicalResultJson=body.GetRawText()};
+                }
+                using var declaration=connection.CreateCommand();declaration.Transaction=tx;
+                declaration.CommandText="INSERT OR IGNORE INTO released_declarations(file_id,declaration) VALUES($id,$json)";
+                declaration.Parameters.AddWithValue("$id",m.FileId);declaration.Parameters.AddWithValue("$json",JsonSerializer.Serialize(retainedManifest,Json));
+                declaration.ExecuteNonQuery();tx.Commit();
+                log.Add("RECORDING_FILE_CATALOG", "Released",
+                    $"result=COMMITTED fileId={m.FileId} reservation={m.ReservationId} service={m.ServiceName} title={m.Title} scheduled={m.ScheduledStartTime:O} end={m.ScheduledEndTime:O} file={Path.GetFileName(m.OutputPath)} size={result!.SizeBytes} endReason={result.EndReason} rule=physical_recording_file_release_contract");
             }
             catch(Exception ex){log.Add("RECORDING_FILE_CATALOG","Retry",$"result=PENDING errorType={ex.GetType().Name} reason={ex.Message} recordingPriority=unchanged");}
         }
@@ -297,32 +339,143 @@ public sealed class RecordingFileCatalog
         }
         catch { return false; } // An unavailable directory/share is not proof of an uncreated file.
     }
-    private static bool TryRelease(RecordingFileManifest m,Func<string,bool?> workerAlive,
+
+    internal IReadOnlyList<string> KnownOutputPaths(string reservationId)
+    {
+        var declarations=new Dictionary<string,RecordingFileManifest>(StringComparer.Ordinal);
+        void Keep(string json)
+        {
+            var manifest=JsonSerializer.Deserialize<RecordingFileManifest>(json,Json)!;
+            if(manifest.ReservationId==reservationId)declarations[manifest.FileId]=manifest;
+        }
+        using(var c=Open())using(var cmd=c.CreateCommand())
+        {
+            cmd.CommandText="SELECT declaration FROM control_inputs WHERE json_extract(declaration,'$.ReservationId')=$id UNION ALL SELECT declaration FROM released_declarations WHERE json_extract(declaration,'$.ReservationId')=$id";
+            cmd.Parameters.AddWithValue("$id",reservationId);
+            using var rows=cmd.ExecuteReader();while(rows.Read())Keep(rows.GetString(0));
+        }
+        // An initial redirect can precede the background catalog importer. Read those same
+        // durable declarations directly; never search unrelated disks for a similar name.
+        if(Directory.Exists(PendingControlDirectory))
+        foreach(var store in Directory.EnumerateDirectories(PendingControlDirectory))
+        {
+            var relay=Path.Combine(store,"relay");if(!Directory.Exists(relay))continue;
+            foreach(var path in Directory.EnumerateFiles(relay,"*.json"))Keep(File.ReadAllText(path));
+        }
+        var current=declarations.Values.GroupBy(x=>x.JobPath,StringComparer.OrdinalIgnoreCase)
+            .OrderByDescending(group=>File.GetLastWriteTimeUtc(group.Key)).FirstOrDefault();
+        if(current is null)return Array.Empty<string>();
+        var redirects=current.Where(x=>x.DiskRelayPartIndex==1).Select(x=>x.DiskRelaySourcePath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return current.Where(x=>!redirects.Contains(x.OutputPath)).OrderBy(x=>x.DiskRelayPartIndex)
+            .Select(x=>x.OutputPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    internal RecordingFileManifest? ReleasedManifest(string fileId)
+    {
+        using var c=Open();using var cmd=c.CreateCommand();
+        cmd.CommandText="SELECT declaration FROM released_declarations WHERE file_id=$id";
+        cmd.Parameters.AddWithValue("$id",fileId);
+        return cmd.ExecuteScalar() is string json ? JsonSerializer.Deserialize<RecordingFileManifest>(json,Json) : null;
+    }
+
+    internal bool IsPublicationBaseline(long sequence)
+    {
+        using var c=Open();using var cmd=c.CreateCommand();
+        cmd.CommandText="SELECT CAST(value AS INTEGER) FROM catalog_meta WHERE key='publication_baseline_sequence'";
+        return sequence<=Convert.ToInt64(cmd.ExecuteScalar());
+    }
+    internal void MarkManualStop(string jobPath,string outputPath)
+    {
+        using var c=Open();using var cmd=c.CreateCommand();
+        cmd.CommandText="INSERT OR IGNORE INTO file_stop_intents(job_path,file_path,requested_at) VALUES($job,$path,$at)";
+        cmd.Parameters.AddWithValue("$job",Path.GetFullPath(jobPath).ToUpperInvariant());
+        cmd.Parameters.AddWithValue("$path",Path.GetFullPath(outputPath).ToUpperInvariant());
+        cmd.Parameters.AddWithValue("$at",DateTimeOffset.Now.ToString("O"));cmd.ExecuteNonQuery();
+    }
+    internal void StageFinalizedEvent(TvAirEventDto item)
+    {
+        var result=item.RecordingResult ?? throw new ArgumentException("Finalized result required.",nameof(item));
+        var path=string.IsNullOrWhiteSpace(result.FilePath)?"":Path.GetFullPath(result.FilePath);
+        var key=PublicationKey(result.ReservationId,path);
+        using var c=Open();using var cmd=c.CreateCommand();
+        cmd.CommandText="INSERT OR IGNORE INTO file_publications(publication_key,file_path,reservation_id,payload) VALUES($key,$path,$reservation,$payload)";
+        cmd.Parameters.AddWithValue("$key",key);cmd.Parameters.AddWithValue("$path",path);
+        cmd.Parameters.AddWithValue("$reservation",result.ReservationId);
+        cmd.Parameters.AddWithValue("$payload",JsonSerializer.Serialize(item,Json));cmd.ExecuteNonQuery();
+        try { workAvailable.Release(); } catch(SemaphoreFullException) { }
+    }
+    internal static string PublicationKey(string reservationId,string path)
+        => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(reservationId+"\n"+path.ToUpperInvariant())));
+    internal IReadOnlyList<(string Key,string Path,TvAirEventDto Event)> PendingPublications()
+    {
+        using var c=Open();using var cmd=c.CreateCommand();
+        cmd.CommandText="SELECT publication_key,file_path,payload FROM file_publications WHERE delivered=0 ORDER BY rowid LIMIT 64";
+        using var read=cmd.ExecuteReader();var rows=new List<(string,string,TvAirEventDto)>();
+        while(read.Read())rows.Add((read.GetString(0),read.GetString(1),JsonSerializer.Deserialize<TvAirEventDto>(read.GetString(2),Json)!));
+        return rows;
+    }
+    internal bool HasPublication(string reservationId,string path)
+    {
+        using var c=Open();using var cmd=c.CreateCommand();
+        cmd.CommandText="SELECT EXISTS(SELECT 1 FROM file_publications WHERE publication_key=$key)";
+        cmd.Parameters.AddWithValue("$key",PublicationKey(reservationId,Path.GetFullPath(path)));
+        return Convert.ToInt64(cmd.ExecuteScalar())!=0;
+    }
+    internal void CompletePublication(string key)
+    {
+        using var c=Open();using var cmd=c.CreateCommand();
+        cmd.CommandText="UPDATE file_publications SET delivered=1 WHERE publication_key=$key";
+        cmd.Parameters.AddWithValue("$key",key);cmd.ExecuteNonQuery();
+    }
+    internal TvAirFinalizedRecordingFileDto? FindReleased(string path)
+    {
+        using var c=Open();using var cmd=c.CreateCommand();
+        cmd.CommandText="SELECT sequence,payload FROM released_files WHERE json_extract(payload,'$.FilePath')=$path COLLATE NOCASE ORDER BY sequence DESC LIMIT 1";
+        cmd.Parameters.AddWithValue("$path",Path.GetFullPath(path));using var read=cmd.ExecuteReader();
+        return read.Read()?JsonSerializer.Deserialize<TvAirFinalizedRecordingFileDto>(read.GetString(1),Json)! with {Sequence=read.GetInt64(0)}:null;
+    }
+    internal IReadOnlyList<(TvAirFinalizedRecordingFileDto File,RecordingFileManifest? Manifest)> UnpublishedReleasedFiles()
+    {
+        using var c=Open();using var cmd=c.CreateCommand();
+        cmd.CommandText="SELECT r.sequence,r.payload,d.declaration FROM released_files r LEFT JOIN released_declarations d ON d.file_id=r.file_id WHERE NOT EXISTS(SELECT 1 FROM file_publications p WHERE p.file_path=json_extract(r.payload,'$.FilePath') COLLATE NOCASE AND p.reservation_id=json_extract(r.payload,'$.ReservationId')) ORDER BY r.sequence LIMIT 64";
+        using var read=cmd.ExecuteReader();var rows=new List<(TvAirFinalizedRecordingFileDto,RecordingFileManifest?)>();
+        while(read.Read())rows.Add((JsonSerializer.Deserialize<TvAirFinalizedRecordingFileDto>(read.GetString(1),Json)! with {Sequence=read.GetInt64(0)},read.IsDBNull(2)?null:JsonSerializer.Deserialize<RecordingFileManifest>(read.GetString(2),Json)!));
+        return rows;
+    }
+    internal Task WaitForWorkAsync(CancellationToken ct) => workAvailable.WaitAsync(TimeSpan.FromSeconds(5),ct);
+
+    private static string CloseProofPath(RecordingFileManifest m)
+        => File.Exists(m.ResultPath+".physical.json") ? m.ResultPath+".physical.json" : m.ResultPath;
+
+    private bool TryRelease(RecordingFileManifest m,Func<string,bool?> workerAlive,
         out TvAirFinalizedRecordingFileDto? file)
     {
         file=null;
+        if(!File.Exists(m.OutputPath))return false;
+        DateTimeOffset? closedAt=null;
         long? closedSize=null;
         var released=false;var reason="";var result="Released";
         try
         {
-        if(File.Exists(m.ResultPath))
+        if(File.Exists(CloseProofPath(m)))
         {
             // The owned Worker emits this artifact only after the individual sink is flushed/disposed.
             // Incomplete/mismatched proof is never replaced with a file-exists heuristic.
-            using var doc=JsonDocument.Parse(File.ReadAllText(m.ResultPath));var root=doc.RootElement;
+            using var doc=JsonDocument.Parse(File.ReadAllText(CloseProofPath(m)));var root=doc.RootElement;
             if(!root.TryGetProperty("recorderPid",out var pid)||pid.GetInt32()<=0
                 || !root.TryGetProperty("result",out var body)
                 || !body.TryGetProperty("outputPath",out var output)
                 || !string.Equals(Path.GetFullPath(output.GetString()!),m.OutputPath,StringComparison.OrdinalIgnoreCase)
                 || !body.TryGetProperty("runtimeStatsPath",out var stats)
                 || !string.Equals(Path.GetFullPath(stats.GetString()!),m.RuntimeStatsPath,StringComparison.OrdinalIgnoreCase)
-                || !body.TryGetProperty("message",out var message)||message.GetString() is not ("continuous_chain_segment_result" or "continuous_chain_primary_segment_result")
+                || !body.TryGetProperty("message",out var message)||message.GetString() is not ("continuous_chain_segment_result" or "continuous_chain_primary_segment_result" or "disk_relay_file_result")
                 || !body.TryGetProperty("bytesWritten",out var bytes)||!bytes.TryGetInt64(out var bytesWritten)||bytesWritten<0
                 || !body.TryGetProperty("endedAt",out var end)||!DateTimeOffset.TryParse(end.GetString(),out _))
                 throw new InvalidDataException("Segment close proof does not match declaration.");
             reason=root.TryGetProperty("message",out var wrapperMessage)?wrapperMessage.GetString()??"sink_released":"sink_released";
             try { closedSize=new FileInfo(m.OutputPath).Length; }
             catch { closedSize=null; }
+            DateTimeOffset.TryParse(end.GetString(),out var sinkEndedAt);closedAt=sinkEndedAt;
             released=true;
         }
         }
@@ -336,6 +489,16 @@ public sealed class RecordingFileCatalog
             result="WriterExited";reason="writer_exited_without_segment_close_proof";released=true;
         }
         if(!released)return false;
+        using(var c=Open())
+        using(var intent=c.CreateCommand())
+        {
+            intent.CommandText="SELECT requested_at FROM file_stop_intents WHERE job_path=$job AND (file_path=$path OR file_path=$source)";
+            intent.Parameters.AddWithValue("$job",Path.GetFullPath(m.JobPath).ToUpperInvariant());
+            intent.Parameters.AddWithValue("$path",Path.GetFullPath(m.OutputPath).ToUpperInvariant());
+            intent.Parameters.AddWithValue("$source",Path.GetFullPath(m.DiskRelaySourcePath ?? m.OutputPath).ToUpperInvariant());
+            if(intent.ExecuteScalar() is string requested && DateTimeOffset.TryParse(requested,out var requestedAt)
+                && (!closedAt.HasValue || closedAt.Value>=requestedAt))reason="manual_stop";
+        }
         file=new(){RecordingFileId=m.FileId,ReservationId=m.ReservationId,
             RecoveryParentReservationId=m.RecoveryParentReservationId,RecoveryChainId=m.RecoveryChainId,
             ReservationSource=m.Source,ProgramTitle=m.Title,ServiceName=m.ServiceName,
@@ -365,20 +528,7 @@ public sealed class RecordingFileCatalog
 }
 internal sealed record RecordingFileManifest(string FileId,string ReservationId,string? RecoveryParentReservationId,
     string RecoveryChainId,string Source,string Title,string ServiceName,string OutputPath,string ResultPath,
-    string RuntimeStatsPath,string JobPath,int HostPid,long HostStartTicks,IReadOnlyList<TvAirPluginSelectionBindingDto> Bindings);
+    string RuntimeStatsPath,string JobPath,int HostPid,long HostStartTicks,IReadOnlyList<TvAirPluginSelectionBindingDto> Bindings,
+    DateTime? ScheduledStartTime = null, DateTime? ScheduledEndTime = null,
+    bool DiskRelayPart = false, string? PhysicalResultJson = null, string? DiskRelaySourcePath = null, int DiskRelayPartIndex = 0);
 
-internal sealed class RecordingFileCatalogService(RecordingResultStore results,LogRepository log) : BackgroundService
-{
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        results.Files.StopToken=stoppingToken;
-        while(!stoppingToken.IsCancellationRequested)
-        {
-            try { await Task.Run(results.Files.ProcessPending,stoppingToken).ConfigureAwait(false); }
-            catch(OperationCanceledException) when(stoppingToken.IsCancellationRequested){break;}
-            catch(Exception ex){log.Add("RECORDING_FILE_CATALOG","Retry",$"result=PENDING errorType={ex.GetType().Name}");}
-            try{await Task.Delay(TimeSpan.FromSeconds(5),stoppingToken).ConfigureAwait(false);}
-            catch(OperationCanceledException){break;}
-        }
-    }
-}
