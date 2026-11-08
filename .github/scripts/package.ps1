@@ -52,13 +52,13 @@ if($spec.Name -eq 'TvAIr'){
  $notices.Add('Microsoft.Data.Sqlite 8.0.7 license: https://github.com/dotnet/efcore/tree/0d1256be4658567c8a24b4c027bdbb3dbd6de656')
  $notices|Set-Content -LiteralPath (Join-Path $out 'THIRD_PARTY_NOTICES.txt') -Encoding utf8
 }
-$instructions=if($spec.Name -eq 'TvAIr'){'ZIPを展開したフォルダー一式を配置してTvAIr.exeを起動してください。v1.2.15へ更新後は設定の「TVTest」で「連携するTVTestプラグインフォルダ」を指定して保存してください。既存INIは移動・削除しないでください。READMEの動作環境と初回設定に従ってください。'}else{"TvAIr v1.2.14と同じアーキテクチャを使用してください。TvAIrを終了し、$($spec.Dll)をTvAIr.exeと同じ場所のPluginsフォルダーへ配置してください。"}
+$instructions='ZIPを展開したフォルダ一式を配置してTvAIr.exeを起動してください。更新後はTvAIrの設定メニューで「TVTest」を開いてください。「連携するTVTestプラグインフォルダ」にTVTest内の Plugins フォルダを指定して保存してください。'
 @"
 $($spec.Name) v$($spec.Version) ($Platform) - ビルド済み配布
 
 Visual Studioによるビルドは不要です。必要なランタイムと利用条件はREADMEをご確認ください。
 $instructions
-更新時はTvAIrを終了して差し替え、既存の設定・保存データは保持してください。
+更新時はTvAIrを終了して新しいファイルを今までのフォルダへ上書きしてください。
 外部アプリやプラグインが必要な機能はREADMEの条件に従って設定してください。
 "@|Set-Content -LiteralPath (Join-Path $out 'INSTALL.txt') -Encoding utf8
 Compress-Archive -Path "$out/*" -DestinationPath "package/$($spec.Name)_v$($spec.Version)_$Platform.zip"

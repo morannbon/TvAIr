@@ -190,7 +190,7 @@ public sealed class RecordingResultStore
         {
             loadFailed = true;
             log.Add("RECORDING_RESULT_STORE_LOAD", "RecordingResultStore",
-                $"result=FAILED filePreserved=True action=do_not_overwrite reason={Sanitize(ex.Message)} rule=recording_result_store_contract");
+                $"result=FAILED filePreserved=True action=do_not_overwrite reason={LogTextContract.SanitizePersistedError(ex.Message)} rule=recording_result_store_contract");
             return new(StringComparer.OrdinalIgnoreCase);
         }
     }
@@ -242,14 +242,8 @@ public sealed class RecordingResultStore
     }
 
     private static string SanitizePath(string? value)
-        => string.IsNullOrWhiteSpace(value) ? "-" : Sanitize(value);
+        => string.IsNullOrWhiteSpace(value) ? "-" : LogTextContract.SanitizePersistedError(value);
 
-    private static string Sanitize(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return "unknown";
-        var text = value.Replace('\r', ' ').Replace('\n', ' ').Trim();
-        return text.Length <= 160 ? text : text[..160];
-    }
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {

@@ -658,12 +658,6 @@ public sealed class TvTestLauncher
                 pid = process.Id;
             }
 
-            try
-            {
-                using var launched = Process.GetProcessById(pid);
-                launched.WaitForInputIdle(3000);
-            }
-            catch { }
             _log.Add("VIEWER_PROCESS_START", "Viewer", $"result=OK pid={pid} exe={SafeLog(exe)} state=launched activation={(preserveActivation ? "preserved" : "default")} rule=release_contract");
             // release_contract: BonDriver/DID変更時のprofile枠再起動では、既存TVTestへのunscoped再選局を避けつつ、
             // 既存viewerの全画面・最大化・通常位置を可能な範囲で引き継ぐ。
@@ -1018,33 +1012,6 @@ public sealed class TvTestLauncher
                    .Any(part => string.Equals(part.Trim(), token, StringComparison.OrdinalIgnoreCase));
     }
 
-    private string ResolveBonDriverPath(string fileName)
-    {
-        var configuredBonDriverPath = (fileName ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(configuredBonDriverPath))
-        {
-            _log.Add("TUNER_PROTECT", "BonDriver",
-                "ConfiguredBonDriverPath unresolved: value=empty policy=explicit_configuration_only");
-            return configuredBonDriverPath;
-        }
-
-        if (Path.IsPathRooted(configuredBonDriverPath))
-        {
-            if (!File.Exists(configuredBonDriverPath))
-                _log.Add("TUNER_PROTECT", "BonDriver",
-                    $"ConfiguredBonDriverPath not found: {configuredBonDriverPath} policy=explicit_configuration_only");
-            return configuredBonDriverPath;
-        }
-
-        var configuredBonDriverDirectory = _ini.BonDriverDirectory ?? string.Empty;
-        var resolvedConfiguredBonDriverPath = Path.Combine(configuredBonDriverDirectory, configuredBonDriverPath);
-        if (!File.Exists(resolvedConfiguredBonDriverPath))
-        {
-            _log.Add("TUNER_PROTECT", "BonDriver",
-                $"ConfiguredBonDriverPath not found: {resolvedConfiguredBonDriverPath} policy=explicit_configuration_only");
-        }
-        return resolvedConfiguredBonDriverPath;
-    }
 }
 
 

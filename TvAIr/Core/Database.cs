@@ -159,6 +159,15 @@ public sealed class Database
             CREATE INDEX IF NOT EXISTS idx_reservations_status
                 ON reservations (status, start_time);
 
+            -- Logical PreRec responsibility ownership, independent of the physical
+            -- tuner selected when an EPG worker is actually admitted.
+            -- One priority can own only one parent, and a parent can have only one owner.
+            CREATE TABLE IF NOT EXISTS system_epg_priority_ownership (
+                priority_name       TEXT PRIMARY KEY COLLATE NOCASE,
+                group_name          TEXT NOT NULL,
+                parent_reservation_id INTEGER NOT NULL UNIQUE
+            );
+
             CREATE TABLE IF NOT EXISTS recording_start_failure_provenance (
                 reservation_id      INTEGER PRIMARY KEY,
                 failure_kind        TEXT    NOT NULL DEFAULT '',

@@ -188,3 +188,147 @@ public static class UserLogProjectionService
             : null;
     }
 }
+
+internal static class UserLogProjectionContractTests
+{
+    public static void Run()
+    {
+        var row = new UserEventLogEntry
+        {
+            OperationId = "op-test",
+            CreatedAt = new DateTime(2026, 7, 12, 12, 0, 0),
+            Severity = "INFO",
+            Category = "録画",
+            Result = "OK",
+            Target = "テスト局",
+            Message = "録画を終了しました",
+            ReservationSource = "番組表",
+            ScheduledStart = new DateTime(2026, 7, 12, 11, 0, 0),
+            ActualStart = new DateTime(2026, 7, 12, 11, 0, 1),
+            DropCount = 0,
+            CompletionReason = "正常終了",
+            ReservationId = "R1",
+            RecordingId = "REC1",
+            ProgramTitle = "テスト番組",
+            FilePath = @"C:\private\title.ts",
+            DetailsJson = "{\"state.before\":\"recording\",\"state.after\":\"completed\"}"
+        };
+        var policy = new TvAirLogPresentationPolicyDto
+        {
+            ViewKey = "reservation-log",
+            Enabled = true,
+            Layout = TvAirLogDetailLayout.Multiline,
+            DetailKeys = new[]
+            {
+                TvAirLogDetailKeys.ReservationSource,
+                TvAirLogDetailKeys.ScheduleStart,
+                TvAirLogDetailKeys.RecordingQualityDrop,
+                TvAirLogDetailKeys.Reason,
+                "unknown.key"
+            }
+        };
+        var snapshot = UserLogProjectionService.BuildSnapshot(policy, new[] { row });
+        var projected = snapshot.Entries.Single();
+        if (snapshot.Entries.Count != 1)
+            throw new InvalidOperationException("User log projection changed the operation row set.");
+        if (projected.Target != row.Target || projected.Timestamp.DateTime != row.CreatedAt || projected.Category != row.Category || projected.Result != row.Result)
+            throw new InvalidOperationException("User log projection changed a host-owned base column.");
+        if (!projected.Message.StartsWith(row.Message, StringComparison.Ordinal) || !projected.Message.Contains("予約元: 番組表") || !projected.Message.Contains("drop=0") || projected.Message.Contains("REC1") || projected.Message.Contains("private"))
+            throw new InvalidOperationException("User log detail selection contract failed.");
+        if (!projected.Message.Contains('\n'))
+            throw new InvalidOperationException("Extended user log must be multiline.");
+
+        var legacyMultilineRow = new UserEventLogEntry
+        {
+            CreatedAt = row.CreatedAt,
+            Severity = row.Severity,
+            Category = row.Category,
+            Result = row.Result,
+            Target = row.Target,
+            Message = "録画を開始しました\n予約ID: R1\n録画ID: R1"
+        };
+        if (UserLogProjectionService.BuildStandardMessage(legacyMultilineRow) != "録画を開始しました")
+            throw new InvalidOperationException("Standard user log must remain one line.");
+        if (UserLogProjectionService.WithoutInternalReservationNumbers("予約ID: R1") != string.Empty ||
+            UserLogProjectionService.WithoutInternalReservationNumbers("映画 R15") != "映画 R15")
+            throw new InvalidOperationException("User log must hide structured identifiers without changing programme titles.");
+        var noDetailPolicy = new TvAirLogPresentationPolicyDto
+        {
+            ViewKey = "reservation-log",
+            Enabled = true,
+            Layout = TvAirLogDetailLayout.Multiline,
+            DetailKeys = new[] { TvAirLogDetailKeys.RecordingActualEnd }
+        };
+        var noDetail = UserLogProjectionService.BuildSnapshot(noDetailPolicy, new[] { legacyMultilineRow }).Entries.Single();
+        if (noDetail.MessageTextMode != "singleline" || noDetail.Message.Contains('\n'))
+            throw new InvalidOperationException("Rows without projected details must remain single line.");
+
+        var timeFollowRow = new UserEventLogEntry
+        {
+            Message = "放送時間を更新しました: テスト番組",
+            ScheduledStart = new DateTime(2026, 7, 12, 12, 5, 0),
+            ScheduledEnd = new DateTime(2026, 7, 12, 12, 35, 0),
+            DetailsJson = JsonSerializer.Serialize(new Dictionary<string, string>
+            {
+                [TvAirLogDetailKeys.StateBefore] = "2026/07/12 12:00:00〜2026/07/12 12:30:00",
+                [TvAirLogDetailKeys.StateAfter] = "2026/07/12 12:05:00〜2026/07/12 12:35:00"
+            })
+        };
+        var timeFollowPolicy = new TvAirLogPresentationPolicyDto
+        {
+            ViewKey = "reservation-log",
+            Enabled = true,
+            Layout = TvAirLogDetailLayout.Multiline,
+            DetailKeys = new[]
+            {
+                TvAirLogDetailKeys.ScheduleStart,
+                TvAirLogDetailKeys.ScheduleEnd,
+                TvAirLogDetailKeys.StateBefore,
+                TvAirLogDetailKeys.StateAfter
+            }
+        };
+        var timeFollowMessage = UserLogProjectionService.BuildMessage(timeFollowRow, timeFollowPolicy);
+        if (!timeFollowMessage.StartsWith("放送時間を更新しました: テスト番組\n", StringComparison.Ordinal) ||
+            !timeFollowMessage.Contains("変更前: 2026/07/12 12:00:00〜2026/07/12 12:30:00", StringComparison.Ordinal) ||
+            !timeFollowMessage.Contains("変更後: 2026/07/12 12:05:00〜2026/07/12 12:35:00", StringComparison.Ordinal))
+            throw new InvalidOperationException("Time-follow details must project only through selected detail keys.");
+
+        // Internal System EPG / PreRec reservations must never leak through the generic
+        // reservation/recording user-log route. Their dedicated EPG/EPG確認 events are the only user-facing source.
+        var internalPreRec = new Reservation
+        {
+            Source = ReservationSource.Epg,
+            Intent = ReservationIntent.SystemPreRecordEpg,
+            Title = "EPG確認",
+            Status = ReservationStatus.Recording
+        };
+        if (UserEventLogService.ShouldEmitReservationOperation(internalPreRec))
+            throw new InvalidOperationException("Internal PreRec reservation leaked into generic user log semantics.");
+
+        var normalRecording = new Reservation
+        {
+            Source = ReservationSource.Manual,
+            Intent = ReservationIntent.InteractiveProgramEvent,
+            Title = "通常番組",
+            Status = ReservationStatus.Recording
+        };
+        if (!UserEventLogService.ShouldEmitReservationOperation(normalRecording))
+            throw new InvalidOperationException("Normal user reservation was suppressed from user log semantics.");
+
+        var genericPolicy = new TvAirLogPresentationPolicyDto
+        {
+            ViewKey = "reservation-log",
+            Enabled = true,
+            Layout = TvAirLogDetailLayout.Multiline,
+            DetailKeys = new[] { TvAirLogDetailKeys.ProgramTitle, TvAirLogDetailKeys.ReservationId }
+        };
+        var store = new LogPresentationStore();
+        store.SetLogPolicy("test.generic.log.presenter", genericPolicy);
+        var accepted = store.GetActiveLogPolicy("reservation-log");
+        if (accepted?.SourcePluginId != "test.generic.log.presenter")
+            throw new InvalidOperationException("Generic presenter plugin id was not accepted.");
+        var generic = UserLogProjectionService.BuildSnapshot(accepted.Policy, new[] { row }).Entries.Single();
+        if (!generic.Message.Contains("番組: テスト番組") || generic.Message.Contains("R1", StringComparison.Ordinal))
+            throw new InvalidOperationException("Generic presenter must remain independent while hiding internal identifiers.");
+    }
+}

@@ -1,30 +1,30 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 
 <html lang="ja">
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>予約リスト — TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.15"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.15"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.16"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.16"/>
 
-<link href="/tvair-ui-foundation.css?v=1.2.15" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.15" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.15" rel="stylesheet"/>
-<link href="/tvair-list-module.css?v=1.2.15" rel="stylesheet"/>
-<link href="/tvair-reservations.css?v=1.2.15" rel="stylesheet"/>
-<link href="/tvair-user-log.css?v=1.2.15" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.15" rel="stylesheet"/>
-<link href="/tvair-settings-host.css?v=1.2.15" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.2.16" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.2.16" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.2.16" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.2.16" rel="stylesheet"/>
+<link href="/tvair-reservations.css?v=1.2.16" rel="stylesheet"/>
+<link href="/tvair-user-log.css?v=1.2.16" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.2.16" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.2.16" rel="stylesheet"/>
 
-<script src="/tvair-theme.js?v=1.2.15"></script>
-<script src="/tvair-page-view-state.js?v=1.2.15"></script>
-<script src="/tvair-action-button-state.js?v=1.2.15"></script>
-<script src="/tvair-reservation-cancel-request.js?v=1.2.15"></script>
-<script src="/tvair-reservation-action-state.js?v=1.2.15"></script>
-<script src="/tvair-program-time-action.js?v=1.2.15"></script>
-<script src="/genre-shared.js?v=1.2.15"></script>
-<script src="/tvair-user-log.js?v=1.2.15"></script>
+<script src="/tvair-theme.js?v=1.2.16"></script>
+<script src="/tvair-page-view-state.js?v=1.2.16"></script>
+<script src="/tvair-action-button-state.js?v=1.2.16"></script>
+<script src="/tvair-reservation-cancel-request.js?v=1.2.16"></script>
+<script src="/tvair-reservation-action-state.js?v=1.2.16"></script>
+<script src="/tvair-program-time-action.js?v=1.2.16"></script>
+<script src="/genre-shared.js?v=1.2.16"></script>
+<script src="/tvair-user-log.js?v=1.2.16"></script>
 
 
 
@@ -1705,23 +1705,55 @@ async function stopRec(id, btn){
 
 
 
+// Copy the complete immutable report snapshot in one operation, including newlines.
+// A compatible fallback covers non-secure local/LAN pages without clipboard.writeText.
+async function writeUserReportClipboard(report){
+  if(navigator.clipboard && typeof navigator.clipboard.writeText === 'function'){
+    try{
+      await navigator.clipboard.writeText(report);
+      return true;
+    }catch(_){ /* Try the legacy single-click copy route. */ }
+  }
+  const field = document.createElement('textarea');
+  field.value = report;
+  field.setAttribute('readonly', '');
+  field.style.position = 'fixed';
+  field.style.left = '-9999px';
+  const previousFocus = document.activeElement;
+  document.body.appendChild(field);
+  try{
+    field.focus();
+    field.select();
+    return document.execCommand('copy') === true;
+  }catch(_){
+    return false;
+  }finally{
+    field.remove();
+    if(previousFocus && previousFocus.isConnected){
+      try{ previousFocus.focus({ preventScroll:true }); }catch(_){}
+    }
+  }
+}
+
 async function copyUserEventReport(btn){
-  const original = btn ? btn.textContent : '';
+  const original = '報告用コピー';
   if(btn){ btn.disabled = true; btn.textContent = window.TvAirActionButtonState.processingText; }
   try{
-    const res = await fetch('/api/user-events/report?hours=24&count=200', { cache:'no-store' });
-    const text = await res.text();
-    if(!res.ok || !text){ showToast('報告用ログの作成に失敗しました。'); return; }
-    if(navigator.clipboard && navigator.clipboard.writeText){
-      await navigator.clipboard.writeText(text);
-      showToast('直近24時間の報告用ログをコピーしました。');
-    }else{
-      window.prompt('報告用ログをコピーしてください', text);
+    const res = await fetch('/api/user-events/report?hours=24&count=1000', { cache:'no-store' });
+    if(!res.ok){ showToast('報告用ログを取得できませんでした。'); return; }
+    const report = (await res.text()).trim();
+    if(!/^TVR2[A-Za-z0-9]+(?:\r?\nTVR2[A-Za-z0-9]+)*$/.test(report)){
+      showToast('報告用ログを取得できませんでした。');
+      return;
     }
-  }catch(_){
-    showToast('通信エラー');
-  }finally{
-    if(btn){ btn.disabled = false; btn.textContent = original || '報告用コピー'; }
+    if(await writeUserReportClipboard(report)){
+      showToast('報告用ログをコピーしました。');
+    }else{
+      showToast('報告用ログをコピーできませんでした。');
+    }
+  }catch(_){ showToast('通信エラー'); }
+  finally{
+    if(btn){ btn.disabled = false; btn.textContent = original; }
   }
 }
 
@@ -1874,10 +1906,10 @@ document.addEventListener('DOMContentLoaded', ()=>{
 });
 
 </script>
-<script src="/tvair-notification.js?v=1.2.15"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.15"></script>
-<script src="/tvair-settings-host.js?v=1.2.15"></script>
-<script src="/tvair-menu-spine.js?v=1.2.15"></script>
+<script src="/tvair-notification.js?v=1.2.16"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.16"></script>
+<script src="/tvair-settings-host.js?v=1.2.16"></script>
+<script src="/tvair-menu-spine.js?v=1.2.16"></script>
 </body>
 </html>
 

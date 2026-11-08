@@ -484,9 +484,7 @@ body[data-theme="dark"]{
 
   /* Program-cell projections remain internal to ProgramCell. */
 
-  /* EPG progress-panel roles
-     EPG progress panel is a tool/dialog surface. Keep panel tokens as role aliases only;
-     do not let the old fixed navy palette override light theme dialogs. */
+  /* EPG progress panel uses the shared dialog roles in both themes. */
   --tvair-epg-panel-bg:var(--tvair-role-dialog-bg);
   --tvair-epg-panel-head-bg:var(--tvair-role-header-bg);
   --tvair-epg-panel-fg:var(--tvair-role-dialog-fg);

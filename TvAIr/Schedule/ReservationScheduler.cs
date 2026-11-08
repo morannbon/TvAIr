@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Collections.Concurrent;
 using System.Management;
 using System.Text.Json;
@@ -99,12 +99,6 @@ private readonly ReservationStore _store;
     private readonly ConcurrentDictionary<int, RecordingStartOwnerEntry> _recordingStartInProgress = new();
     private readonly ScheduledChainEditAdmission _chainEditAdmission;
     private int _chainRuntimeProtectionReady;
-    // RECORDING_LAUNCH_ORDER_INVARIANT:
-    // 通常録画worker投入は設定グループごとに最大1件を同時単位とし、同一グループの追加投入は1秒間隔とする。
-    // 明示チェーンは同一物理Tuner/worker/leaseのcontinuous capture内で予約ごとの別Sinkを管理する。
-    // 起動完了時間やPC性能を間隔へ加算してはならず、全放送波を単一ゲートで直列化してはならない。
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _recordingLaunchAdmissionGates = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, DateTime> _recordingLaunchNextAllowedAt = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<int, byte> _activePreRecordEpgEntries = new();
     // PRE_REC_TIME_FOLLOW_EVIDENCE_INVARIANT:
     // PreRecで実際に観測した同一EventIdentityの時刻は、録画開始後に古いProgramGuide投影で巻き戻してはならない。
@@ -202,13 +196,11 @@ private readonly ReservationStore _store;
     private const int PreRecordEpgMinimumProbeSeconds = 8;
     // USER_CHAIN_PROTECTED_PATH: chain-root PreRecの保護上限。チェーン境界契約と一体で維持する。
     private const int ProtectedUserChainPreRecordProbeCeilingSeconds = 90;
-    private const int ViewingPreemptCountdownSec = 30;
     private const int RecordingLaunchWaitForFreeTunerMs = 5000;
     // release_contract: 本番録画の直前と録画開始競合時は、同一放送波のEPG新規起動を共通ゲートで止める。
     private const int RecordingDueEpgSuppressBeforeAfterSec = 180;
     private const int RecordingTimelineEpgGateSafetySeconds = 320;
     // Tuner再利用可否はworker終了・デバイス解放・lease解放・occupancy generation更新の証拠で決定する。
-    private const int RecordingLaunchCadenceMs = 1_000;
     private const int ChainContinuousRetryUrgencyWindowSeconds = 10;
     private const int TvAIrEpgRecStopTimeoutMs = 4_000;
     // 録画プロセスが生存していてもTSファイルが増えない状態を、予定終了まで放置しない。
@@ -327,7 +319,7 @@ private readonly ReservationStore _store;
         {
             _log.Add("REC_STARTUP_INTERRUPTED_START_REARM", $"R{rearmed.Id}",
                 $"result=REARMED status=Scheduled dataVersion={rearmed.DataVersion} start={rearmed.StartTime:MM/dd HH:mm:ss} end={rearmed.EndTime:MM/dd HH:mm:ss} " +
-                $"service={SafeValue(rearmed.ServiceName)} title={ReservationDisplayTitle(rearmed.Title)} action=common_allocation_due_retry " +
+                $"service={LogTextContract.TrimOrDash(rearmed.ServiceName)} title={ReservationDisplayTitle(rearmed.Title)} action=common_allocation_due_retry " +
                 "reason=worker_exited_after_open_before_recording rule=interrupted_recording_recovery_contract");
         }
 
@@ -347,7 +339,7 @@ private readonly ReservationStore _store;
                 if (reattach.State == RecordingWorkerReattachState.WorkerAliveOwnershipUnavailable)
                 {
                     _log.Add("REC_STARTUP_REATTACH", $"R{r.Id}",
-                        $"result=OWNERSHIP_UNAVAILABLE pid={(reattach.ProcessId.HasValue ? reattach.ProcessId.Value.ToString() : "-")} reason={SafeValue(reattach.Reason)} " +
+                        $"result=OWNERSHIP_UNAVAILABLE pid={(reattach.ProcessId.HasValue ? reattach.ProcessId.Value.ToString() : "-")} reason={LogTextContract.TrimOrDash(reattach.Reason)} " +
                         $"action=keep_worker_do_not_create_recovery_reservation rule=recording_worker_reattach_contract");
                     continue;
                 }
@@ -467,19 +459,19 @@ private readonly ReservationStore _store;
         catch (Exception ex) when (command.Result is true)
         {
             _log.Add("REC_INTERRUPTED_RECOVERY_MAINTENANCE", $"R{r.Id}",
-                $"result=COMMITTED_POSTPROCESS_FAILED trigger={trigger} title={ReservationDisplayTitle(r.Title)} reason={SafeValue(ex.Message)} rule=interrupted_recording_recovery_atomic_contract");
+                $"result=COMMITTED_POSTPROCESS_FAILED trigger={trigger} title={ReservationDisplayTitle(r.Title)} reason={LogTextContract.TrimOrDash(ex.Message)} rule=interrupted_recording_recovery_atomic_contract");
             return true;
         }
         if (command.Result.HasValue) return command.Result.Value;
         _log.Add("REC_INTERRUPTED_RECOVERY_PENDING", $"R{r.Id}",
-            $"result=QUEUED trigger={trigger} reason={SafeValue(result.Reason)} title={ReservationDisplayTitle(r.Title)} action=execute_in_common_allocation_core rule=interrupted_recording_recovery_atomic_contract");
+            $"result=QUEUED trigger={trigger} reason={LogTextContract.TrimOrDash(result.Reason)} title={ReservationDisplayTitle(r.Title)} action=execute_in_common_allocation_core rule=interrupted_recording_recovery_atomic_contract");
         return false;
     }
 
     internal void RecordEpgImportCommit(string source, EpgReservationCommitResult result)
     {
         _log.Add("EPG_IMPORT_COMMIT", "CommonRoute",
-            $"source={SafeValue(source)} imported={result.Capture?.Upsert.Count ?? 0} otherInserted={result.Capture?.OtherSupplement?.InsertedEvents.Count ?? 0} retiredKeyword={result.RemovedIds.Count} result=COMMITTED rule=epg_import_commit_contract");
+            $"source={LogTextContract.TrimOrDash(source)} imported={result.Capture?.Upsert.Count ?? 0} otherInserted={result.Capture?.OtherSupplement?.InsertedEvents.Count ?? 0} retiredKeyword={result.RemovedIds.Count} result=COMMITTED rule=epg_import_commit_contract");
     }
 
     internal ProgramReservationCleanupResult ExecuteProgramReservationCleanupCore(ReservationStore store,ProgramReservationCleanupRequest request)
@@ -829,14 +821,14 @@ private readonly ReservationStore _store;
         if (!guard.ShouldRecover)
         {
             _log.Add($"REC_{phaseTag}_RECOVERY_GUARD", $"R{r.Id}",
-                $"result=SKIPPED reason={SafeValue(guard.Reason)} now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} file={SafeValue(interruptedFile.Summary)} workerPid={guard.WorkerPid?.ToString() ?? "-"} completedResult={guard.CompletedResult} trigger={phase} rule=release_contract");
+                $"result=SKIPPED reason={LogTextContract.TrimOrDash(guard.Reason)} now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} service={LogTextContract.TrimOrDash(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} file={LogTextContract.TrimOrDash(interruptedFile.Summary)} workerPid={guard.WorkerPid?.ToString() ?? "-"} completedResult={guard.CompletedResult} trigger={phase} rule=release_contract");
             return false;
         }
 
         var recoverUntil = r.EndTime.AddSeconds(Math.Max(10, _ini.PostEndMarginSeconds + 30));
         var recoverable = now <= recoverUntil && r.IsEnabled && !r.IsConflicted && r.Source != ReservationSource.Epg;
         _log.Add("REC_INTERRUPTED_DETECTED", $"R{r.Id}",
-            $"result=DETECTED recoverable={recoverable} trigger={phase} guard=passed now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} recoverUntil={recoverUntil:MM/dd HH:mm:ss} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} file={SafeValue(interruptedFile.Summary)} rule=release_contract");
+            $"result=DETECTED recoverable={recoverable} trigger={phase} guard=passed now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} recoverUntil={recoverUntil:MM/dd HH:mm:ss} service={LogTextContract.TrimOrDash(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} file={LogTextContract.TrimOrDash(interruptedFile.Summary)} rule=release_contract");
 
         if (recoverable && now < r.EndTime)
         {
@@ -859,16 +851,16 @@ private readonly ReservationStore _store;
             catch (Exception ex) when (recoveryId > 0)
             {
                 _log.Add($"REC_{phaseTag}_RECOVERY_NOTIFICATION", $"R{recoveryId}",
-                    $"result=COMMITTED_POSTPROCESS_FAILED source=R{r.Id} recovery=R{recoveryId} trigger={phase} reason={SafeValue(ex.Message)} action=continue_with_committed_recovery rule=interrupted_recording_recovery_atomic_contract");
+                    $"result=COMMITTED_POSTPROCESS_FAILED source=R{r.Id} recovery=R{recoveryId} trigger={phase} reason={LogTextContract.TrimOrDash(ex.Message)} action=continue_with_committed_recovery rule=interrupted_recording_recovery_atomic_contract");
             }
             catch (InvalidOperationException ex)
             {
                 _log.Add($"REC_{phaseTag}_RECOVERY_CAS", $"R{r.Id}",
-                    $"result=REJECTED action=rollback_atomic_recovery expectedDataVersion={r.DataVersion} trigger={phase} reason={SafeValue(ex.Message)} rule=interrupted_recording_recovery_atomic_contract");
+                    $"result=REJECTED action=rollback_atomic_recovery expectedDataVersion={r.DataVersion} trigger={phase} reason={LogTextContract.TrimOrDash(ex.Message)} rule=interrupted_recording_recovery_atomic_contract");
                 return false;
             }
             _log.Add($"REC_{phaseTag}_RECOVERY_REQUEUE", $"R{recoveryId}",
-                    $"result=REQUEUED_AS_NEW source=R{r.Id} recovery=R{recoveryId} trigger={phase} reason=recording_window_still_recoverable_and_original_finalized_atomically now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} recoverUntil={recoverUntil:MM/dd HH:mm:ss} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} fileCollisionPolicy=append_number_suffix rule=interrupted_recording_recovery_atomic_contract");
+                    $"result=REQUEUED_AS_NEW source=R{r.Id} recovery=R{recoveryId} trigger={phase} reason=recording_window_still_recoverable_and_original_finalized_atomically now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} recoverUntil={recoverUntil:MM/dd HH:mm:ss} service={LogTextContract.TrimOrDash(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} fileCollisionPolicy=append_number_suffix rule=interrupted_recording_recovery_atomic_contract");
         }
         else
         {
@@ -888,7 +880,7 @@ private readonly ReservationStore _store;
             catch (Exception ex) when (finalized)
             {
                 _log.Add($"REC_{phaseTag}_RECOVERY_NOTIFICATION", $"R{r.Id}",
-                    $"result=COMMITTED_POSTPROCESS_FAILED trigger={phase} reason={SafeValue(ex.Message)} action=continue_with_committed_finalization rule=interrupted_recording_recovery_atomic_contract");
+                    $"result=COMMITTED_POSTPROCESS_FAILED trigger={phase} reason={LogTextContract.TrimOrDash(ex.Message)} action=continue_with_committed_finalization rule=interrupted_recording_recovery_atomic_contract");
             }
             if (!finalized)
             {
@@ -898,7 +890,7 @@ private readonly ReservationStore _store;
             }
 
             _log.Add($"REC_{phaseTag}_RECOVERY_REQUEUE", $"R{r.Id}",
-                $"result=FINALIZED_ONLY trigger={phase} reason={(now >= r.EndTime ? "program_already_finished" : "not_recordable_or_outside_recoverable_window")} now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} recoverUntil={recoverUntil:MM/dd HH:mm:ss} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} rule=release_contract");
+                $"result=FINALIZED_ONLY trigger={phase} reason={(now >= r.EndTime ? "program_already_finished" : "not_recordable_or_outside_recoverable_window")} now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} recoverUntil={recoverUntil:MM/dd HH:mm:ss} service={LogTextContract.TrimOrDash(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} rule=release_contract");
         }
 
         commitRecoveryEvents();
@@ -940,7 +932,7 @@ private readonly ReservationStore _store;
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
             {
-                _log.Add("REC_DUE_SCHEDULER", "ERROR", $"result=ERROR message={SafeValue(ex.Message)} rule=release_contract");
+                _log.Add("REC_DUE_SCHEDULER", "ERROR", $"result=ERROR message={LogTextContract.TrimOrDash(ex.Message)} rule=release_contract");
             }
 
             await Task.Delay(RecordingDueMonitorIntervalMs, stoppingToken).ConfigureAwait(false);
@@ -954,14 +946,14 @@ private readonly ReservationStore _store;
             .Where(slot => string.Equals(slot.Role, "Recording", StringComparison.OrdinalIgnoreCase))
             .ToList();
         var configuredRecordingGroups = configuredRecordingTuners
-            .GroupBy(slot => NormalizeRecordingLaunchGroup(slot.Group), StringComparer.OrdinalIgnoreCase)
+            .GroupBy(slot => TunerDisplayName.NormalizeGroup(slot.Group), StringComparer.OrdinalIgnoreCase)
             .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
-            .Select(group => $"{SafeValue(group.Key)}:{group.Count()}")
+            .Select(group => $"{LogTextContract.TrimOrDash(group.Key)}:{group.Count()}")
             .ToArray();
         _log.Add("CHAIN_BOUNDARY_SCHEDULER", "START",
             $"result=STARTED intervalMs={ChainBoundaryMonitorIntervalMs} normalTickMs={PollingIntervalMs} policy=high_priority_chain_boundary_monitor " +
             $"configuredRecordingTuners={configuredRecordingTuners.Count} configuredRecordingGroups=[{string.Join(',', configuredRecordingGroups)}] " +
-            $"fixedTunerLimit=none launchPolicy=dynamic_all_recording_tuners cadenceMs={RecordingLaunchCadenceMs} retryUrgencyWindowSec={ChainContinuousRetryUrgencyWindowSeconds} " +
+            $"fixedTunerLimit=none launchPolicy=per_wave_physical_device_gate retryUrgencyWindowSec={ChainContinuousRetryUrgencyWindowSeconds} " +
             $"softwareResponsibility=no_internal_fixed_cap_no_unnecessary_wait_environmentResponsibility=driver_os_storage_worker_startup_performance " +
             $"commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=chain_dynamic_capacity_responsibility_contract");
         while (!stoppingToken.IsCancellationRequested)
@@ -979,7 +971,7 @@ private readonly ReservationStore _store;
             catch (Exception ex)
             {
                 _log.Add("CHAIN_BOUNDARY_SCHEDULER", "ERROR",
-                    $"result=ERROR message={TrimForLog(ex.Message, 180)} rule=release_contract");
+                    $"result=ERROR message={LogTextContract.TruncateWithDots(ex.Message, 180)} rule=release_contract");
             }
 
             await Task.Delay(ChainBoundaryMonitorIntervalMs, stoppingToken).ConfigureAwait(false);
@@ -1166,7 +1158,7 @@ private readonly ReservationStore _store;
         if (completedResult && !fileEvidence.LikelyCompleted)
         {
             _log.Add("REC_INTERRUPTED_RECOVERY_COMPLETED_REJECTED", $"R{r.Id}",
-                $"result=REJECT reason=completed_result_but_file_not_complete now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} fileAudit={SafeValue(interruptedFile)} fileEvidence={SafeValue(fileEvidence.Summary)} action=finalize_as_interrupted_not_completed rule=release_contract");
+                $"result=REJECT reason=completed_result_but_file_not_complete now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} service={LogTextContract.TrimOrDash(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} fileAudit={LogTextContract.TrimOrDash(interruptedFile)} fileEvidence={LogTextContract.TrimOrDash(fileEvidence.Summary)} action=finalize_as_interrupted_not_completed rule=release_contract");
             return false;
         }
         if (!completedResult && !fileEvidence.LikelyCompleted)
@@ -1181,13 +1173,13 @@ private readonly ReservationStore _store;
         catch (Exception ex) when (committed is { Applied: true })
         {
             _log.Add("REC_INTERRUPTED_RECOVERY_NOTIFICATION", $"R{r.Id}",
-                $"result=COMMITTED_POSTPROCESS_FAILED reason={SafeValue(ex.Message)} action=continue_with_completed_finalization rule=interrupted_recording_recovery_atomic_contract");
+                $"result=COMMITTED_POSTPROCESS_FAILED reason={LogTextContract.TrimOrDash(ex.Message)} action=continue_with_completed_finalization rule=interrupted_recording_recovery_atomic_contract");
         }
         var finalize = committed ?? throw new InvalidOperationException("Recovery finalization outcome is unavailable.");
         if (!finalize.Applied)
         {
             _log.Add("REC_INTERRUPTED_RECOVERY_FINALIZE", $"R{r.Id}",
-                $"result=REJECTED_PAST_END reason={SafeValue(finalize.Reason)} expectedStatus=Recording actualStatus={SafeValue(finalize.CurrentStatus?.ToString())} expectedVersion={r.DataVersion} actualVersion={finalize.CurrentDataVersion} " +
+                $"result=REJECTED_PAST_END reason={LogTextContract.TrimOrDash(finalize.Reason)} expectedStatus=Recording actualStatus={LogTextContract.TrimOrDash(finalize.CurrentStatus?.ToString())} expectedVersion={r.DataVersion} actualVersion={finalize.CurrentDataVersion} " +
                 $"action=preserve_newer_runtime_or_edit rule=release_contract");
             return false;
         }
@@ -1195,8 +1187,8 @@ private readonly ReservationStore _store;
         _log.Add("REC_INTERRUPTED_RECOVERY_FINALIZE", $"R{r.Id}",
             $"result=COMPLETED_PAST_END reason={(completedResult ? "completed_record_result" : "recording_file_reached_program_end")} " +
             $"now={now:MM/dd HH:mm:ss} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} " +
-            $"service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} fileAudit={SafeValue(interruptedFile)} " +
-            $"fileEvidence={SafeValue(fileEvidence.Summary)} dataVersion={finalize.PreviousDataVersion}->{finalize.CurrentDataVersion} atomicFinishEvidence=True rule=release_contract");
+            $"service={LogTextContract.TrimOrDash(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} fileAudit={LogTextContract.TrimOrDash(interruptedFile)} " +
+            $"fileEvidence={LogTextContract.TrimOrDash(fileEvidence.Summary)} dataVersion={finalize.PreviousDataVersion}->{finalize.CurrentDataVersion} atomicFinishEvidence=True rule=release_contract");
         return true;
     }
 
@@ -1209,7 +1201,7 @@ private readonly ReservationStore _store;
             var minViableBytes = CalculateMinimumViableCompletedRecordingBytes(expectedSeconds);
             var path = session.RecordingFilePath;
             if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
-                return CompletedRecordingSessionEvidence.Failed("recording_file_missing_at_completion", $"path={SafeValue(path)} expectedSeconds={(int)expectedSeconds} minViableBytes={minViableBytes}");
+                return CompletedRecordingSessionEvidence.Failed("recording_file_missing_at_completion", $"path={LogTextContract.TrimOrDash(path)} expectedSeconds={(int)expectedSeconds} minViableBytes={minViableBytes}");
 
             var fi = new FileInfo(path);
             var observedLastGrowth = session.LastRecordingFileGrowthAt;
@@ -1232,7 +1224,7 @@ private readonly ReservationStore _store;
         }
         catch (Exception ex)
         {
-            return CompletedRecordingSessionEvidence.Failed("recording_completion_evidence_error", $"error={ex.GetType().Name}:{SafeValue(ex.Message)}");
+            return CompletedRecordingSessionEvidence.Failed("recording_completion_evidence_error", $"error={ex.GetType().Name}:{LogTextContract.TrimOrDash(ex.Message)}");
         }
     }
 
@@ -1466,10 +1458,10 @@ private readonly ReservationStore _store;
                 ? "REC_STARTUP_REATTACH"
                 : "REC_RESUME_REATTACH";
             _log.Add(reattachLogCategory, $"R{reservation.Id}",
-                $"result=ATTACHED source={SafeValue(source)} pid={worker.ProcessId} tuner={lease.Name} did={lease.Did} bonDriver={lease.BonDriverFileName} " +
+                $"result=ATTACHED source={LogTextContract.TrimOrDash(source)} pid={worker.ProcessId} tuner={lease.Name} did={lease.Did} bonDriver={lease.BonDriverFileName} " +
                 $"poolLeaseId={lease.PoolLeaseId} generation={lease.OccupancyGeneration} plannedEnd={plannedEnd:MM/dd HH:mm:ss} " +
-                $"output={SafeValue(outputPath)} job={SafeValue(worker.JobPath)} dataVersion={attachCommit.PreviousDataVersion}->{attachCommit.CurrentDataVersion} " +
-                $"sharedCapture={isSharedReattach} chainControl={SafeValue(chainControlPath)} action=resume_monitoring_completion_growth_chain rule=recording_worker_reattach_contract");
+                $"output={LogTextContract.TrimOrDash(outputPath)} job={LogTextContract.TrimOrDash(worker.JobPath)} dataVersion={attachCommit.PreviousDataVersion}->{attachCommit.CurrentDataVersion} " +
+                $"sharedCapture={isSharedReattach} chainControl={LogTextContract.TrimOrDash(chainControlPath)} action=resume_monitoring_completion_growth_chain rule=recording_worker_reattach_contract");
             return RecordingWorkerReattachResult.Attached(worker.ProcessId);
         }
         catch (Exception ex)
@@ -1589,7 +1581,7 @@ private readonly ReservationStore _store;
                 return InterruptedRecordingRecoveryGuardResult.Skip("completed_record_result_exists", null, true);
 
             _log.Add("REC_INTERRUPTED_RECOVERY_GUARD", $"R{r.Id}",
-                $"result=CONTINUE reason=completed_result_ignored_due_partial_file file={SafeValue(interruptedFile.Summary)} action=finalize_as_interrupted_not_completed rule=release_contract");
+                $"result=CONTINUE reason=completed_result_ignored_due_partial_file file={LogTextContract.TrimOrDash(interruptedFile.Summary)} action=finalize_as_interrupted_not_completed rule=release_contract");
         }
 
         // release_contract invariant:
@@ -1820,12 +1812,6 @@ private readonly ReservationStore _store;
         public static InterruptedRecordingRecoveryGuardResult Skip(string reason, int? workerPid, bool completedResult) => new(false, reason, workerPid, completedResult);
     }
 
-    private static string TrimForLog(string? text, int maxLength)
-    {
-        if (string.IsNullOrEmpty(text)) return string.Empty;
-        if (text.Length <= maxLength) return text;
-        return text[..maxLength] + "...";
-    }
 
 
     // ─── 公開API（外部からの停止要求） ──────────────────────────────
@@ -1845,7 +1831,7 @@ private readonly ReservationStore _store;
         try
         {
             var policyReservation = _store.GetById(reservationId);
-            var policyService = SafeValue(policyReservation?.ServiceName);
+            var policyService = LogTextContract.TrimOrDash(policyReservation?.ServiceName);
             var policyTitle = ReservationDisplayTitle(policyReservation?.Title);
             var policyRawTitleBlank = ReservationTitleDisplayContract.RawBlankFlag(policyReservation?.Title);
             if (policyReservation is null) return StopRecordingRequestResult.CreateFailed(reservationId);
@@ -1870,7 +1856,7 @@ private readonly ReservationStore _store;
             if (detachedSuccessors.Count > 0)
             {
                 SafeManualStopLog("CHAIN_SESSION_DETACH", $"R{reservationId}",
-                    $"operation=ManualStop result=SUCCESSORS_DETACHED count={detachedSuccessors.Count} targets=[{string.Join(",", detachedSuccessors.Select(x => $"R{x.Id}:{SafeValue(x.ServiceName)}:{ReservationDisplayTitle(x.Title, 40)}"))}] sessionReleaseDeferredUntilStop=True rule=release_contract");
+                    $"operation=ManualStop result=SUCCESSORS_DETACHED count={detachedSuccessors.Count} targets=[{string.Join(",", detachedSuccessors.Select(x => $"R{x.Id}:{LogTextContract.TrimOrDash(x.ServiceName)}:{ReservationDisplayTitle(x.Title, 40)}"))}] sessionReleaseDeferredUntilStop=True rule=release_contract");
 
                 // Runtime reconciliation is owned by the common preparation core.
             }
@@ -1886,7 +1872,7 @@ private readonly ReservationStore _store;
                 }
 
                 SafeManualStopLog("MANUAL_STOP_OCCURRENCE", $"R{reservationId}",
-                    $"result=SIBLING_STOP_REQUEST target=R{sid} source=R{reservationId} reason=same_occurrence_manual_stop pid={sibling.ProcessId} tuner={SafeValue(sibling.Lease.Name)} rule=release_contract");
+                    $"result=SIBLING_STOP_REQUEST target=R{sid} source=R{reservationId} reason=same_occurrence_manual_stop pid={sibling.ProcessId} tuner={LogTextContract.TrimOrDash(sibling.Lease.Name)} rule=release_contract");
                 StopPhaseGate.PhysicalReleaseBarrier? siblingScope = null;
                 var siblingTaskOwnsRequest = false;
                 try
@@ -1932,7 +1918,7 @@ private readonly ReservationStore _store;
                     {
                         SafeManualStopLog("MANUAL_STOP_NO_SESSION", $"R{reservationId}",
                             $"result=REJECTED status={latest.Status} dataVersion={latest.DataVersion} reason=live_runtime_owner ownerKind={liveOwnerKind} " +
-                            $"pid={(liveOwnerPid > 0 ? liveOwnerPid.ToString() : "-")} tuner={SafeValue(liveOwnerTuner)} action=keep_latest_state rule=recording_lifecycle_cas_contract");
+                            $"pid={(liveOwnerPid > 0 ? liveOwnerPid.ToString() : "-")} tuner={LogTextContract.TrimOrDash(liveOwnerTuner)} action=keep_latest_state rule=recording_lifecycle_cas_contract");
                         return StopRecordingRequestResult.CreateFailed(reservationId);
                     }
 
@@ -1940,7 +1926,7 @@ private readonly ReservationStore _store;
                     if (!stopping.Applied)
                     {
                         SafeManualStopLog("MANUAL_STOP_NO_SESSION", $"R{reservationId}",
-                            $"result=CAS_REJECTED stage=recording_to_stopping status={latest.Status} reason={SafeValue(stopping.Reason)} " +
+                            $"result=CAS_REJECTED stage=recording_to_stopping status={latest.Status} reason={LogTextContract.TrimOrDash(stopping.Reason)} " +
                             $"dataVersion={stopping.PreviousDataVersion}->{stopping.CurrentDataVersion} action=keep_latest_state rule=recording_lifecycle_cas_contract");
                         return StopRecordingRequestResult.CreateFailed(reservationId);
                     }
@@ -1965,7 +1951,7 @@ private readonly ReservationStore _store;
                 if (!cancelResult.Applied)
                 {
                     SafeManualStopLog("MANUAL_STOP_NO_SESSION", $"R{reservationId}",
-                        $"result=CAS_REJECTED status={latest.Status} reason={SafeValue(cancelResult.Reason)} dataVersion={cancelResult.PreviousDataVersion}->{cancelResult.CurrentDataVersion} action=keep_latest_state rule=recording_lifecycle_cas_contract");
+                        $"result=CAS_REJECTED status={latest.Status} reason={LogTextContract.TrimOrDash(cancelResult.Reason)} dataVersion={cancelResult.PreviousDataVersion}->{cancelResult.CurrentDataVersion} action=keep_latest_state rule=recording_lifecycle_cas_contract");
                     return StopRecordingRequestResult.CreateFailed(reservationId);
                 }
 
@@ -1982,7 +1968,7 @@ private readonly ReservationStore _store;
         catch (Exception ex)
         {
             SafeManualStopLog("MANUAL_STOP_REQUEST", $"R{reservationId}",
-                $"result=FAILED action=release_request errorType={ex.GetType().Name} error={TrimForLog(ex.Message, 240)} rule=release_contract");
+                $"result=FAILED action=release_request errorType={ex.GetType().Name} error={LogTextContract.TruncateWithDots(ex.Message, 240)} rule=release_contract");
             return StopRecordingRequestResult.CreateFailed(reservationId);
         }
         finally
@@ -2002,7 +1988,7 @@ private readonly ReservationStore _store;
         catch (Exception ex) when (command.Result is { Applied: true })
         {
             SafeManualStopLog("CHAIN_STOP_NOTIFICATION", $"R{command.ReservationId}",
-                $"result=FAILED topologyCommitted=True action=continue_existing_stop errorType={ex.GetType().Name} error={TrimForLog(ex.Message, 240)} rule=release_contract");
+                $"result=FAILED topologyCommitted=True action=continue_existing_stop errorType={ex.GetType().Name} error={LogTextContract.TruncateWithDots(ex.Message, 240)} rule=release_contract");
         }
         return command.Result;
     }
@@ -2041,7 +2027,7 @@ private readonly ReservationStore _store;
             if (resumeRequest is not null) _allocationRoute.RetainStopResumeRequest(resumeRequest);
             _forceAllocationReevaluate = true;
             SafeManualStopLog("MANUAL_STOP_RELEASE", $"R{reservationId}",
-                $"result=FAILED action=retry_existing_scheduler errorType={ex.GetType().Name} error={TrimForLog(ex.Message, 240)} rule=release_contract");
+                $"result=FAILED action=retry_existing_scheduler errorType={ex.GetType().Name} error={LogTextContract.TruncateWithDots(ex.Message, 240)} rule=release_contract");
         }
     }
 
@@ -2132,8 +2118,8 @@ private readonly ReservationStore _store;
             try { TvAirManagedProcessRegistry.Unregister(candidate.ProcessId); } catch { }
             RemoveChainRuntimeSnapshot(candidate.ReservationId, reason, "dead_runtime_owner_cleanup");
             _log.Add("REC_OWNERLESS_SESSION_CLEANUP", $"R{reservationId}",
-                $"result=REMOVED staleOwner=R{candidate.ReservationId} pid={candidate.ProcessId} tuner={SafeValue(candidate.Lease.Name)} " +
-                $"reason={SafeValue(reason)} workerAlive=False leaseIdentityCurrent={candidate.Lease.IsIdentityCurrent} rule=recording_lifecycle_convergence_contract");
+                $"result=REMOVED staleOwner=R{candidate.ReservationId} pid={candidate.ProcessId} tuner={LogTextContract.TrimOrDash(candidate.Lease.Name)} " +
+                $"reason={LogTextContract.TrimOrDash(reason)} workerAlive=False leaseIdentityCurrent={candidate.Lease.IsIdentityCurrent} rule=recording_lifecycle_convergence_contract");
         }
     }
 
@@ -2171,7 +2157,7 @@ private readonly ReservationStore _store;
                 {
                     _forceAllocationReevaluate = true;
                     SafeManualStopLog("MANUAL_STOP_TASK", $"R{reservationId}",
-                        $"result=FAILED action=release_request_continue_scheduler errorType={ex.GetType().Name} error={TrimForLog(ex.Message, 240)} rule=release_contract");
+                        $"result=FAILED action=release_request_continue_scheduler errorType={ex.GetType().Name} error={LogTextContract.TruncateWithDots(ex.Message, 240)} rule=release_contract");
                 }
                 finally
                 {
@@ -2545,7 +2531,7 @@ private readonly ReservationStore _store;
                 if (cancel.Applied)
                     _forceAllocationReevaluate = true;
                 _log.Add("REC_START_DECISION", $"R{r.Id}",
-                    $"result=SKIP reason=automatic_rerecord_after_manual_stop service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} rawTitleBlank={ReservationTitleDisplayContract.RawBlankFlag(r.Title)} source={r.Source} ruleId={(r.SourceRuleId?.ToString() ?? "-")} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} rule=release_contract");
+                    $"result=SKIP reason=automatic_rerecord_after_manual_stop service={LogTextContract.TrimOrDash(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} rawTitleBlank={ReservationTitleDisplayContract.RawBlankFlag(r.Title)} source={r.Source} ruleId={(r.SourceRuleId?.ToString() ?? "-")} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} rule=release_contract");
                 continue;
             }
 
@@ -2571,7 +2557,7 @@ private readonly ReservationStore _store;
                     // Manual/Immediate等の入口種別で分岐せずScheduled+IsConflictedを保持し、
                     // EPGのComplete / ExplicitCancel / RealFailureでwave占有が解放された後、共通Allocation再評価から通常開始へ戻す。
                     _log.Add("REC_START_DECISION", $"R{r.Id}",
-                        $"result=DEFER reason=active_normal_epg_wave_conflict group={conflictGroup} epgSource={SafeValue(epgBlock.Source)} epgSilent={epgBlock.Silent} epgRunGeneration={epgBlock.RunGeneration} epgOccupy={epgBlock.StartedAt:MM/dd HH:mm:ss}〜{EffectiveNormalEpgOccupationEnd(epgBlock):MM/dd HH:mm:ss} terminalStatus=none preserveStatus=Scheduled preserveConflict=True action=wait_for_common_reallocation_after_epg_terminal " + FormatReservationForAudit(conflictTarget, "normal_epg_conflict_held"));
+                        $"result=DEFER reason=active_normal_epg_wave_conflict group={conflictGroup} epgSource={LogTextContract.TrimOrDash(epgBlock.Source)} epgSilent={epgBlock.Silent} epgRunGeneration={epgBlock.RunGeneration} epgOccupy={epgBlock.StartedAt:MM/dd HH:mm:ss}〜{EffectiveNormalEpgOccupationEnd(epgBlock):MM/dd HH:mm:ss} terminalStatus=none preserveStatus=Scheduled preserveConflict=True action=wait_for_common_reallocation_after_epg_terminal " + FormatReservationForAudit(conflictTarget, "normal_epg_conflict_held"));
                     continue;
                 }
 
@@ -2592,8 +2578,8 @@ private readonly ReservationStore _store;
                     continue;
 
                 startCandidate = conflictTarget;
-                _log.Add("Scheduler", SafeValue(conflictTarget.ServiceName),
-                    $"競合再評価: service=[{SafeValue(conflictTarget.ServiceName)}] title=[{ReservationDisplayTitle(conflictTarget.Title)}] id=R{conflictTarget.Id} 空きチューナーを確認できたため録画開始します。group={conflictGroup} rule=release_contract");
+                _log.Add("Scheduler", LogTextContract.TrimOrDash(conflictTarget.ServiceName),
+                    $"競合再評価: service=[{LogTextContract.TrimOrDash(conflictTarget.ServiceName)}] title=[{ReservationDisplayTitle(conflictTarget.Title)}] id=R{conflictTarget.Id} 空きチューナーを確認できたため録画開始します。group={conflictGroup} rule=release_contract");
             }
 
             startCandidates.Add(startCandidate);
@@ -2601,12 +2587,11 @@ private readonly ReservationStore _store;
 
         if (startCandidates.Count > 0)
         {
-            // 多チューナー環境では、前のworkerがACTIVEになるまで逐次awaitすると、
-            // 設定グループ別Admissionより上流で全開始要求が直列化される。
-            // 予約IDごとのsingle-flight ownerを同時に投入し、同一グループのcadenceと
-            // 異なるグループの並列性は、共通割当確定後のApplyRecordingLaunchAdmissionAsyncだけに所有させる。
+            // 予約IDごとにsingle-flight ownerを同時投入する。
+            // 物理Openの競合はTunerDeviceAccessGateが放送波ごとに直列化し、
+            // WorkerのOpen完了時点でGateを解放する。
             _log.Add("REC_DUE_DISPATCH", "START",
-                $"count={startCandidates.Count} ids={string.Join(",", startCandidates.Select(candidate => $"R{candidate.Id}"))} parallelByReservation=True admissionByConfiguredGroup=True owner=reservation_id_singleflight rule=recording_due_parallel_dispatch_contract");
+                $"count={startCandidates.Count} ids={string.Join(",", startCandidates.Select(candidate => $"R{candidate.Id}"))} parallelByReservation=True physicalOpenGate=per_wave owner=reservation_id_singleflight rule=recording_due_parallel_dispatch_contract");
 
             var startTasks = startCandidates
                 .Select(candidate => StartDueReservationIsolatedAsync(candidate, ct))
@@ -2615,7 +2600,7 @@ private readonly ReservationStore _store;
             var started = startResults.Count(result => result);
 
             _log.Add("REC_DUE_DISPATCH", "END",
-                $"count={startResults.Length} started={started} notStarted={startResults.Length - started} parallelByReservation=True admissionByConfiguredGroup=True rule=recording_due_parallel_dispatch_contract");
+                $"count={startResults.Length} started={started} notStarted={startResults.Length - started} parallelByReservation=True physicalOpenGate=per_wave rule=recording_due_parallel_dispatch_contract");
         }
 
             return true;
@@ -2641,7 +2626,7 @@ private readonly ReservationStore _store;
             // 1予約の開始例外で同じdueバッチの他予約を巻き込まない。
             // StartRecordingAsync側で当該予約の開始claimは収束済みなので、ここでは監査だけを行う。
             _log.Add("REC_DUE_DISPATCH", $"R{reservation.Id}",
-                $"result=NOT_STARTED reason=start_exception_isolated exception={ex.GetType().Name} message={SafeValue(ex.Message)} otherReservationsContinue=True rule=recording_due_parallel_dispatch_contract");
+                $"result=NOT_STARTED reason=start_exception_isolated exception={ex.GetType().Name} message={LogTextContract.TrimOrDash(ex.Message)} otherReservationsContinue=True rule=recording_due_parallel_dispatch_contract");
             return false;
         }
     }
@@ -2698,7 +2683,7 @@ private readonly ReservationStore _store;
             if (runtimeLease is null)
             {
                 _log.Add("EPG_SCHEDULER", "PreRecAdmission",
-                    $"admission=R{originalPlan.Epg.Id} result=DEFER reason=no_distinct_safe_tuner_claim_this_tick epg=R{originalPlan.Epg.Id} parent=R{originalPlan.Parent.Id} group={SafeValue(originalPlan.Group)} selectedTuners=[{string.Join(',', selectedTuners)}] action=reevaluate_next_tick policy=physical_recording_tuner_atomic_claim rule=pre_record_epg_admission_claim_ssot");
+                    $"admission=R{originalPlan.Epg.Id} result=DEFER reason=no_distinct_safe_tuner_claim_this_tick epg=R{originalPlan.Epg.Id} parent=R{originalPlan.Parent.Id} group={LogTextContract.TrimOrDash(originalPlan.Group)} selectedTuners=[{string.Join(',', selectedTuners)}] action=reevaluate_next_tick policy=physical_recording_tuner_atomic_claim rule=pre_record_epg_admission_claim_ssot");
                 continue;
             }
 
@@ -2712,7 +2697,7 @@ private readonly ReservationStore _store;
 
             started++;
             _log.Add("EPG_SCHEDULER", "PreRecAdmission",
-                $"admission=R{plan.Epg.Id} result=START wave=0 reason=atomic_safe_recording_tuner_claim epg=R{plan.Epg.Id} parent=R{plan.Parent.Id} group={SafeValue(plan.Group)} tuner={SafeValue(plan.RuntimeTunerName)} leaseId={runtimeLease.PoolLeaseId} generation={runtimeLease.OccupancyGeneration} dueStart={plan.DueStart:MM/dd HH:mm:ss} secondsUntilDueStart={plan.SecondsUntilDueStart} admittedThisTick={started} selectedTuners=[{string.Join(',', selectedTuners)}] policy=physical_recording_tuner_atomic_claim rule=pre_record_epg_admission_claim_ssot");
+                $"admission=R{plan.Epg.Id} result=START wave=0 reason=atomic_safe_recording_tuner_claim epg=R{plan.Epg.Id} parent=R{plan.Parent.Id} group={LogTextContract.TrimOrDash(plan.Group)} tuner={LogTextContract.TrimOrDash(plan.RuntimeTunerName)} leaseId={runtimeLease.PoolLeaseId} generation={runtimeLease.OccupancyGeneration} dueStart={plan.DueStart:MM/dd HH:mm:ss} secondsUntilDueStart={plan.SecondsUntilDueStart} admittedThisTick={started} selectedTuners=[{string.Join(',', selectedTuners)}] policy=physical_recording_tuner_atomic_claim rule=pre_record_epg_admission_claim_ssot");
             _ = Task.Run(() => ExecutePreRecordEpgPlanAsync(plan, ct), CancellationToken.None);
         }
 
@@ -2742,7 +2727,7 @@ private readonly ReservationStore _store;
         if (IsExpiredPreRecordEpgForParent(epg, parent, now))
         {
             _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
-                $"result=SKIP reason=deadline_already_passed epg=R{epg.Id} parent=R{parent.Id} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} epgStart={epg.StartTime:MM/dd HH:mm:ss} parentCreated={parent.CreatedAt:MM/dd HH:mm:ss} epgCreated={epg.CreatedAt:MM/dd HH:mm:ss} now={now:MM/dd HH:mm:ss} action=recording_priority rule=release_contract");
+                $"result=SKIP reason=deadline_already_passed epg=R{epg.Id} parent=R{parent.Id} service={LogTextContract.TrimOrDash(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} epgStart={epg.StartTime:MM/dd HH:mm:ss} parentCreated={parent.CreatedAt:MM/dd HH:mm:ss} epgCreated={epg.CreatedAt:MM/dd HH:mm:ss} now={now:MM/dd HH:mm:ss} action=recording_priority rule=release_contract");
             TryCompletePreRecordEpgEntry(epg, "skip_deadline_already_passed");
             return null;
         }
@@ -2758,7 +2743,7 @@ private readonly ReservationStore _store;
         if (parent.Status == ReservationStatus.Recording)
         {
             _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
-                $"result=SKIP reason=parent_already_recording epg=R{epg.Id} parent=R{parent.Id} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=release_contract");
+                $"result=SKIP reason=parent_already_recording epg=R{epg.Id} parent=R{parent.Id} service={LogTextContract.TrimOrDash(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=release_contract");
             TryCompletePreRecordEpgEntry(epg, "skip_before_probe");
             return null;
         }
@@ -2766,7 +2751,7 @@ private readonly ReservationStore _store;
         if (parent.Status != ReservationStatus.Scheduled || !parent.IsEnabled || parent.IsConflicted)
         {
             _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
-                $"result=SKIP reason=parent_not_recordable epg=R{epg.Id} parent=R{parent.Id} status={parent.Status} enabled={parent.IsEnabled} conflicted={parent.IsConflicted} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=release_contract");
+                $"result=SKIP reason=parent_not_recordable epg=R{epg.Id} parent=R{parent.Id} status={parent.Status} enabled={parent.IsEnabled} conflicted={parent.IsConflicted} service={LogTextContract.TrimOrDash(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=release_contract");
             TryCompletePreRecordEpgEntry(epg, "skip_before_probe");
             return null;
         }
@@ -2775,7 +2760,7 @@ private readonly ReservationStore _store;
         if (string.IsNullOrWhiteSpace(group))
         {
             _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
-                $"result=SKIP reason=group_unresolved epg=R{epg.Id} parent=R{parent.Id} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=release_contract");
+                $"result=SKIP reason=group_unresolved epg=R{epg.Id} parent=R{parent.Id} service={LogTextContract.TrimOrDash(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=release_contract");
             TryCompletePreRecordEpgEntry(epg, "skip_before_probe");
             return null;
         }
@@ -2785,9 +2770,9 @@ private readonly ReservationStore _store;
         if (!_tunerPool.HasFreeSlot(group))
         {
             _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
-                $"result=SKIP reason=no_free_recording_tuner epg=R{epg.Id} parent=R{parent.Id} group={SafeValue(group)} action=keep_original_recording_time_no_retry viewingTunerUse=False rule=pre_record_epg_tuner_availability_exception_contract");
+                $"result=SKIP reason=no_free_recording_tuner epg=R{epg.Id} parent=R{parent.Id} group={LogTextContract.TrimOrDash(group)} action=keep_original_recording_time_no_retry viewingTunerUse=False rule=pre_record_epg_tuner_availability_exception_contract");
             TryCompletePreRecordEpgEntry(epg, "skip_no_free_recording_tuner");
-            _userEvents.AddPreRecordEpgFailed(parent, "no_free_recording_tuner");
+            _userEvents.AddPreRecordEpgFailed(parent, PreRecordEpgFailureReason.NoFreeRecordingTuner);
             return null;
         }
 
@@ -2798,7 +2783,7 @@ private readonly ReservationStore _store;
         if (secondsUntilDueStart <= PreRecordEpgStopBeforeRecordingDueSeconds)
         {
             _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
-                $"result=SKIP reason=too_close_to_recording epg=R{epg.Id} parent=R{parent.Id} secondsUntilDueStart={secondsUntilDueStart} stopBeforeDueSeconds={PreRecordEpgStopBeforeRecordingDueSeconds} dueStart={dueStart:MM/dd HH:mm:ss} now={schedulerNow:MM/dd HH:mm:ss} action=recording_priority service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=release_contract");
+                $"result=SKIP reason=too_close_to_recording epg=R{epg.Id} parent=R{parent.Id} secondsUntilDueStart={secondsUntilDueStart} stopBeforeDueSeconds={PreRecordEpgStopBeforeRecordingDueSeconds} dueStart={dueStart:MM/dd HH:mm:ss} now={schedulerNow:MM/dd HH:mm:ss} action=recording_priority service={LogTextContract.TrimOrDash(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=release_contract");
             TryCompletePreRecordEpgEntry(epg, "skip_before_probe");
             return null;
         }
@@ -2864,7 +2849,7 @@ private readonly ReservationStore _store;
                 var finalized = TryCompletePreRecordEpgEntry(epg, "execution_deadline_too_close_before_worker_launch");
                 _log.Add("PRE_REC_EPG_RESULT", $"R{epg.Id}",
                     $"result=FINALIZED_WITHOUT_TIME_FOLLOW epg=R{epg.Id} parent=R{parent.Id} failureStage=execution_contract failureReason=hard_deadline_too_close secondsUntilDueStart={secondsUntilDueStart} remainingSafeSeconds={remainingSafeSeconds} plannedProbeCeilingSeconds={plan.ProbeCeilingSeconds} minProbeSeconds={PreRecordEpgMinimumProbeSeconds} prerecEntryFinalized={finalized} action=keep_original_recording_time_no_retry rule=pre_record_epg_execution_lifecycle_contract");
-                _userEvents.AddPreRecordEpgFailed(parent, "hard_deadline_too_close");
+                _userEvents.AddPreRecordEpgFailed(parent, PreRecordEpgFailureReason.DeadlineTooClose);
                 return;
             }
             var hardDeadline = DateTimeOffset.Now.AddSeconds(executionProbeSeconds);
@@ -2897,16 +2882,16 @@ private readonly ReservationStore _store;
                 // PreRec確認だけを失敗終端し、親録画は元の予定時刻で進める。再試行・worker preemptは行わない。
                 var finalized = TryCompletePreRecordEpgEntry(epg, "normal_epg_running_single_attempt");
                 _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
-                    $"result=SKIP reason=normal_epg_running epg=R{epg.Id} parent=R{parent.Id} group={SafeValue(plan.Group)} phase={status.Phase} runPurpose={SafeValue(status.RunPurpose)} targetScope={SafeValue(status.TargetScope)} prerecEntryFinalized={finalized} action=keep_original_recording_time_no_retry_no_preempt service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=pre_record_epg_single_attempt_contract");
-                _userEvents.AddPreRecordEpgFailed(parent, "normal_epg_running");
+                    $"result=SKIP reason=normal_epg_running epg=R{epg.Id} parent=R{parent.Id} group={LogTextContract.TrimOrDash(plan.Group)} phase={status.Phase} runPurpose={LogTextContract.TrimOrDash(status.RunPurpose)} targetScope={LogTextContract.TrimOrDash(status.TargetScope)} prerecEntryFinalized={finalized} action=keep_original_recording_time_no_retry_no_preempt service={LogTextContract.TrimOrDash(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=pre_record_epg_single_attempt_contract");
+                _userEvents.AddPreRecordEpgFailed(parent, PreRecordEpgFailureReason.NormalEpgRunning);
                 return;
             }
 
             _log.Add("PRE_REC_EPG_START", $"R{epg.Id}",
-                $"epg=R{epg.Id} parent=R{parent.Id} group={plan.Group} admissionGroup={plan.AdmissionGroup} tuner={SafeValue(plan.RuntimeTunerName)} recordingTuner={SafeValue(parent.TunerName)} epgAction=time_follow_probe window={epg.StartTime:MM/dd HH:mm:ss}〜{epg.EndTime:MM/dd HH:mm:ss} plannedProbeCeilingSeconds={plan.ProbeCeilingSeconds} executionProbeSeconds={executionProbeSeconds} hardDeadline={hardDeadline:MM/dd HH:mm:ss.fff} configuredPreRecordMinutes={plan.ConfiguredPreRecordMinutes} dueStart={plan.DueStart:MM/dd HH:mm:ss} stopBeforeDueSeconds={PreRecordEpgStopBeforeRecordingDueSeconds} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} nid={parent.NetworkId} tsid={parent.TransportStreamId} sid={parent.ServiceId} eventId={parent.EventId} lifecycleOwner=EpgCapture rule=pre_record_epg_execution_lifecycle_contract");
+                $"epg=R{epg.Id} parent=R{parent.Id} group={plan.Group} admissionGroup={plan.AdmissionGroup} tuner={LogTextContract.TrimOrDash(plan.RuntimeTunerName)} recordingTuner={LogTextContract.TrimOrDash(parent.TunerName)} epgAction=time_follow_probe window={epg.StartTime:MM/dd HH:mm:ss}〜{epg.EndTime:MM/dd HH:mm:ss} plannedProbeCeilingSeconds={plan.ProbeCeilingSeconds} executionProbeSeconds={executionProbeSeconds} hardDeadline={hardDeadline:MM/dd HH:mm:ss.fff} configuredPreRecordMinutes={plan.ConfiguredPreRecordMinutes} dueStart={plan.DueStart:MM/dd HH:mm:ss} stopBeforeDueSeconds={PreRecordEpgStopBeforeRecordingDueSeconds} service={LogTextContract.TrimOrDash(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} nid={parent.NetworkId} tsid={parent.TransportStreamId} sid={parent.ServiceId} eventId={parent.EventId} lifecycleOwner=EpgCapture rule=pre_record_epg_execution_lifecycle_contract");
 
             _log.Add("PRE_REC_EPG_RUNTIME_PLAN", $"R{epg.Id}",
-                $"parent=R{parent.Id} service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} group={executionContract.TargetScope} runtimeTuner={SafeValue(executionContract.RuntimeTunerName)} expectedNid={executionContract.NetworkId} expectedTsid={executionContract.TransportStreamId} expectedSid={executionContract.ServiceId} expectedEventId={(executionContract.EventId?.ToString() ?? "-")} hardDeadline={executionContract.HardDeadline:MM/dd HH:mm:ss.fff} identitySource=parent_recording_reservation contractOwner=ReservationScheduler downstreamOwner=single_contract_reference chainScope={(parent.IsUserChain ? "root" : "single")} policy=time_follow_probe_runtime_tuner_no_pretune rule=pre_record_epg_runtime_tuner_contract");
+                $"parent=R{parent.Id} service={LogTextContract.TrimOrDash(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} group={executionContract.TargetScope} runtimeTuner={LogTextContract.TrimOrDash(executionContract.RuntimeTunerName)} expectedNid={executionContract.NetworkId} expectedTsid={executionContract.TransportStreamId} expectedSid={executionContract.ServiceId} expectedEventId={(executionContract.EventId?.ToString() ?? "-")} hardDeadline={executionContract.HardDeadline:MM/dd HH:mm:ss.fff} identitySource=parent_recording_reservation contractOwner=ReservationScheduler downstreamOwner=single_contract_reference chainScope={(parent.IsUserChain ? "root" : "single")} policy=time_follow_probe_runtime_tuner_no_pretune rule=pre_record_epg_runtime_tuner_contract");
 
 
             // PRE_RECORD_EPG_INDEPENDENT_PROBE_CONTRACT:
@@ -2917,8 +2902,8 @@ private readonly ReservationStore _store;
             {
                 var finalized = TryCompletePreRecordEpgEntry(epg, "admission_claim_lost_before_worker_launch");
                 _log.Add("PRE_REC_EPG_RESULT", $"R{epg.Id}",
-                    $"result=FINALIZED_WITHOUT_TIME_FOLLOW epg=R{epg.Id} parent=R{parent.Id} failureStage=admission_claim failureReason=admission_claim_lost_before_worker_launch tuner={SafeValue(plan.RuntimeTunerName)} prerecEntryFinalized={finalized} action=keep_original_recording_time_no_retry rule=pre_record_epg_admission_claim_ssot");
-                _userEvents.AddPreRecordEpgFailed(parent, "admission_claim_lost_before_worker_launch");
+                    $"result=FINALIZED_WITHOUT_TIME_FOLLOW epg=R{epg.Id} parent=R{parent.Id} failureStage=admission_claim failureReason=admission_claim_lost_before_worker_launch tuner={LogTextContract.TrimOrDash(plan.RuntimeTunerName)} prerecEntryFinalized={finalized} action=keep_original_recording_time_no_retry rule=pre_record_epg_admission_claim_ssot");
+                _userEvents.AddPreRecordEpgFailed(parent, PreRecordEpgFailureReason.AdmissionClaimLost);
                 return;
             }
 
@@ -2937,11 +2922,10 @@ private readonly ReservationStore _store;
             {
                 var finalized = TryCompletePreRecordEpgEntry(epg, "probe_finished_without_execution_evidence_single_attempt");
                 _log.Add("PRE_REC_EPG_RESULT", $"R{epg.Id}",
-                    $"result=FINALIZED_WITHOUT_TIME_FOLLOW epg=R{epg.Id} parent=R{parent.Id} probeResult={SafeValue(result.RunResult)} success={result.Success} completedGroups={result.CompletedGroups}/{result.TotalGroups} observedEvents={result.PreRecordEvents.Count} dbImportedEvents={result.ImportedEvents} prerecEntryFinalized={finalized} action=keep_original_recording_time_no_retry service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=pre_record_epg_single_attempt_contract");
-                var failureReason = string.IsNullOrWhiteSpace(result.Detail)
-                    ? $"probe_{result.RunResult.ToLowerInvariant()}"
-                    : result.Detail;
-                _userEvents.AddPreRecordEpgFailed(parent, failureReason);
+                    $"result=FINALIZED_WITHOUT_TIME_FOLLOW epg=R{epg.Id} parent=R{parent.Id} probeResult={LogTextContract.TrimOrDash(result.RunResult)} success={result.Success} completedGroups={result.CompletedGroups}/{result.TotalGroups} observedEvents={result.PreRecordEvents.Count} dbImportedEvents={result.ImportedEvents} prerecEntryFinalized={finalized} action=keep_original_recording_time_no_retry service={LogTextContract.TrimOrDash(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=pre_record_epg_single_attempt_contract");
+                // The probe returns a typed failure reason; never infer a user-visible
+                // explanation from a diagnostic string or worker detail.
+                _userEvents.AddPreRecordEpgFailed(parent, result.PreRecordFailureReason);
                 return;
             }
 
@@ -2950,7 +2934,7 @@ private readonly ReservationStore _store;
             if (!completed || !IsRecordableForPreRecordFollow(latestParent))
             {
                 _log.Add("PRE_REC_EPG_RESULT", $"R{epg.Id}",
-                    $"result=SKIP_AFTER_PROBE epg=R{epg.Id} parent=R{parent.Id} probe=completed reason={(completed ? "parent_not_recordable_after_probe" : "epg_state_changed_during_probe")} parentStatus={latestParent.Status} parentEnabled={latestParent.IsEnabled} parentConflicted={latestParent.IsConflicted} action=do_not_apply_time_follow service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=release_contract");
+                    $"result=SKIP_AFTER_PROBE epg=R{epg.Id} parent=R{parent.Id} probe=completed reason={(completed ? "parent_not_recordable_after_probe" : "epg_state_changed_during_probe")} parentStatus={latestParent.Status} parentEnabled={latestParent.IsEnabled} parentConflicted={latestParent.IsConflicted} action=do_not_apply_time_follow service={LogTextContract.TrimOrDash(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=release_contract");
                 return;
             }
 
@@ -3046,22 +3030,22 @@ private readonly ReservationStore _store;
             var followUpdated = followResults.Count(x => x.Updated);
             var followOutcome = followUpdated > 0 ? "UPDATED" : "NO_CHANGE_OR_NOT_FOUND";
             _log.Add("PRE_REC_EPG_RESULT", $"R{epg.Id}",
-                $"result={(result.Success ? "OK" : "FAIL")} epg=R{epg.Id} parent=R{parent.Id} probe=completed followOutcome={followOutcome} timeFollowUpdated={followUpdated} action=keep_or_update_parent_by_time_follow service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=release_contract");
+                $"result={(result.Success ? "OK" : "FAIL")} epg=R{epg.Id} parent=R{parent.Id} probe=completed followOutcome={followOutcome} timeFollowUpdated={followUpdated} action=keep_or_update_parent_by_time_follow service={LogTextContract.TrimOrDash(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=release_contract");
             if (!result.Success)
-                _userEvents.AddPreRecordEpgFailed(latestParent, "probe_failed");
+                _userEvents.AddPreRecordEpgFailed(latestParent, PreRecordEpgFailureReason.ProbeFailed);
         }
         catch (OperationCanceledException)
         {
             var finalized = TryCompletePreRecordEpgEntry(epg, "scheduler_stop_cancelled_single_attempt");
             _log.Add("PRE_REC_EPG_RESULT", $"R{epg.Id}",
-                $"result=FINALIZED_WITHOUT_TIME_FOLLOW epg=R{epg.Id} parent=R{parent.Id} reason=scheduler_stop prerecEntryFinalized={finalized} action=keep_original_recording_time_no_retry service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=pre_record_epg_single_attempt_contract");
+                $"result=FINALIZED_WITHOUT_TIME_FOLLOW epg=R{epg.Id} parent=R{parent.Id} reason=scheduler_stop prerecEntryFinalized={finalized} action=keep_original_recording_time_no_retry service={LogTextContract.TrimOrDash(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=pre_record_epg_single_attempt_contract");
         }
         catch (Exception ex)
         {
             var finalized = TryCompletePreRecordEpgEntry(epg, "execution_exception_single_attempt");
             _log.Add("PRE_REC_EPG_RESULT", $"R{epg.Id}",
-                $"result=FINALIZED_WITHOUT_TIME_FOLLOW epg=R{epg.Id} parent=R{parent.Id} error={ex.GetType().Name}:{SafeValue(ex.Message)} prerecEntryFinalized={finalized} action=keep_original_recording_time_no_retry service={SafeValue(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=pre_record_epg_single_attempt_contract");
-            _userEvents.AddPreRecordEpgFailed(parent, $"{ex.GetType().Name}: {ex.Message}");
+                $"result=FINALIZED_WITHOUT_TIME_FOLLOW epg=R{epg.Id} parent=R{parent.Id} error={ex.GetType().Name}:{LogTextContract.TrimOrDash(ex.Message)} prerecEntryFinalized={finalized} action=keep_original_recording_time_no_retry service={LogTextContract.TrimOrDash(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} rule=pre_record_epg_single_attempt_contract");
+            _userEvents.AddPreRecordEpgFailed(parent, PreRecordEpgFailureReason.ExecutionFailed);
         }
         finally
         {
@@ -3152,7 +3136,7 @@ private readonly ReservationStore _store;
         _log.Add("PRE_REC_EPG_RUNTIME_TUNER", $"R{parent.Id}",
             $"result={(claimed is null ? "NONE" : "CLAIMED")} group={normalizedGroup} selected={(claimed?.Name ?? "-")} probeEnd={probeEnd:MM/dd HH:mm:ss} " +
             $"safeCandidates=[{string.Join(',', candidates.Select(x => $"{x.Slot.Name}:nextDue={(x.NextDue == DateTime.MaxValue ? "none" : x.NextDue.ToString("HH:mm:ss"))}"))}] " +
-            $"recordingAssignedTuner={SafeValue(parent.TunerName)} excluded=[{(excludedTuners is null ? "-" : string.Join(',', excludedTuners))}] " +
+            $"recordingAssignedTuner={LogTextContract.TrimOrDash(parent.TunerName)} excluded=[{(excludedTuners is null ? "-" : string.Join(',', excludedTuners))}] " +
             $"leaseId={(claimed is null ? "-" : claimed.PoolLeaseId)} generation={(claimed is null ? 0 : claimed.OccupancyGeneration)} selection=select_and_claim_single_owner rule=pre_record_epg_admission_claim_ssot");
         return claimed;
     }
@@ -3240,7 +3224,7 @@ private readonly ReservationStore _store;
 
         var terminalAlready = retryCurrent?.Status is ReservationStatus.Completed or ReservationStatus.Failed or ReservationStatus.Cancelled;
         _log.Add("PRE_REC_EPG_RESULT", $"R{epgEntry.Id}",
-            $"result={(terminalAlready ? "ALREADY_TERMINAL" : "COMPLETED_CAS_REJECTED")} epg=R{epgEntry.Id} reason={reason} detail={SafeValue(complete.Reason)} dataVersion={complete.PreviousDataVersion}->{complete.CurrentDataVersion} latestStatus={(retryCurrent?.Status.ToString() ?? "Missing")} action=do_not_rerun_probe rule=pre_record_epg_single_attempt_contract");
+            $"result={(terminalAlready ? "ALREADY_TERMINAL" : "COMPLETED_CAS_REJECTED")} epg=R{epgEntry.Id} reason={reason} detail={LogTextContract.TrimOrDash(complete.Reason)} dataVersion={complete.PreviousDataVersion}->{complete.CurrentDataVersion} latestStatus={(retryCurrent?.Status.ToString() ?? "Missing")} action=do_not_rerun_probe rule=pre_record_epg_single_attempt_contract");
         return terminalAlready;
     }
 
@@ -3263,13 +3247,13 @@ private readonly ReservationStore _store;
                 EmitConflictLogs: false));
 
             _log.Add("EPG_SCHEDULER", "ResponsibilityAdvance",
-                $"result=REEVALUATED completedEpg=R{epgEntry.Id} parent={(epgEntry.SourceRuleId.HasValue ? $"R{epgEntry.SourceRuleId.Value}" : "-")} reason={SafeValue(reason)} scope=priority_self_next_with_wave_stage2_exception rule=system_epg_priority_sequential_search_contract");
+                $"result=REEVALUATED completedEpg=R{epgEntry.Id} parent={(epgEntry.SourceRuleId.HasValue ? $"R{epgEntry.SourceRuleId.Value}" : "-")} reason={LogTextContract.TrimOrDash(reason)} scope=priority_self_next_with_wave_stage2_exception rule=system_epg_priority_sequential_search_contract");
         }
         catch (Exception ex)
         {
             // PreRec terminal正本は既に確定済み。派生責務投影失敗でprobeを再実行しない。
             _log.Add("EPG_SCHEDULER", "ResponsibilityAdvance",
-                $"result=FAILED completedEpg=R{epgEntry.Id} reason={SafeValue(reason)} error={ex.GetType().Name}:{ex.Message} action=keep_terminal_retry_by_next_route rule=system_epg_priority_sequential_search_contract");
+                $"result=FAILED completedEpg=R{epgEntry.Id} reason={LogTextContract.TrimOrDash(reason)} error={ex.GetType().Name}:{ex.Message} action=keep_terminal_retry_by_next_route rule=system_epg_priority_sequential_search_contract");
         }
     }
 
@@ -3289,7 +3273,7 @@ private readonly ReservationStore _store;
         foreach (var r in results)
         {
             _log.Add("EPG_SCHEDULER", r.Updated ? "TimeFollowUpdated" : "TimeFollowNoChange",
-                $"source=PreRecEpg parent=R{r.ReservationId} epg=R{epgEntry.Id} result={(r.Updated ? "UPDATED" : "NO_CHANGE")} reason={r.Reason} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} old={r.OldStart:MM/dd HH:mm:ss}〜{r.OldEnd:MM/dd HH:mm:ss} new={(r.NewStart.HasValue ? r.NewStart.Value.ToString("MM/dd HH:mm:ss") : "-")}〜{(r.NewEnd.HasValue ? r.NewEnd.Value.ToString("MM/dd HH:mm:ss") : "-")} rule=release_contract");
+                $"source=PreRecEpg parent=R{r.ReservationId} epg=R{epgEntry.Id} result={(r.Updated ? "UPDATED" : "NO_CHANGE")} reason={r.Reason} service={LogTextContract.TrimOrDash(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} old={r.OldStart:MM/dd HH:mm:ss}〜{r.OldEnd:MM/dd HH:mm:ss} new={(r.NewStart.HasValue ? r.NewStart.Value.ToString("MM/dd HH:mm:ss") : "-")}〜{(r.NewEnd.HasValue ? r.NewEnd.Value.ToString("MM/dd HH:mm:ss") : "-")} rule=release_contract");
             var latest = _store.GetById(r.ReservationId);
             if (latest is null)
                 continue;
@@ -3374,7 +3358,7 @@ private readonly ReservationStore _store;
                 reason: $"exception:{ex.GetType().Name}");
             ownerResult = false;
             _log.Add("REC_START_SINGLEFLIGHT", $"R{r.Id}",
-                $"result=NOT_STARTED role=owner ownerId={owner.OwnerId} reason=start_exception_converged exceptionType={ex.GetType().Name} error={TrimForLog(ex.Message, 180)} ownerAndJoinerSameResult=True rule=recording_start_singleflight_contract");
+                $"result=NOT_STARTED role=owner ownerId={owner.OwnerId} reason=start_exception_converged exceptionType={ex.GetType().Name} error={LogTextContract.TruncateWithDots(ex.Message, 180)} ownerAndJoinerSameResult=True rule=recording_start_singleflight_contract");
         }
         finally
         {
@@ -3391,7 +3375,7 @@ private readonly ReservationStore _store;
                 _forceAllocationReevaluate = true;
                 _log.Add("REC_START_OWNER_EXIT", $"R{r.Id}",
                     $"result=SETTLEMENT_EXCEPTION ownerId={owner.OwnerId} resolvedResult=False exceptionType={ex.GetType().Name} " +
-                    $"error={TrimForLog(ex.Message, 180)} action=release_joiners_and_return_to_normal_retry rule=recording_start_owner_exit_contract");
+                    $"error={LogTextContract.TruncateWithDots(ex.Message, 180)} action=release_joiners_and_return_to_normal_retry rule=recording_start_owner_exit_contract");
             }
             finally
             {
@@ -3471,7 +3455,7 @@ private readonly ReservationStore _store;
         if (TryResolveLiveStartingRuntimeOwner(latest, out var ownerKind, out var ownerPid, out var ownerTuner))
         {
             _log.Add("REC_START_ORPHAN_RECOVERY", $"R{latest.Id}",
-                $"result=LIVE_RUNTIME_OWNED ownerKind={ownerKind} pid={(ownerPid > 0 ? ownerPid.ToString() : "-")} tuner={SafeValue(ownerTuner)} " +
+                $"result=LIVE_RUNTIME_OWNED ownerKind={ownerKind} pid={(ownerPid > 0 ? ownerPid.ToString() : "-")} tuner={LogTextContract.TrimOrDash(ownerTuner)} " +
                 "action=keep_starting_no_rollback rule=reservation_lifecycle_convergence_contract");
             return latest;
         }
@@ -3508,7 +3492,7 @@ private readonly ReservationStore _store;
         _forceAllocationReevaluate = true;
         _log.Add("REC_START_ORPHAN_RECOVERY", $"R{latest.Id}",
             $"result={(rollback.Applied ? "ROLLED_BACK" : "CAS_REJECTED")} ageMs={(long)Math.Max(0, age.TotalMilliseconds)} " +
-            $"workerRegistered={session is not null} workerAlive=False detail={SafeValue(rollback.Reason)} " +
+            $"workerRegistered={session is not null} workerAlive=False detail={LogTextContract.TrimOrDash(rollback.Reason)} " +
             $"dataVersion={rollback.PreviousDataVersion}->{rollback.CurrentDataVersion} action=return_to_common_allocation_start_path " +
             "rule=recording_start_orphan_recovery_contract");
 
@@ -3539,7 +3523,7 @@ private readonly ReservationStore _store;
                 {
                     _log.Add("REC_START_OWNER_EXIT", $"R{reservationId}",
                         $"result=CONVERGED_RECORDING ownerId={ownerId} coreResult=False resolvedResult=True pid={session.ProcessId} " +
-                        $"tuner={SafeValue(session.Lease.Name)} rule=recording_start_owner_exit_contract");
+                        $"tuner={LogTextContract.TrimOrDash(session.Lease.Name)} rule=recording_start_owner_exit_contract");
                 }
                 return true;
             }
@@ -3609,7 +3593,7 @@ private readonly ReservationStore _store;
 
                     _log.Add("REC_START_OWNER_EXIT", $"R{reservationId}",
                         $"result=PROVISIONAL_WORKER_COMMITTED ownerId={ownerId} coreResult={coreResult} resolvedResult=True " +
-                        $"pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} dataVersion={commit.PreviousDataVersion}->{commit.CurrentDataVersion} " +
+                        $"pid={session.ProcessId} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} dataVersion={commit.PreviousDataVersion}->{commit.CurrentDataVersion} " +
                         "action=promote_existing_worker_without_restart rule=recording_start_owner_exit_contract");
                     return true;
                 }
@@ -3633,7 +3617,7 @@ private readonly ReservationStore _store;
                 _forceAllocationReevaluate = true;
                 _log.Add("REC_START_OWNER_EXIT", $"R{reservationId}",
                     $"result=PROVISIONAL_WORKER_COMMIT_REJECTED ownerId={ownerId} coreResult={coreResult} resolvedResult=False pid={session.ProcessId} " +
-                    $"workerGone={cleanup.WorkerIdentityGone} detail={SafeValue(commit.Reason)} action={(cleanup.WorkerIdentityGone ? "abort_and_return_to_common_allocation" : "keep_starting_until_worker_disappears")} " +
+                    $"workerGone={cleanup.WorkerIdentityGone} detail={LogTextContract.TrimOrDash(commit.Reason)} action={(cleanup.WorkerIdentityGone ? "abort_and_return_to_common_allocation" : "keep_starting_until_worker_disappears")} " +
                     "rule=recording_start_owner_exit_contract");
                 return false;
             }
@@ -3655,96 +3639,13 @@ private readonly ReservationStore _store;
             _forceAllocationReevaluate = true;
             _log.Add("REC_START_OWNER_EXIT", $"R{reservationId}",
                 $"result={(rollback.Applied ? "ORPHAN_STARTING_ROLLED_BACK" : "ORPHAN_STARTING_CAS_REJECTED")} ownerId={ownerId} " +
-                $"coreResult={coreResult} resolvedResult=False detail={SafeValue(rollback.Reason)} " +
+                $"coreResult={coreResult} resolvedResult=False detail={LogTextContract.TrimOrDash(rollback.Reason)} " +
                 $"dataVersion={rollback.PreviousDataVersion}->{rollback.CurrentDataVersion} action=return_to_common_allocation_start_path " +
                 "rule=recording_start_owner_exit_contract");
             return false;
         }
 
         return coreResult && latest?.Status == ReservationStatus.Recording && workerAlive;
-    }
-
-    private bool TryResolveAssignedRecordingLaunchGroup(Reservation reservation, out string normalizedGroup, out string reason)
-    {
-        normalizedGroup = string.Empty;
-        reason = string.Empty;
-
-        // Admissionの正本は、共通割当が確定した予約のTunerNameと設定済みTunerProfile.Groupである。
-        // 放送波IdentityからGR/BSCSへ縮退すると、同一放送波内の独立グループが再び誤合流するため禁止する。
-        var assignedTunerName = string.IsNullOrWhiteSpace(reservation.TunerName)
-            ? reservation.ActualTunerName
-            : reservation.TunerName;
-        if (string.IsNullOrWhiteSpace(assignedTunerName))
-        {
-            reason = "assigned_tuner_missing";
-            return false;
-        }
-
-        var profile = _tunerProfiles.FirstOrDefault(candidate =>
-            string.Equals(candidate.Name, assignedTunerName, StringComparison.OrdinalIgnoreCase));
-        if (profile is null)
-        {
-            reason = "assigned_tuner_profile_missing";
-            return false;
-        }
-
-        normalizedGroup = NormalizeRecordingLaunchGroup(profile.Group);
-        if (string.Equals(normalizedGroup, "UNKNOWN", StringComparison.Ordinal))
-        {
-            reason = "assigned_tuner_group_missing";
-            return false;
-        }
-
-        return true;
-    }
-
-    private static string NormalizeRecordingLaunchGroup(string? group)
-    {
-        var normalized = (group ?? string.Empty).Trim();
-        if (normalized.Length == 0)
-            return "UNKNOWN";
-
-        if (string.Equals(normalized, "BS/CS", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(normalized, "BS-CS", StringComparison.OrdinalIgnoreCase))
-            return "BSCS";
-
-        return normalized.ToUpperInvariant();
-    }
-
-    private async Task<bool> ApplyRecordingLaunchAdmissionAsync(Reservation r, CancellationToken ct)
-    {
-        if (!TryResolveAssignedRecordingLaunchGroup(r, out var normalizedGroup, out var groupFailureReason))
-        {
-            _log.Add("REC_LAUNCH_ADMISSION", $"R{r.Id}",
-                $"result=DEFER reason={groupFailureReason} assignedTuner={SafeValue(r.TunerName)} actualTuner={SafeValue(r.ActualTunerName)} " +
-                "stage=after_common_allocation action=do_not_claim_starting nextTick=True fallbackGroup=False rule=recording_launch_admission_contract");
-            return false;
-        }
-
-        var gate = _recordingLaunchAdmissionGates.GetOrAdd(normalizedGroup, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
-            var now = DateTime.Now;
-            if (_recordingLaunchNextAllowedAt.TryGetValue(normalizedGroup, out var nextAllowed) && nextAllowed > now)
-            {
-                var delay = nextAllowed - now;
-                _log.Add("REC_LAUNCH_ADMISSION", $"R{r.Id}",
-                    $"result=WAIT group={normalizedGroup} assignedTuner={SafeValue(r.TunerName)} waitMs={(int)delay.TotalMilliseconds} cadenceMs={RecordingLaunchCadenceMs} chain=False rule=recording_launch_admission_contract");
-                await Task.Delay(delay, ct).ConfigureAwait(false);
-            }
-
-            // Admissionはworker寿命を保持しない。共通割当で確定した設定グループごとに
-            // 投入開始時刻だけを予約し、別グループは互いに待たせない。
-            _recordingLaunchNextAllowedAt[normalizedGroup] = DateTime.Now.AddMilliseconds(RecordingLaunchCadenceMs);
-            _log.Add("REC_LAUNCH_ADMISSION", $"R{r.Id}",
-                $"result=ENTER group={normalizedGroup} assignedTuner={SafeValue(r.TunerName)} chain=False cadenceMs={RecordingLaunchCadenceMs} parallelAcrossGroups=True admissionScope=launch_timestamp_only source=committed_allocation rule=recording_launch_admission_contract");
-            return true;
-        }
-        finally
-        {
-            gate.Release();
-        }
     }
 
     private void SettleInterruptedRecordingStartClaim(int reservationId, bool preferRetry, string reason)
@@ -3763,8 +3664,8 @@ private readonly ReservationStore _store;
             // 実worker・leaseとDB状態が分裂する。状態変更はowner終了収束へ委ねる。
             _forceAllocationReevaluate = true;
             _log.Add("REC_START_EXCEPTION_SETTLE", $"R{reservationId}",
-                $"result=DEFER_TO_OWNER_EXIT reason={SafeValue(reason)} workerActive=True pid={session.ProcessId} " +
-                $"tuner={SafeValue(session.Lease.Name)} action=preserve_starting_until_existing_worker_converges " +
+                $"result=DEFER_TO_OWNER_EXIT reason={LogTextContract.TrimOrDash(reason)} workerActive=True pid={session.ProcessId} " +
+                $"tuner={LogTextContract.TrimOrDash(session.Lease.Name)} action=preserve_starting_until_existing_worker_converges " +
                 "rule=recording_lifecycle_cas_contract");
             return;
         }
@@ -3774,8 +3675,8 @@ private readonly ReservationStore _store;
             ? _store.TryRollbackRecordingStart(reservationId, latest.DataVersion)
             : _store.TryFailRecordingStart(reservationId, latest.DataVersion, reason);
         _log.Add("REC_START_EXCEPTION_SETTLE", $"R{reservationId}",
-            $"result={(settle.Applied ? "APPLIED" : "SKIPPED")} reason={SafeValue(reason)} target={(rollback ? "Scheduled" : "Failed")} " +
-            $"detail={SafeValue(settle.Reason)} dataVersion={settle.PreviousDataVersion}->{settle.CurrentDataVersion} rule=recording_lifecycle_cas_contract");
+            $"result={(settle.Applied ? "APPLIED" : "SKIPPED")} reason={LogTextContract.TrimOrDash(reason)} target={(rollback ? "Scheduled" : "Failed")} " +
+            $"detail={LogTextContract.TrimOrDash(settle.Reason)} dataVersion={settle.PreviousDataVersion}->{settle.CurrentDataVersion} rule=recording_lifecycle_cas_contract");
         if (settle.Applied)
         {
             _forceAllocationReevaluate = true;
@@ -3887,7 +3788,7 @@ private readonly ReservationStore _store;
             if (cancel.Applied)
                 _forceAllocationReevaluate = true;
             _log.Add("REC_START_DECISION", $"R{r.Id}",
-                $"result=SKIP reason=automatic_rerecord_after_manual_stop stage=start_request cancelApplied={cancel.Applied} cancelReason={SafeValue(cancel.Reason)} dataVersion={cancel.PreviousDataVersion}->{cancel.CurrentDataVersion} " + FormatReservationForAudit(r, "manual_stop_suppressed"));
+                $"result=SKIP reason=automatic_rerecord_after_manual_stop stage=start_request cancelApplied={cancel.Applied} cancelReason={LogTextContract.TrimOrDash(cancel.Reason)} dataVersion={cancel.PreviousDataVersion}->{cancel.CurrentDataVersion} " + FormatReservationForAudit(r, "manual_stop_suppressed"));
             return false;
         }
 
@@ -3899,10 +3800,10 @@ private readonly ReservationStore _store;
         if (group is null)
         {
             _log.Add("REC_START_DECISION", $"R{r.Id}", "result=FAIL reason=group_unresolved");
-            Fail(r, $"グループを特定できませんでした。service_id={r.ServiceId}");
+            Fail(r, $"グループを特定できませんでした。service_id={r.ServiceId}", RecordingFailureCause.ServiceGroupUnavailable);
             return false;
         }
-        _log.Add("REC_START_DECISION", $"R{r.Id}", $"stage=group_resolved group={group} tuner={SafeValue(EffectiveTunerName(r))} ch={SafeValue(r.ChannelArgument)} " + FormatReservationForAudit(r, "group_resolved"));
+        _log.Add("REC_START_DECISION", $"R{r.Id}", $"stage=group_resolved group={group} tuner={LogTextContract.TrimOrDash(EffectiveTunerName(r))} ch={LogTextContract.TrimOrDash(r.ChannelArgument)} " + FormatReservationForAudit(r, "group_resolved"));
 
         // release_contract: 競合予約は録画開始へ進めない。
         // 先に共通割り当てルートで再評価し、まだ競合なら静かにスキップする。
@@ -3920,7 +3821,7 @@ private readonly ReservationStore _store;
             if (disposition == ConflictedStartDisposition.ActiveNormalEpgWave)
             {
                 _log.Add("REC_START_DECISION", $"R{r.Id}",
-                    $"result=DEFER reason=active_normal_epg_wave_conflict_before_start group={group} epgSource={SafeValue(epgBlock.Source)} epgSilent={epgBlock.Silent} epgRunGeneration={epgBlock.RunGeneration} epgOccupy={epgBlock.StartedAt:MM/dd HH:mm:ss}〜{EffectiveNormalEpgOccupationEnd(epgBlock):MM/dd HH:mm:ss} terminalStatus=none preserveStatus=Scheduled preserveConflict=True action=return_to_due_tick_after_common_reallocation " + FormatReservationForAudit(conflictTarget, "normal_epg_conflict_start_deferred"));
+                    $"result=DEFER reason=active_normal_epg_wave_conflict_before_start group={group} epgSource={LogTextContract.TrimOrDash(epgBlock.Source)} epgSilent={epgBlock.Silent} epgRunGeneration={epgBlock.RunGeneration} epgOccupy={epgBlock.StartedAt:MM/dd HH:mm:ss}〜{EffectiveNormalEpgOccupationEnd(epgBlock):MM/dd HH:mm:ss} terminalStatus=none preserveStatus=Scheduled preserveConflict=True action=return_to_due_tick_after_common_reallocation " + FormatReservationForAudit(conflictTarget, "normal_epg_conflict_start_deferred"));
                 return false;
             }
 
@@ -3941,8 +3842,8 @@ private readonly ReservationStore _store;
                 return false;
 
             r = conflictTarget;
-            _log.Add("Scheduler", SafeValue(r.ServiceName),
-                $"競合再評価: service=[{SafeValue(r.ServiceName)}] title=[{ReservationDisplayTitle(r.Title)}] id=R{r.Id} 空きチューナーを確認できたため録画開始します。group={group} rule=release_contract");
+            _log.Add("Scheduler", LogTextContract.TrimOrDash(r.ServiceName),
+                $"競合再評価: service=[{LogTextContract.TrimOrDash(r.ServiceName)}] title=[{ReservationDisplayTitle(r.Title)}] id=R{r.Id} 空きチューナーを確認できたため録画開始します。group={group} rule=release_contract");
         }
 
         // CHAIN_CONTINUOUS_CAPTURE_DUE_GUARD:
@@ -3955,8 +3856,8 @@ private readonly ReservationStore _store;
             if (activePredecessor is not null)
             {
                 _log.Add("REC_START_DECISION", $"R{r.Id}",
-                    $"result=DEFER reason=chain_continuous_capture_owner_active predecessor=R{predecessorId!.Value} predecessorSource={SafeValue(predecessorSource)} " +
-                    $"predecessorTuner={SafeValue(activePredecessor.Lease.Name)} successorAssignedTuner={SafeValue(r.TunerName)} pid={activePredecessor.ProcessId} " +
+                    $"result=DEFER reason=chain_continuous_capture_owner_active predecessor=R{predecessorId!.Value} predecessorSource={LogTextContract.TrimOrDash(predecessorSource)} " +
+                    $"predecessorTuner={LogTextContract.TrimOrDash(activePredecessor.Lease.Name)} successorAssignedTuner={LogTextContract.TrimOrDash(r.TunerName)} pid={activePredecessor.ProcessId} " +
                     "action=wait_for_continuous_capture_owner rule=chain_continuous_capture_contract");
                 return false;
             }
@@ -3969,7 +3870,7 @@ private readonly ReservationStore _store;
         if (allocationResult is null || allocationResult.Deferred || allocationResult.RetryRequired)
         {
             _log.Add("REC_START_DECISION", $"R{r.Id}",
-                $"result=DEFER reason=allocation_unsettled_after_before_start_claim deferred={(allocationResult?.Deferred.ToString() ?? "unknown")} retryRequired={(allocationResult?.RetryRequired.ToString() ?? "unknown")} allocationReason={SafeValue(allocationResult?.Reason)} stage=allocation_barrier nextTick=True action=do_not_claim_starting rule=common_allocation_start_barrier " + FormatReservationForAudit(r, "allocation_barrier_unsettled"));
+                $"result=DEFER reason=allocation_unsettled_after_before_start_claim deferred={(allocationResult?.Deferred.ToString() ?? "unknown")} retryRequired={(allocationResult?.RetryRequired.ToString() ?? "unknown")} allocationReason={LogTextContract.TrimOrDash(allocationResult?.Reason)} stage=allocation_barrier nextTick=True action=do_not_claim_starting rule=common_allocation_start_barrier " + FormatReservationForAudit(r, "allocation_barrier_unsettled"));
             return false;
         }
 
@@ -3992,7 +3893,7 @@ private readonly ReservationStore _store;
         if (allocated.IsConflicted)
         {
             _log.Add("REC_START_DECISION", $"R{r.Id}",
-                $"result=SKIP reason=conflict_after_allocation_barrier tuner={SafeValue(allocated.TunerName)} dataVersion={allocated.DataVersion} " +
+                $"result=SKIP reason=conflict_after_allocation_barrier tuner={LogTextContract.TrimOrDash(allocated.TunerName)} dataVersion={allocated.DataVersion} " +
                 "stage=allocation_barrier nextTick=True rule=common_allocation_start_barrier " + FormatReservationForAudit(allocated, "allocation_barrier_conflict"));
             return false;
         }
@@ -4007,13 +3908,8 @@ private readonly ReservationStore _store;
 
         r = allocated;
         _log.Add("REC_START_ALLOCATION_BARRIER", $"R{r.Id}",
-            $"result=PASSED assignedTuner={SafeValue(r.TunerName)} dataVersion={r.DataVersion} source={r.Source} " +
-            "commonRoute=ALLOC_ROUTE/TUNER_ALLOC action=continue_to_launch_admission rule=common_allocation_start_barrier");
-
-        // 設定グループ別Admissionは、共通割当でTunerNameが確定した後、Starting CASより前に一度だけ通す。
-        // これより上流で放送波fallbackを使ったAdmissionを行ってはならない。
-        if (!await ApplyRecordingLaunchAdmissionAsync(r, ct).ConfigureAwait(false))
-            return false;
+            $"result=PASSED assignedTuner={LogTextContract.TrimOrDash(r.TunerName)} dataVersion={r.DataVersion} source={r.Source} " +
+            "commonRoute=ALLOC_ROUTE/TUNER_ALLOC action=continue_to_start_claim rule=common_allocation_start_barrier");
 
         // release_contract: 実チューナー操作へ入る直前に、最新の Scheduled + Enabled + DataVersion を
         // Starting へ原子的に確定する。ここで負けた要求はEPG停止・Lease取得・worker起動へ進まない。
@@ -4033,13 +3929,12 @@ private readonly ReservationStore _store;
             return false;
         }
 
-        // Admission待機中に共通割当が更新された場合、旧Tunerのグループで通したAdmissionを流用しない。
-        // 次Tickで最新割当を正本としてAdmissionからやり直す。
+        // 共通割当後の最新状態で確定Tunerが変更された場合はStartingを取得せず、次Tickで再割当する。
         if (!string.Equals(latestBeforeStartClaim.TunerName, r.TunerName, StringComparison.OrdinalIgnoreCase))
         {
-            _log.Add("REC_LAUNCH_ADMISSION", $"R{r.Id}",
-                $"result=RETRY reason=assigned_tuner_changed_after_admission admittedTuner={SafeValue(r.TunerName)} latestTuner={SafeValue(latestBeforeStartClaim.TunerName)} " +
-                $"dataVersion={r.DataVersion}->{latestBeforeStartClaim.DataVersion} action=return_to_due_tick noStartClaim=True rule=recording_launch_admission_contract");
+            _log.Add("REC_START_DECISION", $"R{r.Id}",
+                $"result=DEFER reason=assigned_tuner_changed_before_start_claim allocatedTuner={LogTextContract.TrimOrDash(r.TunerName)} latestTuner={LogTextContract.TrimOrDash(latestBeforeStartClaim.TunerName)} " +
+                $"dataVersion={r.DataVersion}->{latestBeforeStartClaim.DataVersion} action=return_to_due_tick noStartClaim=True rule=common_allocation_start_barrier");
             return false;
         }
 
@@ -4047,7 +3942,7 @@ private readonly ReservationStore _store;
         if (!startClaim.Applied || startClaim.Reservation is null)
         {
             _log.Add("REC_START_DECISION", $"R{r.Id}",
-                $"result=SKIP reason=start_claim_rejected detail={SafeValue(startClaim.Reason)} previousStatus={startClaim.PreviousStatus?.ToString() ?? "-"} currentStatus={startClaim.CurrentStatus?.ToString() ?? "-"} " +
+                $"result=SKIP reason=start_claim_rejected detail={LogTextContract.TrimOrDash(startClaim.Reason)} previousStatus={startClaim.PreviousStatus?.ToString() ?? "-"} currentStatus={startClaim.CurrentStatus?.ToString() ?? "-"} " +
                 $"dataVersion={startClaim.PreviousDataVersion}->{startClaim.CurrentDataVersion} stage=lifecycle_cas rule=recording_lifecycle_cas_contract");
             return false;
         }
@@ -4067,10 +3962,10 @@ private readonly ReservationStore _store;
         // 視聴競合チェック（今すぐ録画等でViewingが占有している場合）
         var hasFreeBeforeViewing = _tunerPool.HasFreeSlot(group);
         var hasViewing = _tunerPool.HasViewingSlot(group);
-        _log.Add("REC_TUNER_CHECK", $"R{r.Id}", $"stage=before_viewing_preempt group={group} hasFree={hasFreeBeforeViewing} hasViewing={hasViewing} tuner={SafeValue(r.TunerName)}");
+        _log.Add("REC_TUNER_CHECK", $"R{r.Id}", $"stage=before_viewing_preempt group={group} hasFree={hasFreeBeforeViewing} hasViewing={hasViewing} tuner={LogTextContract.TrimOrDash(r.TunerName)}");
         if (!hasFreeBeforeViewing && hasViewing)
         {
-            _log.Add("TUNER_PROTECT", "Viewing", $"result=KEEP_VIEWING reason=no_recordable_free_slot group={group} reservation=R{r.Id} tuner={SafeValue(r.TunerName)}");
+            _log.Add("TUNER_PROTECT", "Viewing", $"result=KEEP_VIEWING reason=no_recordable_free_slot group={group} reservation=R{r.Id} tuner={LogTextContract.TrimOrDash(r.TunerName)}");
         }
 
         // ASSIGNED_TUNER_WAIT_INVARIANT:
@@ -4104,7 +3999,7 @@ private readonly ReservationStore _store;
             var rollback = _store.TryRollbackRecordingStart(r.Id, r.DataVersion);
             _log.Add("REC_START_DECISION", $"R{r.Id}",
                 $"result=DEFER reason=stop_phase_active stage=before_tuner_acquire chain={chainContinuationAtLaunch} nextTick=True " +
-                $"rollbackApplied={rollback.Applied} rollbackReason={SafeValue(rollback.Reason)} dataVersion={rollback.PreviousDataVersion}->{rollback.CurrentDataVersion} " +
+                $"rollbackApplied={rollback.Applied} rollbackReason={LogTextContract.TrimOrDash(rollback.Reason)} dataVersion={rollback.PreviousDataVersion}->{rollback.CurrentDataVersion} " +
                 FormatReservationForAudit(rollback.Reservation ?? r, "launch_deferred"));
             return false;
         }
@@ -4140,9 +4035,9 @@ private readonly ReservationStore _store;
                     _ => "service_not_enabled_in_tvtest_ch2"
                 };
                 _log.Add("CH2_CHANNEL_MATCH", $"R{r.Id}",
-                    $"result=REJECT service={SafeValue(r.ServiceName)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eligibility={serviceEligibility} beforeArg={SafeValue(r.ChannelArgument)} action=do_not_use_stale_channel_argument rule=recording_service_activation_contract");
+                    $"result=REJECT service={LogTextContract.TrimOrDash(r.ServiceName)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} eligibility={serviceEligibility} beforeArg={LogTextContract.TrimOrDash(r.ChannelArgument)} action=do_not_use_stale_channel_argument rule=recording_service_activation_contract");
                 _log.Add("REC_START_DECISION", $"R{r.Id}", $"result=FAIL reason={reason}");
-                Fail(r, $"TVTestで有効な録画対象サービスとして解決できないため録画をスキップしました。service_id={r.ServiceId}");
+                Fail(r, $"TVTestで有効な録画対象サービスとして解決できないため録画をスキップしました。service_id={r.ServiceId}", RecordingFailureCause.TargetServiceUnavailable);
                 return false;
             }
 
@@ -4157,17 +4052,17 @@ private readonly ReservationStore _store;
             if (string.IsNullOrWhiteSpace(r.ServiceName)) r.ServiceName = resolvedChannel.Name;
 
             _log.Add("CH2_CHANNEL_MATCH", $"R{r.Id}",
-                $"result=OK service={SafeValue(r.ServiceName)} ch2Name={SafeValue(resolvedChannel.Name)} " +
-                $"group={SafeValue(resolvedChannel.Group)} nid={resolvedChannel.OriginalNetworkId} tsid={resolvedChannel.TransportStreamId} sid={resolvedChannel.ServiceId} " +
-                $"ch2File={SafeValue(resolvedChannel.Ch2FileName)} ch2Line={resolvedChannel.Ch2LineNumber} " +
+                $"result=OK service={LogTextContract.TrimOrDash(r.ServiceName)} ch2Name={LogTextContract.TrimOrDash(resolvedChannel.Name)} " +
+                $"group={LogTextContract.TrimOrDash(resolvedChannel.Group)} nid={resolvedChannel.OriginalNetworkId} tsid={resolvedChannel.TransportStreamId} sid={resolvedChannel.ServiceId} " +
+                $"ch2File={LogTextContract.TrimOrDash(resolvedChannel.Ch2FileName)} ch2Line={resolvedChannel.Ch2LineNumber} " +
                 $"bonCh={resolvedChannel.BonDriverChannel} resolvedSpace={resolvedChannel.ResolvedSpace} resolvedChi={resolvedChannel.ResolvedChannelIndex} " +
-                $"sameTsServices={resolvedChannel.SameTransportServiceCount} buildSource={SafeValue(resolvedChannel.ChannelBuildSource)} " +
-                $"baseArg={SafeValue(baseChannelArg)} generatedArg={SafeValue(recordingChannelArg)} beforeArg={SafeValue(beforeChannelArg)} rule=recording_service_activation_contract");
+                $"sameTsServices={resolvedChannel.SameTransportServiceCount} buildSource={LogTextContract.TrimOrDash(resolvedChannel.ChannelBuildSource)} " +
+                $"baseArg={LogTextContract.TrimOrDash(baseChannelArg)} generatedArg={LogTextContract.TrimOrDash(recordingChannelArg)} beforeArg={LogTextContract.TrimOrDash(beforeChannelArg)} rule=recording_service_activation_contract");
 
             if (!string.Equals(beforeChannelArg, r.ChannelArgument, StringComparison.OrdinalIgnoreCase))
             {
                 _log.Add("CHANNEL_RESOLVE", $"R{r.Id}",
-                    $"launch_re_resolved service={SafeValue(r.ServiceName)} svcId={r.ServiceId} before={SafeValue(beforeChannelArg)} after={SafeValue(r.ChannelArgument)} source=current_tvtest_ch2_active_service");
+                    $"launch_re_resolved service={LogTextContract.TrimOrDash(r.ServiceName)} svcId={r.ServiceId} before={LogTextContract.TrimOrDash(beforeChannelArg)} after={LogTextContract.TrimOrDash(r.ChannelArgument)} source=current_tvtest_ch2_active_service");
             }
 
             _log.Add("RESERVATION_PIPELINE_AUDIT", $"R{r.Id}",
@@ -4176,7 +4071,7 @@ private readonly ReservationStore _store;
             if (string.IsNullOrWhiteSpace(r.ChannelArgument))
             {
                 _log.Add("REC_START_DECISION", $"R{r.Id}", "result=FAIL reason=active_service_empty_channel_argument invariant=True");
-                Fail(r, $"有効サービスのチャンネル引数を生成できないため録画をスキップしました。service_id={r.ServiceId}");
+                Fail(r, $"有効サービスのチャンネル引数を生成できないため録画をスキップしました。service_id={r.ServiceId}", RecordingFailureCause.ChannelArgumentUnavailable);
                 return false;
             }
 
@@ -4186,7 +4081,7 @@ private readonly ReservationStore _store;
             // Do not reuse persisted ChSet arguments or invent cross-driver coordinates.
             r.ChannelArgument = string.Empty;
             _log.Add("CH2_CHANNEL_MATCH", $"R{r.Id}",
-                $"result=DEFER source=assigned_bondriver_ch2 tuner={SafeValue(r.TunerName)} " +
+                $"result=DEFER source=assigned_bondriver_ch2 tuner={LogTextContract.TrimOrDash(r.TunerName)} " +
                 $"nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} " +
                 "action=resolve_after_physical_lease");
         }
@@ -4221,18 +4116,18 @@ private readonly ReservationStore _store;
             _forceAllocationReevaluate = true;
             _log.Add("REC_START_DECISION", $"R{r.Id}",
                 $"result=DEFER reason=missing_final_plan_assigned_tuner stage=before_tuner_acquire chain={chainContinuation} " +
-                $"rollbackApplied={rollback.Applied} rollbackReason={SafeValue(rollback.Reason)} dataVersion={rollback.PreviousDataVersion}->{rollback.CurrentDataVersion} " +
+                $"rollbackApplied={rollback.Applied} rollbackReason={LogTextContract.TrimOrDash(rollback.Reason)} dataVersion={rollback.PreviousDataVersion}->{rollback.CurrentDataVersion} " +
                 "commonRoute=ALLOC_ROUTE/TUNER_ALLOC nextTick=True rule=common_allocation_start_barrier");
             return false;
         }
 
         _log.Add("REC_TUNER_VIRTUAL_POLICY", $"R{r.Id}",
-            $"virtualTuner={SafeValue(r.TunerName)} group={group} chain={chainContinuation} action=require_final_plan_assigned_tuner reason=common_allocation_start_barrier");
+            $"virtualTuner={LogTextContract.TrimOrDash(r.TunerName)} group={group} chain={chainContinuation} action=require_final_plan_assigned_tuner reason=common_allocation_start_barrier");
 
         if (!_tunerPool.HasFreeSlotByName(r.TunerName))
         {
             _log.Add("REC_ASSIGNED_TUNER_WAIT", $"R{r.Id}",
-                $"waiting_for_assigned_tuner assignedTuner={SafeValue(r.TunerName)} group={group} chain={chainContinuation} " +
+                $"waiting_for_assigned_tuner assignedTuner={LogTextContract.TrimOrDash(r.TunerName)} group={group} chain={chainContinuation} " +
                 $"waitMode=tuner_pool_state_signal limitMs={RecordingLaunchWaitForFreeTunerMs} status={_tunerPool.GetStatusSummary()} rule=common_allocation_start_barrier");
             var assignedWaitResult = await _tunerPool.WaitForFreeSlotByNameDetailedAsync(
                 r.TunerName,
@@ -4242,7 +4137,7 @@ private readonly ReservationStore _store;
             {
                 SettleInterruptedRecordingStartClaim(r.Id, preferRetry: true, reason: assignedWaitResult.ToString());
                 _log.Add("REC_START_DECISION", $"R{r.Id}",
-                    $"result=REJECTED reason={assignedWaitResult} stage=assigned_tuner_wait assignedTuner={SafeValue(r.TunerName)} action=do_not_start_worker rule=shutdown_admission_contract");
+                    $"result=REJECTED reason={assignedWaitResult} stage=assigned_tuner_wait assignedTuner={LogTextContract.TrimOrDash(r.TunerName)} action=do_not_start_worker rule=shutdown_admission_contract");
                 return false;
             }
         }
@@ -4253,8 +4148,8 @@ private readonly ReservationStore _store;
             var rollback = _store.TryRollbackRecordingStart(r.Id, r.DataVersion);
             _forceAllocationReevaluate = true;
             _log.Add("REC_START_DECISION", $"R{r.Id}",
-                $"result=DEFER reason=assigned_tuner_unavailable_no_fallback assignedTuner={SafeValue(r.TunerName)} group={group} chain={chainContinuation} " +
-                $"rollbackApplied={rollback.Applied} rollbackReason={SafeValue(rollback.Reason)} dataVersion={rollback.PreviousDataVersion}->{rollback.CurrentDataVersion} " +
+                $"result=DEFER reason=assigned_tuner_unavailable_no_fallback assignedTuner={LogTextContract.TrimOrDash(r.TunerName)} group={group} chain={chainContinuation} " +
+                $"rollbackApplied={rollback.Applied} rollbackReason={LogTextContract.TrimOrDash(rollback.Reason)} dataVersion={rollback.PreviousDataVersion}->{rollback.CurrentDataVersion} " +
                 $"status={_tunerPool.GetStatusSummary()} commonRoute=ALLOC_ROUTE/TUNER_ALLOC nextTick=True rule=common_allocation_start_barrier");
             return false;
         }
@@ -4270,10 +4165,10 @@ private readonly ReservationStore _store;
                     out var leaseChannel))
             {
                 _log.Add("REC_START_DECISION", $"R{r.Id}",
-                    $"result=REJECT reason=assigned_bondriver_service_route_unavailable tuner={SafeValue(lease.Name)} " +
+                    $"result=REJECT reason=assigned_bondriver_service_route_unavailable tuner={LogTextContract.TrimOrDash(lease.Name)} " +
                     $"nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} action=no_worker_launch");
                 ReleaseRejectedRecordingStartLease(r.Id, lease, "assigned_bondriver_service_route_unavailable");
-                Fail(r, $"割当チューナーのチャンネル定義から録画対象サービスを解決できません。service_id={r.ServiceId}");
+                Fail(r, $"割当チューナーのチャンネル定義から録画対象サービスを解決できません。service_id={r.ServiceId}", RecordingFailureCause.AssignedTunerChannelUnavailable);
                 return false;
             }
 
@@ -4284,7 +4179,7 @@ private readonly ReservationStore _store;
                 leaseChannel.TransportStreamId,
                 leaseChannel.ServiceId);
             _log.Add("CH2_CHANNEL_MATCH", $"R{r.Id}",
-                $"result=OK source=assigned_bondriver_ch2 tuner={SafeValue(lease.Name)} " +
+                $"result=OK source=assigned_bondriver_ch2 tuner={LogTextContract.TrimOrDash(lease.Name)} " +
                 $"nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} " +
                 $"space={leaseChannel.ResolvedSpace} chi={leaseChannel.ResolvedChannelIndex} rule=physical_lease_route");
         }
@@ -4294,7 +4189,7 @@ private readonly ReservationStore _store;
             _log.Add("REC_START_DECISION", $"R{r.Id}",
                 "result=REJECT reason=physical_lease_channel_argument_unresolved action=no_worker_launch");
             ReleaseRejectedRecordingStartLease(r.Id, lease, "physical_lease_channel_argument_unresolved");
-            Fail(r, $"割当チューナーの選局情報を解決できません。service_id={r.ServiceId}");
+            Fail(r, $"割当チューナーの選局情報を解決できません。service_id={r.ServiceId}", RecordingFailureCause.AssignedTunerTuningUnavailable);
             return false;
         }
 
@@ -4321,7 +4216,7 @@ private readonly ReservationStore _store;
         if (IsActiveRecordingDidOccupiedByOtherReservation(group, lease.Did, r.Id, out var activeDidOwner))
         {
             _log.Add("ACTIVE_RECORDING_DID_GUARD", $"R{r.Id}",
-                $"result=DENY group={group} candidateTuner={lease.Name} did={lease.Did} owner={activeDidOwner} requestedTuner={SafeValue(r.TunerName)} action=release_acquired_tuner_and_fail_this_start reason=active_recording_did_is_source_of_truth rule=release_contract");
+                $"result=DENY group={group} candidateTuner={lease.Name} did={lease.Did} owner={activeDidOwner} requestedTuner={LogTextContract.TrimOrDash(r.TunerName)} action=release_acquired_tuner_and_fail_this_start reason=active_recording_did_is_source_of_truth rule=release_contract");
             ReleaseRejectedRecordingStartLease(r.Id, lease, "active_recording_did_is_source_of_truth");
             SettleClaimedRecordingLaunchFailure(
                 r,
@@ -4334,11 +4229,11 @@ private readonly ReservationStore _store;
         {
             var locked = string.Equals(r.TunerName, lease.Name, StringComparison.OrdinalIgnoreCase);
             _log.Add(locked ? "REC_ASSIGNED_TUNER_MATCH" : "REC_ASSIGNED_TUNER_MISMATCH", $"R{r.Id}",
-                $"result={(locked ? "OK" : "WARN")} assignedTuner={SafeValue(r.TunerName)} actualTuner={lease.Name} did={lease.Did} group={group} chain={chainContinuation} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} rule=recording_tuner_execution_single_source");
+                $"result={(locked ? "OK" : "WARN")} assignedTuner={LogTextContract.TrimOrDash(r.TunerName)} actualTuner={lease.Name} did={lease.Did} group={group} chain={chainContinuation} service={LogTextContract.TrimOrDash(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} rule=recording_tuner_execution_single_source");
         }
 
         _log.Add("REC_TUNER_ACQUIRE", $"R{r.Id}",
-            $"result=OK group={group} requestedTuner={SafeValue(r.TunerName)} chain={chainContinuation} lease={lease.Name} bonDriver={lease.BonDriverFileName} did={lease.Did} elapsedSinceReleaseMs={(lease.ElapsedSinceReleaseMs.HasValue ? lease.ElapsedSinceReleaseMs.Value.ToString("F0") : "-")}");
+            $"result=OK group={group} requestedTuner={LogTextContract.TrimOrDash(r.TunerName)} chain={chainContinuation} lease={lease.Name} bonDriver={lease.BonDriverFileName} did={lease.Did} elapsedSinceReleaseMs={(lease.ElapsedSinceReleaseMs.HasValue ? lease.ElapsedSinceReleaseMs.Value.ToString("F0") : "-")}");
         _log.Add("TUNER_PIPELINE_AUDIT", $"R{r.Id}",
             BuildReservationPipelineAudit(r, "tuner_acquired", group: group, plannedTuner: r.TunerName, actualTuner: lease.Name, lease: lease, resolvedChannel: resolvedChannel, plannedEnd: plannedEnd, finalGuardApplied: false, note: "actual_tuner_lease_acquired"));
 
@@ -4358,9 +4253,9 @@ private readonly ReservationStore _store;
         if (viewingAudit.ShouldBlock || _tunerPool.IsViewingReservedDid(lease.Did))
         {
             _log.Add("REC_START_DECISION", $"R{r.Id}",
-                $"result=FAIL reason=viewing_protection_block targetDid={SafeValue(lease.Did)} targetBonDriver={SafeValue(lease.BonDriverFileName)} targetIsViewingRole={viewingAudit.TargetIsViewingRole} unmanagedExternalTvTest=out_of_scope protectedViewingDids={string.Join(",", viewingAudit.ProtectedViewingDids)}");
+                $"result=FAIL reason=viewing_protection_block targetDid={LogTextContract.TrimOrDash(lease.Did)} targetBonDriver={LogTextContract.TrimOrDash(lease.BonDriverFileName)} targetIsViewingRole={viewingAudit.TargetIsViewingRole} unmanagedExternalTvTest=out_of_scope protectedViewingDids={string.Join(",", viewingAudit.ProtectedViewingDids)}");
             lease.Dispose();
-            Fail(r, $"TvAIr設定上の視聴専用チューナー保護のため録画開始を中止しました。targetDid={lease.Did}");
+            Fail(r, $"TvAIr設定上の視聴専用チューナー保護のため録画開始を中止しました。targetDid={lease.Did}", RecordingFailureCause.ViewingTunerProtected);
             return false;
         }
 
@@ -4379,12 +4274,12 @@ private readonly ReservationStore _store;
         // 録画開始ログはRecordingWorker本線へ渡す入力だけを記録する。
         // EDCB/EpgDataCap_Bonと同じく、局名ではなく .ch2 由来の NID/TSID/SID と chspace/chi を主キーにする。
         _log.Add("REC_OPERATIONAL_MODE", $"R{r.Id}",
-            $"mode=TvAIrEpgRecProduction legacyTvTestRecording=False nativeRecProbe=False legacyRecorderExecutableDependency=false service={SafeValue(r.ServiceName)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} channelArg={SafeValue(channelArg)} rule=release_contract");
+            $"mode=TvAIrEpgRecProduction legacyTvTestRecording=False nativeRecProbe=False legacyRecorderExecutableDependency=false service={LogTextContract.TrimOrDash(r.ServiceName)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} channelArg={LogTextContract.TrimOrDash(channelArg)} rule=release_contract");
 
         // TUNER_DEVICE_GATE_SCOPE_INVARIANT:
         // 放送波GateはBonDriver Openの同時衝突だけを防ぐ。TvAIrEpgRecがOpenTunerOkを報告した時点で
         // 対象workerは自身のDID/物理デバイス所有を確立済みなので、TS開始・ファイル生成・完全Ready待ちまで
-        // Gateを保持してはならない。保持を延ばすと別物理Tunerの1秒刻み投入が数秒単位で直列化される。
+        // Gateを保持してはならない。保持を延ばすと別物理Tunerの起動も不必要に直列化される。
         // Gate削除、固定wait追加、OpenTunerOkより前の解放は禁止する。
         var tunerDeviceGateReleased = 0;
         void ReleaseTunerDeviceGateAfterOpen(int workerPid, RecordingWorkerStartupObservation observation)
@@ -4393,7 +4288,7 @@ private readonly ReservationStore _store;
             tunerDeviceAccess.Dispose();
             _log.Add("TUNER_DEVICE_LOCK", $"R{r.Id}",
                 $"TUNER_DEVICE_LOCK_RELEASE_AFTER_OPEN owner=REC_START R{r.Id} gateKey={group} pid={workerPid} " +
-                $"phase={SafeValue(observation.Phase)} open={observation.OpenTunerOk} setChannel={observation.SetChannelOk} " +
+                $"phase={LogTextContract.TrimOrDash(observation.Phase)} open={observation.OpenTunerOk} setChannel={observation.SetChannelOk} " +
                 "reason=physical_device_ownership_established remaining_startup_outside_gate=True rule=tuner_device_gate_minimum_scope_contract");
         }
 
@@ -4404,7 +4299,7 @@ private readonly ReservationStore _store;
         if (!directStart.Success && directStart.RetryableStartupFailure)
         {
             _log.Add("TVAIREPGREC_RECORD_START_RETRY", $"R{r.Id}",
-                $"result=RETRY reason={SafeValue(directStart.FailureDetail)} attempt=2 maxAttempts=2 tuner={lease.Name} did={lease.Did} commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=worker_structured_start_contract");
+                $"result=RETRY reason={LogTextContract.TrimOrDash(directStart.FailureDetail)} attempt=2 maxAttempts=2 tuner={lease.Name} did={lease.Did} commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=worker_structured_start_contract");
             directStart = await TryStartRecordingWorkerRecordingAsync(
                 r, group, lease, resolvedChannel, plannedEnd, postEndMarginSeconds, recordFolderForDiscovery, ct,
                 ReleaseTunerDeviceGateAfterOpen).ConfigureAwait(false);
@@ -4422,7 +4317,8 @@ private readonly ReservationStore _store;
                 directStart.Message,
                 retryableStart: retryableStartupFailureObserved,
                 startupFailureKind: directStart.FailureKind,
-                tunerOpenedBeforeFailure: directStart.TunerOpenedBeforeFailure);
+                tunerOpenedBeforeFailure: directStart.TunerOpenedBeforeFailure,
+                userFailureCause: directStart.UserFailureCause);
             return false;
         }
 
@@ -4465,14 +4361,14 @@ private readonly ReservationStore _store;
         if (!provisionalRegistered)
         {
             _log.Add("REC_START_PROVISIONAL_SESSION", $"R{r.Id}",
-                $"result=REJECTED reason=active_session_already_exists pid={directStart.ProcessId} tuner={SafeValue(lease.Name)} " +
+                $"result=REJECTED reason=active_session_already_exists pid={directStart.ProcessId} tuner={LogTextContract.TrimOrDash(lease.Name)} " +
                 "action=stop_new_worker_preserve_existing_session rule=recording_lifecycle_cas_contract");
             await AbortUncommittedRecordingStartAsync(session).ConfigureAwait(false);
             return false;
         }
 
         _log.Add("REC_START_PROVISIONAL_SESSION", $"R{r.Id}",
-            $"result=REGISTERED state=Starting committed=False pid={directStart.ProcessId} tuner={SafeValue(lease.Name)} " +
+            $"result=REGISTERED state=Starting committed=False pid={directStart.ProcessId} tuner={LogTextContract.TrimOrDash(lease.Name)} " +
             $"poolLeaseId={lease.PoolLeaseId} generation={lease.OccupancyGeneration} rule=recording_lifecycle_cas_contract");
 
         // worker起動成功後の永続化はStarting + DataVersionのCASで一括確定する。
@@ -4517,9 +4413,9 @@ private readonly ReservationStore _store;
         if (!completeStart.Applied || completeStart.Reservation is null)
         {
             _log.Add("REC_START_DECISION", $"R{r.Id}",
-                $"result=ABORT reason=recording_start_commit_rejected detail={SafeValue(completeStart.Reason)} " +
+                $"result=ABORT reason=recording_start_commit_rejected detail={LogTextContract.TrimOrDash(completeStart.Reason)} " +
                 $"previousStatus={completeStart.PreviousStatus?.ToString() ?? "-"} currentStatus={completeStart.CurrentStatus?.ToString() ?? "-"} " +
-                $"dataVersion={completeStart.PreviousDataVersion}->{completeStart.CurrentDataVersion} pid={directStart.ProcessId} tuner={SafeValue(lease.Name)} " +
+                $"dataVersion={completeStart.PreviousDataVersion}->{completeStart.CurrentDataVersion} pid={directStart.ProcessId} tuner={LogTextContract.TrimOrDash(lease.Name)} " +
                 "action=stop_uncommitted_worker_release_lease rule=recording_lifecycle_cas_contract");
             var latestAfterCommitReject = _store.GetById(r.Id);
             if (latestAfterCommitReject?.Status == ReservationStatus.Recording
@@ -4541,7 +4437,7 @@ private readonly ReservationStore _store;
                 var settle = _store.TryRollbackRecordingStart(r.Id, latestAfterCommitReject.DataVersion);
                 _log.Add("REC_START_DECISION", $"R{r.Id}",
                     $"result=SETTLED_AFTER_COMMIT_REJECT target=Scheduled retryableStart=True " +
-                    $"applied={settle.Applied} detail={SafeValue(settle.Reason)} dataVersion={settle.PreviousDataVersion}->{settle.CurrentDataVersion} " +
+                    $"applied={settle.Applied} detail={LogTextContract.TrimOrDash(settle.Reason)} dataVersion={settle.PreviousDataVersion}->{settle.CurrentDataVersion} " +
                     "rule=recording_lifecycle_cas_contract");
             }
             return false;
@@ -4551,13 +4447,13 @@ private readonly ReservationStore _store;
         if (!session.CompleteRecordingCommit(commitGeneration))
         {
             _log.Add("REC_START_PROVISIONAL_SESSION", $"R{r.Id}",
-                $"result=PROMOTION_REJECTED state={session.RecordingCommitState} pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} " +
+                $"result=PROMOTION_REJECTED state={session.RecordingCommitState} pid={session.ProcessId} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} " +
                 "action=force_runtime_reconciliation rule=recording_lifecycle_cas_contract");
             _forceAllocationReevaluate = true;
             return false;
         }
         _log.Add("REC_START_PROVISIONAL_SESSION", $"R{r.Id}",
-            $"result=PROMOTED state=Recording committed=True pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} " +
+            $"result=PROMOTED state=Recording committed=True pid={session.ProcessId} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} " +
             "rule=recording_lifecycle_cas_contract");
         _log.Add("REC_CONFLICT_RECONCILE", $"R{r.Id}",
             $"result=CLEARED_AT_START_COMMIT reason=recording_started_with_actual_tuner actualTuner={lease.Name} did={lease.Did} " +
@@ -4566,7 +4462,7 @@ private readonly ReservationStore _store;
         PublishChainRuntimeSnapshot(r, session, null, "recording_started");
         TvAirManagedProcessRegistry.RegisterRecording(directStart.ProcessId, r.Id, lease.Did, lease.BonDriverFileName, directStart.OutputPath);
         _log.Add("REC_START_MODE", $"R{r.Id}",
-            $"mode=TvAIrEpgRecProcessStarted pid={directStart.ProcessId} service={SafeValue(r.ServiceName)} sid={r.ServiceId} tuner={lease.Name} did={lease.Did} path={SafeValue(directStart.OutputPath)} seconds={directStart.Seconds} rule=release_contract");
+            $"mode=TvAIrEpgRecProcessStarted pid={directStart.ProcessId} service={LogTextContract.TrimOrDash(r.ServiceName)} sid={r.ServiceId} tuner={lease.Name} did={lease.Did} path={LogTextContract.TrimOrDash(directStart.OutputPath)} seconds={directStart.Seconds} rule=release_contract");
         if (chainContinuation)
         {
             var predecessorIdAtRecoveryStart = TryResolveChainPredecessorId(r, out _);
@@ -4574,7 +4470,7 @@ private readonly ReservationStore _store;
                 && !string.Equals(r.TunerName, lease.Name, StringComparison.OrdinalIgnoreCase);
             _log.Add("CHAIN_RECORDING_RUNTIME_AUDIT", $"R{r.Id}",
                 $"result=RECORDING_STARTED stage=recording_started successor=R{r.Id} predecessor={(predecessorIdAtRecoveryStart.HasValue ? $"R{predecessorIdAtRecoveryStart.Value}" : "-")} " +
-                $"plannedTuner={SafeValue(r.TunerName)} actualTuner={SafeValue(lease.Name)} did={SafeValue(lease.Did)} pid={directStart.ProcessId} path={SafeValue(directStart.OutputPath)} " +
+                $"plannedTuner={LogTextContract.TrimOrDash(r.TunerName)} actualTuner={LogTextContract.TrimOrDash(lease.Name)} did={LogTextContract.TrimOrDash(lease.Did)} pid={directStart.ProcessId} path={LogTextContract.TrimOrDash(directStart.OutputPath)} " +
                 $"startSource=common_recording_recovery expectedSource=final_plan_persisted_tuner sourceTransition=exact_tuner_acquired_then_recording_started sourceDecision=no_chain_specific_worker_path plannedActualMismatch={plannedActualMismatchAtStart} inheritMatchedActual=True " +
                 $"plannedEnd={plannedEnd:MM/dd HH:mm:ss} seconds={directStart.Seconds} separateTsFile=True commonRoute=ALLOC_ROUTE/TUNER_ALLOC successorSinkPreOpenOnAssignedTuner=True continuousCaptureOnly=True rule=release_contract");
         }
@@ -4618,7 +4514,8 @@ private readonly ReservationStore _store;
         string ChainSegmentResultPath = "",
         string ChainSegmentRuntimeStatsPath = "",
         DateTime? CapturePlannedEnd = null,
-        bool ContinuousChainCapture = false);
+        bool ContinuousChainCapture = false,
+        RecordingFailureCause UserFailureCause = RecordingFailureCause.Unspecified);
 
     private async Task<RecordingWorkerStartResult> TryStartRecordingWorkerRecordingAsync(
         Reservation r,
@@ -4634,25 +4531,28 @@ private readonly ReservationStore _store;
         if (resolvedChannel is null)
         {
             return new RecordingWorkerStartResult(false, 0, string.Empty, 0, string.Empty, string.Empty, string.Empty, string.Empty, string.Empty,
-                $"TvAIrEpgRec選局解決に失敗しました。nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId}");
+                $"TvAIrEpgRec選局解決に失敗しました。nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId}",
+                UserFailureCause: RecordingFailureCause.AssignedTunerTuningUnavailable);
         }
 
         var bonDriverPath = ResolveBonDriverPathForRecordingWorker(lease.BonDriverFileName);
         if (!File.Exists(bonDriverPath))
         {
             return new RecordingWorkerStartResult(false, 0, string.Empty, 0, string.Empty, string.Empty, string.Empty, string.Empty, string.Empty,
-                $"TvAIrEpgRec用BonDriverが見つかりません。path={bonDriverPath}");
+                $"TvAIrEpgRec用BonDriverが見つかりません。path={bonDriverPath}",
+                UserFailureCause: RecordingFailureCause.BonDriverMissing);
         }
 
         var epgRecExe = TvAIrWorkerExecutableLocator.Resolve();
         if (string.IsNullOrWhiteSpace(epgRecExe) || !File.Exists(epgRecExe))
         {
             return new RecordingWorkerStartResult(false, 0, string.Empty, 0, string.Empty, string.Empty, string.Empty, string.Empty, string.Empty,
-                "TvAIrEpgRec.exe が見つかりません。");
+                "TvAIrEpgRec.exe が見つかりません。",
+                UserFailureCause: RecordingFailureCause.WorkerExecutableMissing);
         }
 
         _log.Add("TVAIREPGREC_RECORD_ROUTE", $"R{r.Id}",
-            $"result=SELECTED exe={SafeValue(epgRecExe)} currentProductionRoute=TvAIrEpgRec mode=record " +
+            $"result=SELECTED exe={LogTextContract.TrimOrDash(epgRecExe)} currentProductionRoute=TvAIrEpgRec mode=record " +
             $"chainDecisionOwner=TvAIrCommonAllocationRoute filenameOwner=TvAIrCurrentPolicy rule=release_contract");
 
         var now = DateTime.Now;
@@ -4666,13 +4566,13 @@ private readonly ReservationStore _store;
         _log.Add("RECORD_FILE_NAME_TIME_POLICY", $"R{r.Id}",
             $"mode={namingPolicy.Mode} base={namingPolicy.Base} source={r.Source} reservationStart={r.StartTime:yyyy-MM-dd HH:mm:ss} actualStart={now:yyyy-MM-dd HH:mm:ss} fileBaseTime={namingPolicy.BaseTime:yyyy-MM-dd HH:mm:ss} rule=release_contract");
         _log.Add("RECORD_FILENAME_TITLE_GUARD", $"R{r.Id}",
-            $"result={fileNameBuild.TitleGuardResult} source={fileNameBuild.TitleSource} persisted={fileNameBuild.TitlePersisted} originalTitle={SafeValue(fileNameBuild.OriginalReservationTitle)} resolvedTitle={SafeValue(fileNameBuild.RawTitle)} service={SafeValue(r.ServiceName)} event={r.NetworkId}/{r.TransportStreamId}/{r.ServiceId}/{r.EventId} chainPrev={(r.UserChainPreviousId.HasValue ? $"R{r.UserChainPreviousId.Value}" : "-")} chainRoot={(r.UserChainRootId.HasValue ? $"R{r.UserChainRootId.Value}" : "-")} rule=release_contract");
+            $"result={fileNameBuild.TitleGuardResult} source={fileNameBuild.TitleSource} persisted={fileNameBuild.TitlePersisted} originalTitle={LogTextContract.TrimOrDash(fileNameBuild.OriginalReservationTitle)} resolvedTitle={LogTextContract.TrimOrDash(fileNameBuild.RawTitle)} service={LogTextContract.TrimOrDash(r.ServiceName)} event={r.NetworkId}/{r.TransportStreamId}/{r.ServiceId}/{r.EventId} chainPrev={(r.UserChainPreviousId.HasValue ? $"R{r.UserChainPreviousId.Value}" : "-")} chainRoot={(r.UserChainRootId.HasValue ? $"R{r.UserChainRootId.Value}" : "-")} rule=release_contract");
         var fileNameNormalizedChanged = !string.Equals(fileNameBuild.RawTitle, fileNameBuild.NormalizedEventName, StringComparison.Ordinal);
         var fileNameDetail = fileNameNormalizedChanged
-            ? $" rawTitle={SafeValue(fileNameBuild.RawTitle)} normalizedEventName={SafeValue(fileNameBuild.NormalizedEventName)} sanitizedEventName={SafeValue(fileNameBuild.SanitizedEventName)}"
+            ? $" rawTitle={LogTextContract.TrimOrDash(fileNameBuild.RawTitle)} normalizedEventName={LogTextContract.TrimOrDash(fileNameBuild.NormalizedEventName)} sanitizedEventName={LogTextContract.TrimOrDash(fileNameBuild.SanitizedEventName)}"
             : string.Empty;
         _log.Add("RECORD_FILENAME_NORMALIZE", $"R{r.Id}",
-            $"result=OK changed={fileNameNormalizedChanged} fileName={SafeValue(fileNameBuild.FileName)} outputPath={SafeValue(outputPath)} unsupportedTokens={SafeValue(fileNameBuild.UnsupportedTokens)}{fileNameDetail} rule=release_contract");
+            $"result=OK changed={fileNameNormalizedChanged} fileName={LogTextContract.TrimOrDash(fileNameBuild.FileName)} outputPath={LogTextContract.TrimOrDash(outputPath)} unsupportedTokens={LogTextContract.TrimOrDash(fileNameBuild.UnsupportedTokens)}{fileNameDetail} rule=release_contract");
         _log.Add("RECORD_FILENAME_PIPELINE_AUDIT", $"R{r.Id}",
             BuildReservationPipelineAudit(r, "filename_finalized", group: group, plannedTuner: r.TunerName, actualTuner: lease.Name, lease: lease, resolvedChannel: resolvedChannel, fileNameBuild: fileNameBuild, outputPath: outputPath, plannedEnd: plannedEnd, finalGuardApplied: true, note: $"namingMode={namingPolicy.Mode};timeBase={namingPolicy.Base};changed={fileNameNormalizedChanged}"));
         var workDir = Path.Combine(AppContext.BaseDirectory, "runtime", "tvairepgrec-production-recording");
@@ -4778,8 +4678,8 @@ private readonly ReservationStore _store;
                     segment.SaveSubtitles) { RecordingFileDeclaration = segment.RecordingFileDeclaration }).ToArray());
             ChainControlState.CreateNewStore(chainControlPath, initialChainControl);
             _log.Add("CHAIN_CONTINUOUS_CAPTURE_PLAN", $"R{r.Id}",
-                $"result={(continuousChainCapture ? "ARMED" : "UPGRADE_READY")} root=R{r.UserChainRootId ?? r.Id} captureTuner={SafeValue(lease.Name)} did={SafeValue(lease.Did)} segments={chainSegments.Count} captureStart={now:MM/dd HH:mm:ss.fff} captureEnd={capturePlannedEnd:MM/dd HH:mm:ss.fff} " +
-                $"overlapPolicy=pre_margin_plus_post_margin preMarginSec={_ini.PreStartMarginSeconds} postMarginSec={postEndMarginSeconds} physicalRetuneAtBoundary=False control={SafeValue(chainControlPath)} controlStore=immutable_generation " +
+                $"result={(continuousChainCapture ? "ARMED" : "UPGRADE_READY")} root=R{r.UserChainRootId ?? r.Id} captureTuner={LogTextContract.TrimOrDash(lease.Name)} did={LogTextContract.TrimOrDash(lease.Did)} segments={chainSegments.Count} captureStart={now:MM/dd HH:mm:ss.fff} captureEnd={capturePlannedEnd:MM/dd HH:mm:ss.fff} " +
+                $"overlapPolicy=pre_margin_plus_post_margin preMarginSec={_ini.PreStartMarginSeconds} postMarginSec={postEndMarginSeconds} physicalRetuneAtBoundary=False control={LogTextContract.TrimOrDash(chainControlPath)} controlStore=immutable_generation " +
                 $"segmentMap=[{string.Join(",", chainSegments.Select(segment => $"R{segment.ReservationId}:{segment.OpenAt:HH:mm:ss.fff}-{segment.CloseAt:HH:mm:ss.fff}"))}] rule=chain_continuous_capture_contract");
         }
 
@@ -4904,7 +4804,8 @@ private readonly ReservationStore _store;
 #endif
             if (!process.Start())
             {
-                return new RecordingWorkerStartResult(false, 0, outputPath, seconds, responsePath, stopSignalPath, progressPath, runtimeStatsPath, requestPath, "TvAIrEpgRecの起動に失敗しました。");
+                return new RecordingWorkerStartResult(false, 0, outputPath, seconds, responsePath, stopSignalPath, progressPath, runtimeStatsPath, requestPath, "TvAIrEpgRecの起動に失敗しました。",
+                    UserFailureCause: RecordingFailureCause.WorkerLaunchFailed);
             }
 #if TVAIR_DEVELOPER_DIAGNOSTICS
             _log.Add("WORKER_FOCUS_BOUNDARY", $"R{r.Id}",
@@ -4914,28 +4815,29 @@ private readonly ReservationStore _store;
         catch (Exception ex)
         {
             return new RecordingWorkerStartResult(false, 0, outputPath, seconds, responsePath, stopSignalPath, progressPath, runtimeStatsPath, requestPath,
-                $"TvAIrEpgRec起動例外: {ex.GetType().Name} {ex.Message}");
+                $"TvAIrEpgRec起動例外: {ex.GetType().Name} {ex.Message}",
+                UserFailureCause: RecordingFailureCause.WorkerLaunchFailed);
         }
 
         _log.Add("TVAIREPGREC_RECORD_START", $"R{r.Id}",
-            $"pid={process.Id} exe={SafeValue(epgRecExe)} job={SafeValue(requestPath)} result={SafeValue(responsePath)} progress={SafeValue(progressPath)} stopSignal={SafeValue(stopSignalPath)} " +
-            $"service={SafeValue(r.ServiceName)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} " +
-            $"space={resolvedChannel.ResolvedSpace} ch={recordingWorkerChannelIndex} tvtestArgCh={resolvedChannel.ResolvedChannelIndex} bonCh={resolvedChannel.BonDriverChannel} channelReason={SafeValue(recordingWorkerChannelReason)} tuner={lease.Name} did={lease.Did} " +
-            $"seconds={seconds} path={SafeValue(outputPath)} recordingReservation=R{r.Id} contract=one_worker_one_reservation_one_ts_one_quality_result launchKind={launchKind} taskbarIconVisible={showWorkerTaskbarIcon} windowPolicy={windowPolicy} productionRoute=TvAIrEpgRec state=Starting rule=release_contract");
+            $"pid={process.Id} exe={LogTextContract.TrimOrDash(epgRecExe)} job={LogTextContract.TrimOrDash(requestPath)} result={LogTextContract.TrimOrDash(responsePath)} progress={LogTextContract.TrimOrDash(progressPath)} stopSignal={LogTextContract.TrimOrDash(stopSignalPath)} " +
+            $"service={LogTextContract.TrimOrDash(r.ServiceName)} nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} " +
+            $"space={resolvedChannel.ResolvedSpace} ch={recordingWorkerChannelIndex} tvtestArgCh={resolvedChannel.ResolvedChannelIndex} bonCh={resolvedChannel.BonDriverChannel} channelReason={LogTextContract.TrimOrDash(recordingWorkerChannelReason)} tuner={lease.Name} did={lease.Did} " +
+            $"seconds={seconds} path={LogTextContract.TrimOrDash(outputPath)} recordingReservation=R{r.Id} contract=one_worker_one_reservation_one_ts_one_quality_result launchKind={launchKind} taskbarIconVisible={showWorkerTaskbarIcon} windowPolicy={windowPolicy} productionRoute=TvAIrEpgRec state=Starting rule=release_contract");
 
         var startup = await WaitForRecordingWorkerStartupAsync(
             process, progressPath, stopSignalPath, r.Id, ct, onTunerOpened).ConfigureAwait(false);
         if (!startup.Success)
         {
             _log.Add("TVAIREPGREC_RECORD_START_GATE", $"R{r.Id}",
-                $"result=FAILED pid={process.Id} reason={SafeValue(startup.Reason)} phase={SafeValue(startup.Phase)} open={startup.OpenTunerOk} setChannel={startup.SetChannelOk} tsStarted={startup.TsReadStarted} scopeReady={startup.ScopeReady} currentServiceOnly={startup.CurrentServiceOnly} mediaPackets={startup.MediaPackets} bytesWritten={startup.BytesWritten} rule=worker_structured_start_contract");
+                $"result=FAILED pid={process.Id} reason={LogTextContract.TrimOrDash(startup.Reason)} phase={LogTextContract.TrimOrDash(startup.Phase)} open={startup.OpenTunerOk} setChannel={startup.SetChannelOk} tsStarted={startup.TsReadStarted} scopeReady={startup.ScopeReady} currentServiceOnly={startup.CurrentServiceOnly} mediaPackets={startup.MediaPackets} bytesWritten={startup.BytesWritten} rule=worker_structured_start_contract");
             var workerFailure = ReadRecordingWorkerWorkerFailure(responsePath);
             var retryableStartupFailure = IsRetryableRecordingWorkerStartupFailure(startup);
             var failureDetail = string.IsNullOrWhiteSpace(workerFailure)
                 ? startup.Reason
                 : $"{startup.Reason};{workerFailure}";
             _log.Add("TVAIREPGREC_RECORD_START_FAILURE_DETAIL", $"R{r.Id}",
-                $"result=FAILED pid={process.Id} retryable={retryableStartupFailure} detail={SafeValue(failureDetail)} resultPath={SafeValue(responsePath)} rule=worker_structured_start_contract");
+                $"result=FAILED pid={process.Id} retryable={retryableStartupFailure} detail={LogTextContract.TrimOrDash(failureDetail)} resultPath={LogTextContract.TrimOrDash(responsePath)} rule=worker_structured_start_contract");
 
             // RECORDING_STARTUP_FAILURE_ARTIFACT_LIFECYCLE_INVARIANT:
             // RecordingSession成立前の失敗attemptは通常録画終了cleanupへ到達しない。
@@ -4960,7 +4862,7 @@ private readonly ReservationStore _store;
         }
 
         _log.Add("TVAIREPGREC_RECORD_START_GATE", $"R{r.Id}",
-            $"result=ACTIVE pid={process.Id} phase={SafeValue(startup.Phase)} open={startup.OpenTunerOk} setChannel={startup.SetChannelOk} tsStarted={startup.TsReadStarted} scopeReady={startup.ScopeReady} currentServiceOnly={startup.CurrentServiceOnly} mediaPackets={startup.MediaPackets} bytesWritten={startup.BytesWritten} rule=worker_structured_start_contract");
+            $"result=ACTIVE pid={process.Id} phase={LogTextContract.TrimOrDash(startup.Phase)} open={startup.OpenTunerOk} setChannel={startup.SetChannelOk} tsStarted={startup.TsReadStarted} scopeReady={startup.ScopeReady} currentServiceOnly={startup.CurrentServiceOnly} mediaPackets={startup.MediaPackets} bytesWritten={startup.BytesWritten} rule=worker_structured_start_contract");
 
         return new RecordingWorkerStartResult(
             true, process.Id, outputPath, seconds, responsePath, stopSignalPath, progressPath, runtimeStatsPath, requestPath, "TvAIrEpgRec recording active",
@@ -5753,9 +5655,9 @@ private readonly ReservationStore _store;
     private void PublishChainRuntimeSnapshot(Reservation current, RecordingSession session, Reservation? next, string stage)
     {
         var chainRootId = current.UserChainRootId ?? current.Id;
-        var actualTuner = SafeValue(session.Lease.Name);
-        var did = SafeValue(session.Lease.Did);
-        var bonDriver = SafeValue(session.Lease.BonDriverFileName);
+        var actualTuner = LogTextContract.TrimOrDash(session.Lease.Name);
+        var did = LogTextContract.TrimOrDash(session.Lease.Did);
+        var bonDriver = LogTextContract.TrimOrDash(session.Lease.BonDriverFileName);
         var nextReservation = next ?? _store.GetAll()
             .Where(x => x.IsUserChain
                 && x.UserChainPreviousId == current.Id
@@ -5924,9 +5826,9 @@ private readonly ReservationStore _store;
             .Where(slot => string.Equals(slot.Role, "Recording", StringComparison.OrdinalIgnoreCase))
             .ToList();
         var recordingGroupSnapshot = recordingTunerSnapshot
-            .GroupBy(slot => NormalizeRecordingLaunchGroup(slot.Group), StringComparer.OrdinalIgnoreCase)
+            .GroupBy(slot => TunerDisplayName.NormalizeGroup(slot.Group), StringComparer.OrdinalIgnoreCase)
             .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
-            .Select(group => $"{SafeValue(group.Key)}:{group.Count()}")
+            .Select(group => $"{LogTextContract.TrimOrDash(group.Key)}:{group.Count()}")
             .ToArray();
         _log.Add("CHAIN_BOUNDARY_BATCH", "START",
             $"result=BEGIN activeSessions={active.Count} chainPairs={successorOf.Count} configuredRecordingTuners={recordingTunerSnapshot.Count} " +
@@ -6138,15 +6040,15 @@ private readonly ReservationStore _store;
             }
 
             _log.Add("CHAIN_CONTINUOUS_CAPTURE_UPGRADE", $"R{predecessor.Id}",
-                $"result=SUCCESS predecessor=R{predecessor.Id} successor=R{successor.Id} pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} did={SafeValue(session.Lease.Did)} " +
-                $"control={SafeValue(session.ChainControlPath)} successorOpenAt={successorOpenAt:MM/dd HH:mm:ss.fff} predecessorCloseAt={predecessorCloseAt:MM/dd HH:mm:ss.fff} logicalSegmentEnd={session.PlannedEndTime:MM/dd HH:mm:ss.fff} physicalCaptureEnd={captureEnd:MM/dd HH:mm:ss.fff} segments={updated.Segments.Length} " +
+                $"result=SUCCESS predecessor=R{predecessor.Id} successor=R{successor.Id} pid={session.ProcessId} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} did={LogTextContract.TrimOrDash(session.Lease.Did)} " +
+                $"control={LogTextContract.TrimOrDash(session.ChainControlPath)} successorOpenAt={successorOpenAt:MM/dd HH:mm:ss.fff} predecessorCloseAt={predecessorCloseAt:MM/dd HH:mm:ss.fff} logicalSegmentEnd={session.PlannedEndTime:MM/dd HH:mm:ss.fff} physicalCaptureEnd={captureEnd:MM/dd HH:mm:ss.fff} segments={updated.Segments.Length} " +
                 $"workerRestart=False bonDriverClose=False physicalRetune=False existingCapturePromoted={!wasSharedCapture} multiHopAppend={wasSharedCapture} successorAlreadyPresent={successorAlreadyPresent} controlStore=immutable_generation rule=chain_continuous_capture_contract");
             return true;
         }
         catch (Exception ex)
         {
             _log.Add("CHAIN_CONTINUOUS_CAPTURE_UPGRADE", $"R{predecessor.Id}",
-                $"result=FAILED predecessor=R{predecessor.Id} successor=R{successor.Id} error={SafeValue(ex.GetType().Name)}:{SafeValue(ex.Message)} action=keep_existing_capture_retry_no_boundary_fallback rule=chain_continuous_capture_contract");
+                $"result=FAILED predecessor=R{predecessor.Id} successor=R{successor.Id} error={LogTextContract.TrimOrDash(ex.GetType().Name)}:{LogTextContract.TrimOrDash(ex.Message)} action=keep_existing_capture_retry_no_boundary_fallback rule=chain_continuous_capture_contract");
             return false;
         }
     }
@@ -6202,7 +6104,7 @@ private readonly ReservationStore _store;
             catch (Exception ex)
             {
                 _log.Add("CHAIN_RUNTIME_ATTACHMENT_SNAPSHOT", $"R{session.ReservationId}",
-                    $"result=READ_FAILED exception={SafeValue(ex.GetType().Name)} message={TrimForLog(ex.Message, 160)} action=protect_current_owner_only rule=chain_lifecycle_single_source");
+                    $"result=READ_FAILED exception={LogTextContract.TrimOrDash(ex.GetType().Name)} message={LogTextContract.TruncateWithDots(ex.Message, 160)} action=protect_current_owner_only rule=chain_lifecycle_single_source");
             }
         }
         return result;
@@ -6233,12 +6135,12 @@ private readonly ReservationStore _store;
             {
                 succeeded = false;
                 _log.Add("CHAIN_RUNTIME_TOPOLOGY_RECONCILE", $"R{session.ReservationId}",
-                    $"result=FAILED reason={SafeValue(reason)} exception={SafeValue(ex.GetType().Name)} message={TrimForLog(ex.Message, 180)} action=retry_on_boundary_scan rule=chain_lifecycle_single_source");
+                    $"result=FAILED reason={LogTextContract.TrimOrDash(reason)} exception={LogTextContract.TrimOrDash(ex.GetType().Name)} message={LogTextContract.TruncateWithDots(ex.Message, 180)} action=retry_on_boundary_scan rule=chain_lifecycle_single_source");
             }
         }
 
         _log.Add("CHAIN_RUNTIME_TOPOLOGY_RECONCILE", "Summary",
-            $"result={(succeeded ? "COMPLETED" : "RETRY_REQUIRED")} reason={SafeValue(reason)} activeSharedCaptures={active.Count} rule=chain_lifecycle_single_source");
+            $"result={(succeeded ? "COMPLETED" : "RETRY_REQUIRED")} reason={LogTextContract.TrimOrDash(reason)} activeSharedCaptures={active.Count} rule=chain_lifecycle_single_source");
         return succeeded;
     }
 
@@ -6274,8 +6176,8 @@ private readonly ReservationStore _store;
         if (currentReservation is not null)
             PublishChainRuntimeSnapshot(currentReservation, session, null, $"runtime_reconcile:{reason}");
         _log.Add("CHAIN_PHYSICAL_LIFETIME_RECONCILE", $"R{session.ReservationId}",
-            $"result=UPDATED direction={(canonicalEnd < before ? "SHRINK" : "EXTEND")} reason={SafeValue(reason)} before={before:MM/dd HH:mm:ss.fff} after={canonicalEnd:MM/dd HH:mm:ss.fff} " +
-            $"logicalEnd={session.PlannedEndTime:MM/dd HH:mm:ss.fff} pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} workerRestart=False physicalRetune=False rule=chain_physical_capture_lifetime_single_source");
+            $"result=UPDATED direction={(canonicalEnd < before ? "SHRINK" : "EXTEND")} reason={LogTextContract.TrimOrDash(reason)} before={before:MM/dd HH:mm:ss.fff} after={canonicalEnd:MM/dd HH:mm:ss.fff} " +
+            $"logicalEnd={session.PlannedEndTime:MM/dd HH:mm:ss.fff} pid={session.ProcessId} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} workerRestart=False physicalRetune=False rule=chain_physical_capture_lifetime_single_source");
         return canonicalEnd;
     }
 
@@ -6326,7 +6228,7 @@ private readonly ReservationStore _store;
         if (control is null)
         {
             _log.Add("REC_FOLLOW_WORKER_DEADLINE", $"R{reservation.Id}",
-                $"result=KEEP_SESSION_ONLY reason=control_unavailable requestedEnd={followedEnd:MM/dd HH:mm:ss.fff} source={SafeValue(reason)} workerRestart=False rule=recording_timing_ssot_contract");
+                $"result=KEEP_SESSION_ONLY reason=control_unavailable requestedEnd={followedEnd:MM/dd HH:mm:ss.fff} source={LogTextContract.TrimOrDash(reason)} workerRestart=False rule=recording_timing_ssot_contract");
             return string.IsNullOrWhiteSpace(session.ChainControlPath) ? followedEnd : null;
         }
 
@@ -6367,7 +6269,7 @@ private readonly ReservationStore _store;
             if (updated is null)
             {
                 _log.Add("REC_FOLLOW_WORKER_DEADLINE", $"R{reservation.Id}",
-                    $"result=RETRY_PENDING reason=control_segment_missing requestedEnd={followedEnd:MM/dd HH:mm:ss.fff} source={SafeValue(reason)} workerRestart=False rule=recording_timing_ssot_contract");
+                    $"result=RETRY_PENDING reason=control_segment_missing requestedEnd={followedEnd:MM/dd HH:mm:ss.fff} source={LogTextContract.TrimOrDash(reason)} workerRestart=False rule=recording_timing_ssot_contract");
                 return null;
             }
 
@@ -6377,13 +6279,13 @@ private readonly ReservationStore _store;
                 .DefaultIfEmpty(followedEnd)
                 .Max();
             _log.Add("REC_FOLLOW_WORKER_DEADLINE", $"R{reservation.Id}",
-                $"result=UPDATED requestedEnd={followedEnd:MM/dd HH:mm:ss.fff} workerDeadline={controlEnd:MM/dd HH:mm:ss.fff} source={SafeValue(reason)} controlStore=immutable_generation workerRestart=False rule=recording_timing_ssot_contract");
+                $"result=UPDATED requestedEnd={followedEnd:MM/dd HH:mm:ss.fff} workerDeadline={controlEnd:MM/dd HH:mm:ss.fff} source={LogTextContract.TrimOrDash(reason)} controlStore=immutable_generation workerRestart=False rule=recording_timing_ssot_contract");
             return controlEnd;
         }
         catch (Exception ex)
         {
             _log.Add("REC_FOLLOW_WORKER_DEADLINE", $"R{reservation.Id}",
-                $"result=RETRY_PENDING reason=control_update_failed requestedEnd={followedEnd:MM/dd HH:mm:ss.fff} source={SafeValue(reason)} errorType={ex.GetType().Name} error={TrimForLog(ex.Message, 180)} workerRestart=False rule=recording_timing_ssot_contract");
+                $"result=RETRY_PENDING reason=control_update_failed requestedEnd={followedEnd:MM/dd HH:mm:ss.fff} source={LogTextContract.TrimOrDash(reason)} errorType={ex.GetType().Name} error={LogTextContract.TruncateWithDots(ex.Message, 180)} workerRestart=False rule=recording_timing_ssot_contract");
             return null;
         }
     }
@@ -6460,13 +6362,13 @@ private readonly ReservationStore _store;
                 return null;
             }
             _log.Add("CHAIN_CONTINUOUS_CAPTURE_TIMING", $"R{session.ReservationId}",
-                $"result=UPDATED reason={SafeValue(reason)} captureEnd={maxClose:MM/dd HH:mm:ss.fff} segments={updated.Segments.Length} connectedSegments={connectedSegmentIds.Count} physicalRetune=False workerRestart=False controlStore=immutable_generation rule=chain_continuous_capture_contract");
+                $"result=UPDATED reason={LogTextContract.TrimOrDash(reason)} captureEnd={maxClose:MM/dd HH:mm:ss.fff} segments={updated.Segments.Length} connectedSegments={connectedSegmentIds.Count} physicalRetune=False workerRestart=False controlStore=immutable_generation rule=chain_continuous_capture_contract");
             return maxClose;
         }
         catch (Exception ex)
         {
             _log.Add("CHAIN_CONTINUOUS_CAPTURE_TIMING", $"R{session.ReservationId}",
-                $"result=KEEP_EXISTING reason={SafeValue(reason)} errorType={ex.GetType().Name} error={TrimForLog(ex.Message, 180)} captureEnd={session.PhysicalCaptureEndTime:MM/dd HH:mm:ss.fff} rule=chain_continuous_capture_contract");
+                $"result=KEEP_EXISTING reason={LogTextContract.TrimOrDash(reason)} errorType={ex.GetType().Name} error={LogTextContract.TruncateWithDots(ex.Message, 180)} captureEnd={session.PhysicalCaptureEndTime:MM/dd HH:mm:ss.fff} rule=chain_continuous_capture_contract");
             return null;
         }
     }
@@ -6493,7 +6395,7 @@ private readonly ReservationStore _store;
             catch(InvalidOperationException ex)
             {
                 _log.Add("REC_END_PUBLICATION",$"R{reservation.Id}",
-                    $"result=RETRY_PENDING reason=lease_update_rejected error={TrimForLog(ex.Message,180)} rule=recording_end_decision_contract");
+                    $"result=RETRY_PENDING reason=lease_update_rejected error={LogTextContract.TruncateWithDots(ex.Message,180)} rule=recording_end_decision_contract");
                 return false;
             }
             session.UpdatePlannedEndTime(logicalEnd);
@@ -6526,7 +6428,7 @@ private readonly ReservationStore _store;
             || !successorState.Enabled)
         {
             _log.Add("CHAIN_CONTINUOUS_CAPTURE_BOUNDARY", $"R{predecessorId}",
-                $"result=RETRYABLE_FAILED predecessor=R{predecessorId} successor=R{successor.Id} reason=control_segment_missing control={SafeValue(session.ChainControlPath)} action=keep_capture_and_retry rule=chain_continuous_capture_contract");
+                $"result=RETRYABLE_FAILED predecessor=R{predecessorId} successor=R{successor.Id} reason=control_segment_missing control={LogTextContract.TrimOrDash(session.ChainControlPath)} action=keep_capture_and_retry rule=chain_continuous_capture_contract");
             return false;
         }
         var predecessorSegment = new ContinuousChainSegmentArtifact(predecessorState.ReservationId, predecessorState.OpenAt, predecessorState.CloseAt, predecessorState.OutputPath, predecessorState.ResultPath, predecessorState.RuntimeStatsPath);
@@ -6546,12 +6448,12 @@ private readonly ReservationStore _store;
             if (!claim.Applied)
             {
                 _log.Add("CHAIN_CONTINUOUS_CAPTURE_SINK_PREOPEN", $"R{predecessorId}",
-                    $"result=RETRYABLE_FAILED predecessor=R{predecessorId} successor=R{successor.Id} reason={SafeValue(claim.Reason)} status={SafeValue(claim.CurrentStatus?.ToString())} dataVersion={claim.CurrentDataVersion} physicalRetune=False workerRestart=False rule=chain_continuous_capture_contract");
+                    $"result=RETRYABLE_FAILED predecessor=R{predecessorId} successor=R{successor.Id} reason={LogTextContract.TrimOrDash(claim.Reason)} status={LogTextContract.TrimOrDash(claim.CurrentStatus?.ToString())} dataVersion={claim.CurrentDataVersion} physicalRetune=False workerRestart=False rule=chain_continuous_capture_contract");
                 return false;
             }
             latestSuccessor = claim.Reservation ?? _store.GetById(successor.Id);
             _log.Add("CHAIN_CONTINUOUS_CAPTURE_SINK_PREOPEN", $"R{predecessorId}",
-                $"result=STARTING_CLAIMED predecessor=R{predecessorId} successor=R{successor.Id} openAt={successorSegment.OpenAt:MM/dd HH:mm:ss.fff} successorDue={successorDueTime:MM/dd HH:mm:ss.fff} pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} physicalRetune=False workerRestart=False separateTsFile=True rule=chain_continuous_capture_contract");
+                $"result=STARTING_CLAIMED predecessor=R{predecessorId} successor=R{successor.Id} openAt={successorSegment.OpenAt:MM/dd HH:mm:ss.fff} successorDue={successorDueTime:MM/dd HH:mm:ss.fff} pid={session.ProcessId} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} physicalRetune=False workerRestart=False separateTsFile=True rule=chain_continuous_capture_contract");
         }
 
         if (latestSuccessor?.Status is not (ReservationStatus.Starting or ReservationStatus.Recording))
@@ -6563,20 +6465,20 @@ private readonly ReservationStore _store;
         {
             var successorHeadReady = File.Exists(successorSegment.OutputPath) && new FileInfo(successorSegment.OutputPath).Length > 0;
             _log.Add("CHAIN_CONTINUOUS_CAPTURE_OVERLAP", $"R{predecessorId}",
-                $"result=ACTIVE predecessor=R{predecessorId} successor=R{successor.Id} predecessorCloseAt={predecessorSegment.CloseAt:MM/dd HH:mm:ss.fff} successorOpenAt={successorSegment.OpenAt:MM/dd HH:mm:ss.fff} successorHeadReady={successorHeadReady} samePid={session.ProcessId} sameTuner={SafeValue(session.Lease.Name)} physicalRetune=False workerRestart=False rule=chain_continuous_capture_contract");
+                $"result=ACTIVE predecessor=R{predecessorId} successor=R{successor.Id} predecessorCloseAt={predecessorSegment.CloseAt:MM/dd HH:mm:ss.fff} successorOpenAt={successorSegment.OpenAt:MM/dd HH:mm:ss.fff} successorHeadReady={successorHeadReady} samePid={session.ProcessId} sameTuner={LogTextContract.TrimOrDash(session.Lease.Name)} physicalRetune=False workerRestart=False rule=chain_continuous_capture_contract");
             return false;
         }
 
         if (!File.Exists(predecessorSegment.ResultPath))
         {
             _log.Add("CHAIN_CONTINUOUS_CAPTURE_BOUNDARY", $"R{predecessorId}",
-                $"result=WAIT predecessor=R{predecessorId} successor=R{successor.Id} reason=predecessor_segment_result_pending resultPath={SafeValue(predecessorSegment.ResultPath)} physicalRetune=False workerRestart=False rule=chain_continuous_capture_contract");
+                $"result=WAIT predecessor=R{predecessorId} successor=R{successor.Id} reason=predecessor_segment_result_pending resultPath={LogTextContract.TrimOrDash(predecessorSegment.ResultPath)} physicalRetune=False workerRestart=False rule=chain_continuous_capture_contract");
             return false;
         }
         if (!File.Exists(successorSegment.OutputPath) || new FileInfo(successorSegment.OutputPath).Length <= 0)
         {
             _log.Add("CHAIN_CONTINUOUS_CAPTURE_BOUNDARY", $"R{predecessorId}",
-                $"result=WAIT predecessor=R{predecessorId} successor=R{successor.Id} reason=successor_sink_not_started output={SafeValue(successorSegment.OutputPath)} physicalRetune=False workerRestart=False rule=chain_continuous_capture_contract");
+                $"result=WAIT predecessor=R{predecessorId} successor=R{successor.Id} reason=successor_sink_not_started output={LogTextContract.TrimOrDash(successorSegment.OutputPath)} physicalRetune=False workerRestart=False rule=chain_continuous_capture_contract");
             return false;
         }
 
@@ -6619,7 +6521,7 @@ private readonly ReservationStore _store;
             if (!startCommit.Applied)
             {
                 _log.Add("CHAIN_CONTINUOUS_CAPTURE_BOUNDARY", $"R{predecessorId}",
-                    $"result=RETRYABLE_FAILED predecessor=R{predecessorId} successor=R{successor.Id} reason=start_commit_rejected detail={SafeValue(startCommit.Reason)} physicalRetune=False workerRestart=False rule=chain_continuous_capture_contract");
+                    $"result=RETRYABLE_FAILED predecessor=R{predecessorId} successor=R{successor.Id} reason=start_commit_rejected detail={LogTextContract.TrimOrDash(startCommit.Reason)} physicalRetune=False workerRestart=False rule=chain_continuous_capture_contract");
                 return false;
             }
             committedSuccessor = startCommit.Reservation ?? _store.GetById(successor.Id) ?? latestSuccessor;
@@ -6627,7 +6529,7 @@ private readonly ReservationStore _store;
         else
         {
             _log.Add("CHAIN_CONTINUOUS_CAPTURE_BOUNDARY", $"R{predecessorId}",
-                $"result=RESUME predecessor=R{predecessorId} successor=R{successor.Id} reason=successor_already_recording_retry_pool_owner_transfer pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} physicalRetune=False workerRestart=False rule=chain_continuous_capture_contract");
+                $"result=RESUME predecessor=R{predecessorId} successor=R{successor.Id} reason=successor_already_recording_retry_pool_owner_transfer pid={session.ProcessId} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} physicalRetune=False workerRestart=False rule=chain_continuous_capture_contract");
         }
 
         // Terminal/start observers can run other reservation work. Re-read before the lease
@@ -6646,7 +6548,7 @@ private readonly ReservationStore _store;
         catch (Exception ex)
         {
             _log.Add("CHAIN_CONTINUOUS_CAPTURE_BOUNDARY", $"R{predecessorId}",
-                $"result=RETRYABLE_FAILED predecessor=R{predecessorId} successor=R{successor.Id} reason=pool_owner_transfer_failed errorType={ex.GetType().Name} error={TrimForLog(ex.Message, 180)} " +
+                $"result=RETRYABLE_FAILED predecessor=R{predecessorId} successor=R{successor.Id} reason=pool_owner_transfer_failed errorType={ex.GetType().Name} error={LogTextContract.TruncateWithDots(ex.Message, 180)} " +
                 $"sessionOwner=R{session.ReservationId} activeSessionKey=predecessor_kept successorStatus={committedSuccessor?.Status.ToString() ?? "-"} physicalRetune=False workerRestart=False leaseRelease=False rule=chain_continuous_capture_contract");
             return false;
         }
@@ -6664,8 +6566,8 @@ private readonly ReservationStore _store;
         PublishChainRuntimeSnapshot(committedSuccessor, session, null, "continuous_capture_owner_transfer");
 
         _log.Add("CHAIN_CONTINUOUS_CAPTURE_BOUNDARY", $"R{successor.Id}",
-            $"result=SUCCESS predecessor=R{predecessorId} successor=R{successor.Id} pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} did={SafeValue(session.Lease.Did)} " +
-            $"predecessorOutput={SafeValue(predecessorSegment.OutputPath)} successorOutput={SafeValue(successorSegment.OutputPath)} successorOpenAt={successorSegment.OpenAt:MM/dd HH:mm:ss.fff} predecessorCloseAt={predecessorSegment.CloseAt:MM/dd HH:mm:ss.fff} " +
+            $"result=SUCCESS predecessor=R{predecessorId} successor=R{successor.Id} pid={session.ProcessId} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} did={LogTextContract.TrimOrDash(session.Lease.Did)} " +
+            $"predecessorOutput={LogTextContract.TrimOrDash(predecessorSegment.OutputPath)} successorOutput={LogTextContract.TrimOrDash(successorSegment.OutputPath)} successorOpenAt={successorSegment.OpenAt:MM/dd HH:mm:ss.fff} predecessorCloseAt={predecessorSegment.CloseAt:MM/dd HH:mm:ss.fff} " +
             $"successorLogicalSegmentEnd={successorSegment.CloseAt:MM/dd HH:mm:ss.fff} physicalCaptureEnd={captureEnd:MM/dd HH:mm:ss.fff} " +
             "samePhysicalLease=True physicalRetune=False bonDriverClose=False workerRestart=False separateTsFiles=True overlapMarginsPreserved=True rule=recording_timing_ssot_contract");
 
@@ -6789,7 +6691,7 @@ private readonly ReservationStore _store;
         if (!File.Exists(segment.ResultPath))
         {
             _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{rid}",
-                $"result=WAIT reason=segment_sink_release_evidence_missing resultPath={SafeValue(segment.ResultPath)} output={SafeValue(segment.OutputPath)} rule=recording_result_finalized_file_release_contract");
+                $"result=WAIT reason=segment_sink_release_evidence_missing resultPath={LogTextContract.TrimOrDash(segment.ResultPath)} output={LogTextContract.TrimOrDash(segment.OutputPath)} rule=recording_result_finalized_file_release_contract");
             return false;
         }
 
@@ -6816,7 +6718,7 @@ private readonly ReservationStore _store;
             if (!stopClaim.Applied)
             {
                 _log.Add("CHAIN_CONTINUOUS_SEGMENT_FINALIZE", $"R{rid}",
-                    $"result=RETRYABLE_FAILED reason=stop_claim_rejected detail={SafeValue(stopClaim.Reason)} physicalCaptureContinues=True rule=chain_continuous_capture_contract");
+                    $"result=RETRYABLE_FAILED reason=stop_claim_rejected detail={LogTextContract.TrimOrDash(stopClaim.Reason)} physicalCaptureContinues=True rule=chain_continuous_capture_contract");
                 return false;
             }
             stoppingVersion = stopClaim.CurrentDataVersion;
@@ -6834,7 +6736,7 @@ private readonly ReservationStore _store;
         catch (Exception ex)
         {
             _log.Add("CHAIN_CONTINUOUS_SEGMENT_VERIFY", $"R{rid}",
-                $"result=FAILED errorType={ex.GetType().Name} error={TrimForLog(ex.Message, 180)} action=continue_completion_evidence rule=chain_continuous_capture_contract");
+                $"result=FAILED errorType={ex.GetType().Name} error={LogTextContract.TruncateWithDots(ex.Message, 180)} action=continue_completion_evidence rule=chain_continuous_capture_contract");
         }
         var evidence = EvaluateRecordingCompletionEvidence(outcome, verify);
         var finalStatus = receipt?.Transition.CurrentStatus
@@ -6845,11 +6747,14 @@ private readonly ReservationStore _store;
             var terminal = _store.TryCompleteRecordingStopWithReceipt(rid, stoppingVersion, finalStatus, failureReason,
                 committed => boundaryExecution.PredecessorTerminalCommit = new(committed, failureReason),
                 new ContinuousChainFinalizationArtifact(segment.OutputPath, segment.ResultPath, segment.RuntimeStatsPath)
-                { JobPath = session.JobPath, ControlPath = session.ChainControlPath });
+                { JobPath = session.JobPath, ControlPath = session.ChainControlPath },
+                finalStatus == ReservationStatus.Failed
+                    ? RecordingFailurePresentationContract.FromWorkerResult(outcome.ResponseExists, outcome.Success)
+                    : RecordingFailureCause.Unspecified);
             if (!terminal.Applied)
             {
                 _log.Add("CHAIN_CONTINUOUS_SEGMENT_FINALIZE", $"R{rid}",
-                    $"result=FAILED reason=terminal_commit_rejected detail={SafeValue(terminal.Reason)} physicalCaptureContinues=True rule=chain_continuous_capture_contract");
+                    $"result=FAILED reason=terminal_commit_rejected detail={LogTextContract.TrimOrDash(terminal.Reason)} physicalCaptureContinues=True rule=chain_continuous_capture_contract");
                 return false;
             }
         }
@@ -6859,8 +6764,8 @@ private readonly ReservationStore _store;
             new ContinuousChainResultProjectionContext(session.ProcessId, true, _tunerPool.GetStatusSummary()))) return false;
         boundaryExecution.PredecessorResultProjected = true;
         _log.Add("CHAIN_CONTINUOUS_SEGMENT_FINALIZE", $"R{rid}",
-            $"result={finalStatus} bytes={outcome.BytesWritten} packets={outcome.PacketsWritten} outputDrops={SafeValue(outcome.OutputContinuityDrops)} outputCcErrors={SafeValue(outcome.OutputContinuityErrors)} outputSyncErrors={SafeValue(outcome.OutputSyncErrors)} outputScrambled={SafeValue(outcome.OutputScrambledPackets)} targetMediaScrambled={SafeValue(outcome.OutputTargetMediaScrambledPackets)} " +
-            $"leaseReleased=False workerStopped=False physicalCaptureContinues=True output={SafeValue(segment.OutputPath)} rule=chain_continuous_capture_contract");
+            $"result={finalStatus} bytes={outcome.BytesWritten} packets={outcome.PacketsWritten} outputDrops={LogTextContract.TrimOrDash(outcome.OutputContinuityDrops)} outputCcErrors={LogTextContract.TrimOrDash(outcome.OutputContinuityErrors)} outputSyncErrors={LogTextContract.TrimOrDash(outcome.OutputSyncErrors)} outputScrambled={LogTextContract.TrimOrDash(outcome.OutputScrambledPackets)} targetMediaScrambled={LogTextContract.TrimOrDash(outcome.OutputTargetMediaScrambledPackets)} " +
+            $"leaseReleased=False workerStopped=False physicalCaptureContinues=True output={LogTextContract.TrimOrDash(segment.OutputPath)} rule=chain_continuous_capture_contract");
         // CHAIN_CONTINUOUS_CAPTURE_BOUNDARY_EVIDENCE_LIFETIME_INVARIANT:
         // Keep the predecessor segment result/runtime files until logical owner transfer succeeds.
         // ProcessContinuousChainBoundaryAsync deliberately uses ResultPath existence as the durable
@@ -6942,7 +6847,7 @@ private readonly ReservationStore _store;
             {
                 using var eventScope = _typedEvents.BeginOutboxScope(out var commitEvents);
                 _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{rid}",
-                    $"result=READY source={(context.SharedCaptureContinues ? "shared_chain_segment" : "stored_chain_segment")} projection=PluginTypedEvent segmentSinkReleased=True sharedWorkerContinues={context.SharedCaptureContinues} path={SafeValue(result.FilePath)} externalReadAllowed={(result.FileCreated == true && !string.IsNullOrWhiteSpace(result.FilePath) ? "True" : "NoFile")} rule=recording_result_finalized_file_release_contract");
+                    $"result=READY source={(context.SharedCaptureContinues ? "shared_chain_segment" : "stored_chain_segment")} projection=PluginTypedEvent segmentSinkReleased=True sharedWorkerContinues={context.SharedCaptureContinues} path={LogTextContract.TrimOrDash(result.FilePath)} externalReadAllowed={(result.FileCreated == true && !string.IsNullOrWhiteSpace(result.FilePath) ? "True" : "NoFile")} rule=recording_result_finalized_file_release_contract");
                 _log.Add("RECORDING_RESULT_PUBLICATION", "Pending", "result=DURABLY_STAGED owner=recording_file_catalog rule=recording_file_publication_contract");
                 commitEvents();
             }
@@ -7041,7 +6946,10 @@ private readonly ReservationStore _store;
                 recordCommitted(committed);
                 // Release every file/admission owned by this attempt before external observers.
                 boundRead.Dispose(); verifiedRead.Dispose(); recoveryAdmission.Dispose();
-            }, current.Artifact);
+            }, current.Artifact,
+            terminal == ReservationStatus.Failed
+                ? RecordingFailurePresentationContract.FromWorkerResult(outcome.ResponseExists, outcome.Success)
+                : RecordingFailureCause.Unspecified);
         if (!result.Applied) recordCommitted(result);
     }
 
@@ -7262,7 +7170,7 @@ private readonly ReservationStore _store;
 
             _log.Add("CHAIN_BOUNDARY_PLAN", $"R{session.ReservationId}",
                 $"result={(assignedTunerMissing ? "MISSING_ASSIGNED_TUNER" : "OK")} predecessor=R{session.ReservationId} successor=R{successorId} " +
-                $"assignedTuner={SafeValue(assignedSuccessorTuner)} activePredecessorTuner={SafeValue(activePredecessorTuner)} activePredecessorDid={SafeValue(activePredecessorDid)} " +
+                $"assignedTuner={LogTextContract.TrimOrDash(assignedSuccessorTuner)} activePredecessorTuner={LogTextContract.TrimOrDash(activePredecessorTuner)} activePredecessorDid={LogTextContract.TrimOrDash(activePredecessorDid)} " +
                 $"sameAssignedTunerAsPredecessor={sameAssignedTunerAsPredecessor} successorDue={successorDueTime:MM/dd HH:mm:ss} successorStart={successor.StartTime:MM/dd HH:mm:ss} " +
                 $"sinkPreOpenAt={sinkPreOpenAt:MM/dd HH:mm:ss} sinkPreOpenLeadSeconds={sinkPreOpenLeadSeconds} scheduler=high_priority intervalMs={ChainBoundaryMonitorIntervalMs} normalTickMs={PollingIntervalMs} commonRoute=ALLOC_ROUTE/TUNER_ALLOC source=FinalConflictPlan.AssignedTuner rule=release_contract");
 
@@ -7278,7 +7186,7 @@ private readonly ReservationStore _store;
                 if (timeToSinkPreOpen.TotalSeconds <= 60 && ShouldLogChainBoundaryWait(boundaryExecutionKey, timeToSinkPreOpen.TotalSeconds))
                 {
                     _log.Add("CHAIN_SUCCESSOR_SINK_PREOPEN", $"R{session.ReservationId}",
-                        $"result=WAIT predecessor=R{session.ReservationId} successor=R{successorId} assignedTuner={SafeValue(assignedSuccessorTuner)} " +
+                        $"result=WAIT predecessor=R{session.ReservationId} successor=R{successorId} assignedTuner={LogTextContract.TrimOrDash(assignedSuccessorTuner)} " +
                         $"sameAssignedTunerAsPredecessor={sameAssignedTunerAsPredecessor} sinkPreOpenAt={sinkPreOpenAt:HH:mm:ss} remainingSec={timeToSinkPreOpen.TotalSeconds:F0} " +
                         $"scheduler=high_priority intervalMs={ChainBoundaryMonitorIntervalMs} normalTickMs={PollingIntervalMs} commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=release_contract");
                 }
@@ -7318,7 +7226,7 @@ private readonly ReservationStore _store;
             {
                 CompleteChainBoundaryExecution(boundaryExecution, false, true, "chain_assigned_tuner_mismatch", now);
                 _log.Add("CHAIN_TUNER_INVARIANT", $"R{session.ReservationId}",
-                    $"result=RETRYABLE_FAILED predecessor=R{session.ReservationId} successor=R{successorId} expectedTuner={SafeValue(activePredecessorTuner)} assignedTuner={SafeValue(assignedSuccessorTuner)} action=do_not_start_on_different_tuner commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=chain_same_physical_tuner_contract");
+                    $"result=RETRYABLE_FAILED predecessor=R{session.ReservationId} successor=R{successorId} expectedTuner={LogTextContract.TrimOrDash(activePredecessorTuner)} assignedTuner={LogTextContract.TrimOrDash(assignedSuccessorTuner)} action=do_not_start_on_different_tuner commonRoute=ALLOC_ROUTE/TUNER_ALLOC rule=chain_same_physical_tuner_contract");
                 return;
             }
 
@@ -7345,7 +7253,7 @@ private readonly ReservationStore _store;
             CompleteChainBoundaryExecution(boundaryExecution, false, true, "continuous_capture_required", now);
             _log.Add("CHAIN_CONTINUOUS_CAPTURE_GUARD", $"R{session.ReservationId}",
                 $"result=RETRY predecessor=R{session.ReservationId} successor=R{successorId} reason=shared_capture_not_active " +
-                $"assignedTuner={SafeValue(assignedSuccessorTuner)} actualTuner={SafeValue(activePredecessorTuner)} pid={session.ProcessId} " +
+                $"assignedTuner={LogTextContract.TrimOrDash(assignedSuccessorTuner)} actualTuner={LogTextContract.TrimOrDash(activePredecessorTuner)} pid={session.ProcessId} " +
                 "action=keep_predecessor_running_retry_continuous_upgrade workerRestart=False bonDriverClose=False physicalRetune=False rule=chain_continuous_capture_contract");
             return;
         
@@ -7375,21 +7283,22 @@ private readonly ReservationStore _store;
             {
                 skippedRuntimeOwner++;
                 _log.Add("RESERVATION_LIFECYCLE_CONVERGENCE", $"R{r.Id}",
-                    $"result=SKIPPED_LIVE_OWNER source={SafeValue(source)} status={r.Status} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} " +
+                    $"result=SKIPPED_LIVE_OWNER source={LogTextContract.TrimOrDash(source)} status={r.Status} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} " +
                     $"deadline={ReservationRuntimeResponsibilityPolicy.GetExecutionDeadline(r, _ini.PostEndMarginSeconds):MM/dd HH:mm:ss} ownerKind={ownerKind} " +
-                    $"pid={(ownerPid > 0 ? ownerPid.ToString() : "-")} tuner={SafeValue(ownerTuner)} userChain={r.IsUserChain} " +
+                    $"pid={(ownerPid > 0 ? ownerPid.ToString() : "-")} tuner={LogTextContract.TrimOrDash(ownerTuner)} userChain={r.IsUserChain} " +
                     "action=preserve_nonterminal rule=reservation_lifecycle_convergence_contract");
                 continue;
             }
 
             const string reason = "expired_starting_without_live_runtime_owner";
-            var terminal = _store.TryFailRecordingStart(r.Id, r.DataVersion, reason);
+            var terminal = _store.TryFailRecordingStart(r.Id, r.DataVersion, reason,
+                failureCause: RecordingFailureCause.StartDeadlinePassed);
             _log.Add("RESERVATION_LIFECYCLE_CONVERGENCE", $"R{r.Id}",
-                $"result={(terminal.Applied ? "APPLIED" : "REJECTED")} source={SafeValue(source)} from=Starting to={(terminal.Reservation?.Status.ToString() ?? "-")} " +
+                $"result={(terminal.Applied ? "APPLIED" : "REJECTED")} source={LogTextContract.TrimOrDash(source)} from=Starting to={(terminal.Reservation?.Status.ToString() ?? "-")} " +
                 $"start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} deadline={ReservationRuntimeResponsibilityPolicy.GetExecutionDeadline(r, _ini.PostEndMarginSeconds):MM/dd HH:mm:ss} " +
                 $"recordingStartedAt={(r.RecordingStartedAt.HasValue ? r.RecordingStartedAt.Value.ToString("MM/dd HH:mm:ss") : "-")} " +
                 $"userChain={r.IsUserChain} chainPrev={(r.UserChainPreviousId.HasValue ? $"R{r.UserChainPreviousId.Value}" : "-")} runtimeOwner=False " +
-                $"reason={reason} casReason={SafeValue(terminal.Reason)} dataVersion={terminal.PreviousDataVersion}->{terminal.CurrentDataVersion} " +
+                $"reason={reason} casReason={LogTextContract.TrimOrDash(terminal.Reason)} dataVersion={terminal.PreviousDataVersion}->{terminal.CurrentDataVersion} " +
                 "uiFiltering=none powerGuardFiltering=derived_from_same_deadline rule=reservation_lifecycle_convergence_contract");
 
             if (terminal.Applied) applied++; else rejected++;
@@ -7398,7 +7307,7 @@ private readonly ReservationStore _store;
         if (applied > 0 || skippedRuntimeOwner > 0 || rejected > 0)
         {
             _log.Add("RESERVATION_LIFECYCLE_CONVERGENCE", "Summary",
-                $"result=COMPLETED source={SafeValue(source)} candidates={candidates.Count} applied={applied} skippedRuntimeOwner={skippedRuntimeOwner} rejected={rejected} " +
+                $"result=COMPLETED source={LogTextContract.TrimOrDash(source)} candidates={candidates.Count} applied={applied} skippedRuntimeOwner={skippedRuntimeOwner} rejected={rejected} " +
                 $"postEndMarginSec={_ini.PostEndMarginSeconds} lifecycleOwner=reservation_scheduler runtimeOwnerSource=start_singleflight+active_session+shared_capture_segment " +
                 "uiFiltering=none rule=reservation_lifecycle_convergence_contract");
         }
@@ -7473,8 +7382,8 @@ private readonly ReservationStore _store;
 
             var restore = _store.TryRestoreFailedRecordingRuntime(r.Id, r.DataVersion);
             _log.Add("REC_STATUS_GUARD_ACTIVE_SESSION", $"R{r.Id}",
-                $"result={(restore.Applied ? "RESTORED_BEFORE_DECISION" : "RESTORE_REJECTED")} stage={stage} reason=active_tvairepgrec_session_is_source_of_truth pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} previousStatus=Failed " +
-                $"casReason={SafeValue(restore.Reason)} dataVersion={restore.PreviousDataVersion}->{restore.CurrentDataVersion} rule=recording_lifecycle_cas_contract");
+                $"result={(restore.Applied ? "RESTORED_BEFORE_DECISION" : "RESTORE_REJECTED")} stage={stage} reason=active_tvairepgrec_session_is_source_of_truth pid={session.ProcessId} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} previousStatus=Failed " +
+                $"casReason={LogTextContract.TrimOrDash(restore.Reason)} dataVersion={restore.PreviousDataVersion}->{restore.CurrentDataVersion} rule=recording_lifecycle_cas_contract");
         }
     }
 
@@ -7528,7 +7437,7 @@ private readonly ReservationStore _store;
                 {
                     resumeRecovered++;
                     _log.Add("REC_RESUME_REATTACH", $"R{reservation.Id}",
-                        $"result=RECOVERED_AFTER_VERIFICATION cycle={context.CycleId} source={context.Source} workerState={reattach.State} reason={SafeValue(reattach.Reason)} action=converged_via_interrupted_recording_recovery rule=recording_worker_reattach_contract");
+                        $"result=RECOVERED_AFTER_VERIFICATION cycle={context.CycleId} source={context.Source} workerState={reattach.State} reason={LogTextContract.TrimOrDash(reattach.Reason)} action=converged_via_interrupted_recording_recovery rule=recording_worker_reattach_contract");
                     continue;
                 }
             }
@@ -7540,7 +7449,7 @@ private readonly ReservationStore _store;
 
             _log.Add("REC_RESUME_REATTACH", $"R{reservation.Id}",
                 $"result=OWNERSHIP_UNAVAILABLE cycle={context.CycleId} source={context.Source} " +
-                $"workerState={reattach.State} pid={(reattach.ProcessId.HasValue ? reattach.ProcessId.Value.ToString() : "-")} reason={SafeValue(reattach.Reason)} " +
+                $"workerState={reattach.State} pid={(reattach.ProcessId.HasValue ? reattach.ProcessId.Value.ToString() : "-")} reason={LogTextContract.TrimOrDash(reattach.Reason)} " +
                 $"action={(reattach.State == RecordingWorkerReattachState.NoWorker && !finalizeMissingWorker ? "preserve_until_resume_verification" : "preserve_db_recording_do_not_kill_do_not_reassign")} rule=recording_worker_reattach_contract");
         }
 
@@ -7557,7 +7466,7 @@ private readonly ReservationStore _store;
                 foreach (var session in aliveSessions)
                 {
                     _log.Add("REC_POWER_RESUME_RECORDING_OBSERVE", $"R{session.ReservationId}",
-                        $"result=PRESERVED_ALIVE cycle={context.CycleId} source={context.Source} pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} " +
+                        $"result=PRESERVED_ALIVE cycle={context.CycleId} source={context.Source} pid={session.ProcessId} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} " +
                         "reason=owned_worker_alive powerNotification=observation_only action=continue_same_session_same_file rule=power_notification_observation_only_contract");
                 }
             }
@@ -7582,8 +7491,8 @@ private readonly ReservationStore _store;
                         _recordingTerminalFailureReasons[session.ReservationId] = "worker_missing_confirmed_after_power_resume";
 
                     _log.Add("REC_POWER_RESUME_RECORDING_EVIDENCE", $"R{session.ReservationId}",
-                        $"result=WORKER_MISSING_CONFIRMED cycle={context.CycleId} source={context.Source} pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} " +
-                        $"service={SafeValue(reservation?.ServiceName)} title={ReservationDisplayTitle(reservation?.Title)} " +
+                        $"result=WORKER_MISSING_CONFIRMED cycle={context.CycleId} source={context.Source} pid={session.ProcessId} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} " +
+                        $"service={LogTextContract.TrimOrDash(reservation?.ServiceName)} title={ReservationDisplayTitle(reservation?.Title)} " +
                         "evidence=owned_worker_missing_after_bounded_verification action=close_missing_segment_then_use_common_recovery rule=power_resume_worker_evidence_contract");
 
                     await StopSessionAsync(
@@ -7622,7 +7531,7 @@ private readonly ReservationStore _store;
         foreach (var stale in stalePoolLeases)
         {
             _log.Add("RECORDING_RECONCILE_STALE_POOL_LEASE", $"R{stale.ReservationId}",
-                $"result=OWNERSHIP_UNAVAILABLE cycle={context.CycleId} source={context.Source} pid={stale.ProcessId} tuner={SafeValue(stale.Lease.Name)} " +
+                $"result=OWNERSHIP_UNAVAILABLE cycle={context.CycleId} source={context.Source} pid={stale.ProcessId} tuner={LogTextContract.TrimOrDash(stale.Lease.Name)} " +
                 $"poolLeaseId={stale.Lease.PoolLeaseId:D} occupancyGeneration={stale.Lease.OccupancyGeneration} action=preserve_worker_reject_stale_cleanup rule=release_contract");
         }
         return new TunerOwnershipReconcileResult(
@@ -7656,13 +7565,13 @@ private readonly ReservationStore _store;
             if (r is null)
             {
                 _log.Add("REC_INTERRUPTED_DETECTED", $"R{session.ReservationId}",
-                    $"result=DETECTED reason=reservation_missing_worker_process_gone pid={session.ProcessId} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} tuner={SafeValue(session.Lease.Name)} action=release_session_only rule=release_contract");
+                    $"result=DETECTED reason=reservation_missing_worker_process_gone pid={session.ProcessId} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} action=release_session_only rule=release_contract");
             }
             else
             {
                 var fileEvidence = ProbeInterruptedRecordingFile(r);
                 _log.Add("REC_INTERRUPTED_DETECTED", $"R{session.ReservationId}",
-                    $"result=DETECTED reason=worker_process_missing_before_planned_end pid={session.ProcessId} now={now:MM/dd HH:mm:ss} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} file={SafeValue(fileEvidence.Summary)} rule=release_contract");
+                    $"result=DETECTED reason=worker_process_missing_before_planned_end pid={session.ProcessId} now={now:MM/dd HH:mm:ss} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} service={LogTextContract.TrimOrDash(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} file={LogTextContract.TrimOrDash(fileEvidence.Summary)} rule=release_contract");
                 lock (_sessionGate)
                     _recordingTerminalFailureReasons[session.ReservationId] = "worker_process_missing_before_planned_end";
             }
@@ -7803,9 +7712,9 @@ private readonly ReservationStore _store;
 
 #if TVAIR_DEVELOPER_DIAGNOSTICS
                     _log.Add("BROADCAST_TIME_OBSERVATION", $"R{reservationId}",
-                        $"result=OBSERVED purpose=recording_runtime group={SafeValue(group)} source=worker_transport_boundary tableId=0x{tableId:X2} observations={Math.Max(1, observationCount)} " +
+                        $"result=OBSERVED purpose=recording_runtime group={LogTextContract.TrimOrDash(group)} source=worker_transport_boundary tableId=0x{tableId:X2} observations={Math.Max(1, observationCount)} " +
                         $"broadcastTime={broadcastTime:O} systemTimeAtObservation={systemObservedAt:O} offsetMs={offsetMilliseconds} " +
-                        $"precision=section_second_resolution_transport_latency_uncompensated action=update_prerec_reference_only updatePolicy=refresh_on_every_newer_valid_observation_hold_latest_between_observations referenceUpdated={updated} referenceReason={SafeValue(reason)} windowsTimeChanged=False " +
+                        $"precision=section_second_resolution_transport_latency_uncompensated action=update_prerec_reference_only updatePolicy=refresh_on_every_newer_valid_observation_hold_latest_between_observations referenceUpdated={updated} referenceReason={LogTextContract.TrimOrDash(reason)} windowsTimeChanged=False " +
                         $"reservationClockMutation=none prerecClockMutation=effective_clock_only recordingClockMutation=none epgClockMutation=none wakeClockMutation=none rule=broadcast_time_reference_single_source");
 #endif
                     return;
@@ -7874,12 +7783,12 @@ private readonly ReservationStore _store;
             session.MarkRecordingFileStallStopRequested();
             lock (_sessionGate) _recordingTerminalFailureReasons[session.ReservationId] = observation.Reason;
             _log.Add("REC_WRITE_STALLED", $"R{session.ReservationId}",
-                $"result=FAILED reason={observation.Reason} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} " +
-                $"path={SafeValue(session.RecordingFilePath)} bytes={observation.Bytes} previousBytes={observation.PreviousBytes} " +
+                $"result=FAILED reason={observation.Reason} service={LogTextContract.TrimOrDash(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} " +
+                $"path={LogTextContract.TrimOrDash(session.RecordingFilePath)} bytes={observation.Bytes} previousBytes={observation.PreviousBytes} " +
                 $"monitorStarted={session.RecordingFileGrowthWatchStartedAt:MM/dd HH:mm:ss} lastGrowth={session.LastRecordingFileGrowthAt:MM/dd HH:mm:ss} " +
                 $"elapsedSinceStartSec={(int)Math.Max(0, (now - session.RecordingFileGrowthWatchStartedAt).TotalSeconds)} elapsedSinceGrowthSec={(int)Math.Max(0, (now - session.LastRecordingFileGrowthAt).TotalSeconds)} " +
                 $"initialGraceSec={RecordingFileGrowthInitialGraceSec} stallSec={RecordingFileGrowthStallSec} logicalSegmentEnd={logicalSegmentEnd:MM/dd HH:mm:ss} physicalCaptureEnd={session.PhysicalCaptureEndTime:MM/dd HH:mm:ss} sharedCapture={session.IsSharedChainCapture} " +
-                $"pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} action=stop_and_fail_after_recovery_exhausted rule=recording_timing_ssot_contract");
+                $"pid={session.ProcessId} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} action=stop_and_fail_after_recovery_exhausted rule=recording_timing_ssot_contract");
 
             await StopSessionAsync(session, ReservationStatus.Failed).ConfigureAwait(false);
         }
@@ -7896,8 +7805,8 @@ private readonly ReservationStore _store;
         {
             _log.Add("REC_STARTUP_ZERO_BYTE_RECOVERY", $"R{session.ReservationId}",
                 $"result=SKIP reason=attempt_exhausted attempts={attempt - 1} max={RecordingStartupZeroByteReloadMaxAttempts} " +
-                $"sourceReason={SafeValue(observation.Reason)} bytes={observation.Bytes} previousBytes={observation.PreviousBytes} " +
-                $"pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} rule=release_contract");
+                $"sourceReason={LogTextContract.TrimOrDash(observation.Reason)} bytes={observation.Bytes} previousBytes={observation.PreviousBytes} " +
+                $"pid={session.ProcessId} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} rule=release_contract");
             return false;
         }
 
@@ -7905,7 +7814,7 @@ private readonly ReservationStore _store;
         if (now >= logicalSegmentEnd.AddSeconds(-RecordingFileGrowthPlannedEndGuardSec))
         {
             _log.Add("REC_STARTUP_ZERO_BYTE_RECOVERY", $"R{session.ReservationId}",
-                $"result=SKIP reason=near_logical_segment_end attempt={attempt} sourceReason={SafeValue(observation.Reason)} now={now:MM/dd HH:mm:ss} logicalSegmentEnd={logicalSegmentEnd:MM/dd HH:mm:ss} physicalCaptureEnd={session.PhysicalCaptureEndTime:MM/dd HH:mm:ss} rule=recording_timing_ssot_contract");
+                $"result=SKIP reason=near_logical_segment_end attempt={attempt} sourceReason={LogTextContract.TrimOrDash(observation.Reason)} now={now:MM/dd HH:mm:ss} logicalSegmentEnd={logicalSegmentEnd:MM/dd HH:mm:ss} physicalCaptureEnd={session.PhysicalCaptureEndTime:MM/dd HH:mm:ss} rule=recording_timing_ssot_contract");
             return false;
         }
 
@@ -7913,14 +7822,14 @@ private readonly ReservationStore _store;
         if (string.IsNullOrWhiteSpace(group))
         {
             _log.Add("REC_STARTUP_ZERO_BYTE_RECOVERY", $"R{session.ReservationId}",
-                $"result=SKIP reason=group_unresolved attempt={attempt} sourceReason={SafeValue(observation.Reason)} service={SafeValue(r.ServiceName)} sid={r.ServiceId} rule=release_contract");
+                $"result=SKIP reason=group_unresolved attempt={attempt} sourceReason={LogTextContract.TrimOrDash(observation.Reason)} service={LogTextContract.TrimOrDash(r.ServiceName)} sid={r.ServiceId} rule=release_contract");
             return false;
         }
 
         _log.Add("REC_STARTUP_ZERO_BYTE_RECOVERY", $"R{session.ReservationId}",
             $"result=BEGIN action=reload_worker_and_bondriver attempt={attempt} max={RecordingStartupZeroByteReloadMaxAttempts} " +
-            $"sourceReason={SafeValue(observation.Reason)} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} " +
-            $"bytes={observation.Bytes} previousBytes={observation.PreviousBytes} pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} did={SafeValue(session.Lease.Did)} " +
+            $"sourceReason={LogTextContract.TrimOrDash(observation.Reason)} service={LogTextContract.TrimOrDash(r.ServiceName)} title={ReservationDisplayTitle(r.Title)} " +
+            $"bytes={observation.Bytes} previousBytes={observation.PreviousBytes} pid={session.ProcessId} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} did={LogTextContract.TrimOrDash(session.Lease.Did)} " +
             $"plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} rule=release_contract");
 
         session.MarkRecordingFileStallStopRequested();
@@ -7938,7 +7847,7 @@ private readonly ReservationStore _store;
         // worker終了・lease解放・generation更新を再利用可能証拠の単一正本とする。
         try { session.Lease.Dispose(); } catch { }
         _log.Add("REC_STARTUP_ZERO_BYTE_RECOVERY", $"R{session.ReservationId}",
-            $"result=RELEASED stage=after_old_worker_stop attempt={attempt} tuner={SafeValue(session.Lease.Name)} did={SafeValue(session.Lease.Did)} " +
+            $"result=RELEASED stage=after_old_worker_stop attempt={attempt} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} did={LogTextContract.TrimOrDash(session.Lease.Did)} " +
             $"nextGate=worker_exit_lease_release_generation rule=release_contract");
         TvAirManagedProcessRegistry.Unregister(session.ProcessId);
         lock (_sessionGate)
@@ -7958,7 +7867,7 @@ private readonly ReservationStore _store;
             {
                 var failed = _store.TryFinalizeRecordingRuntimeFailure(latest.Id, latest.DataVersion, DateTime.Now, "reservation_not_recordable_after_old_worker_stop");
                 _log.Add("REC_STARTUP_ZERO_BYTE_RECOVERY_TERMINAL_CAS", $"R{session.ReservationId}",
-                    $"result={(failed.Applied ? "APPLIED" : "REJECTED")} reason={SafeValue(failed.Reason)} dataVersion={failed.PreviousDataVersion}->{failed.CurrentDataVersion} source=reservation_not_recordable_after_old_worker_stop rule=recording_lifecycle_cas_contract");
+                    $"result={(failed.Applied ? "APPLIED" : "REJECTED")} reason={LogTextContract.TrimOrDash(failed.Reason)} dataVersion={failed.PreviousDataVersion}->{failed.CurrentDataVersion} source=reservation_not_recordable_after_old_worker_stop rule=recording_lifecycle_cas_contract");
             }
             _recordingStartupZeroByteReloadAttempts.TryRemove(session.ReservationId, out _);
             return true;
@@ -7966,8 +7875,8 @@ private readonly ReservationStore _store;
 
         var restarted = await LaunchNewRecordingAsync(latest, group, ct).ConfigureAwait(false);
         _log.Add("REC_STARTUP_ZERO_BYTE_RECOVERY", $"R{session.ReservationId}",
-            $"result={(restarted ? "RESTARTED" : "RESTART_FAILED")} action=reload_worker_and_bondriver attempt={attempt} group={SafeValue(group)} " +
-            $"service={SafeValue(latest.ServiceName)} title={ReservationDisplayTitle(latest.Title)} oldPid={session.ProcessId} rule=release_contract");
+            $"result={(restarted ? "RESTARTED" : "RESTART_FAILED")} action=reload_worker_and_bondriver attempt={attempt} group={LogTextContract.TrimOrDash(group)} " +
+            $"service={LogTextContract.TrimOrDash(latest.ServiceName)} title={ReservationDisplayTitle(latest.Title)} oldPid={session.ProcessId} rule=release_contract");
 
         if (!restarted)
         {
@@ -7976,7 +7885,7 @@ private readonly ReservationStore _store;
             {
                 var failed = _store.TryFinalizeRecordingRuntimeFailure(failedSnapshot.Id, failedSnapshot.DataVersion, DateTime.Now, "restart_failed");
                 _log.Add("REC_STARTUP_ZERO_BYTE_RECOVERY_TERMINAL_CAS", $"R{session.ReservationId}",
-                    $"result={(failed.Applied ? "APPLIED" : "REJECTED")} reason={SafeValue(failed.Reason)} dataVersion={failed.PreviousDataVersion}->{failed.CurrentDataVersion} source=restart_failed rule=recording_lifecycle_cas_contract");
+                    $"result={(failed.Applied ? "APPLIED" : "REJECTED")} reason={LogTextContract.TrimOrDash(failed.Reason)} dataVersion={failed.PreviousDataVersion}->{failed.CurrentDataVersion} source=restart_failed rule=recording_lifecycle_cas_contract");
             }
             _recordingStartupZeroByteReloadAttempts.TryRemove(session.ReservationId, out _);
         }
@@ -8011,7 +7920,7 @@ private readonly ReservationStore _store;
             if (previousBytes <= 0 && bytes > 0)
             {
                 _log.Add("REC_FILE_GROWTH_WATCH", $"R{session.ReservationId}",
-                    $"result=OBSERVED path={SafeValue(session.RecordingFilePath)} bytes={bytes} previousBytes={previousBytes} pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} rule=release_contract");
+                    $"result=OBSERVED path={LogTextContract.TrimOrDash(session.RecordingFilePath)} bytes={bytes} previousBytes={previousBytes} pid={session.ProcessId} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} rule=release_contract");
             }
             return RecordingFileGrowthObservation.Continue(bytes, previousBytes);
         }
@@ -8030,7 +7939,7 @@ private readonly ReservationStore _store;
         {
             session.MarkRecordingFileGrowth(now, bytes);
             _log.Add("REC_FILE_GROWTH_WATCH", $"R{session.ReservationId}",
-                $"result=RESET reason=file_size_decreased path={SafeValue(session.RecordingFilePath)} bytes={bytes} previousBytes={previousBytes} pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} rule=release_contract");
+                $"result=RESET reason=file_size_decreased path={LogTextContract.TrimOrDash(session.RecordingFilePath)} bytes={bytes} previousBytes={previousBytes} pid={session.ProcessId} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} rule=release_contract");
             return RecordingFileGrowthObservation.Continue(bytes, previousBytes);
         }
 
@@ -8061,7 +7970,7 @@ private readonly ReservationStore _store;
             if (r is null)
             {
                 _log.Add("REC_FOLLOW_CHECK", $"R{session.ReservationId}",
-                    $"result=SKIP reason=reservation_missing tuner={SafeValue(session.Lease.Name)} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss}");
+                    $"result=SKIP reason=reservation_missing tuner={LogTextContract.TrimOrDash(session.Lease.Name)} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss}");
                 continue;
             }
 
@@ -8070,21 +7979,21 @@ private readonly ReservationStore _store;
                 var restore = _store.TryRestoreFailedRecordingRuntime(r.Id, r.DataVersion);
                 r = restore.Reservation ?? _store.GetById(session.ReservationId) ?? r;
                 _log.Add("REC_STATUS_RECONCILE", $"R{session.ReservationId}",
-                    $"result={(restore.Applied ? "RESTORED_TO_RECORDING" : "RESTORE_REJECTED")} reason=active_tvairepgrec_session_is_source_of_truth pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} previousStatus=Failed " +
-                    $"casReason={SafeValue(restore.Reason)} dataVersion={restore.PreviousDataVersion}->{restore.CurrentDataVersion} rule=recording_lifecycle_cas_contract");
+                    $"result={(restore.Applied ? "RESTORED_TO_RECORDING" : "RESTORE_REJECTED")} reason=active_tvairepgrec_session_is_source_of_truth pid={session.ProcessId} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} previousStatus=Failed " +
+                    $"casReason={LogTextContract.TrimOrDash(restore.Reason)} dataVersion={restore.PreviousDataVersion}->{restore.CurrentDataVersion} rule=recording_lifecycle_cas_contract");
             }
 
             if (r.Status != ReservationStatus.Recording)
             {
                 _log.Add("REC_FOLLOW_CHECK", $"R{r.Id}",
-                    $"result=SKIP reason=status_not_recording status={r.Status} tuner={SafeValue(session.Lease.Name)} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} " + FormatReservationForAudit(r, "follow_skip"));
+                    $"result=SKIP reason=status_not_recording status={r.Status} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} " + FormatReservationForAudit(r, "follow_skip"));
                 continue;
             }
 
             if (r.ServiceId == 0 || r.EventId == 0)
             {
                 _log.Add("REC_FOLLOW_CHECK", $"R{r.Id}",
-                    $"result=SKIP reason=missing_service_or_event_id svcId={r.ServiceId} eventId={r.EventId} tuner={SafeValue(session.Lease.Name)} source=active_recording_session_no_extra_tuner");
+                    $"result=SKIP reason=missing_service_or_event_id svcId={r.ServiceId} eventId={r.EventId} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} source=active_recording_session_no_extra_tuner");
                 continue;
             }
 
@@ -8099,7 +8008,7 @@ private readonly ReservationStore _store;
                     TryApplyRecordingFollowTiming(session, r, session.PlannedEndTime, "RecordingProgressMissingProjection");
                 }
                 _log.Add("REC_FOLLOW_CHECK", $"R{r.Id}",
-                    $"result=MISS reason=epg_event_not_found nid={r.NetworkId} tsid={r.TransportStreamId} svcId={r.ServiceId} eventId={r.EventId} tuner={SafeValue(session.Lease.Name)} source=active_recording_session_no_extra_tuner plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} " +
+                    $"result=MISS reason=epg_event_not_found nid={r.NetworkId} tsid={r.TransportStreamId} svcId={r.ServiceId} eventId={r.EventId} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} source=active_recording_session_no_extra_tuner plannedEnd={session.PlannedEndTime:MM/dd HH:mm:ss} " +
                     $"liveTargetPresent={liveTargetPresentWithoutProjection} rule=recording_live_present_continuation_guard_contract");
                 continue;
             }
@@ -8127,7 +8036,7 @@ private readonly ReservationStore _store;
             var plannedChanged = Math.Abs((followedEnd - session.LogicalSegmentEndTime).TotalSeconds) > 1;
 
             _log.Add("REC_FOLLOW_CHECK", $"R{r.Id}",
-                $"result=OK source=active_recording_session_no_extra_tuner tuner={SafeValue(session.Lease.Name)} pid={session.ProcessId} " +
+                $"result=OK source=active_recording_session_no_extra_tuner tuner={LogTextContract.TrimOrDash(session.Lease.Name)} pid={session.ProcessId} " +
                 $"event={r.NetworkId}/{r.TransportStreamId}/{r.ServiceId}/{r.EventId} " +
                 $"dbStart={r.StartTime:MM/dd HH:mm:ss} epgStart={ev.Start:MM/dd HH:mm:ss} effectiveNewStart={effectiveNewStart:MM/dd HH:mm:ss} dbEnd={r.EndTime:MM/dd HH:mm:ss} epgEnd={ev.End:MM/dd HH:mm:ss} " +
                 $"sessionLogicalSegmentEnd={session.LogicalSegmentEndTime:MM/dd HH:mm:ss} sessionPhysicalCaptureEnd={session.PhysicalCaptureEndTime:MM/dd HH:mm:ss} singleProgramPlannedEnd={singleProgramFollowedEnd:MM/dd HH:mm:ss} " +
@@ -8139,7 +8048,7 @@ private readonly ReservationStore _store;
             {
                 _log.Add("REC_FOLLOW_START_REWIND_GUARD", $"R{r.Id}",
                     $"result=SUPPRESSED source={r.Source} reason=user_runtime_recording_start_is_source_of_truth oldStart={r.StartTime:MM/dd HH:mm:ss} epgStart={ev.Start:MM/dd HH:mm:ss} keptStart={effectiveNewStart:MM/dd HH:mm:ss} " +
-                    $"epgEnd={ev.End:MM/dd HH:mm:ss} plannedEnd={followedEnd:MM/dd HH:mm:ss} tuner={SafeValue(session.Lease.Name)} actualTuner={SafeValue(r.ActualTunerName)} pid={session.ProcessId} userChain={r.IsUserChain} chainPrev=R{(r.UserChainPreviousId.HasValue ? r.UserChainPreviousId.Value.ToString() : "-")} chainRoot=R{(r.UserChainRootId.HasValue ? r.UserChainRootId.Value.ToString() : "-")} " +
+                    $"epgEnd={ev.End:MM/dd HH:mm:ss} plannedEnd={followedEnd:MM/dd HH:mm:ss} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} actualTuner={LogTextContract.TrimOrDash(r.ActualTunerName)} pid={session.ProcessId} userChain={r.IsUserChain} chainPrev=R{(r.UserChainPreviousId.HasValue ? r.UserChainPreviousId.Value.ToString() : "-")} chainRoot=R{(r.UserChainRootId.HasValue ? r.UserChainRootId.Value.ToString() : "-")} " +
                     $"rule=release_contract");
             }
 
@@ -8276,7 +8185,7 @@ private readonly ReservationStore _store;
             _log.Add("REC_FOLLOW_UPDATE", $"R{r.Id}",
                 $"source=active_recording_session_no_extra_tuner route=ALLOC_ROUTE oldStart={r.StartTime:MM/dd HH:mm:ss} newStart={effectiveNewStart:MM/dd HH:mm:ss} epgStart={ev.Start:MM/dd HH:mm:ss} startRewindSuppressed={suppressStartRewind} " +
                 $"oldEnd={r.EndTime:MM/dd HH:mm:ss} newEnd={ev.End:MM/dd HH:mm:ss} logicalSegmentEnd={followedEnd:MM/dd HH:mm:ss} physicalCaptureEnd={effectiveCaptureEnd:MM/dd HH:mm:ss} " +
-                $"tuner={SafeValue(session.Lease.Name)} pid={session.ProcessId} now={now:MM/dd HH:mm:ss} rule=recording_timing_ssot_contract");
+                $"tuner={LogTextContract.TrimOrDash(session.Lease.Name)} pid={session.ProcessId} now={now:MM/dd HH:mm:ss} rule=recording_timing_ssot_contract");
 
             try
             {
@@ -8296,7 +8205,7 @@ private readonly ReservationStore _store;
             }
             catch (Exception ex)
             {
-                _log.Add("REC_FOLLOW_UPDATE", $"R{r.Id}", $"alloc_route_error={TrimForLog(ex.Message, 240)}");
+                _log.Add("REC_FOLLOW_UPDATE", $"R{r.Id}", $"alloc_route_error={LogTextContract.TruncateWithDots(ex.Message, 240)}");
             }
 
             // 前番組と直接境界のCASを収束させた後、最新snapshotで未開始memberを追従する。
@@ -8305,7 +8214,7 @@ private readonly ReservationStore _store;
             if (now >= followedEnd)
             {
                 _log.Add("REC_FOLLOW_END_DETECTED", $"R{r.Id}",
-                    $"reason=followed_event_already_ended now={now:MM/dd HH:mm:ss} epgEnd={ev.End:MM/dd HH:mm:ss} plannedEnd={followedEnd:MM/dd HH:mm:ss} tuner={SafeValue(session.Lease.Name)} route=CheckSessionEndsAsync_next");
+                    $"reason=followed_event_already_ended now={now:MM/dd HH:mm:ss} epgEnd={ev.End:MM/dd HH:mm:ss} plannedEnd={followedEnd:MM/dd HH:mm:ss} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} route=CheckSessionEndsAsync_next");
             }
         }
 
@@ -8413,7 +8322,7 @@ private readonly ReservationStore _store;
                 $"result=REHYDRATED source=reservation_runtime_baseline reason=projection_behind_persisted_reservation " +
                 $"reservationStart={reservation.StartTime:MM/dd HH:mm:ss} reservationEnd={reservation.EndTime:MM/dd HH:mm:ss} " +
                 $"projectedStart={projectedEvent!.Start:MM/dd HH:mm:ss} projectedEnd={projectedEvent.End:MM/dd HH:mm:ss} " +
-                $"tuner={SafeValue(session.Lease.Name)} pid={session.ProcessId} action=restore_no_stale_rollback_boundary_after_restart " +
+                $"tuner={LogTextContract.TrimOrDash(session.Lease.Name)} pid={session.ProcessId} action=restore_no_stale_rollback_boundary_after_restart " +
                 $"rule=recording_time_follow_no_stale_rollback_contract");
         }
 
@@ -8461,7 +8370,7 @@ private readonly ReservationStore _store;
             _log.Add("REC_FOLLOW_STALE_ROLLBACK_GUARD", $"R{reservation.Id}",
                 $"result=SUPPRESSED source=program_guide_projection_vs_follow_evidence evidenceStart={resolvedEvidence.Start:MM/dd HH:mm:ss} evidenceEnd={resolvedEvidence.End:MM/dd HH:mm:ss} " +
                 $"projectedStart={projectedEvent.Start:MM/dd HH:mm:ss} projectedEnd={projectedEvent.End:MM/dd HH:mm:ss} resolvedStart={resolvedStart:MM/dd HH:mm:ss} resolvedEnd={resolvedEnd:MM/dd HH:mm:ss} " +
-                $"tuner={SafeValue(session.Lease.Name)} pid={session.ProcessId} action=preserve_latest_observed_boundary rule=recording_time_follow_no_stale_rollback_contract");
+                $"tuner={LogTextContract.TrimOrDash(session.Lease.Name)} pid={session.ProcessId} action=preserve_latest_observed_boundary rule=recording_time_follow_no_stale_rollback_contract");
             resolvedEvidence = resolvedEvidence with { LastSuppressedProjectionKey = suppressionKey };
             evidenceChanged = true;
         }
@@ -8681,7 +8590,7 @@ private readonly ReservationStore _store;
         var updated = results.Where(x => x.Updated).ToList();
 
         _log.Add("REC_CHAIN_MEMBER_FOLLOW", $"R{activeReservation.Id}",
-            $"result={(updated.Count > 0 ? "UPDATED" : "NO_CHANGE")} root=R{rootId} source=active_recording_session_no_extra_tuner tuner={SafeValue(session.Lease.Name)} pid={session.ProcessId} checked={results.Count} updated={updated.Count} targets=[{string.Join(',', targets.Select(x => $"R{x.Id}"))}] updatedIds=[{string.Join(',', updated.Select(x => $"R{x.ReservationId}"))}] childWorkers=0 extraTunerLease=0 rule=chain_time_follow_single_session_contract");
+            $"result={(updated.Count > 0 ? "UPDATED" : "NO_CHANGE")} root=R{rootId} source=active_recording_session_no_extra_tuner tuner={LogTextContract.TrimOrDash(session.Lease.Name)} pid={session.ProcessId} checked={results.Count} updated={updated.Count} targets=[{string.Join(',', targets.Select(x => $"R{x.Id}"))}] updatedIds=[{string.Join(',', updated.Select(x => $"R{x.ReservationId}"))}] childWorkers=0 extraTunerLease=0 rule=chain_time_follow_single_session_contract");
 
         if (updated.Count == 0)
             return false;
@@ -8748,8 +8657,8 @@ private readonly ReservationStore _store;
                 && IsLivePresentStopHoldActive(session, reservation, now, out var liveEvidence))
             {
                 _log.Add("REC_STOP_LIVE_PRESENT_HOLD", $"R{session.ReservationId}",
-                    $"result=SUPPRESSED service={SafeValue(reservation.ServiceName)} title={ReservationDisplayTitle(reservation.Title)} " +
-                    $"now={now:MM/dd HH:mm:ss.fff} logicalSegmentEnd={session.LogicalSegmentEndTime:MM/dd HH:mm:ss} physicalCaptureEnd={session.PhysicalCaptureEndTime:MM/dd HH:mm:ss} tuner={SafeValue(session.Lease.Name)} pid={session.ProcessId} " +
+                    $"result=SUPPRESSED service={LogTextContract.TrimOrDash(reservation.ServiceName)} title={ReservationDisplayTitle(reservation.Title)} " +
+                    $"now={now:MM/dd HH:mm:ss.fff} logicalSegmentEnd={session.LogicalSegmentEndTime:MM/dd HH:mm:ss} physicalCaptureEnd={session.PhysicalCaptureEndTime:MM/dd HH:mm:ss} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} pid={session.ProcessId} " +
                     $"progress={liveEvidence.Status} reason={liveEvidence.Reason} action=wait_for_common_end_decision rule=recording_end_decision_contract");
                 continue;
             }
@@ -8775,7 +8684,7 @@ private readonly ReservationStore _store;
         {
             _log.Add("CHAIN_CONTINUOUS_CAPTURE_PHYSICAL_STOP_GUARD", $"R{session.ReservationId}",
                 $"result=SUPPRESSED now={DateTime.Now:MM/dd HH:mm:ss.fff} logicalSegmentEnd={session.LogicalSegmentEndTime:MM/dd HH:mm:ss.fff} " +
-                $"physicalCaptureEnd={session.PhysicalCaptureEndTime:MM/dd HH:mm:ss.fff} pid={session.ProcessId} tuner={SafeValue(session.Lease.Name)} " +
+                $"physicalCaptureEnd={session.PhysicalCaptureEndTime:MM/dd HH:mm:ss.fff} pid={session.ProcessId} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} " +
                 "reason=shared_capture_physical_owner_still_active workerStop=False leaseRelease=False rule=physical_tuner_ownership_single_source");
             return;
         }
@@ -8841,19 +8750,19 @@ private readonly ReservationStore _store;
                         lock (_sessionGate)
                             _recordingTerminalFailureReasons[rid] = sessionCompletionEvidence.Reason;
                         _log.Add("REC_COMPLETION_EVIDENCE", $"R{rid}",
-                            $"result=FAILED reason={SafeValue(sessionCompletionEvidence.Reason)} service={SafeValue(reservationForEvidence.ServiceName)} " +
-                            $"title={ReservationDisplayTitle(reservationForEvidence.Title)} evidence={SafeValue(sessionCompletionEvidence.Summary)} " +
+                            $"result=FAILED reason={LogTextContract.TrimOrDash(sessionCompletionEvidence.Reason)} service={LogTextContract.TrimOrDash(reservationForEvidence.ServiceName)} " +
+                            $"title={ReservationDisplayTitle(reservationForEvidence.Title)} evidence={LogTextContract.TrimOrDash(sessionCompletionEvidence.Summary)} " +
                             "action=downgrade_completed_to_failed rule=recording_completion_evidence_contract");
                     }
                     else
                     {
                         _log.Add("REC_COMPLETION_EVIDENCE", $"R{rid}",
-                            $"result=OK service={SafeValue(reservationForEvidence.ServiceName)} title={ReservationDisplayTitle(reservationForEvidence.Title)} " +
-                            $"evidence={SafeValue(sessionCompletionEvidence.Summary)} rule=recording_completion_evidence_contract");
+                            $"result=OK service={LogTextContract.TrimOrDash(reservationForEvidence.ServiceName)} title={ReservationDisplayTitle(reservationForEvidence.Title)} " +
+                            $"evidence={LogTextContract.TrimOrDash(sessionCompletionEvidence.Summary)} rule=recording_completion_evidence_contract");
                     }
                 }
 
-                var terminalFailureReasonPart = string.IsNullOrWhiteSpace(terminalFailureReason) ? "terminalFailureReason=-" : $"terminalFailureReason={SafeValue(terminalFailureReason)}";
+                var terminalFailureReasonPart = string.IsNullOrWhiteSpace(terminalFailureReason) ? "terminalFailureReason=-" : $"terminalFailureReason={LogTextContract.TrimOrDash(terminalFailureReason)}";
                 var terminationEvidence = new RecordingTerminationEvidence
                 {
                     RecordingRecoveryChainId = reservationForEvidence?.RecordingRecoveryChainId ?? string.Empty,
@@ -8871,7 +8780,7 @@ private readonly ReservationStore _store;
                 if (preserveRecordingLifecycleForRecovery)
                 {
                     _log.Add("REC_STOP_DECISION", $"R{rid}",
-                        $"result=PRESERVE_RECORDING_FOR_RECOVERY status={SafeValue(lifecycleReservation?.Status.ToString())} dataVersion={lifecycleReservation?.DataVersion.ToString() ?? "-"} finalStatus={finalStatus} operationId={session.OperationId} " +
+                        $"result=PRESERVE_RECORDING_FOR_RECOVERY status={LogTextContract.TrimOrDash(lifecycleReservation?.Status.ToString())} dataVersion={lifecycleReservation?.DataVersion.ToString() ?? "-"} finalStatus={finalStatus} operationId={session.OperationId} " +
                         $"action=physical_owner_cleanup_then_atomic_recovery rule=interrupted_recording_recovery_contract");
                 }
                 else if (lifecycleReservation is not null)
@@ -8889,7 +8798,7 @@ private readonly ReservationStore _store;
                         else
                         {
                             _log.Add("REC_STOP_DECISION", $"R{rid}",
-                                $"result=CLAIM_REJECTED reason={SafeValue(stopClaim.Reason)} expectedStatus=Recording actualStatus={SafeValue(stopClaim.CurrentStatus?.ToString())} expectedVersion={lifecycleReservation.DataVersion} actualVersion={stopClaim.CurrentDataVersion} finalStatus={finalStatus} operationId={session.OperationId} action=continue_physical_owner_cleanup_without_db_overwrite rule=release_contract");
+                                $"result=CLAIM_REJECTED reason={LogTextContract.TrimOrDash(stopClaim.Reason)} expectedStatus=Recording actualStatus={LogTextContract.TrimOrDash(stopClaim.CurrentStatus?.ToString())} expectedVersion={lifecycleReservation.DataVersion} actualVersion={stopClaim.CurrentDataVersion} finalStatus={finalStatus} operationId={session.OperationId} action=continue_physical_owner_cleanup_without_db_overwrite rule=release_contract");
                         }
                     }
                     else if (lifecycleReservation.Status == ReservationStatus.Stopping)
@@ -8930,9 +8839,9 @@ private readonly ReservationStore _store;
                 var recorderStopTarget = stopReservation is not null && pid > 0;
                 var stopMode = recorderStopTarget ? "TvAIrEpgRecStopSignalThenWait" : "SinglePidExitOnly";
                 _log.Add("REC_STOP_COMMON_ENTER", $"R{rid}",
-                    $"mode={stopMode} group={SafeValue(stopGroup)} pid={pid} route={("TvAIrEpgRecOnly")} recorderStopTarget={recorderStopTarget} rule=release_contract");
+                    $"mode={stopMode} group={LogTextContract.TrimOrDash(stopGroup)} pid={pid} route={("TvAIrEpgRecOnly")} recorderStopTarget={recorderStopTarget} rule=release_contract");
                 _log.Add("REC_STOP_MODE", $"R{rid}",
-                    $"mode={stopMode} reason=release_contract group={SafeValue(stopGroup)} pid={pid} stopTarget={recorderStopTarget} pt3LockDuringStopWait=False timeoutMs={TvAIrEpgRecStopTimeoutMs}");
+                    $"mode={stopMode} reason=release_contract group={LogTextContract.TrimOrDash(stopGroup)} pid={pid} stopTarget={recorderStopTarget} pt3LockDuringStopWait=False timeoutMs={TvAIrEpgRecStopTimeoutMs}");
 
                 // TvAIrEpgRecへstop signalを送り、既にworker消失を確認した経路では停止要求とKillを重ねない。
                 bool manualStop;
@@ -8968,7 +8877,7 @@ private readonly ReservationStore _store;
                         $"stage=after_single_pid_exit_before_lease_release pid={pid} ownedWorkerAlive={fallbackWorkerAlive} " +
                         $"originalIdentityAvailable={session.WorkerIdentity.IsAvailable} observedIdentityAvailable={fallbackObservedIdentity.IsAvailable} " +
                         $"identityMatches={fallbackIdentityMatches} observedStartUtc={fallbackObservedIdentity.ProcessStartTimeUtc?.ToString("O") ?? "-"} " +
-                        $"observedPath={SafeValue(fallbackObservedIdentity.ExecutablePath)} leaseReleaseBehavior=unchanged diagnosticOnly=True rule=release_contract");
+                        $"observedPath={LogTextContract.TrimOrDash(fallbackObservedIdentity.ExecutablePath)} leaseReleaseBehavior=unchanged diagnosticOnly=True rule=release_contract");
 
                     terminationEvidence.StopRequestResult = "single_pid_fallback_completed";
                     _log.Add("REC_STOP_SINGLE_PID_EXIT", $"R{rid}",
@@ -8984,7 +8893,7 @@ private readonly ReservationStore _store;
                 // worker終了でBonDriverプロセス所有権が消滅した後、lease解放とgeneration更新へ直結する。
                 // 物理解放証拠の後へ不要な固定settleを追加してTuner再利用を遅らせてはならない。
                 _log.Add("REC_STOP_DEVICE_RELEASE_EVIDENCE", $"R{rid}",
-                    $"result=READY fixedWaitMs=0 processExited={processExitedWithoutKill || processAlreadyGone} tuner={SafeValue(session.Lease.Name)} rule=recording_physical_release_contract");
+                    $"result=READY fixedWaitMs=0 processExited={processExitedWithoutKill || processAlreadyGone} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} rule=recording_physical_release_contract");
 
                 try
                 {
@@ -8993,9 +8902,9 @@ private readonly ReservationStore _store;
                 }
                 catch (Exception ex)
                 {
-                    terminationEvidence.LeaseReleaseResult = $"failed:{SafeValue(ex.GetType().Name)}";
+                    terminationEvidence.LeaseReleaseResult = $"failed:{LogTextContract.TrimOrDash(ex.GetType().Name)}";
                     _log.Add("REC_RELEASE_EVIDENCE", $"R{rid}",
-                        $"result=FAILED target=tuner_lease pid={pid} reason={SafeValue(ex.Message)} rule=recording_termination_evidence");
+                        $"result=FAILED target=tuner_lease pid={pid} reason={LogTextContract.TrimOrDash(ex.Message)} rule=recording_termination_evidence");
                 }
                 terminationEvidence.TunerStateAfterRelease = _tunerPool.GetStatusSummary();
                 lock (_sessionGate)
@@ -9032,13 +8941,13 @@ private readonly ReservationStore _store;
                 var qualityGroup = verifyReservation is not null ? ResolveGroup(verifyReservation) : (stopReservation is not null ? ResolveGroup(stopReservation) : "-");
                 var qualityContext = BuildActiveRecordingGroupContext(qualityGroup ?? "-");
                 _log.Add("REC_QUALITY_RESULT", $"R{rid}",
-                    $"service={SafeValue(qualityService)} title={ReservationTitleDisplayContract.ForLog(qualityTitle, 80)} " +
+                    $"service={LogTextContract.TrimOrDash(qualityService)} title={ReservationTitleDisplayContract.ForLog(qualityTitle, 80)} " +
                     $"qualityClass={qualityClassification.ClassName} severity={qualityClassification.Severity} userMeaning={qualityClassification.UserMeaning} action={qualityClassification.Action} " +
-                    $"verdict={SafeValue(recorderOutcome.QualityVerdict)} responseExists={recorderOutcome.ResponseExists} responseSuccess={recorderOutcome.Success} " +
-                    $"qualityGroup={SafeValue(qualityContext.Group)} qualityTuner={SafeValue(session.Lease.Name)} qualityDid={SafeValue(session.Lease.Did)} concurrentSameGroupRecordings={qualityContext.Count} concurrentSameGroupTuners={SafeValue(qualityContext.Names)} concurrentSameGroupDids={SafeValue(qualityContext.Dids)} " +
-                    $"inputRawDrops={SafeValue(recorderOutcome.RawContinuityDrops)} inputRawCcErrors={SafeValue(recorderOutcome.RawContinuityErrors)} inputRawSyncErrors={SafeValue(recorderOutcome.RawSyncErrors)} inputRawScrambled={SafeValue(recorderOutcome.RawScrambledPackets)} " +
-                    $"outputDrops={SafeValue(recorderOutcome.OutputContinuityDrops)} outputCcErrors={SafeValue(recorderOutcome.OutputContinuityErrors)} outputSyncErrors={SafeValue(recorderOutcome.OutputSyncErrors)} outputScrambled={SafeValue(recorderOutcome.OutputScrambledPackets)} outputTargetMediaScrambled={SafeValue(recorderOutcome.OutputTargetMediaScrambledPackets)} " +
-                    $"rawLayerMeaning=pre_write_input_observation outputLayerMeaning=recorded_file_integrity runtimeStatsEmitted={SafeValue(recorderOutcome.RuntimeStatsEmitted)} runtimeStatsPath={SafeValue(recorderOutcome.RuntimeStatsPath)} " +
+                    $"verdict={LogTextContract.TrimOrDash(recorderOutcome.QualityVerdict)} responseExists={recorderOutcome.ResponseExists} responseSuccess={recorderOutcome.Success} " +
+                    $"qualityGroup={LogTextContract.TrimOrDash(qualityContext.Group)} qualityTuner={LogTextContract.TrimOrDash(session.Lease.Name)} qualityDid={LogTextContract.TrimOrDash(session.Lease.Did)} concurrentSameGroupRecordings={qualityContext.Count} concurrentSameGroupTuners={LogTextContract.TrimOrDash(qualityContext.Names)} concurrentSameGroupDids={LogTextContract.TrimOrDash(qualityContext.Dids)} " +
+                    $"inputRawDrops={LogTextContract.TrimOrDash(recorderOutcome.RawContinuityDrops)} inputRawCcErrors={LogTextContract.TrimOrDash(recorderOutcome.RawContinuityErrors)} inputRawSyncErrors={LogTextContract.TrimOrDash(recorderOutcome.RawSyncErrors)} inputRawScrambled={LogTextContract.TrimOrDash(recorderOutcome.RawScrambledPackets)} " +
+                    $"outputDrops={LogTextContract.TrimOrDash(recorderOutcome.OutputContinuityDrops)} outputCcErrors={LogTextContract.TrimOrDash(recorderOutcome.OutputContinuityErrors)} outputSyncErrors={LogTextContract.TrimOrDash(recorderOutcome.OutputSyncErrors)} outputScrambled={LogTextContract.TrimOrDash(recorderOutcome.OutputScrambledPackets)} outputTargetMediaScrambled={LogTextContract.TrimOrDash(recorderOutcome.OutputTargetMediaScrambledPackets)} " +
+                    $"rawLayerMeaning=pre_write_input_observation outputLayerMeaning=recorded_file_integrity runtimeStatsEmitted={LogTextContract.TrimOrDash(recorderOutcome.RuntimeStatsEmitted)} runtimeStatsPath={LogTextContract.TrimOrDash(recorderOutcome.RuntimeStatsPath)} " +
                     $"rule=release_contract");
                 LogRecordingWorkerQualityCorrelation(rid, qualityService, qualityTitle, qualityClassification, recorderOutcome, qualityContext, session.Lease.Name, session.Lease.Did);
                 LogRecordingWorkerRuntimeTimeline(rid, qualityService, qualityTitle, qualityGroup ?? "-", recorderOutcome);
@@ -9050,17 +8959,17 @@ private readonly ReservationStore _store;
                     if (completionEvidence.CanKeepCompleted)
                     {
                         _log.Add("TVAIREPGREC_FINAL_STATUS", $"R{rid}",
-                            $"result=COMPLETED_BY_RECORDING_EVIDENCE source={sourceKind} service={SafeValue(service)} title={TrimForLog(title, 80)} responseExists={recorderOutcome.ResponseExists} responseSuccess={recorderOutcome.Success} finalStatus=Completed " + terminalFailureReasonPart + " " +
-                            $"evidenceResult={completionEvidence.Result} evidenceReason={completionEvidence.Reason} verifyResult={SafeValue(tsVerification?.Result)} verifyVerdict={SafeValue(tsVerification?.Verdict)} verifyReadable={SafeValue(tsVerification?.ReadableJudgement)} " +
-                            $"bytesWritten={recorderOutcome.BytesWritten} packetsWritten={recorderOutcome.PacketsWritten} outputSyncErrors={SafeValue(recorderOutcome.OutputSyncErrors)} outputScrambled={SafeValue(recorderOutcome.OutputScrambledPackets)} outputTargetMediaScrambled={SafeValue(recorderOutcome.OutputTargetMediaScrambledPackets)} outputDrops={SafeValue(recorderOutcome.OutputContinuityDrops)} outputCcErrors={SafeValue(recorderOutcome.OutputContinuityErrors)} response={recorderOutcome.Summary} " +
+                            $"result=COMPLETED_BY_RECORDING_EVIDENCE source={sourceKind} service={LogTextContract.TrimOrDash(service)} title={LogTextContract.TruncateWithDots(title, 80)} responseExists={recorderOutcome.ResponseExists} responseSuccess={recorderOutcome.Success} finalStatus=Completed " + terminalFailureReasonPart + " " +
+                            $"evidenceResult={completionEvidence.Result} evidenceReason={completionEvidence.Reason} verifyResult={LogTextContract.TrimOrDash(tsVerification?.Result)} verifyVerdict={LogTextContract.TrimOrDash(tsVerification?.Verdict)} verifyReadable={LogTextContract.TrimOrDash(tsVerification?.ReadableJudgement)} " +
+                            $"bytesWritten={recorderOutcome.BytesWritten} packetsWritten={recorderOutcome.PacketsWritten} outputSyncErrors={LogTextContract.TrimOrDash(recorderOutcome.OutputSyncErrors)} outputScrambled={LogTextContract.TrimOrDash(recorderOutcome.OutputScrambledPackets)} outputTargetMediaScrambled={LogTextContract.TrimOrDash(recorderOutcome.OutputTargetMediaScrambledPackets)} outputDrops={LogTextContract.TrimOrDash(recorderOutcome.OutputContinuityDrops)} outputCcErrors={LogTextContract.TrimOrDash(recorderOutcome.OutputContinuityErrors)} response={recorderOutcome.Summary} " +
                             $"rule=recording_completion_evidence_contract");
                     }
                     else
                     {
                         _log.Add("TVAIREPGREC_FINAL_STATUS", $"R{rid}",
-                            $"result=FAILED_BY_RECORDING_EVIDENCE source={sourceKind} service={SafeValue(service)} title={TrimForLog(title, 80)} responseExists={recorderOutcome.ResponseExists} responseSuccess={recorderOutcome.Success} finalStatus=Failed " + terminalFailureReasonPart + " " +
-                            $"evidenceResult={completionEvidence.Result} evidenceReason={completionEvidence.Reason} verifyResult={SafeValue(tsVerification?.Result)} verifyVerdict={SafeValue(tsVerification?.Verdict)} verifyReadable={SafeValue(tsVerification?.ReadableJudgement)} " +
-                            $"bytesWritten={recorderOutcome.BytesWritten} packetsWritten={recorderOutcome.PacketsWritten} outputSyncErrors={SafeValue(recorderOutcome.OutputSyncErrors)} outputScrambled={SafeValue(recorderOutcome.OutputScrambledPackets)} outputTargetMediaScrambled={SafeValue(recorderOutcome.OutputTargetMediaScrambledPackets)} outputDrops={SafeValue(recorderOutcome.OutputContinuityDrops)} outputCcErrors={SafeValue(recorderOutcome.OutputContinuityErrors)} response={recorderOutcome.Summary} " +
+                            $"result=FAILED_BY_RECORDING_EVIDENCE source={sourceKind} service={LogTextContract.TrimOrDash(service)} title={LogTextContract.TruncateWithDots(title, 80)} responseExists={recorderOutcome.ResponseExists} responseSuccess={recorderOutcome.Success} finalStatus=Failed " + terminalFailureReasonPart + " " +
+                            $"evidenceResult={completionEvidence.Result} evidenceReason={completionEvidence.Reason} verifyResult={LogTextContract.TrimOrDash(tsVerification?.Result)} verifyVerdict={LogTextContract.TrimOrDash(tsVerification?.Verdict)} verifyReadable={LogTextContract.TrimOrDash(tsVerification?.ReadableJudgement)} " +
+                            $"bytesWritten={recorderOutcome.BytesWritten} packetsWritten={recorderOutcome.PacketsWritten} outputSyncErrors={LogTextContract.TrimOrDash(recorderOutcome.OutputSyncErrors)} outputScrambled={LogTextContract.TrimOrDash(recorderOutcome.OutputScrambledPackets)} outputTargetMediaScrambled={LogTextContract.TrimOrDash(recorderOutcome.OutputTargetMediaScrambledPackets)} outputDrops={LogTextContract.TrimOrDash(recorderOutcome.OutputContinuityDrops)} outputCcErrors={LogTextContract.TrimOrDash(recorderOutcome.OutputContinuityErrors)} response={recorderOutcome.Summary} " +
                             $"rule=recording_completion_evidence_contract");
                         finalStatus = ReservationStatus.Failed;
                         terminalFailureReason = completionEvidence.Reason;
@@ -9074,8 +8983,8 @@ private readonly ReservationStore _store;
                         ? (recorderOutcome.Success ? "OK_CLEAR_OR_TVAIREPGREC_OK" : "TVAIREPGREC_NG_NON_COMPLETED")
                         : "NO_RESPONSE_NON_COMPLETED";
                     _log.Add("TVAIREPGREC_FINAL_STATUS", $"R{rid}",
-                        $"result={finalResultKind} service={SafeValue(service)} title={TrimForLog(title, 80)} finalStatus={finalStatus} " + terminalFailureReasonPart + " " +
-                        $"evidenceResult={completionEvidence.Result} evidenceReason={completionEvidence.Reason} verifyResult={SafeValue(tsVerification?.Result)} verifyVerdict={SafeValue(tsVerification?.Verdict)} verifyReadable={SafeValue(tsVerification?.ReadableJudgement)} " +
+                        $"result={finalResultKind} service={LogTextContract.TrimOrDash(service)} title={LogTextContract.TruncateWithDots(title, 80)} finalStatus={finalStatus} " + terminalFailureReasonPart + " " +
+                        $"evidenceResult={completionEvidence.Result} evidenceReason={completionEvidence.Reason} verifyResult={LogTextContract.TrimOrDash(tsVerification?.Result)} verifyVerdict={LogTextContract.TrimOrDash(tsVerification?.Verdict)} verifyReadable={LogTextContract.TrimOrDash(tsVerification?.ReadableJudgement)} " +
                         $"response={recorderOutcome.Summary} rule=recording_completion_evidence_contract");
                 }
 
@@ -9141,11 +9050,14 @@ private readonly ReservationStore _store;
                 Reservation? committedReservation = null;
                 if (lifecycleClaimed && stoppingDataVersion.HasValue)
                 {
-                    var stopCommit = _store.TryCompleteRecordingStop(rid, stoppingDataVersion.Value, finalStatus, terminalFailureReason);
+                    var failureCause = finalStatus != ReservationStatus.Failed
+                        ? RecordingFailureCause.Unspecified
+                        : RecordingFailurePresentationContract.FromWorkerResult(recorderOutcome.ResponseExists, recorderOutcome.Success);
+                    var stopCommit = _store.TryCompleteRecordingStop(rid, stoppingDataVersion.Value, finalStatus, terminalFailureReason, failureCause);
                     if (!stopCommit.Applied)
                     {
                         _log.Add("REC_STOP_LIFECYCLE_COMMIT", $"R{rid}",
-                            $"result=REJECTED reason={SafeValue(stopCommit.Reason)} expectedStatus=Stopping actualStatus={SafeValue(stopCommit.CurrentStatus?.ToString())} expectedVersion={stoppingDataVersion.Value} actualVersion={stopCommit.CurrentDataVersion} finalStatus={finalStatus} action=suppress_terminal_projections rule=release_contract");
+                            $"result=REJECTED reason={LogTextContract.TrimOrDash(stopCommit.Reason)} expectedStatus=Stopping actualStatus={LogTextContract.TrimOrDash(stopCommit.CurrentStatus?.ToString())} expectedVersion={stoppingDataVersion.Value} actualVersion={stopCommit.CurrentDataVersion} finalStatus={finalStatus} action=suppress_terminal_projections rule=release_contract");
                     }
                     else
                     {
@@ -9172,9 +9084,9 @@ private readonly ReservationStore _store;
                 }
                 catch (Exception ex)
                 {
-                    terminationEvidence.RegistryReleaseResult = $"failed:{SafeValue(ex.GetType().Name)}";
+                    terminationEvidence.RegistryReleaseResult = $"failed:{LogTextContract.TrimOrDash(ex.GetType().Name)}";
                     _log.Add("REC_RELEASE_EVIDENCE", $"R{rid}",
-                        $"result=FAILED target=managed_process_registry pid={pid} reason={SafeValue(ex.Message)} rule=recording_termination_evidence");
+                        $"result=FAILED target=managed_process_registry pid={pid} reason={LogTextContract.TrimOrDash(ex.Message)} rule=recording_termination_evidence");
                 }
                 _log.Add("PROCESS_OWNERSHIP", $"R{rid}",
                     $"unregisterManagedPid=True pid={pid} reason=recording_session_finished rule=release_contract");
@@ -9188,7 +9100,7 @@ private readonly ReservationStore _store;
                 {
                     finalizedResultDto = null;
                     _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{rid}",
-                        $"result=BLOCKED reason=owned_worker_still_alive path={SafeValue(session.RecordingFilePath)} action=suppress_finalized_result_and_event rule=recording_result_finalized_file_release_contract");
+                        $"result=BLOCKED reason=owned_worker_still_alive path={LogTextContract.TrimOrDash(session.RecordingFilePath)} action=suppress_finalized_result_and_event rule=recording_result_finalized_file_release_contract");
                 }
 
                 if (stopLifecycleCommitted && finalizedResultDto is not null && committedReservation is not null)
@@ -9206,7 +9118,7 @@ private readonly ReservationStore _store;
                     catch (Exception projectionEx)
                     {
                         _log.Add("REC_STOP_RESULT_PROJECTION", $"R{rid}",
-                            $"target=UserEventLog result=FAILED terminalStatusCommitted=True finalStatus={finalStatus} errorType={projectionEx.GetType().Name} error={TrimForLog(projectionEx.Message, 240)} action=continue_remaining_projections rule=recording_result_projection_contract");
+                            $"target=UserEventLog result=FAILED terminalStatusCommitted=True finalStatus={finalStatus} errorType={projectionEx.GetType().Name} error={LogTextContract.TruncateWithDots(projectionEx.Message, 240)} action=continue_remaining_projections rule=recording_result_projection_contract");
                     }
 
                     RecordingResultUpsertOutcome? recordingResultOutcome = null;
@@ -9219,7 +9131,7 @@ private readonly ReservationStore _store;
                     catch (Exception projectionEx)
                     {
                         _log.Add("REC_STOP_RESULT_PROJECTION", $"R{rid}",
-                            $"target=RecordingResultStore result=FAILED terminalStatusCommitted=True finalStatus={finalStatus} errorType={projectionEx.GetType().Name} error={TrimForLog(projectionEx.Message, 240)} action=skip_finalized_event rule=recording_result_projection_contract");
+                            $"target=RecordingResultStore result=FAILED terminalStatusCommitted=True finalStatus={finalStatus} errorType={projectionEx.GetType().Name} error={LogTextContract.TruncateWithDots(projectionEx.Message, 240)} action=skip_finalized_event rule=recording_result_projection_contract");
                     }
 
                     if (recordingResultOutcome == RecordingResultUpsertOutcome.AppliedNewFinalized)
@@ -9227,7 +9139,7 @@ private readonly ReservationStore _store;
                         try
                         {
                             _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{rid}",
-                                $"result=READY source=normal_stop projection=PluginTypedEvent workerReleaseConfirmed=True path={SafeValue(finalizedResultDto.FilePath)} externalReadAllowed={(finalizedResultDto.FileCreated == true && !string.IsNullOrWhiteSpace(finalizedResultDto.FilePath) ? "True" : "NoFile")} rule=recording_result_finalized_file_release_contract");
+                                $"result=READY source=normal_stop projection=PluginTypedEvent workerReleaseConfirmed=True path={LogTextContract.TrimOrDash(finalizedResultDto.FilePath)} externalReadAllowed={(finalizedResultDto.FileCreated == true && !string.IsNullOrWhiteSpace(finalizedResultDto.FilePath) ? "True" : "NoFile")} rule=recording_result_finalized_file_release_contract");
                             _log.Add("RECORDING_RESULT_PUBLICATION", "Pending", "result=DURABLY_STAGED owner=recording_file_catalog rule=recording_file_publication_contract");
                             _log.Add("REC_STOP_RESULT_PROJECTION", $"R{rid}",
                                 $"target=PluginTypedEvent result=PERSISTED_PENDING_FILE_CATALOG terminalStatusCommitted=True finalStatus={finalStatus} source=AppliedNewFinalized rule=recording_result_finalize_once_contract");
@@ -9235,7 +9147,7 @@ private readonly ReservationStore _store;
                         catch (Exception projectionEx)
                         {
                             _log.Add("REC_STOP_RESULT_PROJECTION", $"R{rid}",
-                                $"target=PluginTypedEvent result=FAILED terminalStatusCommitted=True finalStatus={finalStatus} errorType={projectionEx.GetType().Name} error={TrimForLog(projectionEx.Message, 240)} action=keep_other_projections rule=recording_result_projection_contract");
+                                $"target=PluginTypedEvent result=FAILED terminalStatusCommitted=True finalStatus={finalStatus} errorType={projectionEx.GetType().Name} error={LogTextContract.TruncateWithDots(projectionEx.Message, 240)} action=keep_other_projections rule=recording_result_projection_contract");
                         }
                     }
                     else
@@ -9257,7 +9169,7 @@ private readonly ReservationStore _store;
                 }
                 session.MarkFinalized();
                 _log.Add("REC_STOP_COMMON_EXIT", $"R{rid}",
-                    $"status={finalStatus} operationId={session.OperationId} pid={pid} tuner={SafeValue(session.Lease.Name)} route={("TvAIrEpgRecOnly")} tunerStatus={_tunerPool.GetStatusSummary()}");
+                    $"status={finalStatus} operationId={session.OperationId} pid={pid} tuner={LogTextContract.TrimOrDash(session.Lease.Name)} route={("TvAIrEpgRecOnly")} tunerStatus={_tunerPool.GetStatusSummary()}");
                 _log.Add("Scheduler", $"R{rid}", $"録画終了完了: status={finalStatus} tunerStatus={_tunerPool.GetStatusSummary()}");
 
                 // 録画終了後に競合フラグを再評価（チューナー解放により競合が解消する場合がある）。
@@ -9323,7 +9235,8 @@ private readonly ReservationStore _store;
                                         session.ReservationId,
                                         stoppingDataVersion.Value,
                                         ReservationStatus.Failed,
-                                        committedStopFailureReason);
+                                        committedStopFailureReason,
+                                        RecordingFailureCause.RecordingStopFailed);
                                 }
                                 else
                                 {
@@ -9336,12 +9249,12 @@ private readonly ReservationStore _store;
                                 exceptionSettleApplied = settle.Applied;
 
                                 _log.Add("REC_STOP_EXCEPTION_SETTLE", $"R{session.ReservationId}",
-                                    $"result={(settle.Applied ? "APPLIED" : "REJECTED")} action={(physicalStopStarted ? "fail_after_physical_stop_started" : "rollback_before_physical_stop")} reason={SafeValue(settle.Reason)} expectedVersion={stoppingDataVersion.Value} actualVersion={settle.CurrentDataVersion} actualStatus={SafeValue(settle.CurrentStatus?.ToString())} operationId={session.OperationId} rule=release_contract");
+                                    $"result={(settle.Applied ? "APPLIED" : "REJECTED")} action={(physicalStopStarted ? "fail_after_physical_stop_started" : "rollback_before_physical_stop")} reason={LogTextContract.TrimOrDash(settle.Reason)} expectedVersion={stoppingDataVersion.Value} actualVersion={settle.CurrentDataVersion} actualStatus={LogTextContract.TrimOrDash(settle.CurrentStatus?.ToString())} operationId={session.OperationId} rule=release_contract");
                             }
                             catch (Exception settleEx)
                             {
                                 _log.Add("REC_STOP_EXCEPTION_SETTLE", $"R{session.ReservationId}",
-                                    $"result=FAILED action={(physicalStopStarted ? "fail_after_physical_stop_started" : "rollback_before_physical_stop")} errorType={settleEx.GetType().Name} error={TrimForLog(settleEx.Message, 240)} operationId={session.OperationId} rule=release_contract");
+                                    $"result=FAILED action={(physicalStopStarted ? "fail_after_physical_stop_started" : "rollback_before_physical_stop")} errorType={settleEx.GetType().Name} error={LogTextContract.TruncateWithDots(settleEx.Message, 240)} operationId={session.OperationId} rule=release_contract");
                             }
                         }
 
@@ -9365,7 +9278,7 @@ private readonly ReservationStore _store;
                             else
                             {
                                 _log.Add("REC_STOP_EXCEPTION_RESULT", $"R{session.ReservationId}",
-                                    $"target=PluginTypedEvent result=SKIPPED reason=file_release_boundary_not_established path={SafeValue(session.RecordingFilePath)} rule=recording_result_finalized_file_release_contract");
+                                    $"target=PluginTypedEvent result=SKIPPED reason=file_release_boundary_not_established path={LogTextContract.TrimOrDash(session.RecordingFilePath)} rule=recording_result_finalized_file_release_contract");
                             }
                         }
                     }
@@ -9415,17 +9328,17 @@ private readonly ReservationStore _store;
         if (!IsOwnedRecordingWorkerAlive(session))
         {
             _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{reservationId}",
-                $"result=WORKER_RELEASED source={SafeValue(source)} workerAlive=False path={SafeValue(session.RecordingFilePath)} publicationPending=True rule=recording_result_finalized_file_release_contract");
+                $"result=WORKER_RELEASED source={LogTextContract.TrimOrDash(source)} workerAlive=False path={LogTextContract.TrimOrDash(session.RecordingFilePath)} publicationPending=True rule=recording_result_finalized_file_release_contract");
             return true;
         }
 
         _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{reservationId}",
-            $"result=RECOVER source={SafeValue(source)} workerAlive=True pid={session.ProcessId} action=stop_owned_worker_before_finalized_publication rule=recording_result_finalized_file_release_contract");
+            $"result=RECOVER source={LogTextContract.TrimOrDash(source)} workerAlive=True pid={session.ProcessId} action=stop_owned_worker_before_finalized_publication rule=recording_result_finalized_file_release_contract");
         await KillProcessTreeAsync(session.ProcessId, reservationId).ConfigureAwait(false);
 
         var stillAlive = IsOwnedRecordingWorkerAlive(session);
         _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{reservationId}",
-            $"result={(stillAlive ? "BLOCKED" : "WORKER_RELEASED")} source={SafeValue(source)} workerAlive={stillAlive} pid={session.ProcessId} path={SafeValue(session.RecordingFilePath)} publicationPending={!stillAlive} rule=recording_result_finalized_file_release_contract");
+            $"result={(stillAlive ? "BLOCKED" : "WORKER_RELEASED")} source={LogTextContract.TrimOrDash(source)} workerAlive={stillAlive} pid={session.ProcessId} path={LogTextContract.TrimOrDash(session.RecordingFilePath)} publicationPending={!stillAlive} rule=recording_result_finalized_file_release_contract");
         return !stillAlive;
     }
 
@@ -9511,7 +9424,7 @@ private readonly ReservationStore _store;
         catch (Exception projectionEx)
         {
             _log.Add("REC_STOP_EXCEPTION_RESULT", $"R{rid}",
-                $"target=UserEventLog result=FAILED errorType={projectionEx.GetType().Name} error={TrimForLog(projectionEx.Message, 240)} action=continue_remaining_projections rule=recording_result_projection_contract");
+                $"target=UserEventLog result=FAILED errorType={projectionEx.GetType().Name} error={LogTextContract.TruncateWithDots(projectionEx.Message, 240)} action=continue_remaining_projections rule=recording_result_projection_contract");
         }
 
         RecordingResultUpsertOutcome? recordingResultOutcome = null;
@@ -9524,7 +9437,7 @@ private readonly ReservationStore _store;
         catch (Exception projectionEx)
         {
             _log.Add("REC_STOP_EXCEPTION_RESULT", $"R{rid}",
-                $"target=RecordingResultStore result=FAILED errorType={projectionEx.GetType().Name} error={TrimForLog(projectionEx.Message, 240)} action=skip_finalized_event rule=recording_result_projection_contract");
+                $"target=RecordingResultStore result=FAILED errorType={projectionEx.GetType().Name} error={LogTextContract.TruncateWithDots(projectionEx.Message, 240)} action=skip_finalized_event rule=recording_result_projection_contract");
         }
 
         if (recordingResultOutcome == RecordingResultUpsertOutcome.AppliedNewFinalized)
@@ -9533,7 +9446,7 @@ private readonly ReservationStore _store;
             {
                 using var eventScope = _typedEvents.BeginOutboxScope(out var commitEvents);
                 _log.Add("RECORDING_RESULT_FINALIZED_BOUNDARY", $"R{rid}",
-                    $"result=READY source=stop_exception_fallback projection=PluginTypedEvent workerReleaseConfirmed=True path={SafeValue(result.FilePath)} externalReadAllowed={(result.FileCreated == true && !string.IsNullOrWhiteSpace(result.FilePath) ? "True" : "NoFile")} rule=recording_result_finalized_file_release_contract");
+                    $"result=READY source=stop_exception_fallback projection=PluginTypedEvent workerReleaseConfirmed=True path={LogTextContract.TrimOrDash(result.FilePath)} externalReadAllowed={(result.FileCreated == true && !string.IsNullOrWhiteSpace(result.FilePath) ? "True" : "NoFile")} rule=recording_result_finalized_file_release_contract");
                 _log.Add("RECORDING_RESULT_PUBLICATION", "Pending", "result=DURABLY_STAGED owner=recording_file_catalog rule=recording_file_publication_contract");
                 commitEvents();
                 _log.Add("REC_STOP_EXCEPTION_RESULT", $"R{rid}",
@@ -9542,7 +9455,7 @@ private readonly ReservationStore _store;
             catch (Exception projectionEx)
             {
                 _log.Add("REC_STOP_EXCEPTION_RESULT", $"R{rid}",
-                    $"target=PluginTypedEvent result=FAILED errorType={projectionEx.GetType().Name} error={TrimForLog(projectionEx.Message, 240)} action=keep_other_projections rule=recording_result_projection_contract");
+                    $"target=PluginTypedEvent result=FAILED errorType={projectionEx.GetType().Name} error={LogTextContract.TruncateWithDots(projectionEx.Message, 240)} action=keep_other_projections rule=recording_result_projection_contract");
             }
         }
         else
@@ -9611,13 +9524,13 @@ private readonly ReservationStore _store;
         if (action == "none")
         {
             CancelRecordingAfterActionPlan("setting_none", reservationId);
-            _log.Add("RECORDING_AFTER_ACTION", $"R{reservationId}", $"result=SKIP action=none service={SafeValue(service)} title={TrimForLog(title, 80)}");
+            _log.Add("RECORDING_AFTER_ACTION", $"R{reservationId}", $"result=SKIP action=none service={LogTextContract.TrimOrDash(service)} title={LogTextContract.TruncateWithDots(title, 80)}");
             return;
         }
 
         if (finalStatus != ReservationStatus.Completed)
         {
-            _log.Add("RECORDING_AFTER_ACTION", $"R{reservationId}", $"result=SKIP action={action} reason=final_status_not_completed finalStatus={finalStatus} service={SafeValue(service)} title={TrimForLog(title, 80)}");
+            _log.Add("RECORDING_AFTER_ACTION", $"R{reservationId}", $"result=SKIP action={action} reason=final_status_not_completed finalStatus={finalStatus} service={LogTextContract.TrimOrDash(service)} title={LogTextContract.TruncateWithDots(title, 80)}");
             return;
         }
 
@@ -9625,7 +9538,7 @@ private readonly ReservationStore _store;
         lock (_sessionGate) activeCount = _activeSessions.Count;
         if (activeCount > 0)
         {
-            _log.Add("RECORDING_AFTER_ACTION", $"R{reservationId}", $"result=WAIT action={action} reason=active_recordings_remain activeCount={activeCount} service={SafeValue(service)} title={TrimForLog(title, 80)}");
+            _log.Add("RECORDING_AFTER_ACTION", $"R{reservationId}", $"result=WAIT action={action} reason=active_recordings_remain activeCount={activeCount} service={LogTextContract.TrimOrDash(service)} title={LogTextContract.TruncateWithDots(title, 80)}");
             return;
         }
 
@@ -9642,7 +9555,7 @@ private readonly ReservationStore _store;
             generation = ++_recordingAfterActionGeneration;
         }
 
-        _log.Add("RECORDING_AFTER_ACTION", $"R{reservationId}", $"result=ARMED action={action} reason=last_completed_recording service={SafeValue(service)} title={TrimForLog(title, 80)} delayMinutes={delayMinutes} executeAt={executeAt:yyyy/MM/dd HH:mm:ss} generation={generation} rule=release_contract");
+        _log.Add("RECORDING_AFTER_ACTION", $"R{reservationId}", $"result=ARMED action={action} reason=last_completed_recording service={LogTextContract.TrimOrDash(service)} title={LogTextContract.TruncateWithDots(title, 80)} delayMinutes={delayMinutes} executeAt={executeAt:yyyy/MM/dd HH:mm:ss} generation={generation} rule=release_contract");
         _ = RunRecordingAfterActionPlanAsync(new RecordingAfterActionPlan(
             generation,
             reservationId,
@@ -9774,7 +9687,7 @@ private readonly ReservationStore _store;
         if (grEpg || bscsEpg)
         {
             reason = "epg_running";
-            detail = $"gr={SafeValue(grSummary)} bscs={SafeValue(bscsSummary)}";
+            detail = $"gr={LogTextContract.TrimOrDash(grSummary)} bscs={LogTextContract.TrimOrDash(bscsSummary)}";
             return false;
         }
 
@@ -9782,7 +9695,7 @@ private readonly ReservationStore _store;
         if (activeViewerLeases.Count > 0)
         {
             reason = "viewer_active";
-            detail = $"activeViewerCount={activeViewerLeases.Count} profiles={string.Join(",", activeViewerLeases.Select(x => SafeValue(x.ViewerProfileId)).Distinct(StringComparer.OrdinalIgnoreCase))}";
+            detail = $"activeViewerCount={activeViewerLeases.Count} profiles={string.Join(",", activeViewerLeases.Select(x => LogTextContract.TrimOrDash(x.ViewerProfileId)).Distinct(StringComparer.OrdinalIgnoreCase))}";
             return false;
         }
 
@@ -9839,7 +9752,7 @@ private readonly ReservationStore _store;
                 {
                     ok = SetSuspendState(false, true, false);
                     err = ok ? 0 : Marshal.GetLastWin32Error();
-                    _log.Add("RECORDING_AFTER_ACTION", $"R{plan.ReservationId}", $"result={(ok ? "EXECUTED" : "FAILED")} action=sleep win32={err} delayMinutes={plan.DelayMinutes} service={SafeValue(plan.Service)} title={TrimForLog(plan.Title, 80)} generation={plan.Generation} transitionGeneration={transitionGeneration} rule=release_contract");
+                    _log.Add("RECORDING_AFTER_ACTION", $"R{plan.ReservationId}", $"result={(ok ? "EXECUTED" : "FAILED")} action=sleep win32={err} delayMinutes={plan.DelayMinutes} service={LogTextContract.TrimOrDash(plan.Service)} title={LogTextContract.TruncateWithDots(plan.Title, 80)} generation={plan.Generation} transitionGeneration={transitionGeneration} rule=release_contract");
                 }
                 finally
                 {
@@ -9869,7 +9782,7 @@ private readonly ReservationStore _store;
                     return;
                 }
 
-                _log.Add("RECORDING_AFTER_ACTION", $"R{plan.ReservationId}", $"result=EXECUTED action=shutdown pid={process.Id} windowsTimeoutSec=0 delayMinutes={plan.DelayMinutes} service={SafeValue(plan.Service)} title={TrimForLog(plan.Title, 80)} generation={plan.Generation} transitionGeneration={transitionGeneration} rule=release_contract");
+                _log.Add("RECORDING_AFTER_ACTION", $"R{plan.ReservationId}", $"result=EXECUTED action=shutdown pid={process.Id} windowsTimeoutSec=0 delayMinutes={plan.DelayMinutes} service={LogTextContract.TrimOrDash(plan.Service)} title={LogTextContract.TruncateWithDots(plan.Title, 80)} generation={plan.Generation} transitionGeneration={transitionGeneration} rule=release_contract");
                 // shutdownが成立した場合は、新規物理操作を再開させない。
                 // ApplicationStoppingがPowerTransitionからQuiescingへ引き継ぎ、プロセス終了がgate所有を終端する。
                 physicalGate = null;
@@ -9988,7 +9901,7 @@ private readonly ReservationStore _store;
         if (shouldKeep)
         {
             _log.Add("TVAIREPGREC_RECORD_RUNTIME_CLEANUP", $"R{reservationId}",
-                $"result=KEPT reason={keepReason} status={finalStatus} responseExists={outcome.ResponseExists} workerSuccess={outcome.Success} tsClear={tsVerification?.ClearEnoughForCompleted == true} files={targets.Count} job={SafeValue(session.JobPath)} result={SafeValue(session.ResponsePath)} progress={SafeValue(session.ProgressPath)} runtime={SafeValue(session.RuntimeStatsPath)} stopSignal={SafeValue(session.StopSignalPath)} rule=release_contract");
+                $"result=KEPT reason={keepReason} status={finalStatus} responseExists={outcome.ResponseExists} workerSuccess={outcome.Success} tsClear={tsVerification?.ClearEnoughForCompleted == true} files={targets.Count} job={LogTextContract.TrimOrDash(session.JobPath)} result={LogTextContract.TrimOrDash(session.ResponsePath)} progress={LogTextContract.TrimOrDash(session.ProgressPath)} runtime={LogTextContract.TrimOrDash(session.RuntimeStatsPath)} stopSignal={LogTextContract.TrimOrDash(session.StopSignalPath)} rule=release_contract");
             return;
         }
 
@@ -10056,7 +9969,7 @@ private readonly ReservationStore _store;
                     using var doc = JsonDocument.Parse(line);
                     var root = doc.RootElement;
                     var stage = GetJsonString(root, "stage");
-                    var message = TrimForLog(GetJsonString(root, "message"), 120);
+                    var message = LogTextContract.TruncateWithDots(GetJsonString(root, "message"), 120);
                     if (stage.Contains("stop", StringComparison.OrdinalIgnoreCase)
                         || stage.Contains("shutdown", StringComparison.OrdinalIgnoreCase)
                         || stage.Contains("flush", StringComparison.OrdinalIgnoreCase)
@@ -10069,7 +9982,7 @@ private readonly ReservationStore _store;
                 catch { }
             }
             if (stages.Count == 0) return $"progress=found stopStages=0 tailLines={lines.Count}";
-            return $"progress=found stopStages={stages.Count} tail={TrimForLog(string.Join(" | ", stages.TakeLast(8)), 700)}";
+            return $"progress=found stopStages={stages.Count} tail={LogTextContract.TruncateWithDots(string.Join(" | ", stages.TakeLast(8)), 700)}";
         }
         catch (Exception ex)
         {
@@ -10092,7 +10005,7 @@ private readonly ReservationStore _store;
             Directory.CreateDirectory(Path.GetDirectoryName(session.StopSignalPath) ?? AppContext.BaseDirectory);
             await File.WriteAllTextAsync(session.StopSignalPath, DateTime.Now.ToString("O")).ConfigureAwait(false);
             _log.Add("TVAIREPGREC_STOP_SIGNAL", $"R{reservationId}",
-                $"result=SENT pid={pid} stopSignal={SafeValue(session.StopSignalPath)} response={SafeValue(session.ResponsePath)} timeoutMs={timeoutMs} rule=release_contract");
+                $"result=SENT pid={pid} stopSignal={LogTextContract.TrimOrDash(session.StopSignalPath)} response={LogTextContract.TrimOrDash(session.ResponsePath)} timeoutMs={timeoutMs} rule=release_contract");
 
             var started = DateTime.UtcNow;
             bool exited;
@@ -10119,7 +10032,7 @@ private readonly ReservationStore _store;
                 var fileSize = File.Exists(session.RecordingFilePath) ? new FileInfo(session.RecordingFilePath).Length : -1;
                 var bridgeResponse = ReadRecordingWorkerResponseSummary(session.ResponsePath);
                 _log.Add("TVAIREPGREC_STOP_RESULT", $"R{reservationId}",
-                    $"result=OK pid={pid} elapsedMs={elapsed} responseExists={responseExists} resultPublication=before_process_exit fileSize={fileSize} path={SafeValue(session.RecordingFilePath)} response={bridgeResponse} rule=release_contract");
+                    $"result=OK pid={pid} elapsedMs={elapsed} responseExists={responseExists} resultPublication=before_process_exit fileSize={fileSize} path={LogTextContract.TrimOrDash(session.RecordingFilePath)} response={bridgeResponse} rule=release_contract");
                 return true;
             }
 
@@ -10133,7 +10046,7 @@ private readonly ReservationStore _store;
         {
             var exceptionResponse = ReadRecordingWorkerResponseSummary(session.ResponsePath);
             _log.Add("TVAIREPGREC_STOP_RESULT", $"R{reservationId}",
-                $"result=NG pid={pid} error={TrimForLog(ex.Message, 240)} response={exceptionResponse} fallback=single_pid_exit rule=release_contract");
+                $"result=NG pid={pid} error={LogTextContract.TruncateWithDots(ex.Message, 240)} response={exceptionResponse} fallback=single_pid_exit rule=release_contract");
             return false;
         }
     }
@@ -10168,7 +10081,7 @@ private readonly ReservationStore _store;
         }
         catch (Exception ex)
         {
-            _log.Add("PROC_TRACE", $"R{reservationId}", $"[PROC] stage=probe_exception pid={pid} error={TrimForLog(ex.Message, 240)}");
+            _log.Add("PROC_TRACE", $"R{reservationId}", $"[PROC] stage=probe_exception pid={pid} error={LogTextContract.TruncateWithDots(ex.Message, 240)}");
             return;
         }
 
@@ -10210,7 +10123,7 @@ private readonly ReservationStore _store;
         catch (Exception ex)
         {
             _log.Add("PROC_TRACE", $"R{reservationId}",
-                $"[PROC] stage=single_pid_kill_exception pid={pid} error={TrimForLog(ex.Message, 240)}");
+                $"[PROC] stage=single_pid_kill_exception pid={pid} error={LogTextContract.TruncateWithDots(ex.Message, 240)}");
             _log.Add("Scheduler", $"R{reservationId}", $"PID単体Kill例外: {ex.Message} / PID={pid}");
         }
         finally
@@ -10231,7 +10144,7 @@ private readonly ReservationStore _store;
             if (preserveForRecovery)
             {
                 _log.Add("REC_APP_SHUTDOWN_POLICY", $"R{s.ReservationId}",
-                    $"result=PRESERVE_RECORDING_FOR_RESTART now={now:MM/dd HH:mm:ss} plannedEnd={s.PlannedEndTime:MM/dd HH:mm:ss} pid={s.ProcessId} tuner={SafeValue(s.Lease.Name)} " +
+                    $"result=PRESERVE_RECORDING_FOR_RESTART now={now:MM/dd HH:mm:ss} plannedEnd={s.PlannedEndTime:MM/dd HH:mm:ss} pid={s.ProcessId} tuner={LogTextContract.TrimOrDash(s.Lease.Name)} " +
                     "action=stop_physical_worker_release_lease_keep_recording_lifecycle rule=interrupted_recording_recovery_contract");
             }
 
@@ -10373,7 +10286,7 @@ private readonly ReservationStore _store;
                 protectUntil,
                 "recording_timeline_due",
                 $"R{rec.ReservationId}",
-                $"service={SafeValue(rec.ServiceName)} title={ReservationDisplayTitle(rec.Title)}",
+                $"service={LogTextContract.TrimOrDash(rec.ServiceName)} title={ReservationDisplayTitle(rec.Title)}",
                 blockNewWorkerAfter);
         }
 
@@ -10603,7 +10516,7 @@ private readonly ReservationStore _store;
             _log.Add("REC_START_ABORT_CLEANUP", $"R{session.ReservationId}",
                 $"result={(result.Complete ? "COMPLETE" : "PARTIAL_FAILURE")} pid={session.ProcessId} gracefulStop={stopped} " +
                 $"workerGone={result.WorkerIdentityGone} leaseReleaseCompleted={result.LeaseReleaseCompleted} " +
-                $"tuner={SafeValue(session.Lease.Name)} did={session.Lease.Did} poolLeaseId={session.Lease.PoolLeaseId} generation={session.Lease.OccupancyGeneration} " +
+                $"tuner={LogTextContract.TrimOrDash(session.Lease.Name)} did={session.Lease.Did} poolLeaseId={session.Lease.PoolLeaseId} generation={session.Lease.OccupancyGeneration} " +
                 "rule=recording_lifecycle_cas_contract");
             return result;
         }
@@ -10613,7 +10526,7 @@ private readonly ReservationStore _store;
             RegisterResidualRecordingWorkerQuarantine(session);
             RegisterRecordingResourceReleaseQuarantine(session);
             _log.Add("REC_START_ABORT_CLEANUP", $"R{session.ReservationId}",
-                $"result=PARTIAL_FAILURE pid={session.ProcessId} exceptionType={ex.GetType().Name} error={TrimForLog(ex.Message, 180)} " +
+                $"result=PARTIAL_FAILURE pid={session.ProcessId} exceptionType={ex.GetType().Name} error={LogTextContract.TruncateWithDots(ex.Message, 180)} " +
                 "action=keep_starting_and_quarantine_did rule=recording_lifecycle_cas_contract");
             return result;
         }
@@ -10755,12 +10668,26 @@ private readonly ReservationStore _store;
     }
 
 
+    private static RecordingFailureCause WorkerStartupFailureCause(RecordingWorkerStartupFailureKind kind) => kind switch
+    {
+        RecordingWorkerStartupFailureKind.OpenTunerFailed => RecordingFailureCause.WorkerOpenTunerFailed,
+        RecordingWorkerStartupFailureKind.SetChannelFailed => RecordingFailureCause.WorkerSetChannelFailed,
+        RecordingWorkerStartupFailureKind.ResourceNotFound => RecordingFailureCause.WorkerResourceMissing,
+        RecordingWorkerStartupFailureKind.LoadLibraryFailed => RecordingFailureCause.WorkerLibraryLoadFailed,
+        RecordingWorkerStartupFailureKind.CommonTsRouteNotReady => RecordingFailureCause.WorkerStreamUnavailable,
+        RecordingWorkerStartupFailureKind.WorkerReportedFailure => RecordingFailureCause.WorkerReportedFailure,
+        RecordingWorkerStartupFailureKind.WorkerExited => RecordingFailureCause.WorkerExitedBeforeRecording,
+        RecordingWorkerStartupFailureKind.StartupDeadlineExceeded => RecordingFailureCause.WorkerStartupTimedOut,
+        _ => RecordingFailureCause.Unspecified
+    };
+
     private void SettleClaimedRecordingLaunchFailure(
         Reservation r,
         string reason,
         bool retryableStart,
         RecordingWorkerStartupFailureKind startupFailureKind = RecordingWorkerStartupFailureKind.None,
-        bool tunerOpenedBeforeFailure = false)
+        bool tunerOpenedBeforeFailure = false,
+        RecordingFailureCause userFailureCause = RecordingFailureCause.Unspecified)
     {
         // RECORDING_START_FAILURE_RETRY_SINGLE_SOURCE_INVARIANT:
         // 再試行可否はチェーン属性では決めない。worker/OpenTuner等の一時失敗として実行側が明示した場合だけ
@@ -10770,35 +10697,37 @@ private readonly ReservationStore _store;
         {
             _log.Add("REC_START_FAILURE_SETTLE", $"R{r.Id}",
                 $"result=SKIPPED reason=status_changed currentStatus={latest?.Status.ToString() ?? "missing"} " +
-                $"retryableStart={retryableStart} originalReason={TrimForLog(reason, 180)} rule=recording_lifecycle_cas_contract");
+                $"retryableStart={retryableStart} originalReason={LogTextContract.TruncateWithDots(reason, 180)} rule=recording_lifecycle_cas_contract");
             return;
         }
 
         var interruptedAfterOpen = startupFailureKind == RecordingWorkerStartupFailureKind.WorkerExited && tunerOpenedBeforeFailure;
         var failureKind = interruptedAfterOpen ? "worker_exited_after_open_before_recording" : null;
+        var cause = userFailureCause != RecordingFailureCause.Unspecified
+            ? userFailureCause : WorkerStartupFailureCause(startupFailureKind);
         var settle = retryableStart || !latest.IsEnabled
             ? _store.TryRollbackRecordingStart(r.Id, latest.DataVersion)
-            : _store.TryFailRecordingStart(r.Id, latest.DataVersion, reason, failureKind);
+            : _store.TryFailRecordingStart(r.Id, latest.DataVersion, reason, failureKind, cause);
         _log.Add("REC_START_FAILURE_SETTLE", $"R{r.Id}",
             $"result={(settle.Applied ? "APPLIED" : "REJECTED")} target={(retryableStart || !latest.IsEnabled ? "Scheduled" : "Failed")} " +
-            $"retryableStart={retryableStart} reason={TrimForLog(reason, 180)} detail={SafeValue(settle.Reason)} " +
-            $"failureKind={SafeValue(failureKind)} workerFailureKind={startupFailureKind} tunerOpenedBeforeFailure={tunerOpenedBeforeFailure} " +
+            $"retryableStart={retryableStart} reason={LogTextContract.TruncateWithDots(reason, 180)} detail={LogTextContract.TrimOrDash(settle.Reason)} " +
+            $"failureKind={LogTextContract.TrimOrDash(failureKind)} workerFailureKind={startupFailureKind} tunerOpenedBeforeFailure={tunerOpenedBeforeFailure} " +
             $"dataVersion={settle.PreviousDataVersion}->{settle.CurrentDataVersion} rule=recording_lifecycle_cas_contract");
         if (settle.Applied)
             _forceAllocationReevaluate = true;
     }
 
-    private void Fail(Reservation r, string reason)
+    private void Fail(Reservation r, string reason, RecordingFailureCause failureCause = RecordingFailureCause.Unspecified)
     {
         var starting = _store.GetById(r.Id);
         if (starting?.Status == ReservationStatus.Starting)
         {
             var settle = starting.IsEnabled
-                ? _store.TryFailRecordingStart(r.Id, starting.DataVersion, reason)
+                ? _store.TryFailRecordingStart(r.Id, starting.DataVersion, reason, failureCause: failureCause)
                 : _store.TryRollbackRecordingStart(r.Id, starting.DataVersion);
             _log.Add("REC_FAIL", $"R{r.Id}",
                 $"reason={reason} lifecycleFrom=Starting lifecycleTarget={(starting.IsEnabled ? "Failed" : "Scheduled")} " +
-                $"casApplied={settle.Applied} casReason={SafeValue(settle.Reason)} dataVersion={settle.PreviousDataVersion}->{settle.CurrentDataVersion} " +
+                $"casApplied={settle.Applied} casReason={LogTextContract.TrimOrDash(settle.Reason)} dataVersion={settle.PreviousDataVersion}->{settle.CurrentDataVersion} " +
                 FormatReservationForAudit(settle.Reservation ?? starting, "start_failure_settled"));
             if (settle.Applied)
             {
@@ -10815,8 +10744,8 @@ private readonly ReservationStore _store;
 
             _log.Add("REC_FAIL_SUPPRESSED_ACTIVE_SESSION", $"R{r.Id}",
                 $"result=KEEP_RECORDING reason=active_tvairepgrec_session_is_source_of_truth pid={activeSession!.ProcessId} " +
-                $"tuner={SafeValue(activeSession.Lease.Name)} plannedEnd={activeSession.PlannedEndTime:MM/dd HH:mm:ss} originalReason={TrimForLog(reason, 180)} " +
-                $"restore={(restore is null ? "not_required" : restore.Applied ? "applied" : "rejected")} restoreReason={(restore is null ? "-" : SafeValue(restore.Reason))} " +
+                $"tuner={LogTextContract.TrimOrDash(activeSession.Lease.Name)} plannedEnd={activeSession.PlannedEndTime:MM/dd HH:mm:ss} originalReason={LogTextContract.TruncateWithDots(reason, 180)} " +
+                $"restore={(restore is null ? "not_required" : restore.Applied ? "applied" : "rejected")} restoreReason={(restore is null ? "-" : LogTextContract.TrimOrDash(restore.Reason))} " +
                 $"dataVersion={(restore is null ? "-" : $"{restore.PreviousDataVersion}->{restore.CurrentDataVersion}")} rule=recording_lifecycle_cas_contract " + FormatReservationForAudit(r, "fail_suppressed_active_session"));
             return;
         }
@@ -10825,9 +10754,9 @@ private readonly ReservationStore _store;
         if (IsInUnfinishedRecordingWindow(latest))
         {
             _log.Add("REC_FAIL_SUPPRESSED_RECORDING_WINDOW", $"R{r.Id}",
-                $"result=KEEP_EXISTING_STATE reason=recording_started_without_finished_at originalReason={TrimForLog(reason, 180)} " +
+                $"result=KEEP_EXISTING_STATE reason=recording_started_without_finished_at originalReason={LogTextContract.TruncateWithDots(reason, 180)} " +
                 $"status={latest!.Status} start={latest.StartTime:MM/dd HH:mm:ss} end={latest.EndTime:MM/dd HH:mm:ss} " +
-                $"recordingStartedAt={latest.RecordingStartedAt:MM/dd HH:mm:ss} tuner={SafeValue(EffectiveReservationTuner(latest))} " +
+                $"recordingStartedAt={latest.RecordingStartedAt:MM/dd HH:mm:ss} tuner={LogTextContract.TrimOrDash(EffectiveReservationTuner(latest))} " +
                 $"rule=release_contract " + FormatReservationForAudit(latest, "fail_suppressed_recording_window"));
             return;
         }
@@ -10845,9 +10774,9 @@ private readonly ReservationStore _store;
         // ここからUpdateStatus(force:true)で新しい状態や世代を上書きしてはならない。
         ReservationLifecycleTransitionResult? terminal = latest.Status switch
         {
-            ReservationStatus.Recording => _store.TryFinalizeRecordingRuntimeFailure(latest.Id, latest.DataVersion, DateTime.Now, reason),
-            ReservationStatus.Starting => _store.TryFailRecordingStart(latest.Id, latest.DataVersion, reason),
-            ReservationStatus.Scheduled => _store.TryFinalizeScheduledReservation(latest.Id, latest.DataVersion, ReservationStatus.Failed, "recording_failure", reason),
+            ReservationStatus.Recording => _store.TryFinalizeRecordingRuntimeFailure(latest.Id, latest.DataVersion, DateTime.Now, reason, failureCause),
+            ReservationStatus.Starting => _store.TryFailRecordingStart(latest.Id, latest.DataVersion, reason, failureCause: failureCause),
+            ReservationStatus.Scheduled => _store.TryFinalizeScheduledReservation(latest.Id, latest.DataVersion, ReservationStatus.Failed, "recording_failure", reason, failureCause),
             _ => null
         };
 
@@ -10859,7 +10788,7 @@ private readonly ReservationStore _store;
         }
 
         _log.Add("REC_FAIL_TERMINAL_CAS", $"R{r.Id}",
-            $"result={(terminal.Applied ? "APPLIED" : "REJECTED")} from={latest.Status} reason={SafeValue(terminal.Reason)} dataVersion={terminal.PreviousDataVersion}->{terminal.CurrentDataVersion} action={(terminal.Applied ? "terminal_committed" : "preserve_newer_state")} rule=recording_lifecycle_cas_contract");
+            $"result={(terminal.Applied ? "APPLIED" : "REJECTED")} from={latest.Status} reason={LogTextContract.TrimOrDash(terminal.Reason)} dataVersion={terminal.PreviousDataVersion}->{terminal.CurrentDataVersion} action={(terminal.Applied ? "terminal_committed" : "preserve_newer_state")} rule=recording_lifecycle_cas_contract");
         if (terminal.Applied)
         {
             var failedSuccessors = _store.FailScheduledUserChainSuccessorsAfterPredecessorFailure(r.Id, reason);
@@ -10933,7 +10862,7 @@ private readonly ReservationStore _store;
             foreach (var item in activeReservations)
             {
                 var r = item.Reservation;
-                _log.Add("RESERVATION_AUDIT", $"{TrimForLog(r.ServiceName, 24)}", FormatReservationForAudit(r, item.ExecutionState));
+                _log.Add("RESERVATION_AUDIT", $"{LogTextContract.TruncateWithDots(r.ServiceName, 24)}", FormatReservationForAudit(r, item.ExecutionState));
             }
 
             if (terminalPastReservations.Count > 0)
@@ -10945,7 +10874,7 @@ private readonly ReservationStore _store;
                     .OrderByDescending(x => x.Reservation.UpdatedAt)
                     .ThenByDescending(x => x.Reservation.Id)
                     .Take(3)
-                    .Select(x => $"R{x.Reservation.Id}:{TrimForLog(x.Reservation.ServiceName, 18)}:{x.Reservation.Status}"));
+                    .Select(x => $"R{x.Reservation.Id}:{LogTextContract.TruncateWithDots(x.Reservation.ServiceName, 18)}:{x.Reservation.Status}"));
                 var signature = $"{context}:{terminalPastReservations.Count}:{completed}:{cancelled}:{failed}:{samples}";
                 var nowUtc = DateTime.UtcNow;
                 if (!string.Equals(_lastPastTerminalAuditSignature, signature, StringComparison.Ordinal)
@@ -10978,7 +10907,7 @@ private readonly ReservationStore _store;
     private string FormatReservationForAudit(Reservation r, string state)
     {
         var dueStart = r.StartTime.AddSeconds(-_ini.PreStartMarginSeconds);
-        return $"service={TrimForLog(r.ServiceName, 40)} title={ReservationDisplayTitle(r.Title, 60)} state={state} id=R{r.Id} status={r.Status} source={r.Source} enabled={r.IsEnabled} conflicted={r.IsConflicted} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} dueStart={dueStart:MM/dd HH:mm:ss} svcId={r.ServiceId} group={ResolveGroup(r) ?? "-"} tuner={SafeValue(EffectiveTunerName(r))} ch={SafeValue(r.ChannelArgument)} userChain={r.IsUserChain} chainPrev={(r.UserChainPreviousId.HasValue ? $"R{r.UserChainPreviousId.Value}" : "-")} chainRoot={(r.UserChainRootId.HasValue ? $"R{r.UserChainRootId.Value}" : "-")} created={r.CreatedAt:MM/dd HH:mm:ss} updated={r.UpdatedAt:MM/dd HH:mm:ss} rule=release_contract";
+        return $"service={LogTextContract.TruncateWithDots(r.ServiceName, 40)} title={ReservationDisplayTitle(r.Title, 60)} state={state} id=R{r.Id} status={r.Status} source={r.Source} enabled={r.IsEnabled} conflicted={r.IsConflicted} start={r.StartTime:MM/dd HH:mm:ss} end={r.EndTime:MM/dd HH:mm:ss} dueStart={dueStart:MM/dd HH:mm:ss} svcId={r.ServiceId} group={ResolveGroup(r) ?? "-"} tuner={LogTextContract.TrimOrDash(EffectiveTunerName(r))} ch={LogTextContract.TrimOrDash(r.ChannelArgument)} userChain={r.IsUserChain} chainPrev={(r.UserChainPreviousId.HasValue ? $"R{r.UserChainPreviousId.Value}" : "-")} chainRoot={(r.UserChainRootId.HasValue ? $"R{r.UserChainRootId.Value}" : "-")} created={r.CreatedAt:MM/dd HH:mm:ss} updated={r.UpdatedAt:MM/dd HH:mm:ss} rule=release_contract";
     }
 
 
@@ -11030,7 +10959,7 @@ private readonly ReservationStore _store;
         {
             var knownOutputs = _recordingResults.Files.KnownOutputPaths("R" + r.Id);
             if (!TvTestRecordingDirectoryResolver.TryResolve(_ini.TvTestExecutablePath, out var directory, out var evidence) && knownOutputs.Count == 0)
-                return new InterruptedRecordingFileProbe(false, $"result=folder_unresolved evidence={TrimForLog(evidence, 420)} rule=release_contract");
+                return new InterruptedRecordingFileProbe(false, $"result=folder_unresolved evidence={LogTextContract.TruncateWithDots(evidence, 420)} rule=release_contract");
 
             var namingPolicy = ResolveRecordingWorkerFileNameTimePolicy(r, r.RecordingStartedAt ?? r.StartTime);
             var expectedName = BuildRecordingWorkerFileName(r, namingPolicy.BaseTime).FileName;
@@ -11047,26 +10976,26 @@ private readonly ReservationStore _store;
             }
 
             if (candidates.Count == 0)
-                return new InterruptedRecordingFileProbe(false, $"result=no_file folder={SafeValue(directory)} expected={SafeValue(expectedName)} start={r.StartTime:yyyy-MM-dd HH:mm:ss} end={r.EndTime:yyyy-MM-dd HH:mm:ss} rule=release_contract");
+                return new InterruptedRecordingFileProbe(false, $"result=no_file folder={LogTextContract.TrimOrDash(directory)} expected={LogTextContract.TrimOrDash(expectedName)} start={r.StartTime:yyyy-MM-dd HH:mm:ss} end={r.EndTime:yyyy-MM-dd HH:mm:ss} rule=release_contract");
 
             var details = candidates.Select(path =>
             {
                 try
                 {
                     var fi = new FileInfo(path);
-                    return $"file={SafeValue(fi.Name)} bytes={fi.Length} lastWrite={fi.LastWriteTime:yyyy-MM-dd HH:mm:ss}";
+                    return $"file={LogTextContract.TrimOrDash(fi.Name)} bytes={fi.Length} lastWrite={fi.LastWriteTime:yyyy-MM-dd HH:mm:ss}";
                 }
                 catch (Exception ex)
                 {
-                    return $"file={SafeValue(Path.GetFileName(path))} statError={SafeValue(ex.GetType().Name)}";
+                    return $"file={LogTextContract.TrimOrDash(Path.GetFileName(path))} statError={LogTextContract.TrimOrDash(ex.GetType().Name)}";
                 }
             });
 
-            return new InterruptedRecordingFileProbe(true, $"result=partial_file_detected folder={SafeValue(directory)} expected={SafeValue(expectedName)} {string.Join(" | ", details)} reservation={r.StartTime:yyyy-MM-dd HH:mm:ss}〜{r.EndTime:yyyy-MM-dd HH:mm:ss} rule=release_contract");
+            return new InterruptedRecordingFileProbe(true, $"result=partial_file_detected folder={LogTextContract.TrimOrDash(directory)} expected={LogTextContract.TrimOrDash(expectedName)} {string.Join(" | ", details)} reservation={r.StartTime:yyyy-MM-dd HH:mm:ss}〜{r.EndTime:yyyy-MM-dd HH:mm:ss} rule=release_contract");
         }
         catch (Exception ex)
         {
-            return new InterruptedRecordingFileProbe(false, $"result=audit_error type={ex.GetType().Name} message={TrimForLog(ex.Message, 240)} rule=release_contract");
+            return new InterruptedRecordingFileProbe(false, $"result=audit_error type={ex.GetType().Name} message={LogTextContract.TruncateWithDots(ex.Message, 240)} rule=release_contract");
         }
     }
 
@@ -11078,7 +11007,7 @@ private readonly ReservationStore _store;
         // TvAIrEpgRec直録画では、RecordFileName をTvAIr側で録画用の相対パスへ展開する。
         if (!TvTestRecordingDirectoryResolver.TryResolve(_ini.TvTestExecutablePath, out var directory, out var evidence))
         {
-            _log.Add("RECORD_FOLDER_RESOLVE", $"R{r.Id}", $"result=FAIL evidence={TrimForLog(evidence, 420)}");
+            _log.Add("RECORD_FOLDER_RESOLVE", $"R{r.Id}", $"result=FAIL evidence={LogTextContract.TruncateWithDots(evidence, 420)}");
             _log.Add("RECORD_FILE_PATH_BUILD", $"R{r.Id}", "result=FAIL reason=record_folder_unresolved route=TvAIrEpgRecTemplateBuild");
             return string.Empty;
         }
@@ -11095,7 +11024,7 @@ private readonly ReservationStore _store;
                 if (alternate is not null) directory = alternate;
             }
         }
-        _log.Add("RECORD_FOLDER_RESOLVE", $"R{r.Id}", $"result=OK folder={directory} evidence={TrimForLog(evidence, 420)}");
+        _log.Add("RECORD_FOLDER_RESOLVE", $"R{r.Id}", $"result=OK folder={directory} evidence={LogTextContract.TruncateWithDots(evidence, 420)}");
         _log.Add("RECORD_FILE_PATH_BUILD", $"R{r.Id}", "result=OK reason=tvairepgrec_uses_recordfilename_ini source=TVTest.RecordFileName route=TvAIrEpgRecTemplateBuild rule=recordfilename_ini_template");
         return directory;
     }
@@ -11152,9 +11081,9 @@ private readonly ReservationStore _store;
         if (samples.Count == 0)
         {
             _log.Add("REC_DROP_TIMELINE_SUMMARY", $"R{rid}",
-                $"service={SafeValue(service)} title={TrimForLog(title, 80)} verdict={SafeValue(outcome.QualityVerdict)} " +
-                $"samples=0 reason=runtime_stats_missing_or_empty path={SafeValue(outcome.RuntimeStatsPath)} " +
-                $"group={SafeValue(context.Group)} groupRecordingCount={context.Count} groupTuners={SafeValue(context.Names)} groupDids={SafeValue(context.Dids)} " +
+                $"service={LogTextContract.TrimOrDash(service)} title={LogTextContract.TruncateWithDots(title, 80)} verdict={LogTextContract.TrimOrDash(outcome.QualityVerdict)} " +
+                $"samples=0 reason=runtime_stats_missing_or_empty path={LogTextContract.TrimOrDash(outcome.RuntimeStatsPath)} " +
+                $"group={LogTextContract.TrimOrDash(context.Group)} groupRecordingCount={context.Count} groupTuners={LogTextContract.TrimOrDash(context.Names)} groupDids={LogTextContract.TrimOrDash(context.Dids)} " +
                 $"rule=release_contract");
             return;
         }
@@ -11172,14 +11101,14 @@ private readonly ReservationStore _store;
 
         var timelineClassification = ClassifyDropTimeline(outcome, samples, deltas, firstDrop, lastDrop, secondsToFirstDrop);
         _log.Add("REC_DROP_TIMELINE_SUMMARY", $"R{rid}",
-            $"service={SafeValue(service)} title={TrimForLog(title, 80)} timelineClass={timelineClassification.ClassName} phase={timelineClassification.Phase} severity={timelineClassification.Severity} userMeaning={timelineClassification.UserMeaning} action={timelineClassification.Action} verdict={SafeValue(outcome.QualityVerdict)} " +
-            $"samples={samples.Count} firstAt={SafeValue(first.At)} firstDropAt={SafeValue(firstDrop?.Sample.At)} lastDropAt={SafeValue(lastDrop?.Sample.At)} " +
+            $"service={LogTextContract.TrimOrDash(service)} title={LogTextContract.TruncateWithDots(title, 80)} timelineClass={timelineClassification.ClassName} phase={timelineClassification.Phase} severity={timelineClassification.Severity} userMeaning={timelineClassification.UserMeaning} action={timelineClassification.Action} verdict={LogTextContract.TrimOrDash(outcome.QualityVerdict)} " +
+            $"samples={samples.Count} firstAt={LogTextContract.TrimOrDash(first.At)} firstDropAt={LogTextContract.TrimOrDash(firstDrop?.Sample.At)} lastDropAt={LogTextContract.TrimOrDash(lastDrop?.Sample.At)} " +
             $"secondsToFirstDrop={(secondsToFirstDrop >= 0 ? secondsToFirstDrop.ToString() : "-")} dropWithinFirst30s={dropWithinFirst30s} dropActive={dropActive} " +
-            $"maxOutputDropDelta={maxOutputDrop.OutputDropDelta} maxOutputDropAt={SafeValue(maxOutputDrop.Sample.At)} maxOutputCcDelta={maxOutputDrop.OutputCcDelta} " +
-            $"maxRawDropDelta={maxRawDrop.RawDropDelta} maxRawDropAt={SafeValue(maxRawDrop.Sample.At)} maxRawCcDelta={maxRawDrop.RawCcDelta} " +
+            $"maxOutputDropDelta={maxOutputDrop.OutputDropDelta} maxOutputDropAt={LogTextContract.TrimOrDash(maxOutputDrop.Sample.At)} maxOutputCcDelta={maxOutputDrop.OutputCcDelta} " +
+            $"maxRawDropDelta={maxRawDrop.RawDropDelta} maxRawDropAt={LogTextContract.TrimOrDash(maxRawDrop.Sample.At)} maxRawCcDelta={maxRawDrop.RawCcDelta} " +
             $"finalInputRawDrops={final.RawContinuityDrops} finalInputRawCcErrors={final.RawContinuityErrors} finalInputRawSyncErrors={final.RawSyncErrors} finalInputRawScrambled={final.RawScrambledPackets} " +
             $"finalOutputDrops={final.OutputContinuityDrops} finalOutputCcErrors={final.OutputContinuityErrors} finalOutputSyncErrors={final.OutputSyncErrors} finalOutputScrambled={final.OutputScrambledPackets} finalOutputTargetMediaScrambled={final.OutputTargetMediaScrambledPackets} finalBytesWritten={final.BytesWritten} " +
-            $"rawLayerMeaning=pre_write_input_observation outputLayerMeaning=recorded_file_integrity group={SafeValue(context.Group)} groupRecordingCount={context.Count} groupTuners={SafeValue(context.Names)} groupDids={SafeValue(context.Dids)} runtimeStatsPath={SafeValue(outcome.RuntimeStatsPath)} " +
+            $"rawLayerMeaning=pre_write_input_observation outputLayerMeaning=recorded_file_integrity group={LogTextContract.TrimOrDash(context.Group)} groupRecordingCount={context.Count} groupTuners={LogTextContract.TrimOrDash(context.Names)} groupDids={LogTextContract.TrimOrDash(context.Dids)} runtimeStatsPath={LogTextContract.TrimOrDash(outcome.RuntimeStatsPath)} " +
             $"rule=release_contract");
 
         var selected = new List<(string Label, RuntimeStatsDelta Delta)>();
@@ -11198,10 +11127,10 @@ private readonly ReservationStore _store;
             var d = item.Delta;
             var x = d.Sample;
             _log.Add("TVAIREPGREC_RUNTIME_STATS", $"R{rid}",
-                $"sample={item.Label} at={SafeValue(x.At)} service={SafeValue(service)} title={TrimForLog(title, 60)} " +
+                $"sample={item.Label} at={LogTextContract.TrimOrDash(x.At)} service={LogTextContract.TrimOrDash(service)} title={LogTextContract.TruncateWithDots(title, 60)} " +
                 $"inputRawPackets={x.RawPackets} inputRawDrops={x.RawContinuityDrops} inputRawDropDelta={d.RawDropDelta} inputRawCcErrors={x.RawContinuityErrors} inputRawCcDelta={d.RawCcDelta} inputRawGapEvents={x.RawContinuityGapEvents} inputRawGapDelta={d.RawGapDelta} inputRawSameCcMismatch={x.RawSameCcContentMismatches} inputRawSameCcMismatchDelta={d.RawSameCcMismatchDelta} inputRawDuplicates={x.RawDuplicatePackets} inputRawDiscontinuityResets={x.RawDiscontinuityResets} inputRawTei={x.RawTransportErrors} inputRawSyncErrors={x.RawSyncErrors} inputRawScrambled={x.RawScrambledPackets} " +
                 $"outputPackets={x.OutputPackets} outputDrops={x.OutputContinuityDrops} outputDropDelta={d.OutputDropDelta} outputCcErrors={x.OutputContinuityErrors} outputCcDelta={d.OutputCcDelta} outputGapEvents={x.OutputContinuityGapEvents} outputGapDelta={d.OutputGapDelta} outputSameCcMismatch={x.OutputSameCcContentMismatches} outputSameCcMismatchDelta={d.OutputSameCcMismatchDelta} outputDuplicates={x.OutputDuplicatePackets} outputDiscontinuityResets={x.OutputDiscontinuityResets} outputTei={x.OutputTransportErrors} outputSyncErrors={x.OutputSyncErrors} outputSyncDelta={d.OutputSyncDelta} outputScrambled={x.OutputScrambledPackets} outputTargetMediaScrambled={x.OutputTargetMediaScrambledPackets} " +
-                $"bytesWritten={x.BytesWritten} bytesDelta={d.BytesDelta} rawLayerMeaning=pre_write_input_observation outputLayerMeaning=recorded_file_integrity group={SafeValue(context.Group)} groupRecordingCount={context.Count} groupTuners={SafeValue(context.Names)} groupDids={SafeValue(context.Dids)} " +
+                $"bytesWritten={x.BytesWritten} bytesDelta={d.BytesDelta} rawLayerMeaning=pre_write_input_observation outputLayerMeaning=recorded_file_integrity group={LogTextContract.TrimOrDash(context.Group)} groupRecordingCount={context.Count} groupTuners={LogTextContract.TrimOrDash(context.Names)} groupDids={LogTextContract.TrimOrDash(context.Dids)} " +
                 $"rule=release_contract");
         }
     }
@@ -11244,11 +11173,11 @@ private readonly ReservationStore _store;
         var correlation = ClassifyDropCorrelation(quality, outputDamage, rawNoise, context.Count);
 
         _log.Add("REC_QUALITY_CORRELATION", $"R{rid}",
-            $"service={SafeValue(service)} title={TrimForLog(title, 80)} " +
+            $"service={LogTextContract.TrimOrDash(service)} title={LogTextContract.TruncateWithDots(title, 80)} " +
             $"correlationClass={correlation.ClassName} priority={correlation.Priority} axis={correlation.Axis} userMeaning={correlation.UserMeaning} action={correlation.Action} " +
-            $"qualityClass={quality.ClassName} qualitySeverity={quality.Severity} group={SafeValue(context.Group)} tuner={SafeValue(tunerName)} did={SafeValue(did)} concurrentSameGroupRecordings={context.Count} concurrentSameGroupTuners={SafeValue(context.Names)} concurrentSameGroupDids={SafeValue(context.Dids)} " +
-            $"outputDamageScore={outputDamage} outputDrops={SafeValue(outcome.OutputContinuityDrops)} outputCcErrors={SafeValue(outcome.OutputContinuityErrors)} outputSyncErrors={SafeValue(outcome.OutputSyncErrors)} outputScrambled={SafeValue(outcome.OutputScrambledPackets)} outputTargetMediaScrambled={SafeValue(outcome.OutputTargetMediaScrambledPackets)} " +
-            $"rawNoiseScore={rawNoise} inputRawDrops={SafeValue(outcome.RawContinuityDrops)} inputRawCcErrors={SafeValue(outcome.RawContinuityErrors)} inputRawSyncErrors={SafeValue(outcome.RawSyncErrors)} inputRawScrambled={SafeValue(outcome.RawScrambledPackets)} " +
+            $"qualityClass={quality.ClassName} qualitySeverity={quality.Severity} group={LogTextContract.TrimOrDash(context.Group)} tuner={LogTextContract.TrimOrDash(tunerName)} did={LogTextContract.TrimOrDash(did)} concurrentSameGroupRecordings={context.Count} concurrentSameGroupTuners={LogTextContract.TrimOrDash(context.Names)} concurrentSameGroupDids={LogTextContract.TrimOrDash(context.Dids)} " +
+            $"outputDamageScore={outputDamage} outputDrops={LogTextContract.TrimOrDash(outcome.OutputContinuityDrops)} outputCcErrors={LogTextContract.TrimOrDash(outcome.OutputContinuityErrors)} outputSyncErrors={LogTextContract.TrimOrDash(outcome.OutputSyncErrors)} outputScrambled={LogTextContract.TrimOrDash(outcome.OutputScrambledPackets)} outputTargetMediaScrambled={LogTextContract.TrimOrDash(outcome.OutputTargetMediaScrambledPackets)} " +
+            $"rawNoiseScore={rawNoise} inputRawDrops={LogTextContract.TrimOrDash(outcome.RawContinuityDrops)} inputRawCcErrors={LogTextContract.TrimOrDash(outcome.RawContinuityErrors)} inputRawSyncErrors={LogTextContract.TrimOrDash(outcome.RawSyncErrors)} inputRawScrambled={LogTextContract.TrimOrDash(outcome.RawScrambledPackets)} " +
             $"rule=release_contract");
     }
 
@@ -11781,7 +11710,7 @@ private readonly ReservationStore _store;
         try
         {
             if (!File.Exists(responsePath))
-                return $"path={SafeValue(responsePath)} exists=False";
+                return $"path={LogTextContract.TrimOrDash(responsePath)} exists=False";
 
             var json = File.ReadAllText(responsePath);
             using var doc = JsonDocument.Parse(json);
@@ -11850,11 +11779,11 @@ private readonly ReservationStore _store;
                 .Replace("\n", " ")
                 .Replace("\t", " ");
 
-            return $"path={SafeValue(responsePath)} exists=True success={topSuccess} exitCode={exitCode} recorderPid={processId} bytesWritten={bytesWritten} packetsWritten={packetsWritten} qualityVerdict={SafeValue(qualityVerdict)} rawDrops={SafeValue(rawDrops)} outputDrops={SafeValue(outputDrops)} runtimeStatsEmitted={SafeValue(runtimeStatsEmitted)} startupGateReleased={SafeValue(startupGate)} startupGateTimedOut={SafeValue(startupTimedOut)} startupReason={SafeValue(startupReason)} startupDiscardedOutputDrops={SafeValue(startupDiscardedDrops)} startupRecoveryAction={SafeValue(startupRecoveryAction)} startupRecoveryCount={SafeValue(startupRecoveryCount)} startupRecoveryResult={SafeValue(startupRecoveryResult)} outputPath={SafeValue(outputPath)} message={TrimForLog(recorderMessage, 1800)}";
+            return $"path={LogTextContract.TrimOrDash(responsePath)} exists=True success={topSuccess} exitCode={exitCode} recorderPid={processId} bytesWritten={bytesWritten} packetsWritten={packetsWritten} qualityVerdict={LogTextContract.TrimOrDash(qualityVerdict)} rawDrops={LogTextContract.TrimOrDash(rawDrops)} outputDrops={LogTextContract.TrimOrDash(outputDrops)} runtimeStatsEmitted={LogTextContract.TrimOrDash(runtimeStatsEmitted)} startupGateReleased={LogTextContract.TrimOrDash(startupGate)} startupGateTimedOut={LogTextContract.TrimOrDash(startupTimedOut)} startupReason={LogTextContract.TrimOrDash(startupReason)} startupDiscardedOutputDrops={LogTextContract.TrimOrDash(startupDiscardedDrops)} startupRecoveryAction={LogTextContract.TrimOrDash(startupRecoveryAction)} startupRecoveryCount={LogTextContract.TrimOrDash(startupRecoveryCount)} startupRecoveryResult={LogTextContract.TrimOrDash(startupRecoveryResult)} outputPath={LogTextContract.TrimOrDash(outputPath)} message={LogTextContract.TruncateWithDots(recorderMessage, 1800)}";
         }
         catch (Exception ex)
         {
-            return $"path={SafeValue(responsePath)} exists={(File.Exists(responsePath) ? "True" : "False")} readError={TrimForLog(ex.Message, 240)}";
+            return $"path={LogTextContract.TrimOrDash(responsePath)} exists={(File.Exists(responsePath) ? "True" : "False")} readError={LogTextContract.TruncateWithDots(ex.Message, 240)}";
         }
     }
 
@@ -11883,17 +11812,17 @@ private readonly ReservationStore _store;
         var created = r.CreatedAt == default ? "-" : r.CreatedAt.ToString("yyyy-MM-dd HH:mm:ss");
         var updated = r.UpdatedAt == default ? "-" : r.UpdatedAt.ToString("yyyy-MM-dd HH:mm:ss");
         var channelIdentity = resolvedChannel is null
-            ? $"nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} ch={SafeValue(r.ChannelArgument)} channelSource=reservation_snapshot"
-            : $"nid={resolvedChannel.OriginalNetworkId} tsid={resolvedChannel.TransportStreamId} sid={resolvedChannel.ServiceId} chspace={resolvedChannel.ResolvedSpace} chi={resolvedChannel.ResolvedChannelIndex} ch2={SafeValue(resolvedChannel.Ch2FileName)}:{resolvedChannel.Ch2LineNumber} channelSource=current_ch2";
+            ? $"nid={r.NetworkId} tsid={r.TransportStreamId} sid={r.ServiceId} ch={LogTextContract.TrimOrDash(r.ChannelArgument)} channelSource=reservation_snapshot"
+            : $"nid={resolvedChannel.OriginalNetworkId} tsid={resolvedChannel.TransportStreamId} sid={resolvedChannel.ServiceId} chspace={resolvedChannel.ResolvedSpace} chi={resolvedChannel.ResolvedChannelIndex} ch2={LogTextContract.TrimOrDash(resolvedChannel.Ch2FileName)}:{resolvedChannel.Ch2LineNumber} channelSource=current_ch2";
         var fileNamePart = fileNameBuild is null
             ? "fileName=- outputPath=- filenameGuard=not_yet"
-            : $"fileName={SafeValue(fileNameBuild.FileName)} outputPath={SafeValue(outputPath)} filenameGuard=recordfilename_ini_template formatterRule={SafeValue(fileNameBuild.FormatterRule)} rawTitleChanged=false unsupportedTokens={SafeValue(fileNameBuild.UnsupportedTokens)}";
+            : $"fileName={LogTextContract.TrimOrDash(fileNameBuild.FileName)} outputPath={LogTextContract.TrimOrDash(outputPath)} filenameGuard=recordfilename_ini_template formatterRule={LogTextContract.TrimOrDash(fileNameBuild.FormatterRule)} rawTitleChanged=false unsupportedTokens={LogTextContract.TrimOrDash(fileNameBuild.UnsupportedTokens)}";
         var leasePart = lease is null
-            ? $"plannedTuner={SafeValue(plannedTuner)} actualTuner={SafeValue(actualTuner)} did=- bonDriver=- leaseKind=-"
-            : $"plannedTuner={SafeValue(plannedTuner)} actualTuner={SafeValue(actualTuner ?? lease.Name)} did={SafeValue(lease.Did)} bonDriver={SafeValue(lease.BonDriverFileName)} leaseKind=Recording elapsedSinceReleaseMs={(lease.ElapsedSinceReleaseMs.HasValue ? lease.ElapsedSinceReleaseMs.Value.ToString("F0") : "-")}";
+            ? $"plannedTuner={LogTextContract.TrimOrDash(plannedTuner)} actualTuner={LogTextContract.TrimOrDash(actualTuner)} did=- bonDriver=- leaseKind=-"
+            : $"plannedTuner={LogTextContract.TrimOrDash(plannedTuner)} actualTuner={LogTextContract.TrimOrDash(actualTuner ?? lease.Name)} did={LogTextContract.TrimOrDash(lease.Did)} bonDriver={LogTextContract.TrimOrDash(lease.BonDriverFileName)} leaseKind=Recording elapsedSinceReleaseMs={(lease.ElapsedSinceReleaseMs.HasValue ? lease.ElapsedSinceReleaseMs.Value.ToString("F0") : "-")}";
         var chainPart = $"userChain={r.IsUserChain} chainPrev={(r.UserChainPreviousId.HasValue ? $"R{r.UserChainPreviousId.Value}" : "-")} chainRoot={(r.UserChainRootId.HasValue ? $"R{r.UserChainRootId.Value}" : "-")} chainContinuation={IsChainContinuation(r)}";
         var timePart = $"start={r.StartTime:yyyy-MM-dd HH:mm:ss} end={r.EndTime:yyyy-MM-dd HH:mm:ss} scheduledStart={scheduledStart} plannedEnd={(plannedEnd.HasValue ? plannedEnd.Value.ToString("yyyy-MM-dd HH:mm:ss") : "-")} created={created} updated={updated} ageMin={ageMin}";
-        return $"result=OK stage={stage} reservation=R{r.Id} kind={reservationKind} source={r.Source} route={route} status={r.Status} enabled={r.IsEnabled} conflicted={r.IsConflicted} service={SafeValue(r.ServiceName)} title={ReservationDisplayTitle(r.Title, 80)} group={SafeValue(group ?? ResolveGroup(r))} {leasePart} {channelIdentity} {fileNamePart} finalGuardApplied={finalGuardApplied} commonAllocationRoute=True wakeCoupled=True preRecordEpgCoupled=True {chainPart} {timePart} sourceRule={(r.SourceRuleId.HasValue ? r.SourceRuleId.Value.ToString() : "-")} sourceRuleName={SafeValue(r.SourceRuleName)} note={SafeValue(note)} rule=reservation_tuner_filename_pipeline_audit_release_contract";
+        return $"result=OK stage={stage} reservation=R{r.Id} kind={reservationKind} source={r.Source} route={route} status={r.Status} enabled={r.IsEnabled} conflicted={r.IsConflicted} service={LogTextContract.TrimOrDash(r.ServiceName)} title={ReservationDisplayTitle(r.Title, 80)} group={LogTextContract.TrimOrDash(group ?? ResolveGroup(r))} {leasePart} {channelIdentity} {fileNamePart} finalGuardApplied={finalGuardApplied} commonAllocationRoute=True wakeCoupled=True preRecordEpgCoupled=True {chainPart} {timePart} sourceRule={(r.SourceRuleId.HasValue ? r.SourceRuleId.Value.ToString() : "-")} sourceRuleName={LogTextContract.TrimOrDash(r.SourceRuleName)} note={LogTextContract.TrimOrDash(note)} rule=reservation_tuner_filename_pipeline_audit_release_contract";
     }
 
     private static string ResolveReservationKindForPipelineAudit(Reservation r)
@@ -11923,8 +11852,6 @@ private readonly ReservationStore _store;
     private static string ReservationDisplayTitle(string? rawTitle, int maxLength = 120)
         => ReservationTitleDisplayContract.ForLog(rawTitle, maxLength);
 
-    private static string SafeValue(string? value)
-        => string.IsNullOrWhiteSpace(value) ? "-" : value.Trim();
 }
 
 // ─── 内部型 ──────────────────────────────────────────────────────

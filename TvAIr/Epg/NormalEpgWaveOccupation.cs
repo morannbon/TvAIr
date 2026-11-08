@@ -19,7 +19,7 @@ public sealed class NormalEpgWaveOccupation
         bool silent,
         long runGeneration)
     {
-        var normalizedGroup = NormalizeGroup(group);
+        var normalizedGroup = TvAIr.Core.TunerDisplayName.NormalizeGroup(group);
         lock (gate)
         {
             var snapshot = new NormalEpgWaveOccupationSnapshot(
@@ -44,7 +44,7 @@ public sealed class NormalEpgWaveOccupation
         IReadOnlyList<string> physicalTuners,
         out NormalEpgWaveOccupationSnapshot snapshot)
     {
-        var normalizedGroup = NormalizeGroup(group);
+        var normalizedGroup = TvAIr.Core.TunerDisplayName.NormalizeGroup(group);
         var normalizedTuners = (physicalTuners ?? Array.Empty<string>())
             .Where(x => !string.IsNullOrWhiteSpace(x))
             .Select(x => x.Trim())
@@ -81,7 +81,7 @@ public sealed class NormalEpgWaveOccupation
 
     public bool Clear(string group, long runGeneration)
     {
-        var normalizedGroup = NormalizeGroup(group);
+        var normalizedGroup = TvAIr.Core.TunerDisplayName.NormalizeGroup(group);
         lock (gate)
         {
             if (!active.TryGetValue(normalizedGroup, out var current))
@@ -108,7 +108,7 @@ public sealed class NormalEpgWaveOccupation
 
     public bool TryGet(string group, out NormalEpgWaveOccupationSnapshot snapshot)
     {
-        var normalizedGroup = NormalizeGroup(group);
+        var normalizedGroup = TvAIr.Core.TunerDisplayName.NormalizeGroup(group);
         lock (gate)
         {
             if (active.TryGetValue(normalizedGroup, out var found))
@@ -127,8 +127,6 @@ public sealed class NormalEpgWaveOccupation
             return active.Values.OrderBy(x => x.Group, StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
-    private static string NormalizeGroup(string group)
-        => TvAIr.Core.TunerDisplayName.NormalizeGroup(group);
 }
 
 public sealed record NormalEpgWaveOccupationSnapshot(

@@ -8,7 +8,7 @@ public sealed class IniSettingsService
 {
     private const int CurrentSettingsSchemaVersion = 1;
     // SETTINGS_MIGRATION_SOURCE_CONTRACT
-    // 公開版 v1.2.0 / v1.2.1 / v1.2.2 は SettingsSchemaVersion を持たないため schema=0 として扱う。
+    // スキーマ番号が保存されていない既存設定は0として現行形式へ移行する。
     // 製品バージョン文字列では判定せず、INI schema と既知の旧キー/旧セクションを移行元の識別子にする。
     // 将来版でもこの schema=0 -> 現行schema の直接移行経路を累積維持し、中間版の順次起動を要求しない。
     private const int LegacyPublicReleaseSettingsSchemaVersion = 0;
@@ -421,7 +421,7 @@ public sealed class IniSettingsService
 
     private static bool NeedsLegacySettingsMigration(Dictionary<string, string> values)
     {
-        // v1.2.0～v1.2.2を含むschema未導入の公開版は0として直接現行schemaへ上げる。
+        // スキーマ番号のない設定も現在のスキーマへ直接移行する。
         // 将来CurrentSettingsSchemaVersionが進んでも、version文字列による隣接版限定にはしない。
         if (GetInt(values, "SettingsSchemaVersion", LegacyPublicReleaseSettingsSchemaVersion) < CurrentSettingsSchemaVersion)
             return true;
@@ -437,8 +437,8 @@ public sealed class IniSettingsService
     {
         var lines = File.ReadAllLines(_iniPath).ToList();
 
-        // 公開版 v1.2.0～v1.2.2 のschema=0を含め、旧schemaから「この実行版の現行schema」へ直接stageする。
-        // 1.2.2→1.2.4のような飛び越し更新でも中間版を要求しないことが契約。
+        // 保存済みの旧スキーマから現在のスキーマへ一段階で移行候補を作る。
+        // スキーマ移行時に中間版の実行を要求しない。
         // 旧schemaで起動している以上、旧キーの実効値を移行元の正本とする。
         // 以前の移行試行等で同名の現行キーが残っていても信用せず、旧キーから必ず再生成する。
         // 旧キー自体はrollback用に次回起動まで保持する。

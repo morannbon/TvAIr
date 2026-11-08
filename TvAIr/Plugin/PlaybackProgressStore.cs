@@ -96,7 +96,7 @@ public sealed class PlaybackProgressStore
         }
         catch (Exception ex)
         {
-            log.Add("PLAYBACK_PROGRESS_STORE_LOAD", "PlaybackProgress", $"result=FAILED filePreserved=True reason={Sanitize(ex.Message)} rule=playback_progress_store_contract");
+            log.Add("PLAYBACK_PROGRESS_STORE_LOAD", "PlaybackProgress", $"result=FAILED filePreserved=True reason={LogTextContract.SanitizePersistedError(ex.Message)} rule=playback_progress_store_contract");
             return new(StringComparer.OrdinalIgnoreCase);
         }
     }
@@ -116,6 +116,5 @@ public sealed class PlaybackProgressStore
         return id;
     }
 
-    private static string Sanitize(string? value) => string.IsNullOrWhiteSpace(value) ? "unknown" : value.Replace('\r', ' ').Replace('\n', ' ').Trim()[..Math.Min(160, value.Replace('\r', ' ').Replace('\n', ' ').Trim().Length)];
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
 }

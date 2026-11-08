@@ -295,7 +295,7 @@ public sealed class UserEventLogEntry
     // UserOperationEvent の内部追跡属性。ユーザー向け表示文言の正本にはしない。
     // USER_LOG_PRESENTATION_INVARIANT:
     // 標準ログは必ずシンプルな1行、詳細ログはユーザーが選択した項目だけを多段表示する。
-    // 報告用コピーにも内部契約名を直接露出させず、ユーザーが理解できる事実だけを投影する。
+    // 報告用コピーでは既存のユーザーログから必要な事実を抽出して可逆圧縮する。開発者ログから補充しない。
     public string Origin { get; set; } = "";
     public string Trigger { get; set; } = "";
     public string StoryRole { get; set; } = "";

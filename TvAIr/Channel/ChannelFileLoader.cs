@@ -374,7 +374,7 @@ public sealed class ChannelFileLoader
         serviceState = new ChannelServiceState();
         var name = cols[0];
         if (string.IsNullOrWhiteSpace(name) || name is "－" or "-") return false;
-        if (!int.TryParse(cols[4], out var svcType) || svcType is not (1 or 161 or 162 or 173)) return false;
+        if (!Ch2ServiceTypePolicy.IsEligible(cols[4])) return false;
         if (!ushort.TryParse(cols[5], out var sid) || sid == 0) return false;
         if (!ushort.TryParse(cols[6], out var onid) || onid == 0) return false;
         if (!ushort.TryParse(cols[7], out var tsid) || tsid == 0) return false;
@@ -404,7 +404,7 @@ public sealed class ChannelFileLoader
         target = new ChannelTarget();
         var name = cols[0];
         if (string.IsNullOrWhiteSpace(name) || name is "－" or "-") return false;
-        if (!int.TryParse(cols[4], out var svcType) || svcType is not (1 or 161 or 162 or 173)) return false;
+        if (!Ch2ServiceTypePolicy.IsEligible(cols[4])) return false;
         if (!ushort.TryParse(cols[5], out var sid)  || sid  == 0) return false;
         if (!ushort.TryParse(cols[6], out var onid) || onid == 0) return false;
         if (!ushort.TryParse(cols[7], out var tsId) || tsId == 0) return false;
@@ -538,7 +538,7 @@ public sealed class ChannelFileLoader
         if (cols.Length < 9) return false;
         var name = cols[0];
         if (string.IsNullOrWhiteSpace(name) || name is "－" or "-") return false;
-        if (!int.TryParse(cols[4], out var svcType) || svcType is not (1 or 161 or 162 or 173)) return false;
+        if (!Ch2ServiceTypePolicy.IsEligible(cols[4])) return false;
         if (!ushort.TryParse(cols[5], out sid) || sid == 0) return false;
         if (!ushort.TryParse(cols[6], out onid) || onid == 0) return false;
         if (!ushort.TryParse(cols[7], out tsid) || tsid == 0) return false;

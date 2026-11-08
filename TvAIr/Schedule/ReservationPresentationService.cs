@@ -53,19 +53,23 @@ public sealed class ReservationPresentationService
     {
         try
         {
-            var reservations = _store.GetAll();
-            var projection = BuildSystemEpgVisibleProjection(reservations);
-            var visible = reservations.Where(r => r.Source != ReservationSource.Epg).ToList();
-            visible.AddRange(projection.Rows
-                .OrderBy(r => r.StartTime)
-                .ThenBy(r => ResolveRecordingTunerOrder(projection.RecordingTuners, projection.PriorityNames.TryGetValue(r.Id, out var priority) ? priority : r.TunerName))
-                .ThenBy(r => r.Id));
-            return BuildPresentationItems(visible, projection.PriorityNames, projection.PendingDailyIds);
+            return _systemEpgResponsibilityPlan.ReadCommitted(() =>
+            {
+                var reservations = _store.GetAll();
+                var projection = BuildSystemEpgVisibleProjection(reservations);
+                var visible = reservations.Where(r => r.Source != ReservationSource.Epg).ToList();
+                visible.AddRange(projection.Rows
+                    .OrderBy(r => r.StartTime)
+                    .ThenBy(r => ResolveRecordingTunerOrder(projection.RecordingTuners, projection.PriorityNames.TryGetValue(r.Id, out var priority) ? priority : r.TunerName))
+                    .ThenBy(r => r.Id));
+                return BuildPresentationItems(visible, projection.PriorityNames, projection.PendingDailyIds);
+            });
         }
         catch (Exception ex)
         {
             _log.Add("ReservationAPI", "GetReservations", $"予約一覧整形失敗: {ex}");
-            return Array.Empty<ReservationPresentationItem>();
+            // Never report a successful empty reservation list when the read failed.
+            throw;
         }
     }
 
@@ -107,7 +111,7 @@ public sealed class ReservationPresentationService
         catch (Exception ex)
         {
             _log.Add("ReservationAPI", "GetKeywordRuleReservations", $"自動検索予約一覧整形失敗: {ex}");
-            return Array.Empty<KeywordRuleReservationPresentationGroup>();
+            throw;
         }
     }
 
@@ -135,8 +139,8 @@ public sealed class ReservationPresentationService
         var preRecordRowsByTuner = new Dictionary<string, List<Reservation>>(StringComparer.OrdinalIgnoreCase);
         if (preRecordEnabled)
         {
-            // PreRecの①/②/③判定と表示優先度はSystemEpgResponsibilityPlanを正本とする。
-            // PriorityNameはユーザー向け順次サーチ表示(T1→T2→T3 / S1→S2→S3)であり、物理PreRec Tunerではない。
+            // ①/②は確定した論理担当を読む。③は定時EPG正本に従う。
+            // PriorityNameは個別責務の担当名であり、物理PreRec Tunerではない。
             foreach (var row in activeSystemRows
                          .Where(IsPreRecordEpgRow)
                          .Where(r => r.SourceRuleId.HasValue && selectedByParent.ContainsKey(r.SourceRuleId.Value)))
@@ -173,49 +177,67 @@ public sealed class ReservationPresentationService
         var pendingDailyIds = new HashSet<int>();
 
         // RESERVATION_LIST_SYSTEM_EPG_NEXT_RESPONSIBILITY:
-        // SystemEpgResponsibilityPlanを各録画Tunerの「次のSystem EPG責務」の正本とする。
-        // PlanはGR/BSCS別に①通常PreRec / ②波内先頭1件 / ③Dailyを判定し、
-        // 表示優先度ごとの現在の次責務を確定する。物理PreRec Tuner選択は実行時資源側の責務。
-        // Presentation層では再判定せず、PlanのPreRec責務またはDaily fallbackをそのまま投影する。
+        // SQLiteで確定した個別責務とDaily正本だけを表示する。
+        // ①の実予約が欠落していれば異常として報告し、仮予約で隠さない。
+        // ②は放送波単位、③は同期Daily、④は明示的な保留として扱う。
         var dailyFallbackTuners = plan.DailyFallbackTuners;
+        var ownerByTuner = plan.PreRecordResponsibilities
+            .ToDictionary(x => x.PriorityName, StringComparer.OrdinalIgnoreCase);
+        var orderedTuners = recordingTuners.ToList();
         foreach (var tuner in recordingTuners)
         {
             Reservation? next = null;
+            var priorityIndex = orderedTuners.FindIndex(t =>
+                string.Equals(t.Name, tuner.Name, StringComparison.OrdinalIgnoreCase));
 
-            if (preRecordEnabled && preRecordRowsByTuner.TryGetValue(tuner.Name, out var preRecordRows))
+            if (preRecordEnabled && ownerByTuner.TryGetValue(tuner.Name, out var owner))
             {
-                next = preRecordRows
-                    .OrderBy(r => r.Status == ReservationStatus.Recording ? 0 : 1)
-                    .ThenBy(r => r.StartTime)
-                    .ThenBy(r => r.Id)
-                    .FirstOrDefault();
+                if (preRecordRowsByTuner.TryGetValue(tuner.Name, out var preRecordRows))
+                    next = preRecordRows
+                        .OrderBy(r => r.Status == ReservationStatus.Recording ? 0 : 1)
+                        .ThenBy(r => r.StartTime).ThenBy(r => r.Id).FirstOrDefault();
+
+                // A logical owner without a persisted executable child is a
+                // registration inconsistency, not a valid synthetic reservation.
+                // Never conceal a missing PreRec by fabricating a Scheduled row.
+                if (next is null)
+                    throw new InvalidOperationException(
+                        $"PreRec child missing for committed priority {tuner.Name}; parent={owner.ParentReservationId}.");
             }
 
-            if (next is null
-                && dailyEnabled
-                && dailyFallbackTuners.Contains(tuner.Name)
-                && dailyRowsByTuner.TryGetValue(tuner.Name, out var dailyRows))
+            if (next is null && dailyEnabled && dailyFallbackTuners.Contains(tuner.Name))
             {
-                next = SelectVisibleDailyEpg(dailyRows);
-            }
+                if (dailyRowsByTuner.TryGetValue(tuner.Name, out var dailyRows))
+                    next = SelectVisibleDailyEpg(dailyRows);
 
-            if (next is null && dailyEnabled && dailyFallbackTuners.Contains(tuner.Name)
-                && plan.Daily is { IsPending: true } pending)
-            {
-                // Display-only responsibility: never persist a fictional executable interval.
-                var id = -10000 - recordingTuners.ToList().FindIndex(t => t.Name == tuner.Name);
-                next = new Reservation
+                // ④ is the only display-only responsibility. A placed ③ must
+                // have a real registered Daily row for this individual tuner.
+                if (next is null)
                 {
-                    Id = id, Source = ReservationSource.Epg, Intent = ReservationIntent.SystemDailyEpg,
-                    Status = ReservationStatus.Scheduled, IsEnabled = true, TunerName = tuner.Name,
-                    StartTime = pending.CanonicalStart, EndTime = pending.CanonicalStart,
-                    Title = $"定時EPG：取得枠なし・保留中（期限{pending.Deadline:HH:mm}）"
-                };
-                pendingDailyIds.Add(id);
-            }
-            if (next is null)
-                continue;
+                    var isPlaced = plan.Daily is { IsPending: false, Start: not null, End: not null };
+                    if (isPlaced)
+                        throw new InvalidOperationException(
+                            $"Daily reservation missing for committed priority {tuner.Name}; start={plan.Daily!.Start:O}; end={plan.Daily.End:O}.");
 
+                    var at = plan.Daily?.CanonicalStart ?? plan.NextDailyStart ?? now;
+                    var pendingId = -10000 - priorityIndex;
+                    next = new Reservation
+                    {
+                        Id = pendingId,
+                        Source = ReservationSource.Epg,
+                        Intent = ReservationIntent.SystemDailyEpg,
+                        Status = ReservationStatus.Scheduled,
+                        IsEnabled = true,
+                        TunerName = tuner.Name,
+                        StartTime = at,
+                        EndTime = at,
+                        Title = "定時EPG：保留中"
+                    };
+                    pendingDailyIds.Add(pendingId);
+                }
+            }
+
+            if (next is null) continue; // Both system EPG features are OFF.
             visibleRows.Add(next);
             priorityNames[next.Id] = tuner.Name;
         }
@@ -241,8 +263,8 @@ public sealed class ReservationPresentationService
 
     private static bool IsActiveFutureSystemEpgRow(Reservation r, DateTime now)
         => r.Source == ReservationSource.Epg
-        && (r.Status == ReservationStatus.Scheduled || r.Status == ReservationStatus.Recording)
-        && r.EndTime > now;
+        && (r.Status == ReservationStatus.Recording
+            || r.Status == ReservationStatus.Scheduled && r.EndTime > now);
 
     private static bool IsPreRecordEpgRow(Reservation r)
         => ReservationIntentContract.IsPreRecordEpg(r);
@@ -353,6 +375,7 @@ public sealed class ReservationPresentationService
             catch (Exception ex)
             {
                 _log.Add("ReservationAPI", "BuildPresentationItem", $"予約ID={r.Id} 整形失敗: {ex.Message}");
+                throw;
             }
         }
 

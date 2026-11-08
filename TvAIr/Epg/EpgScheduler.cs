@@ -1,4 +1,4 @@
-﻿using TvAIr.Epg.Projection;
+using TvAIr.Epg.Projection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Win32;
 using TvAIr.Channel;
@@ -770,30 +770,12 @@ public sealed class EpgScheduler : BackgroundService
                 Source: source,
                 Silent: silent,
                 Reason: normalizedReason,
-                DisplayMessage: BuildStartBlockDisplayMessage(normalizedReason, string.IsNullOrWhiteSpace(blockedGroup) ? targetScope : blockedGroup),
+                DisplayMessage: EpgStartBlockMessage.FromReason(normalizedReason),
                 BlockedUntil: until,
                 BlockedGroup: string.IsNullOrWhiteSpace(blockedGroup) ? targetScope : blockedGroup,
                 Owner: string.IsNullOrWhiteSpace(owner) ? "-" : owner,
                 CreatedAt: DateTime.Now);
         }
-    }
-
-    private static string BuildStartBlockDisplayMessage(string? reason, string? group = null)
-    {
-        var r = string.IsNullOrWhiteSpace(reason) ? string.Empty : reason.Trim();
-        // User-facing blocked messages stay short. The affected scope is shown separately as Target.
-        if (r.Contains("no_free", StringComparison.OrdinalIgnoreCase)
-            || r.Contains("no_tuner", StringComparison.OrdinalIgnoreCase)
-            || r.Contains("tuner", StringComparison.OrdinalIgnoreCase) && !r.Contains("recording", StringComparison.OrdinalIgnoreCase))
-            return "空きチューナーがないためEPG取得を開始できません";
-        if (r.Contains("warmup", StringComparison.OrdinalIgnoreCase))
-            return "録画開始直後のためEPG取得を開始できません";
-        if (r.Contains("target_duration_unavailable", StringComparison.OrdinalIgnoreCase))
-            return "EPG取得に必要なチャンネルまたはチューナーの設定を確認してください";
-        if (r.Contains("recording", StringComparison.OrdinalIgnoreCase)
-            || r.Contains("reservation", StringComparison.OrdinalIgnoreCase))
-            return "録画予約があるためEPG取得を開始できません";
-        return "EPG取得を開始できません。設定とチューナーの状態を確認してください";
     }
 
     // ─── 手動実行 ────────────────────────────────────────────────
@@ -822,7 +804,7 @@ public sealed class EpgScheduler : BackgroundService
             if (TryGetInteractiveEpgOccupancyBlock(normalizedScope, DateTime.Now, out var interactiveReason, out var interactiveUntil, out var interactiveGroup, out var interactiveOwner))
             {
                 RememberStartBlock(normalizedScope, normalizedSource, silent, interactiveReason, interactiveUntil, interactiveGroup, interactiveOwner);
-                var displayMessage = BuildStartBlockDisplayMessage(interactiveReason, interactiveGroup);
+                var displayMessage = EpgStartBlockMessage.FromReason(interactiveReason);
                 log.Add("EPG_RUN_BLOCKED", "BLOCKED",
                     $"{displayMessage}。targetScope={normalizedScope} blockedGroup={interactiveGroup} blockedUntil={(interactiveUntil.HasValue ? interactiveUntil.Value.ToString("MM/dd HH:mm:ss") : "-")} blockedReason={interactiveReason} owner={interactiveOwner} silent={silent} source={normalizedSource} action=reject_interactive_epg_before_run rule=interactive_epg_occupancy_admission_contract");
                 userEvents.AddScheduledEpgCompleted(normalizedScope, normalizedSource, silent, "BLOCKED", 0, 0, 0, 0, $"blockedReason={interactiveReason}; blockedGroup={interactiveGroup}; owner={interactiveOwner}; interactiveAdmission=True");
@@ -1175,8 +1157,8 @@ public sealed class EpgScheduler : BackgroundService
             || previousConfig.Minute != normalizedMinute;
         var depthChanged = !string.Equals(beforeDepth, nextDepth, StringComparison.OrdinalIgnoreCase);
 
-        // 呼出元はINI commit前に同じ契約を検証する。ここでも入口を守り、将来別経路から呼ばれても
-        // Running snapshotへ設定を後段上塗りしない。実行中変更を保存してからdeferする旧方式は採らない。
+        // INIの保存入口と実行入口は同じ不変条件を検証する。
+        // 実行中のDaily設定と取得深度は変更できない。
         if (IsDailyRunning && (scheduleContractChanged || depthChanged))
             throw new InvalidOperationException("Daily EPG is running; daily settings are immutable until completion.");
         if (depthChanged && IsRunning)
@@ -1545,6 +1527,18 @@ public sealed class EpgScheduler : BackgroundService
     /// </summary>
     private int EnsureDailyProjection(DailyEpgRunState state, bool refreshAllocationRoute)
     {
+        // Commit the individual Daily rows and the visible Daily plan under
+        // the same gate used by reservation-list and PreRec ownership readers.
+        // The allocation refresh runs after releasing that gate.
+        var changed = systemEpgResponsibilityPlan.CommitWithReservationProjection(
+            () => EnsureDailyProjectionCore(state));
+        if (refreshAllocationRoute && changed > 0)
+            ReevaluateAndLog("EpgDailyProjection", refreshWakeTask: true);
+        return changed;
+    }
+
+    private int EnsureDailyProjectionCore(DailyEpgRunState state)
+    {
         var changed = 0;
         var recordingTunersByGroup = new[] { "GR", "BSCS", "HYBRID", "CATV" }
             .ToDictionary(
@@ -1585,8 +1579,6 @@ public sealed class EpgScheduler : BackgroundService
         }
 
         systemEpgResponsibilityPlan.UpdateDailyState(state);
-        if (refreshAllocationRoute && changed > 0)
-            ReevaluateAndLog("EpgDailyProjection", refreshWakeTask: true);
         return changed;
     }
 
@@ -1669,8 +1661,8 @@ public sealed class EpgScheduler : BackgroundService
                 log.Add("EPG_DAILY_STATE", "EPG",
                     $"result=STARTUP_TERMINAL_PRESERVED targetDate={startupDailyState!.Date:yyyy-MM-dd} state={startupDailyState.State} action=no_same_day_recreate_ensure_tomorrow rule=daily_epg_single_state_contract");
             }
-            try { UpsertPreRecordEpgEntries(); }
-            catch (Exception ex) { log.Add("EPG_SCHEDULER", "PreRecEpg", $"起動時直前EPGエントリ生成エラー: {ex.Message}"); }
+            // StartupFinalize below owns the PreRec update in the common
+            // allocation route, after Daily restoration and projection.
         }
         else
         {
@@ -1707,7 +1699,9 @@ public sealed class EpgScheduler : BackgroundService
                 $"result=FAILED error={ex.GetType().Name}:{ex.Message} action=retry_by_next_regular_route rule=startup_wake_single_owner_contract");
         }
 
-        nextPreRecordResponsibilityBoundary = systemEpgResponsibilityPlan.ResolveNextStage1Boundary(reservationStore.GetAll(), DateTime.Now);
+        var lastConfirmedPreRecordBoundaryCheck = DateTime.Now;
+        nextPreRecordResponsibilityBoundary = systemEpgResponsibilityPlan.ResolveNextStage1Boundary(
+            reservationStore.GetAll(), lastConfirmedPreRecordBoundaryCheck);
 
         string lastNextLogKey = string.Empty;
         DateTime lastNextLogUtc = DateTime.MinValue;
@@ -1719,14 +1713,16 @@ public sealed class EpgScheduler : BackgroundService
 
             var now = DateTime.Now;
 
-            if (nextPreRecordResponsibilityBoundary.HasValue
-                && now >= nextPreRecordResponsibilityBoundary.Value)
+            // Check every crossed boundary since the last confirmed evaluation,
+            // including thresholds passed while allocation and projection were
+            // running. Never discard a boundary just because the clock advanced.
+            var crossed = systemEpgResponsibilityPlan.ResolveCrossedStage1Boundary(
+                reservationStore.GetAll(), lastConfirmedPreRecordBoundaryCheck, now);
+            if (crossed.HasValue)
             {
-                var reached = nextPreRecordResponsibilityBoundary.Value;
-                nextPreRecordResponsibilityBoundary = null;
                 try
                 {
-                    allocationRoute.Run(new ReservationAllocationRouteRequest(
+                    var boundaryResult = allocationRoute.Run(new ReservationAllocationRouteRequest(
                         Source: "EpgScheduler",
                         Action: "SystemEpgPriorityBoundary",
                         RunKeywordMatcher: false,
@@ -1735,15 +1731,24 @@ public sealed class EpgScheduler : BackgroundService
                         RefreshPreRecordEpgEntries: true,
                         RefreshWakeTask: true,
                         EmitConflictLogs: false));
+                    if (boundaryResult.Deferred || boundaryResult.RetryRequired)
+                        throw new InvalidOperationException("PreRec responsibility boundary is not committed.");
                     log.Add("EPG_SCHEDULER", "ResponsibilityBoundary",
-                        $"result=REEVALUATED boundary={reached:yyyy-MM-dd HH:mm:ss} reason=stage2_entered_stage1_window scope=affected_wave_projection rule=system_epg_priority_sequential_search_contract");
+                        $"result=REEVALUATED boundary={crossed.Value:yyyy-MM-dd HH:mm:ss} reason=stage2_entered_stage1_window scope=affected_wave_projection rule=system_epg_priority_sequential_search_contract");
+                    lastConfirmedPreRecordBoundaryCheck = DateTime.Now;
                 }
                 catch (Exception ex)
                 {
                     log.Add("EPG_SCHEDULER", "ResponsibilityBoundary",
-                        $"result=FAILED boundary={reached:yyyy-MM-dd HH:mm:ss} error={ex.GetType().Name}:{ex.Message} action=retry_by_next_route rule=system_epg_priority_sequential_search_contract");
+                        $"result=FAILED boundary={crossed.Value:yyyy-MM-dd HH:mm:ss} error={ex.GetType().Name}:{ex.Message} action=retry_by_next_route rule=system_epg_priority_sequential_search_contract");
+                    // Retain the unconfirmed boundary; retry on the next scheduler wake.
+                    nextPreRecordResponsibilityBoundary = crossed;
                 }
                 now = DateTime.Now;
+            }
+            else
+            {
+                lastConfirmedPreRecordBoundaryCheck = now;
             }
 
             // live runがFinalizingまで進んだ後にEnsureTomorrowだけが失敗した場合も、
@@ -1858,6 +1863,12 @@ public sealed class EpgScheduler : BackgroundService
             var waitNow = DateTime.Now;
             nextPreRecordResponsibilityBoundary = systemEpgResponsibilityPlan.ResolveNextStage1Boundary(reservationStore.GetAll(), waitNow);
             var nextEvaluation = ComputeNextDailyEvaluationTime(waitNow, cfg);
+            // Failed boundaries are intentionally not acknowledged. Retry with a
+            // bounded delay without busy-spinning or losing the original boundary.
+            var pendingCrossing = systemEpgResponsibilityPlan.ResolveCrossedStage1Boundary(
+                reservationStore.GetAll(), lastConfirmedPreRecordBoundaryCheck, waitNow);
+            if (pendingCrossing.HasValue && waitNow.AddSeconds(5) < nextEvaluation)
+                nextEvaluation = waitNow.AddSeconds(5);
             if (nextPreRecordResponsibilityBoundary.HasValue
                 && nextPreRecordResponsibilityBoundary.Value < nextEvaluation)
                 nextEvaluation = nextPreRecordResponsibilityBoundary.Value;
@@ -2075,7 +2086,7 @@ public sealed class EpgScheduler : BackgroundService
 
     private static string NormalizeBlockedReason(string? reason)
     {
-        if (string.IsNullOrWhiteSpace(reason)) return "recording_occupancy_overlap";
+        if (string.IsNullOrWhiteSpace(reason)) return "unknown";
         return reason.Trim();
     }
 
@@ -2339,21 +2350,24 @@ public sealed class EpgScheduler : BackgroundService
                 userEvents.AddScheduledEpgCompleted(
                     targetScope, requestedBy, silent, "OK",
                     captureResult.CompletedGroups, captureResult.TotalGroups, captureResult.ImportedEvents,
-                    captureResult.MissingGroups, captureResult.Detail);
+                    captureResult.MissingGroups, captureResult.Detail,
+                    failureReason: captureResult.UserFailureReason);
             }
             else if (!isDailyRun)
             {
                 userEvents.AddScheduledEpgCompleted(
                     targetScope, requestedBy, silent, captureResult.RunResult,
                     captureResult.CompletedGroups, captureResult.TotalGroups, captureResult.ImportedEvents,
-                    captureResult.MissingGroups, captureResult.Detail);
+                    captureResult.MissingGroups, captureResult.Detail,
+                    failureReason: captureResult.UserFailureReason);
             }
             else if (isDailyRun)
             {
                 userEvents.AddScheduledEpgCompleted(
                     targetScope, requestedBy, silent, captureResult.RunResult,
                     captureResult.CompletedGroups, captureResult.TotalGroups, captureResult.ImportedEvents,
-                    captureResult.MissingGroups, captureResult.Detail);
+                    captureResult.MissingGroups, captureResult.Detail,
+                    failureReason: captureResult.UserFailureReason);
             }
 
             // 型付きEPGイベントもcapture/importの公開終端であり、Daily lifecycleのSucceededとは分離する。
@@ -2380,6 +2394,11 @@ public sealed class EpgScheduler : BackgroundService
                     ["completedScopes"] = captureResult.CompletedScopes,
                     ["missingGroups"] = captureResult.MissingGroups.ToString(),
                     ["missingScopes"] = captureResult.MissingScopes,
+                    ["failureReason"] = EpgFailurePresentationContract.Code(captureResult.UserFailureReason),
+                    ["message"] = EpgFailurePresentationContract.RunMessage(
+                        typedResult, captureResult.UserFailureReason,
+                        captureResult.CompletedGroups, captureResult.TotalGroups,
+                        EpgFailurePresentationContract.ExtractBlockedReason(captureResult.Detail)),
                     ["detail"] = captureResult.Detail ?? string.Empty
                 }
             });
@@ -2570,8 +2589,9 @@ public sealed class EpgScheduler : BackgroundService
             }
             if (waveReleasedOnFailure)
                 ReevaluateAfterNormalEpgWaveTerminal(requestedBy, targetScope, silent, "real_failure");
-            userEvents.AddScheduledEpgFailed(targetScope, requestedBy, silent, $"{ex.GetType().Name}: {ex.Message}");
-            typedEvents.Publish(new TvAirEventDto { EventType = TvAirEventType.EpgFailed, EntityId = $"epg:{requestedBy}:{DateTimeOffset.Now:yyyyMMddHHmmssfff}", Details = new Dictionary<string, string> { ["source"] = requestedBy, ["targetScope"] = targetScope, ["silent"] = silent.ToString(), ["exceptionType"] = ex.GetType().Name, ["message"] = ex.Message } });
+            var userFailureReason = EpgFailurePresentationContract.FromException(ex);
+            userEvents.AddScheduledEpgFailed(targetScope, requestedBy, silent, userFailureReason);
+            typedEvents.Publish(new TvAirEventDto { EventType = TvAirEventType.EpgFailed, EntityId = $"epg:{requestedBy}:{DateTimeOffset.Now:yyyyMMddHHmmssfff}", Details = new Dictionary<string, string> { ["source"] = requestedBy, ["targetScope"] = targetScope, ["silent"] = silent.ToString(), ["exceptionType"] = ex.GetType().Name, ["failureReason"] = EpgFailurePresentationContract.Code(userFailureReason), ["message"] = EpgFailurePresentationContract.RunMessage("FAILED", userFailureReason) } });
             log.Add("EPG_RUN_ERROR", "EPG", $"EPG取得中に例外が発生しました: {ex.GetType().Name}: {ex.Message}");
         }
         finally
@@ -2673,7 +2693,8 @@ public sealed class EpgScheduler : BackgroundService
     /// - 現在のTuner空きや同一局録画中といった再構築時点の一過性状態で、将来の確認予約を生成抑止しない。
     /// </summary>
     internal IReadOnlyList<SystemEpgPreRecordResponsibility> GetPreRecordWakeResponsibilities(DateTime now)
-        => systemEpgResponsibilityPlan.Build(reservationStore.GetAll(), now).PreRecordResponsibilities;
+        => systemEpgResponsibilityPlan.ReadCommitted(() =>
+            systemEpgResponsibilityPlan.Build(reservationStore.GetAll(), now).PreRecordResponsibilities);
 
     public bool RefreshPreRecordEpgEntries()
     {
@@ -2689,9 +2710,18 @@ public sealed class EpgScheduler : BackgroundService
     }
 
     private bool UpsertPreRecordEpgEntries()
+        => systemEpgResponsibilityPlan.CommitWithReservationProjection(UpsertPreRecordEpgEntriesCore);
+
+    private bool UpsertPreRecordEpgEntriesCore()
     {
         if (!SystemEpgResponsibilityPlanService.IsPreRecordEnabled(ini))
-            return reservationStore.DeleteScheduledPreRecordEpgEntriesExceptParents(allocationRoute.GetActivePreRecordParentIds()) > 0;
+        {
+            var changed = reservationStore.DeleteScheduledPreRecordEpgEntriesExceptParents(
+                allocationRoute.GetActivePreRecordParentIds()) > 0;
+            var ownershipChanged = systemEpgResponsibilityPlan.Publish(
+                systemEpgResponsibilityPlan.Prepare(reservationStore.GetAll(), DateTime.Now));
+            return changed || ownershipChanged;
+        }
 
         var preRecordRouteMutationCount = 0;
         var protectedViewingTuners = tunerProfiles
@@ -2773,14 +2803,16 @@ public sealed class EpgScheduler : BackgroundService
         {
             var deletedObsolete = reservationStore.DeleteScheduledPreRecordEpgEntriesExceptParents(Array.Empty<int>());
             epgEntryMutationCount += deletedObsolete;
+            var ownershipChanged = systemEpgResponsibilityPlan.Publish(
+                systemEpgResponsibilityPlan.Prepare(reservationStore.GetAll(), now));
             log.Add("EPG_SCHEDULER", "PreRecEpg",
                 $"result=NO_TARGETS candidates=0 sourceCandidates={preRecordSourceCandidates.Count} excludedSource={excludedSource} skippedDisabled={skippedDisabled} skippedConflicted={skippedConflicted} skippedServiceUnavailable={skippedServiceUnavailable} manualIncluded=True skippedUserChainChild={skippedUserChainChild} countsExclusive=True deletedObsolete={deletedObsolete} action=remove_prerec_only_daily_epg_untouched rule=pre_record_epg_independent_schedule_contract");
-            return epgEntryMutationCount > 0;
+            return epgEntryMutationCount > 0 || ownershipChanged;
         }
 
         // PreRecの必要性そのものを定時EPG結果で代替しない。
         // System責務はGR/BSCSを独立に評価する。
-        // 1) その放送波で現在から3時間以内の予約イベント群を表示優先度先頭から順次①として投影する。
+        // 1) 3時間以内の①を既存の個別担当を保持して配置し、空き枠のみ次の候補へ進める。
         // 2) 1)がその放送波で一件も無い場合だけ、その放送波の予約リスト先頭1件だけを②候補とする。
         //    同時刻に別チャンネル予約があっても放送波ごとに最大1件で、先頭以外を拾わない。
         // 3) ①/②の取得枠が、その表示優先度の③Daily開始までに完了できない場合は③へfallbackする。
@@ -2788,10 +2820,11 @@ public sealed class EpgScheduler : BackgroundService
 
         // SYSTEM_EPG_RESPONSIBILITY_PLAN_SINGLE_SOURCE_INVARIANT:
         // 各録画Tunerの次System EPG責務はSystemEpgResponsibilityPlanServiceだけを正本とする。
-        // SchedulerはそのPlanが選んだPreRec子だけを永続化する。Daily lifecycle / 実行計画は独立正本を維持し、
+        // SchedulerはPlanが選んだPreRec子を登録・照合してから、論理担当をPublishする。
+        // Daily lifecycle / 実行計画は独立正本を維持し、
         // 予約一覧側はPlanのDaily fallback判定を再ソートせずそのまま投影する。
         // PriorityNameは表示上の順次サーチ優先度。物理PreRec Tunerは従来どおり実行時選択で固定しない。
-        var responsibilityPlan = systemEpgResponsibilityPlan.Build(reservationStore.GetAll(), now);
+        var responsibilityPlan = systemEpgResponsibilityPlan.Prepare(reservationStore.GetAll(), now);
         var selectedParentIdsSet = responsibilityPlan.ParentIds;
         var responsibilityByParent = responsibilityPlan.PreRecordResponsibilities
             .GroupBy(x => x.ParentReservationId)
@@ -2810,8 +2843,7 @@ public sealed class EpgScheduler : BackgroundService
 
         // 現在の次責務に含まれないScheduled PreRec子だけを削除する。Completed証拠と定時EPG行には触れない。
         var selectedParentIds = intentParents.Select(r => r.Id).ToArray();
-        var deletedObsoleteChildren = reservationStore.DeleteScheduledPreRecordEpgEntriesExceptParents(selectedParentIds);
-        epgEntryMutationCount += deletedObsoleteChildren;
+        var deletedObsoleteChildren = 0;
 
         var registeredCount = 0;
         var skippedExpiredDeadline = 0;
@@ -2965,6 +2997,26 @@ public sealed class EpgScheduler : BackgroundService
             registeredCount++;
         }
 
+        // No owner may be published without a persisted executable PreRec
+        // child. A rejected CAS/registration failure leaves the previous
+        // responsibility assignment intact for the next common-route retry.
+        var verified = reservationStore.GetAll();
+        foreach (var responsibility in responsibilityPlan.PreRecordResponsibilities)
+        {
+            if (!verified.Any(child => ReservationIntentContract.IsPreRecordEpg(child)
+                && child.SourceRuleId == responsibility.ParentReservationId
+                && (child.Status is ReservationStatus.Scheduled or ReservationStatus.Recording)
+                && (child.Status == ReservationStatus.Recording || child.EndTime > now)
+                && (child.Status == ReservationStatus.Recording
+                    || child.StartTime == responsibility.Start && child.EndTime == responsibility.End)))
+                throw new InvalidOperationException(
+                    $"PreRec reservation was not persisted; parent={responsibility.ParentReservationId}, priority={responsibility.PriorityName}.");
+        }
+
+        deletedObsoleteChildren = reservationStore.DeleteScheduledPreRecordEpgEntriesExceptParents(selectedParentIds);
+        epgEntryMutationCount += deletedObsoleteChildren;
+        var ownershipUpdated = systemEpgResponsibilityPlan.Publish(responsibilityPlan);
+
         if (dedupeReuseCount > 0)
         {
             log.Add("PRE_REC_EPG_DEDUPE", "Summary",
@@ -2973,7 +3025,7 @@ public sealed class EpgScheduler : BackgroundService
 
         log.Add("EPG_SCHEDULER", "PreRecEpg",
             $"result={(registeredCount > 0 ? "REGISTERED" : "NO_REGISTER")} candidates={userScheduled.Count} registered={registeredCount} dedupeReused={dedupeReuseCount} dedupeParents=[{string.Join(',', dedupeParentIds.Select(x => $"R{x}"))}] staleDeleted={staleCleanup.Deleted} staleParents=[{staleCleanup.ParentIds}] sourceCandidates={preRecordSourceCandidates.Count} excludedSource={excludedSource} skippedDisabled={skippedDisabled} skippedConflicted={skippedConflicted} skippedServiceUnavailable={skippedServiceUnavailable} skippedExpiredDeadline={skippedExpiredDeadline} deletedExpiredDeadline={deletedExpiredDeadline} preMin={preMin} durMin={durMin} systemMode=daily:{ini.EpgEnabled}/prerec:{ini.EpgPreRecordMinutes > 0} responsibilities=[{responsibilityMap}] dailyFallback=[{dailyFallbackMap}] manualIncluded=True skippedUserChainChild={skippedUserChainChild} countsExclusive=True deletedObsolete={deletedObsoleteChildren} routeMutations={epgEntryMutationCount} wakeRefresh=by_caller rule=system_epg_wave_responsibility_fallback_contract");
-        return epgEntryMutationCount > 0 || registeredCount > 0;
+        return epgEntryMutationCount > 0 || registeredCount > 0 || ownershipUpdated;
     }
 
     /// <summary>
@@ -3088,24 +3140,9 @@ public sealed class EpgScheduler : BackgroundService
     }
 
     /// <summary>
-    /// DailyRunState/翌日責務のcommit後にSYSTEM_EPG Wakeだけを現在正本へ同期する。
-    /// PlannerやallocationをWake側から逆起動せず、既存TaskSchedulerServiceの差分適用へ委譲する。
+    /// 予約・EPG更新後の割当は共通ルートで再評価する。
+    /// Wake更新の要否は呼出元が指定する。
     /// </summary>
-    private void RefreshDailyWakeProjection(string action)
-    {
-        allocationRoute.Run(new ReservationAllocationRouteRequest(
-            Source: "EpgScheduler",
-            Action: action,
-            RunKeywordMatcher: false,
-            SyncProgramRuleReservations: false,
-            ReevaluateAllocations: false,
-            RefreshPreRecordEpgEntries: false,
-            RefreshWakeTask: true,
-            EmitConflictLogs: false,
-            ConflictLogCategory: "EPG_SCHEDULER",
-            ConflictLogTitle: $"Conflict({action})"));
-    }
-
     private void ReevaluateAndLog(string context, bool refreshWakeTask = false)
     {
         allocationRoute.Run(new ReservationAllocationRouteRequest(

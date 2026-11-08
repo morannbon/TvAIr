@@ -269,7 +269,8 @@ public sealed class ReservationMutationSideEffectProjection : IDisposable
                     id,
                     ReservationStatus.Failed,
                     after?.RecordingFinishedAt,
-                    canonicalFailureReason);
+                    canonicalFailureReason,
+                    RecordingFailurePresentationContract.FromMetadata(mutation.Metadata));
                 break;
             case ReservationMutationKind.Updated when before is not null && after is not null && before.Status != after.Status:
                 userEvents.AddReservationStatusChanged(

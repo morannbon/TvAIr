@@ -94,7 +94,7 @@ public static class RecordingTsVerifier
         catch (Exception ex)
         {
             log.Add("REC_TS_VERIFY", $"R{reservation.Id}",
-                $"stage={stage} result=FAIL reason=exception message={TrimForLog(ex.Message, 220)} path={Safe(recordingFilePath)}");
+                $"stage={stage} result=FAIL reason=exception message={LogTextContract.TruncateWithDots(ex.Message, 220)} path={Safe(recordingFilePath)}");
             return new VerificationResult(stage, "FAIL", "strict_check", "exception", false, ex.GetType().Name);
         }
     }
@@ -180,7 +180,7 @@ public static class RecordingTsVerifier
         }
         catch (Exception ex)
         {
-            return new EitSummary(false, null, string.Empty, string.Empty, $"eit_parse_error:{TrimForLog(ex.Message, 120)}");
+            return new EitSummary(false, null, string.Empty, string.Empty, $"eit_parse_error:{LogTextContract.TruncateWithDots(ex.Message, 120)}");
         }
     }
 
@@ -323,11 +323,6 @@ public static class RecordingTsVerifier
 
     private static string Safe(string? value) => string.IsNullOrWhiteSpace(value) ? "-" : value.Replace("\r", " ").Replace("\n", " ").Trim();
 
-    private static string TrimForLog(string? text, int maxLength)
-    {
-        if (string.IsNullOrEmpty(text)) return string.Empty;
-        return text.Length <= maxLength ? text : text[..maxLength] + "...";
-    }
 
     private sealed class PsiSummary
     {

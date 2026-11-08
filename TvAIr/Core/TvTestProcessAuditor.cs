@@ -56,8 +56,8 @@ public static class TvTestProcessAuditor
             && protectedList.Any(d => string.Equals(d, targetDid, StringComparison.OrdinalIgnoreCase));
 
         log.Add("VIEWING_ROLE_PROTECTION_DECISION", reason,
-            $"result={(targetIsViewingRole ? "BLOCK" : "OK")} reservation={SafeValue(reservationId)} " +
-            $"targetDid={SafeValue(targetDid)} targetBonDriver={SafeValue(targetBonDriver)} " +
+            $"result={(targetIsViewingRole ? "BLOCK" : "OK")} reservation={LogTextContract.TrimOrDash(reservationId)} " +
+            $"targetDid={LogTextContract.TrimOrDash(targetDid)} targetBonDriver={LogTextContract.TrimOrDash(targetBonDriver)} " +
             $"targetIsConfiguredViewingRole={targetIsViewingRole} protectedViewingDids={FormatList(protectedList)} " +
             "unmanagedExternalTvTest=out_of_scope externalProcessInspection=disabled rule=release_contract");
 
@@ -100,7 +100,7 @@ public static class TvTestProcessAuditor
                     log.Add("TVAIR_MANAGED_TVTEST_PROCESS", phase,
                         $"pid={managed.ProcessId} name={proc.ProcessName} purpose={managed.Purpose} " +
                         $"reservation={(managed.ReservationId.HasValue ? "R" + managed.ReservationId.Value : "-")} " +
-                        $"did={SafeValue(did)} bonDriver={SafeValue(bon)} ownershipSource=managed_registry rule=release_contract");
+                        $"did={LogTextContract.TrimOrDash(did)} bonDriver={LogTextContract.TrimOrDash(bon)} ownershipSource=managed_registry rule=release_contract");
 
 
                 }
@@ -163,7 +163,6 @@ public static class TvTestProcessAuditor
         return value.Length <= max ? value : value[..max] + "...";
     }
 
-    private static string SafeValue(string? value) => string.IsNullOrWhiteSpace(value) ? "-" : value.Trim();
 
     private static string FormatList(IEnumerable<string> values)
     {

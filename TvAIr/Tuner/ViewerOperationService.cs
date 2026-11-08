@@ -1775,7 +1775,7 @@ internal sealed record ViewerRestartSourceIdentity(
     public bool Matches(ExternalTunerLeaseDto lease)
         => string.Equals(ViewerProfileId, lease.ViewerProfileId, StringComparison.OrdinalIgnoreCase)
            && string.Equals(LogicalViewerSlotId, lease.LogicalViewerSlotId, StringComparison.OrdinalIgnoreCase)
-           && string.Equals(NormalizeGroup(Group), NormalizeGroup(lease.Group), StringComparison.OrdinalIgnoreCase)
+           && string.Equals(TunerDisplayName.NormalizeViewerLeaseGroup(Group), TunerDisplayName.NormalizeViewerLeaseGroup(lease.Group), StringComparison.OrdinalIgnoreCase)
            && string.Equals(Did, lease.Did, StringComparison.OrdinalIgnoreCase)
            && string.Equals(NormalizeBonDriver(BonDriverFileName), NormalizeBonDriver(lease.BonDriverFileName), StringComparison.OrdinalIgnoreCase)
            && string.Equals(NormalizePath(TvTestPathKey), NormalizePath(lease.TvTestPathKey), StringComparison.OrdinalIgnoreCase)
@@ -1790,7 +1790,7 @@ internal sealed record ViewerRestartSourceIdentity(
         var mismatches = new List<string>();
         if (!string.Equals(ViewerProfileId, lease.ViewerProfileId, StringComparison.OrdinalIgnoreCase)) mismatches.Add("viewer_profile_mismatch");
         if (!string.Equals(LogicalViewerSlotId, lease.LogicalViewerSlotId, StringComparison.OrdinalIgnoreCase)) mismatches.Add("logical_viewer_slot_mismatch");
-        if (!string.Equals(NormalizeGroup(Group), NormalizeGroup(lease.Group), StringComparison.OrdinalIgnoreCase)) mismatches.Add("group_mismatch");
+        if (!string.Equals(TunerDisplayName.NormalizeViewerLeaseGroup(Group), TunerDisplayName.NormalizeViewerLeaseGroup(lease.Group), StringComparison.OrdinalIgnoreCase)) mismatches.Add("group_mismatch");
         if (!string.Equals(Did, lease.Did, StringComparison.OrdinalIgnoreCase)) mismatches.Add("did_mismatch");
         if (!string.Equals(NormalizeBonDriver(BonDriverFileName), NormalizeBonDriver(lease.BonDriverFileName), StringComparison.OrdinalIgnoreCase)) mismatches.Add("bondriver_mismatch");
         if (!string.Equals(NormalizePath(TvTestPathKey), NormalizePath(lease.TvTestPathKey), StringComparison.OrdinalIgnoreCase)) mismatches.Add("tvtest_path_mismatch");
@@ -1837,15 +1837,13 @@ internal sealed record ViewerRestartSourceIdentity(
         var mismatches = new List<string>();
         if (!string.Equals(lease.ViewerProfileId, plan.Profile.Id, StringComparison.OrdinalIgnoreCase)) mismatches.Add("viewer_profile_mismatch");
         if (!string.Equals(lease.LogicalViewerSlotId, plan.Profile.LogicalViewerSlotId, StringComparison.OrdinalIgnoreCase)) mismatches.Add("logical_viewer_slot_mismatch");
-        if (!string.Equals(NormalizeGroup(lease.Group), NormalizeGroup(plan.Group), StringComparison.OrdinalIgnoreCase)) mismatches.Add("group_mismatch");
+        if (!string.Equals(TunerDisplayName.NormalizeViewerLeaseGroup(lease.Group), TunerDisplayName.NormalizeViewerLeaseGroup(plan.Group), StringComparison.OrdinalIgnoreCase)) mismatches.Add("group_mismatch");
         if (!string.Equals(NormalizePath(lease.TvTestPathKey), NormalizePath(plan.TvTestPathKey), StringComparison.OrdinalIgnoreCase)) mismatches.Add("tvtest_path_mismatch");
         if (lease.ChannelSpace != plan.Channel.ResolvedSpace) mismatches.Add("channel_space_mismatch");
         if (lease.ChannelIndex != plan.Channel.ResolvedChannelIndex) mismatches.Add("channel_index_mismatch");
         return mismatches.Count == 0 ? "identity_match" : string.Join(",", mismatches);
     }
 
-    private static string NormalizeGroup(string? value)
-        => TunerDisplayName.NormalizeViewerLeaseGroup(value);
 
     private static string NormalizeBonDriver(string? value)
         => string.IsNullOrWhiteSpace(value) ? string.Empty : Path.GetFileName(value.Trim());

@@ -414,13 +414,6 @@ public sealed class RecordingFileCatalog
         while(read.Read())rows.Add((read.GetString(0),read.GetString(1),JsonSerializer.Deserialize<TvAirEventDto>(read.GetString(2),Json)!));
         return rows;
     }
-    internal bool HasPublication(string reservationId,string path)
-    {
-        using var c=Open();using var cmd=c.CreateCommand();
-        cmd.CommandText="SELECT EXISTS(SELECT 1 FROM file_publications WHERE publication_key=$key)";
-        cmd.Parameters.AddWithValue("$key",PublicationKey(reservationId,Path.GetFullPath(path)));
-        return Convert.ToInt64(cmd.ExecuteScalar())!=0;
-    }
     internal void CompletePublication(string key)
     {
         using var c=Open();using var cmd=c.CreateCommand();

@@ -645,8 +645,8 @@ public sealed class TunerPool : IDisposable
             if (slot is null)
             {
                 logMessage =
-                    $"result=MISS tuner={SafeValue(tunerName)} expectedLeaseId={poolLeaseId} expectedGeneration={occupancyGeneration} " +
-                    $"owner={SafeValue(owner)} label={SafeValue(label)} status={GetStatusSummaryUnsafe()} rule=epg_owner_identity_contract";
+                    $"result=MISS tuner={LogTextContract.TrimOrDash(tunerName)} expectedLeaseId={poolLeaseId} expectedGeneration={occupancyGeneration} " +
+                    $"owner={LogTextContract.TrimOrDash(owner)} label={LogTextContract.TrimOrDash(label)} status={GetStatusSummaryUnsafe()} rule=epg_owner_identity_contract";
             }
             else
             {
@@ -655,7 +655,7 @@ public sealed class TunerPool : IDisposable
                 PublishStateChangeUnsafe();
                 released = true;
                 logMessage =
-                    $"result=OK_OWNERLESS_PIDLESS released={before} owner={SafeValue(owner)} label={SafeValue(label)} " +
+                    $"result=OK_OWNERLESS_PIDLESS released={before} owner={LogTextContract.TrimOrDash(owner)} label={LogTextContract.TrimOrDash(label)} " +
                     $"version={_snapshotVersion} status={GetStatusSummaryUnsafe()} rule=epg_owner_identity_contract";
             }
         }
@@ -688,7 +688,7 @@ public sealed class TunerPool : IDisposable
 
                 releasedCount = targets.Count;
                 logMessage =
-                    $"result=OK_PIDLESS count={targets.Count} released={released} owner={SafeValue(owner)} label={SafeValue(label)} " +
+                    $"result=OK_PIDLESS count={targets.Count} released={released} owner={LogTextContract.TrimOrDash(owner)} label={LogTextContract.TrimOrDash(label)} " +
                     $"version={_snapshotVersion} status={GetStatusSummaryUnsafe()} rule=release_contract";
             }
         }
@@ -1161,7 +1161,6 @@ public sealed class TunerPool : IDisposable
         };
     }
 
-    private static string SafeValue(string? value) => string.IsNullOrWhiteSpace(value) ? "-" : value.Trim();
 
     private string GetStatusSummaryUnsafe()
     {
@@ -1186,7 +1185,7 @@ public sealed class TunerPool : IDisposable
             if (_lifecycleState != TunerPoolLifecycleState.Running) return false;
             _lifecycleState = TunerPoolLifecycleState.Quiescing;
             PublishStateChangeUnsafe();
-            logMessage = $"reason={SafeValue(reason)} version={_snapshotVersion} status={GetStatusSummaryUnsafe()}";
+            logMessage = $"reason={LogTextContract.TrimOrDash(reason)} version={_snapshotVersion} status={GetStatusSummaryUnsafe()}";
         }
         _log.Add("TUNER_POOL_LIFECYCLE", "Quiescing", logMessage!);
         return true;

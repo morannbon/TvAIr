@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Options;
 using TvAIr.Channel;
 using TvAIr.Core;
 using TvAIr.Tuner;
@@ -689,6 +689,33 @@ public sealed class EpgCapture
         CancellationTokenSource? coverageCts = null;
         Task? coverageMonitor = null;
 
+        // Capture failures that return before a worker is started also own the
+        // visible terminal status. Do not leave the preceding EPG result on screen.
+        void SetNoTargetStatus(EpgUserFailureReason failureReason)
+        {
+            if (!manageStatus) return;
+            SetStatus(st => st with
+            {
+                Phase = "failed",
+                TotalGroups = 0,
+                CompletedGroups = 0,
+                RunningGroups = 0,
+                RunningGroupNames = "",
+                ActiveWorkerElapsedSeconds = 0,
+                ActiveWorkerPlannedSeconds = 0,
+                EstimatedProgressPercent = 0,
+                RunStartedAt = null,
+                LastRunAt = DateTime.Now,
+                LastRunMessage = EpgFailurePresentationContract.RunMessage("FAILED", failureReason),
+                RunDepth = normalizedDepth,
+                TargetScope = normalizedScope,
+                UiVisible = showProgress,
+                RunPurpose = runPurpose,
+                UiMode = showProgress ? "Visible" : "Silent",
+                CancelRoute = showProgress ? "VisibleWidget" : "SilentTray"
+            });
+        }
+
         try
         {
             // 管理外TVTestは監視・保護・EPG除外の対象外。
@@ -706,7 +733,8 @@ public sealed class EpgCapture
             if (load.Targets.Count == 0 && load.DirectSourceServices.Count == 0)
             {
                 Log("EPG_RUN_FAIL", "EPG", "有効なチャンネルがありません。ch2/ChSetを設定画面で明示してください。source=explicit_settings rule=release_contract");
-                return EpgCaptureResult.Failed("有効なチャンネルがありません。ch2/ChSetを設定画面で明示してください。");
+                SetNoTargetStatus(EpgUserFailureReason.ChannelConfiguration);
+                return EpgCaptureResult.Failed(EpgUserFailureReason.ChannelConfiguration);
             }
 
             var groups = FilterGroupsByScope(BuildNormalEpgGroups(load), normalizedScope);
@@ -714,10 +742,9 @@ public sealed class EpgCapture
             {
                 var noTarget = $"EPG取得対象がありません。targetScope={normalizedScope}";
                 Log("EPG_RUN_FAIL", "EPG", noTarget);
-                if (manageStatus)
-                    SetStatus(st => st with { Phase = "idle", TotalGroups = 0, CompletedGroups = 0, RunningGroups = 0, RunningGroupNames = "", ActiveWorkerElapsedSeconds = 0, ActiveWorkerPlannedSeconds = 0, EstimatedProgressPercent = 0, RunStartedAt = null, LastRunAt = DateTime.Now, LastRunMessage = noTarget, RunDepth = normalizedDepth, TargetScope = normalizedScope, UiVisible = showProgress, RunPurpose = runPurpose, UiMode = showProgress ? "Visible" : "Silent", CancelRoute = showProgress ? "VisibleWidget" : "SilentTray" });
+                SetNoTargetStatus(EpgUserFailureReason.NoTargetChannels);
                 epgRunsAcceptingNewWorkers.TryRemove(runId, out _);
-                return EpgCaptureResult.Failed(noTarget);
+                return EpgCaptureResult.Failed(EpgUserFailureReason.NoTargetChannels);
             }
 
             if (manageStatus)
@@ -787,11 +814,15 @@ public sealed class EpgCapture
             var detailExtra = $"blockedReason={SafeLogValue(blockedReason)}";
             var detail = detailCore + " " + detailExtra;
             var captureResultDetail = $"blockedReason={SafeLogValue(blockedReason)}; completedScopes={completedScopes}; missingScopes={missingScopes}; missingGroupDetails={missingGroupDetails}; failureSummary={failureSummary}";
-            var msg = runResult == "OK"
-                ? $"EPG取得を完了しました\n{completedCount}/{totalGroups} グループ完了\n{totalImported} 件取得しました"
-                : runResult == "BLOCKED"
-                    ? "EPG取得を開始できません"
-                    : $"EPG取得に失敗しました\n{completedCount}/{totalGroups} グループ完了\n{totalImported} 件取得しました";
+            var userFailureReason = EpgFailurePresentationContract.Combine(groups
+                .Where(g => !completedGroups.Contains(g.Key))
+                .Select(g => currentRunCaptureFailures.TryGetValue(RunDiagnosticKey(runId, g.Key), out var failure)
+                    ? failure.UserReason : EpgUserFailureReason.Unspecified));
+            var userMessage = EpgFailurePresentationContract.RunMessage(
+                runResult, userFailureReason, completedCount, totalGroups, blockedReason);
+            var msg = runResult == "BLOCKED"
+                ? userMessage
+                : $"{userMessage}\n{completedCount}/{totalGroups} グループ完了\n{totalImported} 件取得しました";
 
             var runEvent = runResult == "OK" ? "EPG_RUN_OK" : runResult == "BLOCKED" ? "EPG_RUN_BLOCKED" : "EPG_RUN_FAILED";
             var runTitle = runResult == "OK" ? "EPG" : runResult == "BLOCKED" ? "BLOCKED" : "FAILED";
@@ -905,7 +936,8 @@ public sealed class EpgCapture
             {
                 MissingScopes = missingScopes,
                 CompletedScopes = completedScopes,
-                PreRecordEvents = Array.Empty<EpgEvent>()
+                PreRecordEvents = Array.Empty<EpgEvent>(),
+                UserFailureReason = userFailureReason
             };
         }
         finally
@@ -942,7 +974,8 @@ public sealed class EpgCapture
                 $"result=HARD_DEADLINE_EXPIRED_BEFORE_LAUNCH targetScope={normalizedScope} hardDeadline={executionContract.HardDeadline:O} action=keep_original_recording_time rule=pre_record_epg_execution_lifecycle_contract");
             return new EpgCaptureResult(false, 0, 1, 0, "FAILED", 1,
                 "録画前EPG確認の実行期限を過ぎました。",
-                "failureStage=execution_contract;failureReason=hard_deadline_expired_before_launch");
+                "failureStage=execution_contract;failureReason=hard_deadline_expired_before_launch")
+                { PreRecordFailureReason = PreRecordEpgFailureReason.DeadlineTooClose };
         }
         var runId = $"prerec-{DateTime.UtcNow:yyyyMMddHHmmssfff}-{Interlocked.Increment(ref epgRunSequence)}";
         if (preclaimedPreRecordLease is null || !preclaimedPreRecordLease.IsCurrent)
@@ -952,7 +985,8 @@ public sealed class EpgCapture
             try { preclaimedPreRecordLease?.Dispose(); } catch { }
             return new EpgCaptureResult(false, 0, 1, 0, "FAILED", 1,
                 "録画前EPG確認用チューナーの実行権を維持できませんでした。",
-                "failureStage=admission_claim;failureReason=admission_claim_not_current");
+                "failureStage=admission_claim;failureReason=admission_claim_not_current")
+                { PreRecordFailureReason = PreRecordEpgFailureReason.AdmissionClaimLost };
         }
         var load = channelLoader.Load();
         if (load.Targets.Count == 0 && load.DirectSourceServices.Count == 0)
@@ -960,7 +994,8 @@ public sealed class EpgCapture
             try { preclaimedPreRecordLease.Dispose(); } catch { }
             return new EpgCaptureResult(false, 0, 1, 0, "FAILED", 1,
                 "録画前EPG確認対象チャンネルがありません。",
-                "failureStage=target_resolution;failureReason=no_prerec_channels");
+                "failureStage=target_resolution;failureReason=no_prerec_channels")
+                { PreRecordFailureReason = PreRecordEpgFailureReason.ChannelUnavailable };
         }
 
         // PRE_RECORD_EPG_RECORDING_IDENTITY_SSOT:
@@ -985,7 +1020,9 @@ public sealed class EpgCapture
                 groups.Count == 0
                     ? "録画対象サービスのNID/TSID/SIDに対応する放送TSを解決できませんでした。"
                     : "録画対象サービスのNID/TSID/SIDに対応する放送TSが複数見つかりました。",
-                $"failureStage=target_resolution;failureReason={failureReason}");
+                $"failureStage=target_resolution;failureReason={failureReason}")
+                { PreRecordFailureReason = groups.Count == 0
+                    ? PreRecordEpgFailureReason.ServiceNotFound : PreRecordEpgFailureReason.ServiceAmbiguous };
         }
 
         var group = groups[0];
@@ -1048,7 +1085,14 @@ public sealed class EpgCapture
         {
             CompletedScopes = success ? normalizedScope : string.Empty,
             MissingScopes = success ? string.Empty : normalizedScope,
-            PreRecordEvents = snapshot
+            PreRecordEvents = snapshot,
+            PreRecordFailureReason = terminalReason switch
+            {
+                PreRecordProbeTerminalReason.DeadlineReachedTargetNotObserved => PreRecordEpgFailureReason.TargetNotObserved,
+                PreRecordProbeTerminalReason.WorkerExitedBeforeDecision or PreRecordProbeTerminalReason.AttemptSuperseded
+                    => PreRecordEpgFailureReason.ProbeNotCompleted,
+                _ => PreRecordEpgFailureReason.ProbeFailed
+            }
         };
     }
 
@@ -1076,26 +1120,30 @@ public sealed class EpgCapture
         return failures.Count == 0 ? "-" : string.Join("|", failures);
     }
 
-    private void RecordCaptureFailure(TsGroup group, string reason, string detail, int attempt, int maxAttempts, string runId)
+    private void RecordCaptureFailure(TsGroup group, EpgCaptureFailureReason cause, string detail,
+        int attempt, int maxAttempts, string runId, Exception? exception = null)
     {
-        var state = new EpgCaptureFailureState(group.Group, group.TsId, reason, detail, attempt, maxAttempts, DateTime.Now);
+        var reasonCode = EpgFailurePresentationContract.CaptureCode(cause);
+        var state = new EpgCaptureFailureState(group.Group, group.TsId, reasonCode, detail,
+            attempt, maxAttempts, DateTime.Now,
+            EpgFailurePresentationContract.FromCaptureFailure(cause, exception));
         currentRunCaptureFailures[RunDiagnosticKey(runId, group.Key)] = state;
         Log("EPG_CAPTURE_FAILURE_CLASSIFIED", $"TS{group.TsId}",
-            $"epgGroup={group.Group} ts={group.TsId} service={SafeLogValue(group.Targets.FirstOrDefault()?.Name)} reason={SafeLogValue(reason)} detail={SafeLogValue(detail)} attempt={attempt}/{maxAttempts} rule=release_contract");
+            $"epgGroup={group.Group} ts={group.TsId} service={SafeLogValue(group.Targets.FirstOrDefault()?.Name)} reason={reasonCode} detail={SafeLogValue(detail)} attempt={attempt}/{maxAttempts} rule=release_contract");
     }
 
-    private string ClassifyImportFailure(TsGroup group, string tsFile)
+    private static EpgCaptureFailureReason ClassifyImportFailure(string tsFile)
     {
         try
         {
-            if (!File.Exists(tsFile)) return "no_ts_file";
+            if (!File.Exists(tsFile)) return EpgCaptureFailureReason.CaptureFileMissing;
             var length = new FileInfo(tsFile).Length;
-            if (length <= 0) return "empty_ts_file";
-            return "import_failed_with_ts_file";
+            if (length <= 0) return EpgCaptureFailureReason.CaptureFileEmpty;
+            return EpgCaptureFailureReason.ImportUnavailable;
         }
         catch
         {
-            return "import_failed_unknown_file_state";
+            return EpgCaptureFailureReason.CaptureFileUnreadable;
         }
     }
 
@@ -1359,7 +1407,7 @@ public sealed class EpgCapture
                     workerTaskState.TryFinalize(EpgWorkerTerminalReason.ProcessMissing);
                     RecordCaptureFailure(
                         g,
-                        "worker_process_missing",
+                        EpgCaptureFailureReason.WorkerProcessMissing,
                         $"cycle={SafeLogValue(ex.CycleId)}",
                         attempt: 1,
                         maxAttempts: 2,
@@ -1372,11 +1420,11 @@ public sealed class EpgCapture
                     workerTaskState.TryFinalize(EpgWorkerTerminalReason.Failed);
                     RecordCaptureFailure(
                         g,
-                        "worker_task_exception",
+                        EpgCaptureFailureReason.WorkerTaskException,
                         $"type={ex.GetType().Name} message={SafeLogValue(ex.Message)}",
                         attempt: 1,
                         maxAttempts: 2,
-                        runId: workerTaskState.RunId);
+                        runId: workerTaskState.RunId, exception: ex);
                     Log("EPG_WORKER_TASK_FAIL", $"TS{g.TsId}",
                         $"result=ERROR pass={pass} group={g.Group} worker={SafeLogValue($"{g.Group}-{g.TsId}")} error={ex.GetType().Name}:{SafeLogValue(ex.Message)} action=classify_group_failed_continue_other_workers rule=release_contract");
                 }
@@ -2177,7 +2225,7 @@ public sealed class EpgCapture
                 {
                     // normal EPG開始後のTuner確保失敗は録画都合のDeferredへ変換しない。
                     // 実際に必要な論理資源を取得できなかったworker failureとして記録する。
-                    RecordCaptureFailure(group, "epg_tuner_unavailable", $"waitMs={ResolveEpgLogicalAcquireWaitMs(plannedEnd, isPreRecordCheck)} unmanagedExternalTvTest=out_of_scope policy=logical_resource_queue", attempt, maxAttempts, workerTaskState.RunId);
+                    RecordCaptureFailure(group, EpgCaptureFailureReason.TunerUnavailable, $"waitMs={ResolveEpgLogicalAcquireWaitMs(plannedEnd, isPreRecordCheck)} unmanagedExternalTvTest=out_of_scope policy=logical_resource_queue", attempt, maxAttempts, workerTaskState.RunId);
                 }
                 return 0;
             }
@@ -2198,7 +2246,7 @@ public sealed class EpgCapture
                         lease, requestedServices, group.Group, out var leaseTargets)
                     || leaseTargets.Count == 0)
                 {
-                    RecordCaptureFailure(group, "epg_bondriver_route_unavailable",
+                    RecordCaptureFailure(group, EpgCaptureFailureReason.ChannelRouteUnavailable,
                         $"tuner={lease.Name} configuredCh2=true action=no_worker_launch", attempt, maxAttempts, workerTaskState.RunId);
                     lease.Dispose();
                     return 0;
@@ -2307,6 +2355,10 @@ public sealed class EpgCapture
                     // queueの後続と同じcapacity gateを取り直して次attemptへ進む。PreRecは単発。
                     var startupProcessConverged = workerTaskState.TrySnapshotAttempt(attemptGeneration, out var startupFailureSnapshot)
                         && !IsOwnedWorkerProcessAlive(startupFailureSnapshot);
+                    if (!isPreRecordCheck)
+                        RecordCaptureFailure(group, EpgCaptureFailureReason.WorkerStartupNotReady,
+                            $"attempt={attempt}/{maxAttempts} message={SafeLogValue(launch.Message)}",
+                            attempt, maxAttempts, workerTaskState.RunId);
                     if (!isPreRecordCheck && attempt < maxAttempts && startupProcessConverged)
                     {
                         if (!workerTaskState.ReleaseLeaseForAttempt(attemptGeneration))
@@ -2317,13 +2369,6 @@ public sealed class EpgCapture
                             return 0;
                         }
                         releaseWorkerAdmission?.Invoke();
-                        RecordCaptureFailure(
-                            group,
-                            "worker_startup_not_ready",
-                            $"attempt={attempt}/{maxAttempts} message={SafeLogValue(launch.Message)}",
-                            attempt,
-                            maxAttempts,
-                            workerTaskState.RunId);
                         Log("EPG_CAPTURE_STARTUP_RETRY", $"TS{group.TsId}",
                             $"result=REQUEUE worker={workerName} attempt={attempt}/{maxAttempts} group={group.Group} processConverged=True " +
                             "action=reacquire_group_capacity_before_retry rule=physical_epg_device_session_contract");
@@ -2671,7 +2716,7 @@ public sealed class EpgCapture
 
             if (!new EpgImportOutcome(imported, importDeferred, captureParsed).ShouldRetryCapture)
             {
-                currentRunCaptureFailures.TryRemove(group.Key, out _);
+                currentRunCaptureFailures.TryRemove(RunDiagnosticKey(workerTaskState.RunId, group.Key), out _);
                 if (importDeferred) Log("EPG_IMPORT_DEFERRED", $"TS{group.TsId}",
                     $"result=ACCEPTED imported={imported} action=release_capture_resources_without_rf_retry rule=epg_import_commit_contract");
                 return imported;
@@ -2679,12 +2724,12 @@ public sealed class EpgCapture
 
             if (!isPreRecordCheck)
             {
-                var failureReason = ClassifyImportFailure(group, tsFile);
+                var failureReason = ClassifyImportFailure(tsFile);
                 RecordCaptureFailure(group, failureReason, $"file={SafeLogValue(tsFile)}", attempt, maxAttempts, workerTaskState.RunId);
                 if (attempt < maxAttempts)
                 {
                     Log("EPG_CAPTURE_RETRY", $"TS{group.TsId}",
-                        $"reason={SafeLogValue(failureReason)} nextAttempt={attempt + 1}/{maxAttempts} group={group.Group} service={SafeLogValue(group.Targets.FirstOrDefault()?.Name)} policy=output_lifecycle_retry rule=release_contract");
+                        $"reason={EpgFailurePresentationContract.CaptureCode(failureReason)} nextAttempt={attempt + 1}/{maxAttempts} group={group.Group} service={SafeLogValue(group.Targets.FirstOrDefault()?.Name)} policy=output_lifecycle_retry rule=release_contract");
                 }
             }
         }
@@ -3749,16 +3794,9 @@ public sealed class EpgCapture
     }
 
     /// <summary>
-    /// EPG用チューナー確保。1.0.0: 空きなしを即スキップにせず、短時間だけ待って再投入する。
-    /// ただし録画・STOPフェーズの安全性を優先し、長時間アイドルや無限待ちは行わない。
+    /// EPG用チューナー確保。空きがなければ実行期限内の上限付き待機を行う。
+    /// 録画・STOPフェーズを優先し、無限待機は行わない。
     /// </summary>
-    private static string NormalizePreRecordAdmissionGroupForCapture(string group)
-    {
-        if (string.Equals(group, "GR", StringComparison.OrdinalIgnoreCase)) return "GR";
-        if (group.Contains("BS", StringComparison.OrdinalIgnoreCase) || group.Contains("CS", StringComparison.OrdinalIgnoreCase)) return "BSCS";
-        return group.Trim();
-    }
-
     private async Task<TunerLease?> AcquireEpgLeaseWithShortWaitAsync(
         TsGroup group,
         DateTime plannedEnd,
@@ -6244,7 +6282,8 @@ internal sealed record EpgCaptureFailureState(
     string Detail,
     int Attempt,
     int MaxAttempts,
-    DateTime CreatedAt);
+    DateTime CreatedAt,
+    EpgUserFailureReason UserReason);
 
 
 internal sealed record EpgOutputLifecycleState(
@@ -6712,9 +6751,14 @@ public sealed record EpgCaptureResult(
     public string MissingScopes { get; init; } = string.Empty;
     public string CompletedScopes { get; init; } = string.Empty;
     public IReadOnlyList<EpgEvent> PreRecordEvents { get; init; } = Array.Empty<EpgEvent>();
+    public EpgUserFailureReason UserFailureReason { get; init; } = EpgUserFailureReason.Unspecified;
+    internal PreRecordEpgFailureReason PreRecordFailureReason { get; init; } = PreRecordEpgFailureReason.Unspecified;
 
-    public static EpgCaptureResult Failed(string message)
-        => new(false, 0, 0, 0, "FAILED", 0, message, "result=FAILED");
+    public static EpgCaptureResult Failed(EpgUserFailureReason reason)
+        => new(false, 0, 0, 0, "FAILED", 0,
+            EpgFailurePresentationContract.RunMessage("FAILED", reason),
+            "result=FAILED; failureReason=" + EpgFailurePresentationContract.Code(reason))
+            { UserFailureReason = reason };
 }
 
 public sealed record EpgCaptureStatus

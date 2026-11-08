@@ -1,8 +1,6 @@
 using Microsoft.Extensions.Hosting;
-using System.Diagnostics;
 using System.Drawing;
 using System.Runtime.InteropServices;
-using System.Text;
 using System.Windows.Forms;
 using TvAIr.Schedule;
 using TvAIr.Tuner;
@@ -406,9 +404,11 @@ public sealed class TrayIconService : IDisposable
                 }
                 else
                 {
+#if TVAIR_DEVELOPER_DIAGNOSTICS
                     var before = CaptureForegroundWindowSnapshot();
                     QueueTrayDiagnostic("TRAY_CONTEXT_MENU", "OPENING",
                         $"result=ENTER sequence={session.Sequence} owner=popup_dedicated_sta lifecycle=per_right_click popupThread={Environment.CurrentManagedThreadId} rootHandle={FormatHwnd(root)} popupOwner={FormatHwnd(owner.Handle)} x={session.Request.X} y={session.Request.Y} foreground={before.ToLogFields()} rule=tray_popup_session_separation_contract");
+#endif
 
                     _ = ShowWindow(owner.Handle, SwShowNoActivate);
                     var foregroundAccepted = SetForegroundWindow(owner.Handle);
@@ -429,16 +429,18 @@ public sealed class TrayIconService : IDisposable
                         IntPtr.Zero);
 
                     _ = PostMessage(owner.Handle, WmNull, IntPtr.Zero, IntPtr.Zero);
+#if TVAIR_DEVELOPER_DIAGNOSTICS
                     var after = CaptureForegroundWindowSnapshot();
                     QueueTrayDiagnostic("TRAY_CONTEXT_MENU", "CLOSED",
                         $"result=OK sequence={session.Sequence} owner=popup_dedicated_sta lifecycle=per_right_click command={command} popupThread={Environment.CurrentManagedThreadId} rootHandle={FormatHwnd(root)} popupOwner={FormatHwnd(owner.Handle)} elapsedMs={Math.Max(0, Environment.TickCount64 - session.Request.RequestedAtTick)} foreground={after.ToLogFields()} rule=tray_popup_session_separation_contract");
+#endif
                 }
             }
         }
         catch (Exception ex)
         {
             QueueTrayDiagnostic("TRAY_CONTEXT_MENU", "OPEN_FAILED",
-                $"result=FAILED sequence={session.Sequence} error={ex.GetType().Name} message={SanitizeWindowField(ex.Message)} popupThread={Environment.CurrentManagedThreadId} owner=popup_dedicated_sta rule=tray_popup_session_separation_contract");
+                $"result=FAILED sequence={session.Sequence} error={ex.GetType().Name} popupThread={Environment.CurrentManagedThreadId} owner=popup_dedicated_sta rule=tray_popup_session_separation_contract");
             command = 0;
         }
         finally
@@ -668,7 +670,7 @@ public sealed class TrayIconService : IDisposable
         {
             try
             {
-                _log.Add("TRAY_EPG_SILENT_ERROR", "EPG", $"EPG取得（サイレント）開始時に例外: {ex.GetType().Name}: {ex.Message}");
+                _log.Add("TRAY_EPG_SILENT_ERROR", "EPG", $"EPG取得（サイレント）開始時に例外: {ex.GetType().Name}");
             }
             catch { }
         }
@@ -687,7 +689,7 @@ public sealed class TrayIconService : IDisposable
         }
         catch (Exception ex)
         {
-            try { _log.Add("TRAY_EPG_CANCEL_ERROR", "EPG", $"EPG取得キャンセル時に例外: {ex.GetType().Name}: {ex.Message}"); } catch { }
+            try { _log.Add("TRAY_EPG_CANCEL_ERROR", "EPG", $"EPG取得キャンセル時に例外: {ex.GetType().Name}"); } catch { }
         }
     }
 
@@ -744,8 +746,7 @@ public sealed class TrayIconService : IDisposable
         {
             try
             {
-                var message = (ex.Message ?? string.Empty).Replace("\r", " ").Replace("\n", " ").Trim();
-                _log.Add("TRAY_ICON", "RECOVER_FAILED", $"error={ex.GetType().Name} message={message} rule=release_contract");
+                _log.Add("TRAY_ICON", "RECOVER_FAILED", $"error={ex.GetType().Name} rule=release_contract");
             }
             catch { }
         }
@@ -1084,65 +1085,31 @@ public sealed class TrayIconService : IDisposable
 
 
 
+#if TVAIR_DEVELOPER_DIAGNOSTICS
+    // Only numeric foreground identity is captured. Window captions, class names and
+    // process names are external user data and must never enter tray diagnostics.
     private static ForegroundWindowSnapshot CaptureForegroundWindowSnapshot()
-        => CaptureWindowSnapshot(GetForegroundWindow());
-
-    private static ForegroundWindowSnapshot CaptureWindowSnapshot(IntPtr hwnd)
     {
+        var hwnd = GetForegroundWindow();
         if (hwnd == IntPtr.Zero)
-        {
-            return new ForegroundWindowSnapshot(IntPtr.Zero, 0, 0, "-", "-", "-");
-        }
+            return new ForegroundWindowSnapshot(IntPtr.Zero, 0, 0);
 
-        uint pid = 0;
-        var tid = GetWindowThreadProcessId(hwnd, out pid);
-        var processName = "-";
-        if (pid != 0)
-        {
-            try { processName = Process.GetProcessById(unchecked((int)pid)).ProcessName; }
-            catch { }
-        }
-
-        var className = ReadWindowString(hwnd, static (h, sb, cap) => GetClassName(h, sb, cap));
-        var title = ReadWindowString(hwnd, static (h, sb, cap) => GetWindowText(h, sb, cap));
-        return new ForegroundWindowSnapshot(hwnd, pid, tid, processName, className, title);
+        var tid = GetWindowThreadProcessId(hwnd, out var pid);
+        return new ForegroundWindowSnapshot(hwnd, pid, tid);
     }
 
-    private static string ReadWindowString(IntPtr hwnd, Func<IntPtr, StringBuilder, int, int> reader)
+    private readonly record struct ForegroundWindowSnapshot(
+        IntPtr Hwnd,
+        uint ProcessId,
+        uint ThreadId)
     {
-        try
-        {
-            var sb = new StringBuilder(512);
-            _ = reader(hwnd, sb, sb.Capacity);
-            return SanitizeWindowField(sb.ToString());
-        }
-        catch
-        {
-            return "-";
-        }
+        public string ToLogFields()
+            => $"hwnd={FormatHwnd(Hwnd)},pid={ProcessId},tid={ThreadId}";
     }
-
-    private static string SanitizeWindowField(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return "-";
-        var normalized = value.Replace("\r", " ").Replace("\n", " ").Replace("|", "/").Trim();
-        return normalized.Length <= 160 ? normalized : normalized[..160];
-    }
+#endif
 
     private static string FormatHwnd(IntPtr hwnd)
         => hwnd == IntPtr.Zero ? "0x0" : $"0x{hwnd.ToInt64():X}";
-
-    private sealed record ForegroundWindowSnapshot(
-        IntPtr Hwnd,
-        uint ProcessId,
-        uint ThreadId,
-        string ProcessName,
-        string ClassName,
-        string Title)
-    {
-        public string ToLogFields()
-            => $"hwnd={FormatHwnd(Hwnd)},pid={ProcessId},tid={ThreadId},process={SanitizeWindowField(ProcessName)},class={SanitizeWindowField(ClassName)},title={SanitizeWindowField(Title)}";
-    }
 
     private sealed record TrayPopupPluginAction(string Label, string Route, string Kind);
 
@@ -1247,17 +1214,13 @@ public sealed class TrayIconService : IDisposable
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsWindow(IntPtr hWnd);
 
+#if TVAIR_DEVELOPER_DIAGNOSTICS
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
 
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+#endif
 
     private void OpenSettingsWindowFromEntry(string source)
     {

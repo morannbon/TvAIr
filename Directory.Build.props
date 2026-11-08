@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project>
   <PropertyGroup>
-    <TvAIrProductVersion>1.2.15</TvAIrProductVersion>
-    <TvAIrFileVersion>1.2.15.0</TvAIrFileVersion>
-    <TvAIrAssemblyVersion>1.2.15.0</TvAIrAssemblyVersion>
+    <TvAIrProductVersion>1.2.16</TvAIrProductVersion>
+    <TvAIrFileVersion>1.2.16.0</TvAIrFileVersion>
+    <TvAIrAssemblyVersion>1.2.16.0</TvAIrAssemblyVersion>
+    <TreatWarningsAsErrors Condition="'$(Configuration)' == 'Release'">true</TreatWarningsAsErrors>
     <TvAIrPluginSdkVersion>1.1.19</TvAIrPluginSdkVersion>
     <TvAIrPluginSdkAssemblyVersion>1.0.0.0</TvAIrPluginSdkAssemblyVersion>
     <TvAIrPluginHostContractVersion>1.1.19</TvAIrPluginHostContractVersion>
@@ -11,6 +12,7 @@
     <TvAIrPluginHostContractName>plugin-host-foundation</TvAIrPluginHostContractName>
     <TvAIrPluginCompatibilityMajor>1</TvAIrPluginCompatibilityMajor>
     <TvAIrMinimumSupportedPluginHostContractVersion>1.0.0</TvAIrMinimumSupportedPluginHostContractVersion>
+    <!-- Developer Diagnostics build boundary. Developer builds default ON; public builds explicitly select OFF. User operational logs remain enabled. -->
     <TvAIrDeveloperDiagnostics>false</TvAIrDeveloperDiagnostics>
   </PropertyGroup>
 </Project>

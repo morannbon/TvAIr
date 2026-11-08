@@ -37,8 +37,8 @@ public sealed class ExternalTunerLeaseService
 
     public ExternalTunerLeaseResult Request(ExternalTunerLeaseRequest request)
     {
-        var group = NormalizeGroup(request.Group);
-        var requiredGroup = NormalizeGroup(string.IsNullOrWhiteSpace(request.RequiredGroup) ? request.Group : request.RequiredGroup);
+        var group = TunerDisplayName.NormalizeViewerLeaseGroup(request.Group);
+        var requiredGroup = TunerDisplayName.NormalizeViewerLeaseGroup(string.IsNullOrWhiteSpace(request.RequiredGroup) ? request.Group : request.RequiredGroup);
         var source = string.IsNullOrWhiteSpace(request.Source) ? "External" : request.Source.Trim();
         if (!_applicationGate.TryAdmit("viewer_lease_request", source, out var shutdownReason))
         {
@@ -486,8 +486,6 @@ public sealed class ExternalTunerLeaseService
 
     private static string Safe(string? value) => string.IsNullOrWhiteSpace(value) ? "-" : value.Trim();
 
-    private static string NormalizeGroup(string? group)
-        => TunerDisplayName.NormalizeViewerLeaseGroup(group);
 }
 
 public sealed record ViewerActionResultSnapshot(

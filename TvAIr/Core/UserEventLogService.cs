@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
@@ -16,7 +16,7 @@ namespace TvAIr.Core;
 /// 起動・Wake・軽微な品質診断は開発ログへ分離し、ユーザー運用ログには日常運用に必要な事実だけを記録する。
 /// - ログタブ標準: ユーザーが日常運用で確認する短い事実を必ず1行で表示する。
 /// - ログタブ詳細: ユーザーが有効化し、チェックした項目だけを多段表示する。
-/// - 報告用コピー: 同じ正本からユーザー可読の必要事実だけを重複なく展開する。/api/log の丸写しや内部契約名の露出は行わない。
+/// - 報告用コピー: 同じユーザー運用イベントを、復元可能な半角英数字の転送データへ符号化する。開発診断や別DBを参照しない。
 /// - /api/log: 裏版・開発診断用。表版では切ってもログタブ/報告用コピーが残る構造にする。
 /// </summary>
 public sealed class UserEventLogService
@@ -39,12 +39,6 @@ public sealed class UserEventLogService
         public static readonly UserLogOutcome CriticalFailure = new("ERROR", "FAILED", "Failed", "UserCanCheck");
     }
 
-    private enum EpgFailureImpact
-    {
-        None,
-        Unavailable,
-        Critical
-    }
     private const int MaxRows = 1000;
     private static readonly TimeSpan Retention = TimeSpan.FromDays(7);
     private readonly Database db;
@@ -161,7 +155,7 @@ public sealed class UserEventLogService
 
     public IReadOnlyList<UserEventLogEntry> GetReportEntries(TimeSpan window, int maxRows = 200)
     {
-        maxRows = Math.Clamp(maxRows, 1, 500);
+        maxRows = Math.Clamp(maxRows, 1, MaxRows);
         var since = DateTime.Now.Subtract(window);
         lock (gate)
         {
@@ -350,7 +344,7 @@ public sealed class UserEventLogService
             ProgramTitle = title,
             // USER_LOG_RESERVATION_ID_PROJECTION_INVARIANT
             // 取消も追加・録画開始・失敗と同じ ReservationId 正本へ格納する。
-            // requestedReservationId を Detail だけへ残して報告用コピーから欠落させない。
+            // 同じ予約を関連付けられるよう ReservationId に格納する。
             ReservationId = requestedReservationId > 0 ? $"R{requestedReservationId}" : string.Empty,
             Detail = BuildCompactDetail(new []
             {
@@ -508,7 +502,8 @@ public sealed class UserEventLogService
         int reservationId,
         ReservationStatus newStatus,
         DateTime? createdAt = null,
-        string? failureReason = null)
+        string? failureReason = null,
+        RecordingFailureCause failureCause = RecordingFailureCause.Unspecified)
     {
         if (before is null || !ShouldEmitReservationOperation(before)) return;
         var at = createdAt ?? DateTime.Now;
@@ -576,6 +571,13 @@ public sealed class UserEventLogService
             // IsConflicted is allocation state and must not be reinterpreted here as a tuner-acquire failure.
             // Conflict-at-due has its own REC_SKIPPED_BY_CONFLICT event and suppresses this generic route.
             var canonicalFailureReason = NormalizeOperationText(failureReason);
+            var failureStage = before.Status switch
+            {
+                ReservationStatus.Scheduled or ReservationStatus.Starting => RecordingFailureStage.BeforeStart,
+                ReservationStatus.Recording => RecordingFailureStage.DuringRecording,
+                _ => RecordingFailureStage.Completion
+            };
+            var failureDescription = RecordingFailurePresentationContract.Message(failureCause, failureStage);
             entry = new UserEventLogEntry
             {
                 CreatedAt = at,
@@ -583,7 +585,7 @@ public sealed class UserEventLogService
                 Category = "録画",
                 Result = "FAILED",
                 Target = target,
-                Message = string.IsNullOrWhiteSpace(title) ? "録画に失敗しました" : $"録画に失敗しました: {title}",
+                Message = string.IsNullOrWhiteSpace(title) ? failureDescription : $"{failureDescription}: {title}",
                 Code = "REC_FAILED",
                 TraceId = operationId,
                 OperationId = operationId,
@@ -595,8 +597,10 @@ public sealed class UserEventLogService
                 Actionability = "UserCanCheck",
                 ReservationSource = source,
                 ProgramTitle = title,
+                CompletionReason = failureDescription,
                 Detail = BuildDirectReservationDetail(before, reservationId, statusOverride: ReservationStatus.Failed)
                     + $"; failureReason={(string.IsNullOrWhiteSpace(canonicalFailureReason) ? "unknown" : canonicalFailureReason)}"
+                    + $"; {RecordingFailurePresentationContract.CauseMetadataKey}={RecordingFailurePresentationContract.Code(failureCause)}"
             };
         }
         else if (newStatus == ReservationStatus.Cancelled && before.Status != ReservationStatus.Cancelled)
@@ -666,6 +670,9 @@ public sealed class UserEventLogService
         var service = NormalizeOperationText(reservation.ServiceName);
         var target = BuildOperationTarget(service, title);
         var operationId = BuildOperationId("REC_INTERRUPTED", at);
+        // Recovery trigger says when the interrupted recording was detected, not why
+        // the application or worker stopped. Do not report an inferred crash.
+        var interruptionMessage = RecordingFailurePresentationContract.InterruptedMessage(trigger);
         var detail = BuildDirectReservationDetail(reservation, reservationId, route, ReservationStatus.Failed)
             + "; failureClass=RecordingInterrupted"
             + $"; interruptionReason={NormalizeOperationText(reason ?? string.Empty)}"
@@ -679,8 +686,8 @@ public sealed class UserEventLogService
             Result = "FAILED",
             Target = target,
             Message = string.IsNullOrWhiteSpace(title)
-                ? "録画が途中で終了しました"
-                : $"録画が途中で終了しました: {title}",
+                ? interruptionMessage
+                : $"{interruptionMessage}: {title}",
             Code = "REC_INTERRUPTED",
             TraceId = operationId,
             OperationId = operationId,
@@ -692,6 +699,7 @@ public sealed class UserEventLogService
             Actionability = "UserCanCheck",
             ReservationSource = route.ReservationSourceLabel,
             ProgramTitle = title,
+            CompletionReason = interruptionMessage,
             Detail = detail
         });
     }
@@ -835,7 +843,7 @@ public sealed class UserEventLogService
             Category = "EPG",
             Result = outcome.Result,
             Target = target,
-            Message = "EPG取得を完了できませんでした",
+            Message = "予定時間内にEPG取得を完了できませんでした",
             Code = "EPG_RUN_FAILED",
             TraceId = operationId,
             OperationId = operationId,
@@ -866,28 +874,25 @@ public sealed class UserEventLogService
         int? importedEvents = null,
         int? missingGroups = null,
         string? resultDetail = null,
-        DateTime? createdAt = null)
+        DateTime? createdAt = null,
+        EpgUserFailureReason failureReason = EpgUserFailureReason.Unspecified)
     {
         var at = createdAt ?? DateTime.Now;
         var normalizedResult = string.IsNullOrWhiteSpace(runResult) ? "OK" : runResult.Trim().ToUpperInvariant();
         var isCleanOk = normalizedResult == "OK";
         var isBlocked = normalizedResult == "BLOCKED";
-        var code = isCleanOk ? "EPG_RUN_OK" : isBlocked ? "EPG_RUN_BLOCKED" : "EPG_RUN_FAILED";
+        var isPartial = normalizedResult == "PARTIAL" || normalizedResult == "INCOMPLETE";
+        var code = isCleanOk ? "EPG_RUN_OK" : isBlocked ? "EPG_RUN_BLOCKED" : isPartial ? "EPG_RUN_PARTIAL" : "EPG_RUN_FAILED";
         var operationId = BuildOperationId(code, at);
         var target = NormalizeEpgTargetLabel(targetScope);
-        var storyContextBase = isCleanOk ? "Completed" : isBlocked ? "Blocked" : "Failed";
+        var storyContextBase = isCleanOk ? "Completed" : isBlocked ? "Blocked" : isPartial ? "Partial" : "Failed";
         var storyContext = ResolveEpgRunStoryContext(requestedBy, silent, storyContextBase);
-        var failureImpact = isCleanOk || isBlocked ? EpgFailureImpact.None : ClassifyEpgFailureImpact(resultDetail);
-        var failureOutcome = failureImpact == EpgFailureImpact.Critical
+        var failureOutcome = EpgFailurePresentationContract.IsCritical(failureReason)
             ? UserLogOutcomes.CriticalFailure
             : UserLogOutcomes.Unavailable;
-        var message = isCleanOk
-            ? "EPG取得を完了しました"
-            : isBlocked
-                ? BuildEpgBlockedUserMessage(resultDetail, targetScope)
-                : BuildGroundedEpgFailureUserMessage(resultDetail, failureImpact);
-        if (!isCleanOk && !isBlocked && string.IsNullOrWhiteSpace(message))
-            return;
+        var blockedReason = isBlocked ? EpgFailurePresentationContract.ExtractBlockedReason(resultDetail) : string.Empty;
+        var message = EpgFailurePresentationContract.RunMessage(
+            normalizedResult, failureReason, completedGroups ?? 0, totalGroups ?? 0, blockedReason);
         var detailParts = new List<string>
         {
             $"targetScope={target}",
@@ -896,13 +901,17 @@ public sealed class UserEventLogService
         };
         if (completedGroups.HasValue && totalGroups.HasValue) detailParts.Add($"completedGroups={completedGroups}/{totalGroups}");
         if (importedEvents.HasValue) detailParts.Add($"imported={importedEvents}");
-        // User-visible EPG results stay: completed / cannot start / failed.
+        // Keep the original admission reason with the persisted result. The
+        // displayed message is resolved once from the same reason as the dialog.
+        if (!string.IsNullOrWhiteSpace(blockedReason)) detailParts.Add($"blockedReason={blockedReason}");
+        if (!isCleanOk && !isBlocked) detailParts.Add($"failureReason={EpgFailurePresentationContract.Code(failureReason)}");
+        // User-visible EPG results stay: completed / cannot start / partial / failed.
         Add(new UserEventLogEntry
         {
             CreatedAt = at,
-            Severity = isCleanOk ? UserLogOutcomes.Success.Severity : isBlocked ? UserLogOutcomes.Blocked.Severity : failureOutcome.Severity,
+            Severity = isCleanOk ? UserLogOutcomes.Success.Severity : isBlocked ? UserLogOutcomes.Blocked.Severity : isPartial ? UserLogOutcomes.Partial.Severity : failureOutcome.Severity,
             Category = "EPG",
-            Result = isCleanOk ? UserLogOutcomes.Success.Result : isBlocked ? UserLogOutcomes.Blocked.Result : failureOutcome.Result,
+            Result = isCleanOk ? UserLogOutcomes.Success.Result : isBlocked ? UserLogOutcomes.Blocked.Result : isPartial ? UserLogOutcomes.Partial.Result : failureOutcome.Result,
             Target = target,
             Message = message,
             Code = code,
@@ -911,117 +920,21 @@ public sealed class UserEventLogService
             StoryContext = storyContext,
             Origin = "Epg",
             Trigger = NormalizeEpgTriggerLabel(requestedBy),
-            StoryRole = isCleanOk ? UserLogOutcomes.Success.StoryRole : isBlocked ? UserLogOutcomes.Blocked.StoryRole : failureOutcome.StoryRole,
+            StoryRole = isCleanOk ? UserLogOutcomes.Success.StoryRole : isBlocked ? UserLogOutcomes.Blocked.StoryRole : isPartial ? UserLogOutcomes.Partial.StoryRole : failureOutcome.StoryRole,
             TargetKind = "EPG",
-            Actionability = isCleanOk ? UserLogOutcomes.Success.Actionability : isBlocked ? UserLogOutcomes.Blocked.Actionability : failureOutcome.Actionability,
+            Actionability = isCleanOk ? UserLogOutcomes.Success.Actionability : isBlocked ? UserLogOutcomes.Blocked.Actionability : isPartial ? UserLogOutcomes.Partial.Actionability : failureOutcome.Actionability,
             Detail = string.Join("; ", detailParts)
         });
     }
 
 
-    private static EpgFailureImpact ClassifyEpgFailureImpact(string? resultDetail)
+    public void AddScheduledEpgFailed(string targetScope, string requestedBy, bool silent,
+        EpgUserFailureReason failureReason, DateTime? createdAt = null)
     {
-        if (string.IsNullOrWhiteSpace(resultDetail)) return EpgFailureImpact.None;
-        var d = resultDetail.ToUpperInvariant();
-
-        // 永続データを保存・更新できない場合は、ユーザーの目的が成立していないため赤表示を許可する。
-        if (d.Contains("UNAUTHORIZEDACCESSEXCEPTION")
-            || d.Contains("IOEXCEPTION")
-            || d.Contains("DIRECTORYNOTFOUNDEXCEPTION")
-            || d.Contains("PATHTOOLONGEXCEPTION")
-            || d.Contains("ACCESS DENIED")
-            || d.Contains("DISK FULL")
-            || d.Contains("NOT ENOUGH SPACE")
-            || (d.Contains("WRITE") && (d.Contains("DENIED") || d.Contains("FAILED") || d.Contains("ERROR")))
-            || d.Contains("SQLITE")
-            || d.Contains("DATABASE")
-            || d.Contains("DB_")
-            || (d.Contains("IMPORT") && (d.Contains("FAILED") || d.Contains("ERROR")))
-            || (d.Contains("STORE") && (d.Contains("FAILED") || d.Contains("ERROR"))))
-            return EpgFailureImpact.Critical;
-
-        // Workerを起動できない等はEPG機能単独の利用不能であり、TvAIr全体の継続不能ではない。
-        if ((d.Contains("TVAIREPGREC") || d.Contains("WORKER") || d.Contains("PROCESS"))
-            && (d.Contains("START") || d.Contains("LAUNCH") || d.Contains("NOT FOUND") || d.Contains("MISSING")))
-            return EpgFailureImpact.Unavailable;
-
-        return EpgFailureImpact.None;
-    }
-
-    private static string BuildGroundedEpgFailureUserMessage(string? resultDetail, EpgFailureImpact impact)
-    {
-        if (impact == EpgFailureImpact.None) return string.Empty;
-        var d = (resultDetail ?? string.Empty).ToUpperInvariant();
-
-        if (impact == EpgFailureImpact.Critical)
-        {
-            if (d.Contains("SQLITE") || d.Contains("DATABASE") || d.Contains("DB_")
-                || (d.Contains("IMPORT") && (d.Contains("FAILED") || d.Contains("ERROR")))
-                || (d.Contains("STORE") && (d.Contains("FAILED") || d.Contains("ERROR"))))
-                return "番組表を更新できませんでした";
-            return "保存先に書き込めませんでした";
-        }
-
-        return "EPG取得用の実行ファイルを起動できませんでした";
-    }
-
-    private static string BuildEpgBlockedUserMessage(string? resultDetail, string? targetScope = null)
-    {
-        var reason = ExtractDetailValue(resultDetail, "blockedReason");
-        var blockedGroup = ExtractDetailValue(resultDetail, "blockedGroup");
-        // User-facing blocked messages stay short. The affected scope is shown separately as Target.
-
-        if (reason.Contains("no_free", StringComparison.OrdinalIgnoreCase)
-            || reason.Contains("no_tuner", StringComparison.OrdinalIgnoreCase)
-            || (reason.Contains("tuner", StringComparison.OrdinalIgnoreCase)
-                && !reason.Contains("recording", StringComparison.OrdinalIgnoreCase)))
-        {
-            return "空きチューナーがないためEPG取得を開始できません";
-        }
-
-        if (reason.Contains("warmup", StringComparison.OrdinalIgnoreCase))
-            return "録画開始直後のためEPG取得を開始できません";
-
-        if (reason.Contains("window_insufficient", StringComparison.OrdinalIgnoreCase)
-            || reason.Contains("preempt", StringComparison.OrdinalIgnoreCase)
-            || reason.Contains("timeline", StringComparison.OrdinalIgnoreCase)
-            || reason.Contains("next", StringComparison.OrdinalIgnoreCase)
-            || reason.Contains("due", StringComparison.OrdinalIgnoreCase)
-            || reason.Contains("recording", StringComparison.OrdinalIgnoreCase))
-        {
-            return "録画予約が近いためEPG取得を開始できません";
-        }
-
-        return "録画予約が近いためEPG取得を開始できません";
-    }
-
-    private static string ExtractDetailValue(string? detail, string key)
-    {
-        if (string.IsNullOrWhiteSpace(detail) || string.IsNullOrWhiteSpace(key))
-            return string.Empty;
-
-        foreach (var part in detail.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            var index = part.IndexOf('=');
-            if (index <= 0) continue;
-            var name = part[..index].Trim();
-            if (string.Equals(name, key, StringComparison.OrdinalIgnoreCase))
-                return part[(index + 1)..].Trim();
-        }
-
-        return string.Empty;
-    }
-
-    public void AddScheduledEpgFailed(string targetScope, string requestedBy, bool silent, string? resultDetail = null, DateTime? createdAt = null)
-    {
-        var failureImpact = ClassifyEpgFailureImpact(resultDetail);
-        var message = BuildGroundedEpgFailureUserMessage(resultDetail, failureImpact);
-        if (string.IsNullOrWhiteSpace(message))
-            return;
-        var outcome = failureImpact == EpgFailureImpact.Critical
+        var message = EpgFailurePresentationContract.RunMessage("FAILED", failureReason);
+        var outcome = EpgFailurePresentationContract.IsCritical(failureReason)
             ? UserLogOutcomes.CriticalFailure
             : UserLogOutcomes.Unavailable;
-
         var at = createdAt ?? DateTime.Now;
         var operationId = BuildOperationId("EPG_RUN_FAILED", at);
         var target = NormalizeEpgTargetLabel(targetScope);
@@ -1042,7 +955,8 @@ public sealed class UserEventLogService
             StoryRole = outcome.StoryRole,
             TargetKind = "EPG",
             Actionability = outcome.Actionability,
-            Detail = BuildCompactDetail(new [] { $"targetScope={target}", $"silent={silent}" })
+            Detail = BuildCompactDetail(new [] { $"targetScope={target}", $"silent={silent}",
+                $"failureReason={EpgFailurePresentationContract.Code(failureReason)}" })
         });
     }
 
@@ -1072,13 +986,13 @@ public sealed class UserEventLogService
         });
     }
 
-    public void AddPreRecordEpgFailed(Reservation parent, string? reason = null, DateTime? createdAt = null)
+    public void AddPreRecordEpgFailed(Reservation parent, PreRecordEpgFailureReason reason, DateTime? createdAt = null)
     {
         var at = createdAt ?? DateTime.Now;
         var operationId = BuildOperationId("PRE_REC_EPG_FAILED", at);
         var title = NormalizeOperationText(parent.Title);
         var service = NormalizeOperationText(parent.ServiceName);
-        var failureReasonText = DescribePreRecordEpgFailureReason(reason);
+        var failureReasonText = EpgFailurePresentationContract.PreRecordMessage(reason);
 
         // USER_LOG_PRESENTATION_INVARIANT
         // 標準ログは、画面をうるさくしないため必ずシンプルな1行表示にする。
@@ -1094,7 +1008,7 @@ public sealed class UserEventLogService
             Category = "EPG確認",
             Result = "FALLBACK",
             Target = BuildOperationTarget(service, title),
-            Message = string.IsNullOrWhiteSpace(title) ? "EPG確認ができなかったため、予約時刻のまま録画します" : $"EPG確認ができなかったため、予約時刻のまま録画します: {title}",
+            Message = string.IsNullOrWhiteSpace(title) ? failureReasonText : $"{failureReasonText}: {title}",
             Code = "PRE_REC_EPG_FAILED",
             TraceId = operationId,
             OperationId = operationId,
@@ -1111,50 +1025,8 @@ public sealed class UserEventLogService
             ScheduledStart = parent.StartTime,
             ScheduledEnd = parent.EndTime,
             CompletionReason = failureReasonText,
-            Detail = BuildCompactDetail(new [] { $"reservationId=R{parent.Id}", $"service={service}", $"programTitle={title}", string.IsNullOrWhiteSpace(reason) ? string.Empty : $"diagnosticReason={NormalizeOperationText(reason)}", $"displayReason={failureReasonText}" })
+            Detail = BuildCompactDetail(new [] { $"reservationId=R{parent.Id}", $"service={service}", $"programTitle={title}", $"reason={EpgFailurePresentationContract.Code(reason)}", $"displayReason={failureReasonText}" })
         });
-    }
-
-    private static string DescribePreRecordEpgFailureReason(string? reason)
-    {
-        if (string.IsNullOrWhiteSpace(reason))
-            return "EPG確認を完了できなかったため、予約時刻のまま録画します";
-
-        var value = reason.Trim();
-        if (value.Contains("admission_claim_lost", StringComparison.OrdinalIgnoreCase)
-            || value.Contains("admission_claim_not_current", StringComparison.OrdinalIgnoreCase)
-            || value.Contains("claim_identity_mismatch", StringComparison.OrdinalIgnoreCase))
-            return "EPG確認用に確保した録画用チューナーの実行権を維持できませんでした。予約時刻のまま録画します";
-
-        if (value.Contains("target_service_identity_not_found", StringComparison.OrdinalIgnoreCase))
-            return "録画対象サービスのNID/TSID/SIDに対応する放送TSを特定できませんでした。予約時刻のまま録画します";
-
-        if (value.Contains("target_service_identity_ambiguous", StringComparison.OrdinalIgnoreCase)
-            || value.Contains("target_ts_not_unique", StringComparison.OrdinalIgnoreCase))
-            return "録画対象サービスのNID/TSID/SIDに対応する放送TSを一意に特定できませんでした。予約時刻のまま録画します";
-
-        if (value.Contains("no_prerec_channels", StringComparison.OrdinalIgnoreCase))
-            return "EPG確認対象のチャンネル情報を取得できませんでした。予約時刻のまま録画します";
-
-        if (value.Contains("target_event_not_observed", StringComparison.OrdinalIgnoreCase))
-            return "EPG確認workerは実行しましたが、対象番組のEPGを確認できませんでした。予約時刻のまま録画します";
-
-        if (value.Contains("probe_no_completion_evidence", StringComparison.OrdinalIgnoreCase))
-            return "EPG確認workerを実行しましたが、確認完了を確定できませんでした。予約時刻のまま録画します";
-
-        if (value.Contains("normal_epg_running", StringComparison.OrdinalIgnoreCase))
-            return "同じ放送波で定時・手動EPG取得が実行中だったため録画前EPG確認を行いませんでした。予約時刻のまま録画します";
-
-        if (value.Contains("no_free_recording_tuner", StringComparison.OrdinalIgnoreCase)
-            || value.Contains("no_safe_free_recording_tuner", StringComparison.OrdinalIgnoreCase))
-            return "録画前EPG確認に使用できる録画用チューナーがありませんでした。予約時刻のまま録画します";
-
-        if (value.Contains("recording_due_priority", StringComparison.OrdinalIgnoreCase)
-            || value.Contains("too_close_to_recording", StringComparison.OrdinalIgnoreCase)
-            || value.Contains("insufficient_probe_window", StringComparison.OrdinalIgnoreCase))
-            return "録画開始が近いためEPG確認を終了し、録画を優先しました。予約時刻のまま録画します";
-
-        return $"EPG確認を完了できませんでした（{NormalizeOperationText(value)}）。予約時刻のまま録画します";
     }
 
     public void AddPreRecordEpgCheckedNoChange(Reservation reservation, DateTime? createdAt = null)
@@ -1963,196 +1835,9 @@ public sealed class UserEventLogService
         }
     }
 
+    // The existing user-event store is the only report source. Do not create a second journal.
     public string BuildReportText(TimeSpan window, int maxRows, string tvairVersion)
-    {
-        var all = GetReportEntries(window, maxRows).OrderBy(e => e.CreatedAt).ToArray();
-        var selected = SelectReportEntries(all);
-        var body = new StringBuilder();
-        body.AppendLine($"TvAIr {SanitizeReportValue(tvairVersion)} トラブル報告用コピー");
-        body.AppendLine($"出力日時: {DateTime.Now:yyyy/MM/dd HH:mm:ss}");
-        body.AppendLine($"対象範囲: 直近{FormatWindow(window)} / 抽出={selected.Length}件 / 保持={all.Length}件");
-        body.AppendLine("※個人情報・保存先の固有名は出力しません。");
-        body.AppendLine("----");
-
-        // USER_LOG_REPORT_COPY_INVARIANT
-        // 報告用コピーもユーザーが扱う公開面である。
-        // 正本は user_event_logs のみ。Developer Diagnostics の生ログを混ぜない。
-        // 標準1行の内容を正本とし、解析に必要なユーザー可読の事実だけを重複なく追加する。
-        // origin / trigger / route / contract / operationId 等の内部契約名や、同一値の別形式再掲を出さない。
-        foreach (var e in selected)
-        {
-            body.AppendLine($"[{e.CreatedAt:yyyy/MM/dd HH:mm:ss}] {SanitizeReportValue(e.Severity)} {SanitizeReportValue(e.Category)}/{SanitizeReportValue(e.Result)}");
-            var reportMessage = SanitizeReportValue(UserLogProjectionService.BuildStandardMessage(e));
-            AppendReportLine(body, "内容", reportMessage);
-            AppendReportLine(body, "放送局", SanitizeReportValue(e.ServiceName));
-            var reportTitle = SanitizeReportValue(e.ProgramTitle);
-            if (!string.IsNullOrWhiteSpace(reportTitle) &&
-                !reportMessage.Contains(reportTitle, StringComparison.Ordinal))
-                AppendReportLine(body, "番組", reportTitle);
-            AppendReportLine(body, "予約元", SanitizeReportValue(e.ReservationSource));
-            AppendReportLine(body, "予定時刻", FormatReportRange(e.ScheduledStart, e.ScheduledEnd));
-            AppendReportLine(body, "実録画時刻", FormatReportRange(e.ActualStart, e.ActualEnd));
-            AppendReportLine(body, "録画品質", FormatReportQuality(e));
-            AppendReportLine(body, "理由", SanitizeReportValue(e.CompletionReason));
-            AppendReportLine(body, "変更前", ReadReportDetail(e, TvAirLogDetailKeys.StateBefore));
-            AppendReportLine(body, "変更後", ReadReportDetail(e, TvAirLogDetailKeys.StateAfter));
-        }
-
-        return SplitReportForPosting(body.ToString());
-    }
-
-    private static UserEventLogEntry[] SelectReportEntries(UserEventLogEntry[] all)
-    {
-        if (all.Length == 0) return Array.Empty<UserEventLogEntry>();
-
-        // REPORT_COPY_CURRENT_CONTEXT_INVARIANT:
-        // 報告用コピーは、過去のWARN/ERRORだけをアンカーにして最新の正常事象を落としてはならない。
-        // 最新の運用事実を必ず含めたうえで、直近のWARN/ERROR周辺を補助的に加える。
-        // これにより、出力直前の録画開始・録画終了・EPG確認結果が画面ログと不一致になるのを防ぐ。
-        const int maxSelected = 18;
-        const int latestCount = 12;
-        var selected = all.TakeLast(Math.Min(latestCount, all.Length)).ToList();
-
-        var incident = all.LastOrDefault(e =>
-            string.Equals(e.Severity, "ERROR", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(e.Severity, "WARN", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(e.Result, "NG", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(e.Result, "FAILED", StringComparison.OrdinalIgnoreCase) ||
-            e.Result.Contains("失敗", StringComparison.OrdinalIgnoreCase));
-
-        if (incident is not null)
-        {
-            static string Op(UserEventLogEntry e) => string.IsNullOrWhiteSpace(e.OperationId) ? e.TraceId : e.OperationId;
-            var related = all.Where(e =>
-                (!string.IsNullOrWhiteSpace(incident.RecordingRecoveryChainId) && string.Equals(e.RecordingRecoveryChainId, incident.RecordingRecoveryChainId, StringComparison.OrdinalIgnoreCase)) ||
-                (!string.IsNullOrWhiteSpace(incident.PowerResumeCycleId) && string.Equals(e.PowerResumeCycleId, incident.PowerResumeCycleId, StringComparison.OrdinalIgnoreCase) &&
-                    ((!string.IsNullOrWhiteSpace(incident.ReservationId) && string.Equals(e.ReservationId, incident.ReservationId, StringComparison.OrdinalIgnoreCase)) ||
-                     (!string.IsNullOrWhiteSpace(incident.RecordingId) && string.Equals(e.RecordingId, incident.RecordingId, StringComparison.OrdinalIgnoreCase)) ||
-                     string.Equals(e.Origin, incident.Origin, StringComparison.OrdinalIgnoreCase))) ||
-                (!string.IsNullOrWhiteSpace(Op(incident)) && string.Equals(Op(e), Op(incident), StringComparison.OrdinalIgnoreCase)) ||
-                (!string.IsNullOrWhiteSpace(incident.ReservationId) && string.Equals(e.ReservationId, incident.ReservationId, StringComparison.OrdinalIgnoreCase)) ||
-                (!string.IsNullOrWhiteSpace(incident.RecordingId) && string.Equals(e.RecordingId, incident.RecordingId, StringComparison.OrdinalIgnoreCase)))
-                .ToList();
-
-            if (related.Count < 5)
-            {
-                var index = Array.IndexOf(all, incident);
-                var from = Math.Max(0, index - 2);
-                var to = Math.Min(all.Length - 1, index + 2);
-                for (var i = from; i <= to; i++)
-                    if (!related.Contains(all[i])) related.Add(all[i]);
-            }
-
-            foreach (var entry in related.OrderByDescending(e => e.CreatedAt).ThenByDescending(e => e.Id))
-            {
-                if (selected.Any(x => x.Id == entry.Id)) continue;
-                selected.Add(entry);
-                if (selected.Count >= maxSelected) break;
-            }
-        }
-
-        return selected
-            .OrderBy(e => e.CreatedAt)
-            .ThenBy(e => e.Id)
-            .TakeLast(maxSelected)
-            .ToArray();
-    }
-
-
-
-
-    private static string? FormatReportRange(DateTime? start, DateTime? end)
-    {
-        if (!start.HasValue && !end.HasValue) return null;
-        if (start.HasValue && end.HasValue)
-            return $"{start.Value:yyyy/MM/dd HH:mm:ss}〜{end.Value:yyyy/MM/dd HH:mm:ss}";
-        return start.HasValue
-            ? $"{start.Value:yyyy/MM/dd HH:mm:ss}〜"
-            : $"〜{end!.Value:yyyy/MM/dd HH:mm:ss}";
-    }
-
-    private static string? FormatReportQuality(UserEventLogEntry entry)
-    {
-        var values = new List<string>();
-        if (entry.DropCount.HasValue) values.Add($"drop={entry.DropCount.Value}");
-        if (entry.ErrorCount.HasValue) values.Add($"error={entry.ErrorCount.Value}");
-        if (entry.ScrambleCount.HasValue) values.Add($"scramble={entry.ScrambleCount.Value}");
-        return values.Count == 0 ? null : string.Join(" ", values);
-    }
-
-    private static string? ReadReportDetail(UserEventLogEntry entry, string key)
-    {
-        try
-        {
-            var values = JsonSerializer.Deserialize<Dictionary<string, string>>(entry.DetailsJson ?? "{}");
-            return values is not null && values.TryGetValue(key, out var value)
-                ? SanitizeReportValue(value)
-                : null;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static string SplitReportForPosting(string text)
-    {
-        const int blockLimit = 3600;
-        const int maxBlocks = 3;
-        var lines = text.Replace("\r\n", "\n").Split('\n');
-        var blocks = new List<string>();
-        var current = new StringBuilder();
-        foreach (var raw in lines)
-        {
-            var line = raw.Length > 500 ? raw[..500] + "…" : raw;
-            if (current.Length > 0 && current.Length + line.Length + 1 > blockLimit)
-            {
-                blocks.Add(current.ToString().TrimEnd());
-                current.Clear();
-                if (blocks.Count == maxBlocks) break;
-            }
-            current.AppendLine(line);
-        }
-        if (current.Length > 0 && blocks.Count < maxBlocks)
-            blocks.Add(current.ToString().TrimEnd());
-        if (blocks.Count == 0) blocks.Add("報告対象のユーザー運用ログはありません。");
-
-        var count = blocks.Count;
-        return string.Join("\n\n", blocks.Select((b, i) => $"[{i + 1}/{count}]\n{b}"));
-    }
-
-    private static string SanitizeReportValue(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
-        var v = value.Trim();
-        v = Regex.Replace(v, @"(?i)\\\\[^\\\s]+\\[^\r\n;]+", "<network-path>");
-        v = Regex.Replace(v, @"(?i)\b[A-Z]:\\[^\r\n;]+", "<local-path>");
-        v = Regex.Replace(v, @"(?i)(?:/home|/Users)/[^/\s]+/[^\r\n;]+", "<local-path>");
-        v = Regex.Replace(v, @"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", "<email>");
-        v = Regex.Replace(v, @"\b(?:\d{1,3}\.){3}\d{1,3}\b", "<ip>");
-        v = Regex.Replace(v, @"(?i)(user(name)?|account|pcname|computername)=([^;\s]+)", "$1=<private>");
-        // Preserve correlation in the stored event; only remove internal reservation numbers from the copied text.
-        return UserLogProjectionService.WithoutInternalReservationNumbers(v);
-    }
-
-    private static void AppendReportLine(StringBuilder sb, string label, string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return;
-        var v = value.Trim();
-        if (v == "—" || v == "-") return;
-        sb.AppendLine($"  {label}: {v}");
-    }
-
-
-
-
-
-    private static string FormatWindow(TimeSpan window)
-    {
-        if (window.TotalDays >= 1) return $"{Math.Round(window.TotalDays)}日";
-        if (window.TotalHours >= 1) return $"{Math.Round(window.TotalHours)}時間";
-        return $"{Math.Round(window.TotalMinutes)}分";
-    }
+        => UserReportCopyFormatter.Build(GetReportEntries(window, maxRows), window, tvairVersion, DateTime.Now);
 
     private enum UserEventOrigin
     {

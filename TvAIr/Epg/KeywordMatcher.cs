@@ -1622,12 +1622,6 @@ public sealed class KeywordMatcher
         return raw.Length <= 60 ? raw : raw[..60] + "…";
     }
 
-    private static string TrimForLog(string? value, int max)
-    {
-        var text = (value ?? string.Empty).Replace("\r", " ").Replace("\n", " ").Trim();
-        return text.Length <= max ? text : text[..max] + "…";
-    }
-
     private static string SafeProjectedLogValue(string? value)
     {
         if (string.IsNullOrWhiteSpace(value)) return "-";

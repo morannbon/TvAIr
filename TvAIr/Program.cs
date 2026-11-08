@@ -577,9 +577,7 @@ static bool IsAllowedLoopbackOrigin(HttpRequest request, int expectedPort)
 
 var app = builder.Build();
 _ = app.Services.GetRequiredService<ReservationMutationSideEffectProjection>();
-#if TVAIR_DEVELOPER_DIAGNOSTICS
 UserLogProjectionContractTests.Run();
-#endif
 
 try
 {
@@ -828,7 +826,7 @@ app.MapGet("/network-login", (HttpContext context) =>
     context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'self'; base-uri 'none'";
     var html = $$$"""
 <!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>TvAIr 接続</title><link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.15"></head><body class="tvair-generated-login"><main><h1>TvAIrへ接続</h1><form id="login"><label for="password">接続用パスワード</label><input id="password" type="password" autocomplete="current-password" required minlength="12"><button type="submit">接続</button><div id="message" class="message" role="status"></div></form></main>
+<title>TvAIr 接続</title><link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.16"></head><body class="tvair-generated-login"><main><h1>TvAIrへ接続</h1><form id="login"><label for="password">接続用パスワード</label><input id="password" type="password" autocomplete="current-password" required minlength="12"><button type="submit">接続</button><div id="message" class="message" role="status"></div></form></main>
 <script>
 const form=document.getElementById('login'),password=document.getElementById('password'),message=document.getElementById('message');
 form.addEventListener('submit',async e=>{e.preventDefault();message.textContent='確認しています…';try{const r=await fetch('/api/network-auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:password.value}),credentials:'same-origin'});const j=await r.json().catch(()=>({}));if(!r.ok){message.textContent=j.message||'接続できませんでした。';return;}location.replace({{{returnUrlJson}}});}catch{message.textContent='接続できませんでした。';}});
@@ -2065,7 +2063,7 @@ static IResult RenderPluginWindowHost(string windowId, HttpRequest http, PluginW
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{title}}</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.15">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.16">
 </head>
 <body class="tvair-plugin-window-page">
 <div class="{{hostClass}}" data-window-id="{{encodedWindowId}}" data-window-revision="{{initialRevision}}" data-tool-host="{{toolHost.ToString().ToLowerInvariant()}}">
@@ -2462,10 +2460,10 @@ static IResult RenderPluginVersionInfoPage(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-notification.css?v=1.2.15">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.2.16">
 </head>
 <body>
-<script src="/tvair-notification.js?v=1.2.15"></script>
+<script src="/tvair-notification.js?v=1.2.16"></script>
 <script>
 document.addEventListener('DOMContentLoaded',function(){
   if(window.TvAIrNotify){ TvAIrNotify({ title:'{{safeTitle}}', message:'{{safeVersion}}', onOk:function(){ location.replace('{{safeReturn}}'); } }); }
@@ -2519,7 +2517,7 @@ static IResult RenderPluginDefaultMenuInfo(PluginDefaultMenuActionInfo actionInf
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeName}} 情報</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.15">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.16">
 </head>
 <body class="tvair-plugin-info-page"><div class="card"><h1>{{safeName}} 情報</h1><div class="row"><div class="k">Version</div><div class="v">{{safeVersion}}</div></div><div class="row"><div class="k">Route</div><div class="v">{{safeRoute}}</div></div><div class="row"><div class="k">Action</div><div class="v">{{safeKind}}</div></div><p>{{safeDescription}}</p><a class="button" href="/">番組表へ戻る</a></div></body>
 </html>
@@ -2540,7 +2538,7 @@ static IResult PluginHtmlMessage(string title, string message, int statusCode, s
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{safeTitle}}</title>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.15">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.16">
 </head>
 <body class="tvair-message-page"><div class="card"><h1>{{safeTitle}}</h1><p>{{safeMessage}}</p><a class="button" href="{{safeHref}}">{{safeLinkText}}</a></div></body>
 </html>
@@ -2600,7 +2598,7 @@ static string BuildPluginFloatingButtonsHtml(RuntimeUiRenderContext context, str
     if (normalized.Length == 0) return string.Empty;
 
     var sb = new System.Text.StringBuilder();
-    sb.Append("<link rel=\"stylesheet\" href=\"/tvair-generated-surfaces.css?v=1.2.15\">");
+    sb.Append("<link rel=\"stylesheet\" href=\"/tvair-generated-surfaces.css?v=1.2.16\">");
 
     foreach (var group in normalized.GroupBy(x => x.Item.Position))
     {
@@ -3660,16 +3658,16 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; media-src 'self' data:">
 <title>{{{{safeTitle}}}} - TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.15">
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.15">
-<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.2.15">
-<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.15">
-<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.2.15">
-<link rel="stylesheet" href="/tvair-notification.css?v=1.2.15">
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.15">
-<link rel="stylesheet" href="/tvair-settings-host.css?v=1.2.15">
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.16">
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.16">
+<link rel="stylesheet" href="/tvair-ui-foundation.css?v=1.2.16">
+<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.16">
+<link rel="stylesheet" href="/tvair-ui-modules.css?v=1.2.16">
+<link rel="stylesheet" href="/tvair-notification.css?v=1.2.16">
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.16">
+<link rel="stylesheet" href="/tvair-settings-host.css?v=1.2.16">
 {{{{developerThemeDiagnosticScript}}}}
-<script src="/tvair-theme.js?v=1.2.15"></script>
+<script src="/tvair-theme.js?v=1.2.16"></script>
 </head>
 <body class="tvair-non-program-page tvair-plugin-shell-page {{{{themeClass}}}}{{{{contentOnlyClass}}}}" data-plugin-route="{{{{safeRoute}}}}" data-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme="{{{{safeSelectedTheme}}}}" data-tvair-selected-theme="{{{{safeSelectedTheme}}}}" data-tvair-effective-theme="{{{{safeEffectiveTheme}}}}" data-tvair-theme-generation="{{{{safeThemeGeneration}}}}" data-tvair-theme-revision="{{{{themeRevision}}}}" data-tvair-theme-scope="all" data-tvair-theme-update-mode="{{{{themeUpdateModeToken}}}}">
 <div id="nav">
@@ -3691,11 +3689,11 @@ static string BuildPluginShellHtml(string title, string route, string pluginBody
   </main>
 </div>
 {{{{themeHotApplyScriptTag}}}}
-<script src="/tvair-notification.js?v=1.2.15"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.15"></script>
-<script src="/tvair-safe-event-host.js?v=1.2.15"></script>
-<script src="/tvair-menu-spine.js?v=1.2.15"></script>
-<script src="/tvair-settings-host.js?v=1.2.15"></script>
+<script src="/tvair-notification.js?v=1.2.16"></script>
+<script src="/tvair-epg-run-contract.js?v=1.2.16"></script>
+<script src="/tvair-safe-event-host.js?v=1.2.16"></script>
+<script src="/tvair-menu-spine.js?v=1.2.16"></script>
+<script src="/tvair-settings-host.js?v=1.2.16"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -3987,17 +3985,17 @@ static string BuildPluginToolWindowContentHtml(string title, string route, strin
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; media-src 'self' data:">
 <title>{{safeTitle}} - TvAIr Tool Window</title>
-<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.15">
+<link rel="stylesheet" href="/tvair-theme-contract.css?v=1.2.16">
 {{developerThemeDiagnosticScript}}
-<script src="/tvair-theme.js?v=1.2.15"></script>
-<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.15">
+<script src="/tvair-theme.js?v=1.2.16"></script>
+<link rel="stylesheet" href="/tvair-generated-surfaces.css?v=1.2.16">
 {{pluginHead}}
 </head>
 <body class="tvair-plugin-toolwindow-content-only {{themeClass}}" data-plugin-route="{{safeRoute}}" data-theme="{{safeEffectiveTheme}}" data-tvair-theme="{{safeSelectedTheme}}" data-tvair-selected-theme="{{safeSelectedTheme}}" data-tvair-effective-theme="{{safeEffectiveTheme}}" data-tvair-theme-generation="{{safeThemeGeneration}}" data-tvair-theme-revision="{{themeRevision}}" data-tvair-theme-scope="all" data-tvair-theme-update-mode="{{themeUpdateModeToken}}" data-tvair-host-kind="winforms_webbrowser_fallback_direct_content" data-tvair-toolwindow-contract="release_contract">
 <div class="tvair-toolwindow-content-root">
 {{pluginContent}}
 </div>
-<script src="/tvair-safe-event-host.js?v=1.2.15"></script>
+<script src="/tvair-safe-event-host.js?v=1.2.16"></script>
 <script>
 function tvairAppendHidden(form,name,value){if(!name||value==null||value==='')return;var i=document.createElement('input');i.type='hidden';i.name=name;i.value=String(value);form.appendChild(i);}
 function tvairGetAttr(el,name){try{return el&&el.getAttribute?el.getAttribute(name)||'':'';}catch(_){return '';} }
@@ -4268,7 +4266,7 @@ static IResult RenderPluginHtml(string route, HttpRequest http, PluginRegistry r
     {
         string body;
 
-        // TvAIr 1.0.0: プラグインページはTvAIr共通ヘッダー付きの拡張画面として表示する。
+        // プラグインページはTvAIr共通ヘッダー付きの拡張画面として表示する。
         var physicalRoute = NormalizePluginRouteSegment(nativeUiDefinition?.Route ?? publicRoute);
         if (string.IsNullOrWhiteSpace(physicalRoute)) physicalRoute = publicRoute;
         var pluginPageRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "Plugins", physicalRoute));
@@ -4805,9 +4803,8 @@ app.MapMethods("/api/plugins/action", new[] { "OPTIONS" }, () => Results.NoConte
 app.MapPost("/api/plugins/window", (HttpRequest http, PluginRegistry registry, PluginActionTokenStore actionTokens, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, PluginBoundaryGate boundaryGate, LogRepository log) =>
     HandlePluginWindowDispatchAsync(http, registry, actionTokens, windows, toolWindows, boundaryGate, log));
 
-// plugin_window_close_contract: old WebBrowser/tool-window content can accidentally navigate
-// close buttons as a normal GET. Treat only closeWindow/close with a valid window token/context
-// as a host-handled close request; this is a compatibility shim, not a generic GET mutation API.
+// Plugin-window GET closes only when closeWindow/close and a valid window token/context
+// are supplied. Other GET requests cannot mutate a plugin window.
 app.MapGet("/api/plugins/window", (HttpRequest http, PluginRegistry registry, PluginActionTokenStore actionTokens, PluginWindowSessionStore windows, PluginToolWindowHostService toolWindows, PluginBoundaryGate boundaryGate, LogRepository log) =>
     HandlePluginWindowDispatchAsync(http, registry, actionTokens, windows, toolWindows, boundaryGate, log));
 app.MapGet("/plugin-window/{windowId}", (string windowId, HttpRequest http, PluginWindowSessionStore windows, LogRepository log) =>
@@ -5174,7 +5171,7 @@ static void EmitTvAIrRuntimeIdentityAudit(LogRepository log)
                 $"runtime={framework} processArch={processArch} osArch={osArch} pluginSdk={TvAIrVersionContract.PluginSdkVersion} hostContract={TvAIrVersionContract.PluginHostContractVersion} " +
                 $"tvairExe={Path.GetFileName(tvairExe)} tvairFile={Stamp(tvairExe)} " +
                 $"workerFileName={Path.GetFileName(workerPath)} workerFile={Stamp(workerPath)} {releaseHistoryAudit} " +
-                $"baseDir=app_base rule=developer_log_header_contract ntp=removed recordFileName=tvtest_ini_template pluginUiAction=host_action_dispatch_value_contract logPolicy=release_noise_reduce",
+                $"baseDir=app_base rule=developer_log_header_contract ntp=removed recordFileName=tvtest_ini_template pluginUiAction=host_action_dispatch_value_contract logPolicy=release_noise_reduce assistantReportRule=R番報告禁止;reportIdentity=放送局・番組名・放送日時",
             CreatedAt = DateTime.Now
         });
     }
@@ -5224,16 +5221,12 @@ app.MapGet("/api/epg/run-state", (EpgScheduler scheduler) =>
     Results.Ok(scheduler.GetRunState()));
 
 // TvAIr終了（メニュー操作用）
-app.MapPost("/api/app/exit", (string? source, LogRepository log, IHostApplicationLifetime lifetime) =>
+app.MapPost("/api/app/exit", (string? source, HttpContext http, LogRepository log, IHostApplicationLifetime lifetime) =>
 {
     var safeSource = string.IsNullOrWhiteSpace(source) ? "WebMenu" : source.Trim().Replace("\r", " ").Replace("\n", " ");
     try { log.Add("APP_EXIT_REQUEST", "Menu", $"source={safeSource} action=StopApplication commonRoute=/api/app/exit rule=release_contract"); } catch { }
     TvAIr.Core.ApplicationExitWatchdog.Arm(log, safeSource);
-    _ = Task.Run(async () =>
-    {
-        await Task.Delay(150).ConfigureAwait(false);
-        lifetime.StopApplication();
-    });
+    ApplicationExitResponseContract.RegisterStopAfterResponse(http.Response, lifetime);
     return Results.Ok(new { accepted = true });
 });
 
@@ -5767,7 +5760,7 @@ app.MapGet("/api/user-events", (int? count, string? severity, string? category, 
 app.MapGet("/api/user-events/report", (int? hours, int? count, UserEventLogService userEvents) =>
 {
     var h = Math.Clamp(hours ?? 24, 1, 24 * 7);
-    var max = Math.Clamp(count ?? 200, 1, 500);
+    var max = Math.Clamp(count ?? 1000, 1, 1000);
     var text = userEvents.BuildReportText(TimeSpan.FromHours(h), max, GetTvAIrAppVersion());
     return Results.Text(text, "text/plain; charset=utf-8");
 });
@@ -7750,15 +7743,10 @@ app.MapPut("/api/settings", (WebSettingsUpdateDto dto, SettingsChangeApplication
 
 // アプリ再起動（設定変更後の反映用）
 // スタートアップタスクが登録されている場合のみ再起動後に自動復帰する
-app.MapPost("/api/restart", (IniSettingsService ini, IHostApplicationLifetime lifetime, LogRepository log) =>
+app.MapPost("/api/restart", (IniSettingsService ini, HttpContext http, IHostApplicationLifetime lifetime, LogRepository log) =>
 {
-    // レスポンスを返してから終了するために遅延実行
-    Task.Run(async () =>
-    {
-        await Task.Delay(500);
-        log.Add("APP_EXIT_REQUEST", "Restart", "source=settings_restart action=StopApplication commonRoute=host_lifetime rule=release_contract");
-        lifetime.StopApplication();
-    });
+    log.Add("APP_EXIT_REQUEST", "Restart", "source=settings_restart action=StopApplication commonRoute=host_lifetime rule=release_contract");
+    ApplicationExitResponseContract.RegisterStopAfterResponse(http.Response, lifetime);
     return Results.Ok(new
     {
         message     = "再起動します。",
@@ -8212,12 +8200,8 @@ static IReadOnlyList<ProjectedProgramEvent> ProjectedProgramGuideNormalizeServic
         .ToList();
 
     // PROGRAM_GUIDE_TIMELINE_NO_HOLE_INVARIANT:
-    // A long stale schedule row may coexist temporarily with the newer rows that replaced it.
-    // The old count-based rule ("contains two or more events") was unsafe: a valid long event
-    // can legitimately contain several short rows from another schedule generation, and dropping
-    // the long row then creates a visible ProgramGuide hole.  Suppress a containing row only when
-    // the other rows cover its complete interval.  This preserves stale-wrapper cleanup without
-    // ever manufacturing an uncovered interval in the display projection.
+    // Suppress a containing schedule row only when other rows cover its entire interval.
+    // Partial overlap cannot remove a visible ProgramGuide interval.
     static bool IsFullyCoveredByOtherEvents(
         ProjectedProgramEvent candidate,
         IReadOnlyList<ProjectedProgramEvent> all)

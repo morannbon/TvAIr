@@ -2299,6 +2299,7 @@ public sealed class ReservationStore
                 new Dictionary<string, string?>
                 {
                     ["reason"] = "chain_predecessor_failed",
+                    [RecordingFailurePresentationContract.CauseMetadataKey] = RecordingFailurePresentationContract.Code(RecordingFailureCause.ChainPredecessorFailed),
                     ["predecessorId"] = predecessorId.ToString(),
                     ["detail"] = reason
                 },
@@ -2581,7 +2582,8 @@ WHERE id = $id
         long expectedDataVersion,
         ReservationStatus finalStatus,
         string source,
-        string? failureReason = null)
+        string? failureReason = null,
+        RecordingFailureCause failureCause = RecordingFailureCause.Unspecified)
     {
         if (finalStatus is not (ReservationStatus.Completed or ReservationStatus.Cancelled or ReservationStatus.Failed))
             return new(false, "invalid_final_status", id, ReservationStatus.Scheduled, null, expectedDataVersion, expectedDataVersion, GetByIdPersisted(id));
@@ -2602,8 +2604,11 @@ WHERE id = $id
             ["source"] = source,
             ["terminalCas"] = "true"
         };
-        if (finalStatus == ReservationStatus.Failed && !string.IsNullOrWhiteSpace(failureReason))
-            terminalMetadata["reason"] = failureReason;
+        if (finalStatus == ReservationStatus.Failed)
+        {
+            if (!string.IsNullOrWhiteSpace(failureReason)) terminalMetadata["reason"] = failureReason;
+            RecordingFailurePresentationContract.WriteCause(terminalMetadata, failureCause);
+        }
 
         mutationJournal.Record(
             mutationKind,
@@ -2667,17 +2672,20 @@ WHERE id = $id
         int id,
         long expectedDataVersion,
         ReservationStatus finalStatus,
-        string? failureReason = null)
-        => TryCompleteRecordingStopCore(id, expectedDataVersion, finalStatus, failureReason, null, null);
+        string? failureReason = null,
+        RecordingFailureCause failureCause = RecordingFailureCause.Unspecified)
+        => TryCompleteRecordingStopCore(id, expectedDataVersion, finalStatus, failureReason, null, null, failureCause);
 
     internal ReservationLifecycleTransitionResult TryCompleteRecordingStopWithReceipt(
         int id, long expectedDataVersion, ReservationStatus finalStatus, string? failureReason,
-        Action<ReservationLifecycleTransitionResult> recordCommitted, ContinuousChainFinalizationArtifact? artifact = null)
-        => TryCompleteRecordingStopCore(id, expectedDataVersion, finalStatus, failureReason, recordCommitted, artifact);
+        Action<ReservationLifecycleTransitionResult> recordCommitted, ContinuousChainFinalizationArtifact? artifact = null,
+        RecordingFailureCause failureCause = RecordingFailureCause.Unspecified)
+        => TryCompleteRecordingStopCore(id, expectedDataVersion, finalStatus, failureReason, recordCommitted, artifact, failureCause);
 
     private ReservationLifecycleTransitionResult TryCompleteRecordingStopCore(
         int id, long expectedDataVersion, ReservationStatus finalStatus, string? failureReason,
-        Action<ReservationLifecycleTransitionResult>? recordCommitted, ContinuousChainFinalizationArtifact? artifact)
+        Action<ReservationLifecycleTransitionResult>? recordCommitted, ContinuousChainFinalizationArtifact? artifact,
+        RecordingFailureCause failureCause)
     {
         if (finalStatus is not (ReservationStatus.Completed or ReservationStatus.Failed or ReservationStatus.Cancelled))
             return new(false, "invalid_final_status", id, ReservationStatus.Stopping, null, expectedDataVersion, expectedDataVersion, GetByIdPersisted(id));
@@ -2787,9 +2795,13 @@ WHERE id = $id
             ReservationStatus.Failed => ReservationMutationKind.RecordingFailed,
             _ => ReservationMutationKind.Updated
         };
-        var terminalMetadata = finalStatus == ReservationStatus.Failed && !string.IsNullOrWhiteSpace(failureReason)
-            ? new Dictionary<string, string?> { ["reason"] = failureReason }
-            : null;
+        Dictionary<string, string?>? terminalMetadata = null;
+        if (finalStatus == ReservationStatus.Failed)
+        {
+            terminalMetadata = new Dictionary<string, string?>();
+            if (!string.IsNullOrWhiteSpace(failureReason)) terminalMetadata["reason"] = failureReason;
+            RecordingFailurePresentationContract.WriteCause(terminalMetadata, failureCause);
+        }
         mutationJournal.Record(
             mutationKind,
             before,
@@ -2912,7 +2924,8 @@ WHERE id = $id
         int id,
         long expectedDataVersion,
         string? reason = null,
-        string? failureKind = null)
+        string? failureKind = null,
+        RecordingFailureCause failureCause = RecordingFailureCause.Unspecified)
     {
         var before = GetByIdPersisted(id);
 
@@ -2946,15 +2959,15 @@ WHERE id = $id
         var result = TryTransitionLifecycle(id, ReservationStatus.Starting, expectedDataVersion, ReservationStatus.Failed);
         if (!result.Applied) return result;
 
+        var failureMetadata = new Dictionary<string, string?>();
+        if (!string.IsNullOrWhiteSpace(reason)) failureMetadata["reason"] = reason;
+        if (!string.IsNullOrWhiteSpace(failureKind)) failureMetadata["failureKind"] = failureKind;
+        RecordingFailurePresentationContract.WriteCause(failureMetadata, failureCause);
         mutationJournal.Record(
             ReservationMutationKind.RecordingFailed,
             before,
             result.Reservation,
-            string.IsNullOrWhiteSpace(reason) ? null : new Dictionary<string, string?>
-            {
-                ["reason"] = reason,
-                ["failureKind"] = failureKind
-            },
+            failureMetadata,
             nameof(Reservation.Status),
             nameof(Reservation.DataVersion));
         return result;
@@ -3039,7 +3052,8 @@ WHERE id = $id
         int id,
         long expectedDataVersion,
         DateTime finishedAt,
-        string? reason = null)
+        string? reason = null,
+        RecordingFailureCause failureCause = RecordingFailureCause.Unspecified)
     {
         // RECORDING_RUNTIME_FAILURE_TERMINAL_CAS_INVARIANT:
         // worker消失・再起動失敗を理由にUpdateStatus(force:true)へ戻してはならない。
@@ -3111,11 +3125,14 @@ WHERE id = $id
 
         tx.Commit();
         var after = GetByIdPersisted(id);
+        var failureMetadata = new Dictionary<string, string?>();
+        if (!string.IsNullOrWhiteSpace(reason)) failureMetadata["reason"] = reason;
+        RecordingFailurePresentationContract.WriteCause(failureMetadata, failureCause);
         mutationJournal.Record(
             ReservationMutationKind.RecordingFailed,
             before,
             after,
-            string.IsNullOrWhiteSpace(reason) ? null : new Dictionary<string, string?> { ["reason"] = reason },
+            failureMetadata,
             nameof(Reservation.Status),
             nameof(Reservation.RecordingFinishedAt),
             nameof(Reservation.DataVersion));
@@ -9545,86 +9562,6 @@ WHERE id = $id
         }
         return total;
     }
-
-    private static IReadOnlyList<Reservation> ReadScheduledKeywordReservations(
-        SqliteConnection con,
-        SqliteTransaction tx,
-        int ruleId)
-    {
-        using var cmd = con.CreateCommand();
-        cmd.Transaction = tx;
-        cmd.CommandText = """
-            SELECT id, network_id, transport_stream_id, service_id, event_id,
-                   title, start_time, end_time, status, source, created_at, updated_at,
-                   channel_argument, is_conflicted, is_enabled, tuner_name, actual_tuner_name,
-                   recording_started_at, recording_finished_at, service_name,
-                   scheduled_start_time, source_rule_id, source_rule_name,
-                   is_user_chain, user_chain_previous_id, user_chain_root_id,
-                   recording_recovery_chain_id, recovery_parent_reservation_id, data_version,
-                   reservation_intent, created_through, created_by_plugin_id
-            FROM reservations
-            WHERE source = 'keyword'
-              AND status = 'scheduled'
-              AND source_rule_id = $ruleId;
-            """;
-        cmd.Parameters.AddWithValue("$ruleId", ruleId);
-        return ReadReservations(cmd, projectRuntimeStatus: false);
-    }
-
-    private static List<Reservation> DeleteScheduledReservations(
-        SqliteConnection con,
-        SqliteTransaction tx,
-        IReadOnlyCollection<Reservation> candidates,
-        ReservationSource source,
-        int ruleId,
-        bool requireDataVersionMatch)
-    {
-        var removed = new List<Reservation>();
-        var sourceValue = source.ToString().ToLowerInvariant();
-        foreach (var candidate in candidates)
-        {
-            using var cmd = con.CreateCommand();
-            cmd.Transaction = tx;
-            cmd.CommandText = requireDataVersionMatch
-                ? """
-                    DELETE FROM reservations
-                    WHERE id = $id
-                      AND source = $source
-                      AND status = 'scheduled'
-                      AND source_rule_id = $ruleId
-                      AND data_version = $dataVersion;
-                    """
-                : """
-                    DELETE FROM reservations
-                    WHERE id = $id
-                      AND source = $source
-                      AND status = 'scheduled'
-                      AND source_rule_id = $ruleId;
-                    """;
-            cmd.Parameters.AddWithValue("$id", candidate.Id);
-            cmd.Parameters.AddWithValue("$source", sourceValue);
-            cmd.Parameters.AddWithValue("$ruleId", ruleId);
-            if (requireDataVersionMatch)
-                cmd.Parameters.AddWithValue("$dataVersion", candidate.DataVersion);
-            if (cmd.ExecuteNonQuery() == 1)
-                removed.Add(candidate);
-        }
-        return removed;
-    }
-
-    private void RecordProjectedReservationRemovals(IEnumerable<Reservation> removed, string reason)
-    {
-        var metadata = new Dictionary<string, string?>
-        {
-            ["suppressUserEvent"] = "projection_cleanup",
-            ["reason"] = reason
-        };
-        foreach (var reservation in removed)
-            mutationJournal.Record(ReservationMutationKind.Removed, reservation, null, metadata);
-    }
-
-
-
 
     private void ReplaceKeywordRules(SqliteConnection con, SqliteTransaction tx, IReadOnlyList<KeywordRule> rules)
     {
