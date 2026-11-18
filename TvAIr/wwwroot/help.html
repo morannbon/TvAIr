@@ -5,14 +5,14 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
 <title>TvAIr ヘルプ</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.16"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.16"/>
-<link href="/tvair-ui-foundation.css?v=1.2.16" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.16" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.16" rel="stylesheet"/>
-<link href="/tvair-help.css?v=1.2.16" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.16" rel="stylesheet"/>
-<script src="/tvair-theme.js?v=1.2.16"></script>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.3.0"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.3.0"/>
+<link href="/tvair-ui-foundation.css?v=1.3.0" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.3.0" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.3.0" rel="stylesheet"/>
+<link href="/tvair-help.css?v=1.3.0" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.3.0" rel="stylesheet"/>
+<script src="/tvair-theme.js?v=1.3.0"></script>
 </head>
 <body class="tvair-non-program-page tvair-page-width-wide tvair-help-page">
 <header class="help-window-bar" aria-label="ヘルプ見出し">
@@ -75,7 +75,7 @@
       <header class="help-section-head"><p class="help-kicker">TVTest</p><h1>TVTest</h1></header>
       <div class="help-group">
         <h2>TVTest</h2>
-        <article class="setting-card"><h3>TVTest.exe のフルパス</h3><p>録画設定やチャンネル情報の参照元となるTVTest.exeを指定します。視聴用を別に指定しなければ視聴にも使います。</p></article>
+        <article class="setting-card"><h3>TVTest.exe のフルパス</h3><p>TVTest 0.10.0以降でチャンネルスキャンを完了してから指定してください。サービスタイプが空欄の局は利用できません。視聴用を別に指定しなければ視聴にも使います。</p></article>
         <article class="setting-card"><h3>連携するTVTestプラグインフォルダ</h3><p>TVTestプラグインの設定フォルダを指定します。対応する連携機能が共通で使い、設定の重複入力を省きます。</p><p>設定の変更はTVTest側で行います。空欄では読み込みません。反映時期は連携機能ごとに異なります。</p><p>設定ファイルだけを読み取り、TVTest用プラグインDLLは実行しません。</p></article>
         <article class="setting-card"><h3>視聴用TVTest.exe のフルパス</h3><p>視聴用のTVTest.exeを指定します。空欄では基準となるTVTest.exeを使います。</p></article>
         <article class="setting-card"><h3>BonDriver フォルダ</h3><p>使用するBonDriver.dllの保存フォルダを指定します。</p></article>
@@ -208,10 +208,11 @@
   if(window.self !== window.top){ document.body.classList.add('in-modal'); }
 })();
 </script>
-<script src="/tvair-settings-host.js?v=1.2.16"></script>
-<script src="/tvair-notification.js?v=1.2.16"></script>
+<script src="/tvair-settings-host.js?v=1.3.0"></script>
+<script src="/tvair-notification.js?v=1.3.0"></script>
 </body>
 </html>
+
 
 
 

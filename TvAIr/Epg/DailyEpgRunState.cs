@@ -5,7 +5,7 @@ namespace TvAIr.Epg;
 
 /// <summary>
 /// 定時EPGの日次ライフサイクルの唯一の永続正本。
-/// Scheduled Dailyは放送波別の実行状態を持たず、1日1本のAll取得として計画・実行・終端する。
+/// Scheduled Dailyは1日1本のAll取得として計画・実行・終端する。
 /// SystemDailyEpg予約行、Wake task、ログ、実行Task/CTSは投影または実行資源であり、
 /// それらから定時EPGの実行状態を逆算しない。
 /// </summary>
@@ -52,11 +52,10 @@ internal enum DailyEpgPlacementState
 }
 
 /// <summary>
-/// Plannerへ渡す録画占有区間。Scheduled Daily AllはGR/BSCSどちらか一方でも録画占有があれば
-/// その区間を使用しない。SafeStartは通常EPGが越えてはならない録画handoff境界。
+/// Plannerへ渡す録画占有区間。Daily Allは全録画予約の占有期間を一括して避ける。
+/// SafeStartは通常EPGが越えてはならない録画handoff境界。
 /// </summary>
 internal sealed record DailyEpgRecordingBlock(
-    string Group,
     DateTime SafeStart,
     DateTime OccupyEnd,
     long ReservationId);
@@ -69,6 +68,64 @@ internal sealed record DailyEpgPlanResult(
     int RequiredSeconds,
     DailyEpgPlacementState Placement,
     string Reason);
+
+/// <summary>
+/// Daily Allの完走期限と必要時間から、開始できる最後の時刻を一度だけ定義する。
+/// Planner・失効commit・待機解除の全経路が同じ境界を使う。
+/// </summary>
+internal static class DailyEpgExecutionWindow
+{
+    public static DateTime LastPossibleStart(DateTime movementDeadline, int requiredSeconds)
+        => requiredSeconds > 0
+            ? movementDeadline.AddSeconds(-requiredSeconds)
+            : movementDeadline;
+
+    // 未配置でも最後の開始時刻までは録画停止等による再配置を許す。
+    // その時刻の再計画でも配置できなければ、以後は完走不能として終端する。
+    public static bool IsUnplacedExhausted(DailyEpgRunState state, DateTime now)
+        => state.State == DailyEpgRunPhase.Planned
+           && state.Date.Date == now.Date
+           && state.Placement == DailyEpgPlacementState.Unplaced
+           && now >= LastPossibleStart(state.MovementDeadline, state.RequiredSeconds);
+}
+
+/// <summary>
+/// Expiredは「前の取得深度では時間内に完走不能」という未開始の結果。
+/// 明示取消・失敗・成功は不可逆とし、当日同じ定時枠の取得深度が短縮され、
+/// 現在の録画占有と期限を再評価した結果、実行できる場合だけPlannedへ戻せる。
+/// 単なる予約取消・録画停止・設定以外の再評価では復帰しない。
+/// </summary>
+internal static class DailyEpgDepthReplanPolicy
+{
+    public static bool CanApplyDepthRevision(
+        DailyEpgRunState current,
+        DailyEpgConfigSnapshot nextConfig,
+        DailyEpgPlanResult nextPlan,
+        DateTime now)
+        => current.State == DailyEpgRunPhase.Expired
+           && current.Date.Date == now.Date
+           && current.Config.Enabled && nextConfig.Enabled
+           && current.Config.CanonicalHour == nextConfig.CanonicalHour
+           && current.Config.CanonicalMinute == nextConfig.CanonicalMinute
+           && !string.Equals(current.Config.Depth, nextConfig.Depth, StringComparison.OrdinalIgnoreCase)
+           && nextPlan.RequiredSeconds > 0
+           && current.CanonicalStart == nextPlan.CanonicalStart
+           && current.MovementDeadline == nextPlan.MovementDeadline;
+
+    public static bool CanReopen(
+        DailyEpgRunState current,
+        DailyEpgConfigSnapshot nextConfig,
+        DailyEpgPlanResult nextPlan,
+        DateTime now)
+        => CanApplyDepthRevision(current, nextConfig, nextPlan, now)
+           && current.RequiredSeconds > 0
+           && nextPlan.RequiredSeconds < current.RequiredSeconds
+           && nextPlan.Placement == DailyEpgPlacementState.Placed
+           && nextPlan.PlannedStart.HasValue
+           && nextPlan.PlannedEnd.HasValue
+           && nextPlan.PlannedStart.Value >= now
+           && nextPlan.PlannedEnd.Value <= nextPlan.MovementDeadline;
+}
 
 internal static class DailyEpgPlanSemantics
 {

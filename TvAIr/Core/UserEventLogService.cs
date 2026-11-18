@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.RegularExpressions;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
@@ -32,8 +31,6 @@ public sealed class UserEventLogService
     {
         public static readonly UserLogOutcome Success = new("INFO", "OK", "Completed", "NoAction");
         public static readonly UserLogOutcome Fallback = new("WARN", "FALLBACK", "Fallback", "NoAction");
-        public static readonly UserLogOutcome Partial = new("WARN", "PARTIAL", "Partial", "NoAction");
-        public static readonly UserLogOutcome Incomplete = new("WARN", "INCOMPLETE", "Incomplete", "UserCanCheck");
         public static readonly UserLogOutcome Blocked = new("WARN", "BLOCKED", "Blocked", "NoAction");
         public static readonly UserLogOutcome Unavailable = new("WARN", "UNAVAILABLE", "Unavailable", "UserCanCheck");
         public static readonly UserLogOutcome CriticalFailure = new("ERROR", "FAILED", "Failed", "UserCanCheck");
@@ -45,7 +42,7 @@ public sealed class UserEventLogService
     private readonly object gate = new();
     private int pruneCounter;
 
-    public UserEventLogService(Database db, LogRepository developerLog)
+    public UserEventLogService(Database db)
     {
         this.db = db;
         // User operation records are written only from confirmed domain operations.
@@ -191,7 +188,6 @@ public sealed class UserEventLogService
         var operationId = BuildOperationId("APP_START", createdAt ?? DateTime.Now);
         var versionState = ResolveAppVersionStory(appVersion);
 
-        // 
         // 実プロセス起動は同一バージョンでもユーザー運用ログへ残す。
         // Wakeシグナルや既存プロセス通知はここへ来ない入口側で分離し、
         // ここでは「TvAIr.exe が実際に起動した事実」を表ログの正本として扱う。
@@ -774,96 +770,6 @@ public sealed class UserEventLogService
         });
     }
 
-    public void AddScheduledEpgPartial(
-        string targetScope,
-        string requestedBy,
-        bool silent,
-        int completedGroups,
-        int totalGroups,
-        int importedEvents,
-        int missingGroups,
-        string missingScopes,
-        DateTime? retryAt,
-        DateTime? retryDeadline,
-        DateTime? createdAt = null)
-    {
-        var at = createdAt ?? DateTime.Now;
-        var operationId = BuildOperationId("EPG_RUN_PARTIAL", at);
-        var target = NormalizeEpgTargetLabel(targetScope);
-        var retryText = retryAt.HasValue
-            ? $"。未完了分は{retryAt.Value:HH:mm:ss}以降に再試行します"
-            : "。未完了分を再試行します";
-        Add(new UserEventLogEntry
-        {
-            CreatedAt = at,
-            Severity = "WARN",
-            Category = "EPG",
-            Result = "PARTIAL",
-            Target = target,
-            Message = "EPG取得の一部を完了しました" + retryText,
-            Code = "EPG_RUN_PARTIAL",
-            TraceId = operationId,
-            OperationId = operationId,
-            StoryContext = ResolveEpgRunStoryContext(requestedBy, silent, "Partial"),
-            Origin = "Epg",
-            Trigger = NormalizeEpgTriggerLabel(requestedBy),
-            StoryRole = "Partial",
-            TargetKind = "EPG",
-            Actionability = "NoAction",
-            Detail = BuildCompactDetail(new[]
-            {
-                $"targetScope={target}",
-                $"silent={silent}",
-                $"completedGroups={completedGroups}/{totalGroups}",
-                $"imported={importedEvents}",
-                $"missingGroups={missingGroups}",
-                string.IsNullOrWhiteSpace(missingScopes) ? string.Empty : $"missingScopes={missingScopes}",
-                retryAt.HasValue ? $"retryAt={retryAt.Value:yyyy/MM/dd HH:mm:ss}" : string.Empty,
-                retryDeadline.HasValue ? $"retryDeadline={retryDeadline.Value:yyyy/MM/dd HH:mm:ss}" : string.Empty
-            })
-        });
-    }
-
-    public void AddScheduledEpgContinuationExpired(
-        string targetScope,
-        string requestedBy,
-        bool silent,
-        string completedScopes,
-        DateTime retryDeadline,
-        DateTime? createdAt = null)
-    {
-        var at = createdAt ?? DateTime.Now;
-        var operationId = BuildOperationId("EPG_RUN_FAILED", at);
-        var target = NormalizeEpgTargetLabel(targetScope);
-        var outcome = UserLogOutcomes.Incomplete;
-        Add(new UserEventLogEntry
-        {
-            CreatedAt = at,
-            Severity = outcome.Severity,
-            Category = "EPG",
-            Result = outcome.Result,
-            Target = target,
-            Message = "予定時間内にEPG取得を完了できませんでした",
-            Code = "EPG_RUN_FAILED",
-            TraceId = operationId,
-            OperationId = operationId,
-            StoryContext = ResolveEpgRunStoryContext(requestedBy, silent, "Failed"),
-            Origin = "Epg",
-            Trigger = NormalizeEpgTriggerLabel(requestedBy),
-            StoryRole = outcome.StoryRole,
-            TargetKind = "EPG",
-            Actionability = outcome.Actionability,
-            Detail = BuildCompactDetail(new[]
-            {
-                $"targetScope={target}",
-                $"silent={silent}",
-                "reason=daily_continuation_deadline_expired",
-                string.IsNullOrWhiteSpace(completedScopes) ? string.Empty : $"completedScopes={completedScopes}",
-                $"retryDeadline={retryDeadline:yyyy/MM/dd HH:mm:ss}"
-            })
-        });
-    }
-
     public void AddScheduledEpgCompleted(
         string targetScope,
         string requestedBy,
@@ -881,11 +787,10 @@ public sealed class UserEventLogService
         var normalizedResult = string.IsNullOrWhiteSpace(runResult) ? "OK" : runResult.Trim().ToUpperInvariant();
         var isCleanOk = normalizedResult == "OK";
         var isBlocked = normalizedResult == "BLOCKED";
-        var isPartial = normalizedResult == "PARTIAL" || normalizedResult == "INCOMPLETE";
-        var code = isCleanOk ? "EPG_RUN_OK" : isBlocked ? "EPG_RUN_BLOCKED" : isPartial ? "EPG_RUN_PARTIAL" : "EPG_RUN_FAILED";
+        var code = isCleanOk ? "EPG_RUN_OK" : isBlocked ? "EPG_RUN_BLOCKED" : "EPG_RUN_FAILED";
         var operationId = BuildOperationId(code, at);
         var target = NormalizeEpgTargetLabel(targetScope);
-        var storyContextBase = isCleanOk ? "Completed" : isBlocked ? "Blocked" : isPartial ? "Partial" : "Failed";
+        var storyContextBase = isCleanOk ? "Completed" : isBlocked ? "Blocked" : "Failed";
         var storyContext = ResolveEpgRunStoryContext(requestedBy, silent, storyContextBase);
         var failureOutcome = EpgFailurePresentationContract.IsCritical(failureReason)
             ? UserLogOutcomes.CriticalFailure
@@ -905,13 +810,13 @@ public sealed class UserEventLogService
         // displayed message is resolved once from the same reason as the dialog.
         if (!string.IsNullOrWhiteSpace(blockedReason)) detailParts.Add($"blockedReason={blockedReason}");
         if (!isCleanOk && !isBlocked) detailParts.Add($"failureReason={EpgFailurePresentationContract.Code(failureReason)}");
-        // User-visible EPG results stay: completed / cannot start / partial / failed.
+        // EPG終端は完了・開始不可・失敗のいずれか。
         Add(new UserEventLogEntry
         {
             CreatedAt = at,
-            Severity = isCleanOk ? UserLogOutcomes.Success.Severity : isBlocked ? UserLogOutcomes.Blocked.Severity : isPartial ? UserLogOutcomes.Partial.Severity : failureOutcome.Severity,
+            Severity = isCleanOk ? UserLogOutcomes.Success.Severity : isBlocked ? UserLogOutcomes.Blocked.Severity : failureOutcome.Severity,
             Category = "EPG",
-            Result = isCleanOk ? UserLogOutcomes.Success.Result : isBlocked ? UserLogOutcomes.Blocked.Result : isPartial ? UserLogOutcomes.Partial.Result : failureOutcome.Result,
+            Result = isCleanOk ? UserLogOutcomes.Success.Result : isBlocked ? UserLogOutcomes.Blocked.Result : failureOutcome.Result,
             Target = target,
             Message = message,
             Code = code,
@@ -920,9 +825,9 @@ public sealed class UserEventLogService
             StoryContext = storyContext,
             Origin = "Epg",
             Trigger = NormalizeEpgTriggerLabel(requestedBy),
-            StoryRole = isCleanOk ? UserLogOutcomes.Success.StoryRole : isBlocked ? UserLogOutcomes.Blocked.StoryRole : isPartial ? UserLogOutcomes.Partial.StoryRole : failureOutcome.StoryRole,
+            StoryRole = isCleanOk ? UserLogOutcomes.Success.StoryRole : isBlocked ? UserLogOutcomes.Blocked.StoryRole : failureOutcome.StoryRole,
             TargetKind = "EPG",
-            Actionability = isCleanOk ? UserLogOutcomes.Success.Actionability : isBlocked ? UserLogOutcomes.Blocked.Actionability : isPartial ? UserLogOutcomes.Partial.Actionability : failureOutcome.Actionability,
+            Actionability = isCleanOk ? UserLogOutcomes.Success.Actionability : isBlocked ? UserLogOutcomes.Blocked.Actionability : failureOutcome.Actionability,
             Detail = string.Join("; ", detailParts)
         });
     }
@@ -1815,7 +1720,7 @@ public sealed class UserEventLogService
                    OR code LIKE '%QUALITY%'
                    OR code IN ('VIEWER_PROCESS_LOST', 'PLUGIN_WARN', 'PLUGIN_LOAD_OK')
                    OR (category = 'プラグイン' AND result = 'OK')
-                   OR (category = 'EPG' AND code NOT IN ('EPG_RUN_START', 'EPG_RUN_OK', 'EPG_RUN_PARTIAL', 'EPG_RUN_BLOCKED', 'EPG_RUN_FAILED', 'EPG_RUN_CANCELLED'))
+                   OR (category = 'EPG' AND code NOT IN ('EPG_RUN_START', 'EPG_RUN_OK', 'EPG_RUN_BLOCKED', 'EPG_RUN_FAILED', 'EPG_RUN_CANCELLED'))
                    OR (category = '録画' AND code IN ('REC_START_OK', 'REC_END_OK') AND message LIKE '%EPG確認%');
                 """;
             stale.ExecuteNonQuery();
@@ -1838,105 +1743,5 @@ public sealed class UserEventLogService
     // The existing user-event store is the only report source. Do not create a second journal.
     public string BuildReportText(TimeSpan window, int maxRows, string tvairVersion)
         => UserReportCopyFormatter.Build(GetReportEntries(window, maxRows), window, tvairVersion, DateTime.Now);
-
-    private enum UserEventOrigin
-    {
-        Unknown,
-        UserAction,
-        AppLifecycle,
-        Recording,
-        PreRecordEpg,
-        Epg,
-        Wake,
-        Plugin,
-        Viewer,
-        InternalDiagnostic
-    }
-
-    private enum UserEventRole
-    {
-        Unknown,
-        Start,
-        Stop,
-        Completed,
-        Failed,
-        Cancelled,
-        Warning,
-        Recovery,
-        ChainSwitch,
-        TimeFollow,
-        InternalSignal
-    }
-
-    private enum UserEventVisibility
-    {
-        Suppress,
-        UserVisible
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    private static UserEventLogEntry New(LogEntry src, string severity, string category, string result, string target, string message, string code)
-        => new()
-        {
-            CreatedAt = src.CreatedAt,
-            Severity = severity,
-            Category = category,
-            Result = result,
-            Target = SafeText(target),
-            Message = SafeMessageText(message),
-            Code = code,
-            TraceId = BuildTraceId(src)
-        };
-
-    private static string BuildTraceId(LogEntry src)
-    {
-        var seed = $"{src.CreatedAt:O}|{src.Event}|{src.Title}|{src.Message}";
-        var hash = Math.Abs(seed.GetHashCode()).ToString("X4");
-        return $"U{src.CreatedAt:yyyyMMdd-HHmmss}-{hash}";
-    }
-
-
-
-
-
-
-
-    private static string SafeMessageText(string? value)
-    {
-        var s = SafeTextCore(value);
-        if (string.IsNullOrWhiteSpace(s)) return "—";
-        return s.Length <= 1200 ? s : s[..1200] + "…";
-    }
-
-    private static string SafeText(string? value)
-    {
-        var s = SafeTextCore(value);
-        if (string.IsNullOrWhiteSpace(s)) return "—";
-        return s.Length <= 180 ? s : s[..180] + "…";
-    }
-
-    private static string SafeTextCore(string? value)
-    {
-        var s = (value ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(s)) return string.Empty;
-        s = Regex.Replace(s, @"[A-Za-z]:\\[^\s\|,;]+", "[path]");
-        s = Regex.Replace(s, @"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", "[id]");
-        s = Regex.Replace(s, @"[0-9a-fA-F]{24,}", "[id]");
-        s = Regex.Replace(s, @"(?<![A-Za-z0-9_])R\d{1,8}(?![A-Za-z0-9_])", string.Empty).Trim();
-        return s;
-    }
 
 }

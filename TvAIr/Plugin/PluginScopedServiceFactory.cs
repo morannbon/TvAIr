@@ -6,7 +6,7 @@ namespace TvAIr.Plugin;
 /// <summary>
 /// Creates plugin-scoped owners from one identity and data-directory contract.
 /// Runtime capability contexts must not rebuild plugin identity, log ownership,
-/// or file ownership independently.
+/// or plugin data-directory ownership independently.
 /// </summary>
 internal sealed class PluginScopedServiceFactory
 {
@@ -32,8 +32,12 @@ internal sealed class PluginScopedServiceFactory
         return new PluginLogService(_log, normalizedId, pluginDisplayName);
     }
 
-    public PluginOwnedFileStore CreateFiles(string? pluginId)
-        => new(_dataDirectory, NormalizePluginId(pluginId));
+    public string GetPluginDataDirectory(string? pluginId)
+    {
+        var directory = Path.Combine(_dataDirectory, "Plugins", NormalizePluginId(pluginId));
+        Directory.CreateDirectory(directory);
+        return directory;
+    }
 
     public TvAIr.Plugin.RuntimeHost.PersistentPluginStorage CreateRuntimeStorage(string? pluginId)
     {

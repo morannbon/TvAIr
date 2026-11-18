@@ -105,11 +105,6 @@ public sealed record ScheduledChainJoinPreview(
     bool CanJoin, string Reason, string SnapshotToken,
     IReadOnlyList<ScheduledChainPreviewMember> Members);
 
-public sealed record UserChainFeatureDisableDetachResult(
-    bool Applied,
-    string Reason,
-    IReadOnlyList<Reservation> DetachedReservations);
-
 internal sealed record ContinuousChainFinalizationArtifact(string OutputPath, string ResultPath, string RuntimeStatsPath)
 {
     public string JobPath { get; init; } = string.Empty;
@@ -646,69 +641,6 @@ public sealed class ReservationStore
         return ReadReservations(cmd).FirstOrDefault();
     }
 
-    // CHAIN_ROOT_SINGLE_SOURCE_INVARIANT: 保存トポロジーはChainReservationContractとこの永続値を正本とする。
-    // CHAIN_ROOT_SINGLE_SOURCE_INVARIANT — 変更禁止:
-    // ChainRootはチェーン作成時に確定した永続トポロジーの識別子であり、予約状態、競合、録画完了、
-    // 残存メンバー、実行中アンカーから再推定してはならない。前段リンクを辿るのは保存値の整合性検証だけに使い、
-    // Root決定は保存済みUserChainRootId（先頭だけは自身のId）を唯一の正本とする。
-    private static bool TryResolveCanonicalStoredChainRoot(
-        Reservation reservation,
-        IReadOnlyDictionary<int, Reservation> allById,
-        out int rootId,
-        out string failureReason,
-        out int depth)
-    {
-        rootId = reservation.UserChainRootId
-            ?? (reservation.UserChainPreviousId.HasValue ? 0 : reservation.Id);
-        failureReason = string.Empty;
-        depth = 0;
-
-        var visited = new HashSet<int>();
-        var cursor = reservation;
-        while (cursor.UserChainPreviousId.HasValue)
-        {
-            if (!visited.Add(cursor.Id))
-            {
-                failureReason = "chain_cycle_detected";
-                return false;
-            }
-            depth++;
-            if (!allById.TryGetValue(cursor.UserChainPreviousId.Value, out var predecessor))
-            {
-                failureReason = "chain_broken_predecessor";
-                return false;
-            }
-            cursor = predecessor;
-        }
-
-        // 起動時復旧などで先頭実体が置換されても、保存済みの歴史的Root識別子は変えない。
-        var lineageRootId = cursor.UserChainRootId ?? cursor.Id;
-        if (reservation.UserChainPreviousId.HasValue && !reservation.UserChainRootId.HasValue)
-        {
-            failureReason = "chain_root_missing";
-            return false;
-        }
-        if (rootId == 0) rootId = lineageRootId;
-        if (rootId != lineageRootId)
-        {
-            failureReason = "chain_root_mismatch";
-            return false;
-        }
-        return true;
-    }
-
-    private static bool TryResolveCanonicalRootForSuccessor(
-        Reservation predecessor,
-        IReadOnlyDictionary<int, Reservation> allById,
-        out int rootId,
-        out string failureReason,
-        out int depth)
-    {
-        if (!TryResolveCanonicalStoredChainRoot(predecessor, allById, out rootId, out failureReason, out depth))
-            return false;
-        return true;
-    }
-
     /// <summary>
     /// ユーザー明示チェーンの追加または既存予約昇格を、チェーン構造検証と同一Transactionで確定する。
     /// 同一前番組への複数後続、既存後続の別前番組付替え、循環、壊れたrootを拒否する。
@@ -788,7 +720,12 @@ public sealed class ReservationStore
             return new UserChainMutationResult(false, false, "successor_already_has_predecessor", existing.Id, existing);
         }
 
-        var byId = active.ToDictionary(x => x.Id);
+        // A terminal historical root remains part of the persisted ancestry.
+        // Validate the complete transaction snapshot while new-edge eligibility still
+        // checks only the active predecessor in the original admission route.
+        var byId = ReadAllReservations(con, tx)
+            .Where(x => x.Source != ReservationSource.Epg)
+            .ToDictionary(x => x.Id);
         if (successorId != 0)
         {
             var cursor = predecessor;
@@ -803,7 +740,7 @@ public sealed class ReservationStore
             }
         }
 
-        if (!TryResolveCanonicalRootForSuccessor(predecessor, byId, out var resolvedRootId, out var rootFailure, out var depth))
+        if (!ChainReservationEligibilityContract.TryResolvePersistedLineage(predecessor, byId, out var resolvedRootId, out var rootFailure, out var depth))
             return new UserChainMutationResult(false, false, rootFailure, predecessorId, predecessor);
         if (rootId != resolvedRootId)
             return new UserChainMutationResult(false, false, "chain_root_mismatch", predecessorId, predecessor);
@@ -962,7 +899,7 @@ public sealed class ReservationStore
                        recording_recovery_chain_id, recovery_parent_reservation_id, data_version,
                        reservation_intent, created_through, created_by_plugin_id
                 FROM reservations
-                WHERE status IN ('scheduled','starting','recording','stopping','completed','failed')
+                WHERE status IN ('scheduled','starting','recording','stopping','completed','failed','cancelled')
                 ORDER BY id;
                 """;
             active = ReadReservations(read, projectRuntimeStatus: false).ToList();
@@ -1086,7 +1023,12 @@ public sealed class ReservationStore
             active = ReadReservations(read).ToList();
         }
 
-        var byId = active.ToDictionary(x => x.Id);
+        // A terminal historical root remains part of the persisted ancestry.
+        // Validate the complete transaction snapshot while new-edge eligibility still
+        // checks only the active predecessor in the original admission route.
+        var byId = ReadAllReservations(con, tx)
+            .Where(x => x.Source != ReservationSource.Epg)
+            .ToDictionary(x => x.Id);
         var sequence = new List<Reservation>(reservationIds.Count);
         foreach (var id in reservationIds)
         {
@@ -1099,7 +1041,7 @@ public sealed class ReservationStore
             sequence.Add(reservation);
         }
 
-        if (!TryResolveCanonicalStoredChainRoot(sequence[0], byId, out var canonicalRootId, out var rootFailure, out _))
+        if (!ChainReservationEligibilityContract.TryResolvePersistedLineage(sequence[0], byId, out var canonicalRootId, out var rootFailure, out _))
             return new UserChainSequenceMutationResult(false, rootFailure, reservationIds.Count - 1, 0, 0, Array.Empty<int>());
 
         // 先頭の既存祖先に今回の後続IDが含まれていれば、列を追加するとcycleになる。
@@ -1509,132 +1451,6 @@ public sealed class ReservationStore
         return new UserChainSequenceMutationResult(true,
             updates.Count == 0 ? "already_linked" : "applied", pairCount,
             topologyChangedIds.Count, alreadyLinked, Array.AsReadOnly(updatedIds), notificationIncomplete);
-    }
-
-    /// <summary>
-    /// CHAIN_FEATURE_DISABLE_DETACH_SINGLE_SOURCE_INVARIANT:
-    /// チェーン機能の有効→無効遷移では、まだ実行へ入っていないScheduledの保存トポロジーだけを
-    /// 同一Transactionで通常予約へdetachする。予約そのもの、ActualTunerName、録画実績は変更しない。
-    /// TunerNameはチェーン割当の派生値なので未確定へ戻し、後段の共通割当で独立予約として再解決する。
-    /// Starting/Recording/Stoppingはactive physical captureを設定変更だけで切断しないため対象外。
-    /// </summary>
-    public UserChainFeatureDisableDetachResult DetachScheduledUserChainsForFeatureDisable(
-        string source,
-        IReadOnlySet<int>? runtimeAttachedReservationIds = null,
-        Action<UserChainFeatureDisableDetachResult>? recordCommitted = null)
-    {
-        using var con = db.Open();
-        using var tx = con.BeginTransaction(System.Data.IsolationLevel.Serializable);
-
-        List<Reservation> before;
-        using (var read = con.CreateCommand())
-        {
-            read.Transaction = tx;
-            read.CommandText = """
-                SELECT id, network_id, transport_stream_id, service_id, event_id,
-                       title, start_time, end_time, status, source, created_at, updated_at,
-                       channel_argument, is_conflicted, is_enabled, tuner_name, actual_tuner_name,
-                       recording_started_at, recording_finished_at, service_name,
-                       scheduled_start_time, source_rule_id, source_rule_name,
-                       is_user_chain, user_chain_previous_id, user_chain_root_id,
-                       recording_recovery_chain_id, recovery_parent_reservation_id, data_version,
-                       reservation_intent, created_through, created_by_plugin_id
-                FROM reservations
-                WHERE status = 'scheduled'
-                  AND source <> 'epg'
-                ORDER BY start_time, id;
-                """;
-            before = ReadReservations(read, projectRuntimeStatus: false).ToList();
-        }
-
-        var allScheduled = before;
-        var protectedIds = runtimeAttachedReservationIds ?? new HashSet<int>();
-        before = allScheduled.Where(x => !protectedIds.Contains(x.Id) && !HasOpenRecordingRuntime(x)
-            && (x.IsUserChain || x.UserChainPreviousId.HasValue || x.UserChainRootId.HasValue)).ToList();
-
-        if (before.Count == 0)
-        {
-            tx.Commit();
-            log.Add("CHAIN_FEATURE_DISABLE_DETACH", "Settings",
-                $"result=NOOP source={source} scheduledChainRows=0 protectedRuntimeSegments={protectedIds.Count} action=none activeRuntimeSegmentsPreserved=True rule=chain_lifecycle_single_source");
-            var empty=new UserChainFeatureDisableDetachResult(true, "no_scheduled_chain_rows", Array.Empty<Reservation>());
-            recordCommitted?.Invoke(empty);return empty;
-        }
-
-        var nowText = DateTime.Now.ToString("O");
-        foreach (var target in before)
-        {
-            using var update = con.CreateCommand();
-            update.Transaction = tx;
-            update.CommandText = """
-                UPDATE reservations
-                SET is_user_chain = 0,
-                    user_chain_previous_id = NULL,
-                    user_chain_root_id = NULL,
-                    tuner_name = '',
-                    data_version = data_version + 1,
-                    updated_at = $now
-                WHERE id = $id
-                  AND status = 'scheduled'
-                  AND data_version = $dataVersion
-                  AND (is_user_chain = 1 OR user_chain_previous_id IS NOT NULL OR user_chain_root_id IS NOT NULL);
-                """;
-            update.Parameters.AddWithValue("$now", nowText);
-            update.Parameters.AddWithValue("$id", target.Id);
-            update.Parameters.AddWithValue("$dataVersion", target.DataVersion);
-            if (update.ExecuteNonQuery() != 1)
-            {
-                tx.Rollback();
-                log.Add("CHAIN_FEATURE_DISABLE_DETACH", $"R{target.Id}",
-                    $"result=REJECTED source={source} reason=snapshot_changed expectedStatus=Scheduled expectedDataVersion={target.DataVersion} action=rollback_entire_detach activeRuntimeSegmentsPreserved=True rule=chain_lifecycle_single_source");
-                return new UserChainFeatureDisableDetachResult(false, "snapshot_changed", Array.Empty<Reservation>());
-            }
-        }
-
-        if (!TryAdvanceScheduledChainMembershipVersions(con, tx, allScheduled,
-            before.Select(x => x.UserChainRootId ?? x.Id).ToHashSet(),
-            before.Select(x => x.Id).ToHashSet(), protectedIds, nowText, out var membershipVersions))
-            return new(false, "chain_membership_snapshot_changed", Array.Empty<Reservation>());
-
-        List<Reservation> after;
-        using(var read=con.CreateCommand())
-        {
-            read.Transaction=tx;
-            read.CommandText = """
-                SELECT id, network_id, transport_stream_id, service_id, event_id,
-                       title, start_time, end_time, status, source, created_at, updated_at,
-                       channel_argument, is_conflicted, is_enabled, tuner_name, actual_tuner_name,
-                       recording_started_at, recording_finished_at, service_name,
-                       scheduled_start_time, source_rule_id, source_rule_name,
-                       is_user_chain, user_chain_previous_id, user_chain_root_id,
-                       recording_recovery_chain_id, recovery_parent_reservation_id, data_version,
-                       reservation_intent, created_through, created_by_plugin_id
-                FROM reservations
-                WHERE status = 'scheduled'
-                  AND source <> 'epg'
-                ORDER BY start_time, id;
-                """;
-            var ids=before.Select(r=>r.Id).ToHashSet();
-            after=ReadReservations(read,projectRuntimeStatus:false).Where(r=>ids.Contains(r.Id)).ToList();
-        }
-        var committed=new UserChainFeatureDisableDetachResult(true,"applied",after);
-        tx.Commit();recordCommitted?.Invoke(committed);
-        PublishChainMembershipVersionChanges(membershipVersions);
-        Exception? notificationFailure=null;
-        foreach (var beforeRow in before)
-        {
-            var afterRow = after.FirstOrDefault(x => x.Id == beforeRow.Id);
-            if (afterRow is null) continue;
-            try { mutationJournal.Record(ReservationMutationKind.Updated, beforeRow, afterRow,
-                nameof(Reservation.IsUserChain), nameof(Reservation.UserChainPreviousId), nameof(Reservation.UserChainRootId),
-                nameof(Reservation.TunerName), nameof(Reservation.DataVersion)); }
-            catch(Exception ex){notificationFailure??=ex;}
-        }
-
-        log.Add("CHAIN_FEATURE_DISABLE_DETACH", "Settings",
-            $"result=APPLIED source={source} detached={after.Count} targets=[{string.Join(',', after.Select(x => $"R{x.Id}"))}] protectedRuntimeSegments={protectedIds.Count} reservationDelete=False actualTunerMutation=False tunerPlanReset=True conflictDecision=user_reservation_list_after_common_allocation activeRuntimeSegmentsPreserved=True rule=chain_lifecycle_single_source");
-        if(notificationFailure is not null) throw notificationFailure;
-        return committed;
     }
 
     private sealed record ChainMembershipVersionChange(Reservation Before, Reservation After);
@@ -5551,7 +5367,8 @@ WHERE id = $id
     }
 
 
-    public PreRecordEpgCleanupResult DeleteInvalidScheduledPreRecordEpgEntries()
+    public PreRecordEpgCleanupResult DeleteInvalidScheduledPreRecordEpgEntries(
+        IReadOnlySet<int> operationalChainChildIds)
     {
         using var con = db.Open();
         var targets = new List<(int ChildId, int? ParentId, string Reason)>();
@@ -5563,9 +5380,7 @@ WHERE id = $id
                        parent.id,
                        COALESCE(parent.status, ''),
                        COALESCE(parent.is_enabled, 0),
-                       COALESCE(parent.is_conflicted, 0),
-                       COALESCE(parent.is_user_chain, 0),
-                       parent.user_chain_previous_id
+                       COALESCE(parent.is_conflicted, 0)
                 FROM reservations child
                 LEFT JOIN reservations parent ON parent.id = child.source_rule_id
                 WHERE child.source = 'epg'
@@ -5581,13 +5396,11 @@ WHERE id = $id
                 var status = rdr.GetString(3);
                 var enabled = rdr.GetInt32(4) != 0;
                 var conflicted = rdr.GetInt32(5) != 0;
-                var userChain = rdr.GetInt32(6) != 0;
-                var chainPreviousId = rdr.IsDBNull(7) ? (int?)null : rdr.GetInt32(7);
                 var reason = string.Empty;
                 if (!parentExists) reason = "parent_missing";
                 else if (!enabled) reason = "parent_disabled";
                 else if (conflicted) reason = "parent_conflicted";
-                else if (userChain && chainPreviousId.HasValue) reason = "parent_user_chain_child";
+                else if (operationalChainChildIds.Contains(parentId ?? 0)) reason = "parent_user_chain_child";
                 else if (!string.Equals(status, "scheduled", StringComparison.OrdinalIgnoreCase)
                       && !string.Equals(status, "recording", StringComparison.OrdinalIgnoreCase)) reason = "parent_terminal";
                 if (!string.IsNullOrWhiteSpace(reason)) targets.Add((childId, parentId, reason));
@@ -5632,14 +5445,6 @@ WHERE id = $id
             parents);
     }
 
-    private static bool IsExactContinuousPair(Reservation predecessor, Reservation successor)
-    {
-        // CHAIN_ELIGIBILITY_SINGLE_SOURCE_INVARIANT: 新規チェーン成立条件は
-        // ChainReservationEligibilityContract / ChainReservationContract を唯一の正本とする。
-        // Allocation側でチャンネル名・ChannelArgument・独自時間窓へフォールバックしてはならない。
-        return ChainReservationEligibilityContract.IsSameServiceAndAdjacent(predecessor, successor);
-    }
-
     /// <summary>
     /// 保存済みユーザー明示チェーンの現在有効な直列ペアを返す。
     /// 成立条件の再推論はせず、is_user_chain / user_chain_previous_id の永続topologyだけを読む。
@@ -5651,64 +5456,67 @@ WHERE id = $id
     public Dictionary<int, int> GetChainPredecessors(bool includeTerminal)
         => ReadChainPredecessors(includeTerminal, includeDisabled: false);
 
+    // Same stored graph, distinct operational projection: a disabled feature must not turn
+    // dormant saved edges into physical tuner occupancy or runtime chain boundaries.
+    public Dictionary<int, int> GetOperationalChainPredecessors(
+        bool featureEnabled, IReadOnlySet<int>? activeSharedCaptureRootIds)
+    {
+        var roots = activeSharedCaptureRootIds;
+        if (!featureEnabled && (roots is null || roots.Count == 0))
+            return new Dictionary<int, int>();
+        return ReadChainPredecessors(includeTerminal: false, includeDisabled: false,
+            operationalOnly: true, featureEnabled: featureEnabled,
+            activeSharedCaptureRootIds: roots);
+    }
+
     // Display membership follows persisted links, including disabled reservations.
     // Runtime callers retain their enabled-successor filter through GetChainPredecessors.
     public Dictionary<int, int> GetChainPredecessorsForPresentation()
         => ReadChainPredecessors(includeTerminal: true, includeDisabled: true);
 
-    private Dictionary<int, int> ReadChainPredecessors(bool includeTerminal, bool includeDisabled)
+    private Dictionary<int, int> ReadChainPredecessors(bool includeTerminal, bool includeDisabled,
+        bool operationalOnly = false, bool featureEnabled = true,
+        IReadOnlySet<int>? activeSharedCaptureRootIds = null)
     {
-        // CHAIN_TOPOLOGY_SINGLE_SOURCE_INVARIANT:
-        // チェーン構造は、チェーンボタンで保存された
-        // is_user_chain / user_chain_previous_id だけを正本とする。
-        // Scheduled/Recordingなど現在の状態集合からRootや所属を再推論しない。
-        //
-        // lifecycle状態にかかわらず、保存済みprevious/rootリンクを同一チェーントポロジーとして保持する。
-        // Root判定を現在の状態集合から再推論しない。
-        //
-        // 同一サービス・隣接時刻・同一Tunerからの自動チェーン生成は禁止。
-        //
-        // release_contract:
-        // 高優先度のチェーン境界監視は500ms周期でこのトポロジーだけを必要とする。
-        // Reservation全列をGetAll()でmaterializeせず、同じreservations正本から
-        // 保存トポロジー判定に必要な後続ID/前段IDだけを直接読む。キャッシュは持たず、
-        // 削除・無効化・status遷移を次の監視周期でそのまま観測する。
-        // ParseStatusがterminal以外をactive側へ投影する契約とsource!=epg条件も従来GetAll経路と同一。
+        // Read only the fields required by the one persisted-topology validator.
+        // It must see every ancestor, even terminal/disabled roots, but never derive an
+        // edge from adjacency, a runtime session, or an allocation result.
         using var con = db.Open();
         using var cmd = con.CreateCommand();
         cmd.CommandText = """
-            SELECT successor.id, successor.user_chain_previous_id
-            FROM reservations AS successor
-            INNER JOIN reservations AS predecessor
-                    ON predecessor.id = successor.user_chain_previous_id
-                   AND predecessor.source <> 'epg'
-            WHERE successor.source <> 'epg'
-              AND ($includeDisabled = 1 OR successor.is_enabled = 1)
-              AND successor.is_user_chain = 1
-              AND successor.user_chain_previous_id IS NOT NULL
-              AND successor.status <> 'cancelled'
-              AND ($includeTerminal = 1 OR successor.status NOT IN ('completed','failed'))
-              AND ($includeTerminal = 0 OR predecessor.status <> 'cancelled')
-            ORDER BY successor.start_time;
+            SELECT id, network_id, transport_stream_id, service_id, start_time, end_time,
+                   status, is_enabled, is_user_chain, user_chain_previous_id, user_chain_root_id
+            FROM reservations
+            WHERE source <> 'epg';
             """;
-
-        // Presentation can include completed history through this same persisted-link reader.
-        // The runtime default retains its original active-successor scope.
-        cmd.Parameters.AddWithValue("$includeTerminal", includeTerminal ? 1 : 0);
-        cmd.Parameters.AddWithValue("$includeDisabled", includeDisabled ? 1 : 0);
         using var reader = cmd.ExecuteReader();
-        var result = new Dictionary<int, int>();
+        var all = new Dictionary<int, Reservation>();
         while (reader.Read())
         {
-            result[reader.GetInt32(0)] = reader.GetInt32(1);
+            var row = new Reservation
+            {
+                Id = reader.GetInt32(0),
+                NetworkId = (ushort)reader.GetInt32(1),
+                TransportStreamId = (ushort)reader.GetInt32(2),
+                ServiceId = (ushort)reader.GetInt32(3),
+                StartTime = DateTime.Parse(reader.GetString(4)).ToLocalTime(),
+                EndTime = DateTime.Parse(reader.GetString(5)).ToLocalTime(),
+                Status = ParseStatus(reader.GetString(6)),
+                IsEnabled = reader.IsDBNull(7) || reader.GetInt32(7) != 0,
+                IsUserChain = !reader.IsDBNull(8) && reader.GetInt32(8) != 0,
+                UserChainPreviousId = reader.IsDBNull(9) ? null : reader.GetInt32(9),
+                UserChainRootId = reader.IsDBNull(10) ? null : reader.GetInt32(10)
+            };
+            all.Add(row.Id, row);
         }
-
-        return result;
+        return ChainReservationEligibilityContract.ProjectPersistedPredecessors(
+            all, includeTerminal, includeDisabled, operationalOnly,
+            featureEnabled, activeSharedCaptureRootIds);
     }
 
     /// <summary>
     /// active logical ownerを起点に、現在も保存トポロジーで連結している後続IDを返す。
-    /// shared capture controlのEnabled集合はこの結果を正本にし、削除・取消・設定OFF detach済みsegmentを
+    /// shared capture controlのEnabled集合はこの結果を正本にし、削除・取消で切断されたsegmentを
     /// worker controlへ残さない。固定深度上限は持たず、cycle guardだけで終端する。
     /// </summary>
     public IReadOnlySet<int> GetStoredUserChainDescendantIds(int anchorReservationId, bool includeAnchor = true)
@@ -5747,9 +5555,12 @@ WHERE id = $id
     /// 戻り値: チェーンの先頭から末尾まで順番に並べた予約IDリストのリスト。
     /// 例: [[R1, R2, R3], [R5, R6]] のように複数チェーンが存在しうる。
     /// </summary>
-    public List<List<int>> GetChains()
+    public List<List<int>> GetChains(
+        bool? featureEnabled = null, IReadOnlySet<int>? activeSharedCaptureRootIds = null)
     {
-        var predecessors = GetChainPredecessors();
+        var predecessors = featureEnabled.HasValue
+            ? GetOperationalChainPredecessors(featureEnabled.Value, activeSharedCaptureRootIds)
+            : GetChainPredecessors();
         // predecessors: key=後続ID, value=前番組ID
         // 後続でないID（先頭）を見つけてチェーンを構築する
         var leaderIds    = predecessors.Values.Where(v => !predecessors.ContainsKey(v)).Distinct();
@@ -6394,7 +6205,7 @@ WHERE id = $id
         IReadOnlyList<Core.TunerProfile> tunerProfiles, bool laterProgramPriority,
         bool continuousChainPlanning, bool configuredChainFeatureEnabled, int postEndMarginSeconds,
         Tuner.TunerPool? tunerPool,
-        int preStartMarginSeconds)
+        int preStartMarginSeconds, IReadOnlySet<int> activeSharedCaptureRootIds)
     {
         var reservationSnapshot = ReadAllocationSnapshotToken();
         var allocationGenerationBefore = ReadAllocationGeneration();
@@ -6517,39 +6328,11 @@ WHERE id = $id
         // 新規作成可否は設定契約、実行中/Startingを含む既存保存topologyの物理計画はcontinuousChainPlanningを正本にする。
         // LaterProgramPriorityをOFFにした瞬間にactive shared captureを通常予約へ分解してはならない。
         var configuredChainFeature = configuredChainFeatureEnabled;
-
-        var userChainLockedTunerById = new Dictionary<int, string>();
-        foreach (var chainReservation in scheduled.Where(x => continuousChainPlanning && x.IsUserChain && x.UserChainPreviousId.HasValue))
-        {
-            var predForContract = GetById(chainReservation.UserChainPreviousId!.Value);
-            if (predForContract == null
-                || predForContract.Status == ReservationStatus.Cancelled
-                || !ChainReservationEligibilityContract.IsPersistedExplicitRuntimePair(predForContract, chainReservation))
-            {
-                var predecessorLabel = predForContract == null ? "-" : "R" + predForContract.Id;
-                var sameSid = predForContract != null
-                    && predForContract.NetworkId == chainReservation.NetworkId
-                    && predForContract.TransportStreamId == chainReservation.TransportStreamId
-                    && predForContract.ServiceId == chainReservation.ServiceId;
-                var gapText = predForContract == null
-                    ? "-"
-                    : ((int)Math.Round((chainReservation.StartTime - predForContract.EndTime).TotalSeconds)).ToString();
-                log.Add("CHAIN_CONTRACT_AUDIT", $"R{chainReservation.Id}",
-                    $"result=IGNORED_AT_ALLOC_ROUTE reason=invalid_user_chain_contract predecessor={predecessorLabel} sameSid={sameSid} gapSec={gapText} rule=release_contract");
-                continue;
-            }
-
-            var lockedTuner = ToRoleBindingTunerName(EffectiveTunerName(chainReservation), ResolveGroup(chainReservation));
-            if (string.IsNullOrWhiteSpace(lockedTuner) || lockedTuner == "-")
-                lockedTuner = ToRoleBindingTunerName(EffectiveTunerName(predForContract), ResolveGroup(chainReservation));
-
-            if (!string.IsNullOrWhiteSpace(lockedTuner) && lockedTuner != "-")
-                userChainLockedTunerById[chainReservation.Id] = lockedTuner;
-        }
-
         var userChainCandidatePairs = scheduled.Count(r => r.IsUserChain && r.UserChainPreviousId.HasValue);
-        // Persisted explicit chain topology is the canonical physical-occupancy source.
-        // Do not disable it merely because a successor has already moved from Scheduled to Starting/Recording.
+        // Saved predecessor/root links are the sole chain topology authority. A predecessor
+        // entering a terminal state does not delete its edge or change its historical root.
+        // Only the successor's execution eligibility determines its current allocation;
+        // explicit cancellation and removal have their own atomic topology mutation routes.
 
         // グループ別チューナー本数（地/BS/CS は GR/BSCS の両方の候補に含める）
         var tunerCountByGroup = scheduled
@@ -6562,118 +6345,30 @@ WHERE id = $id
 
         // 明示チェーンの保存トポロジーを読み、同一rootの物理占有を同じPhysicalOccupancyKeyへ投影する。
         // 各番組の競合判定は通常の前後マージン全量を維持し、同一root内部の重複だけを同一物理captureとして扱う。
-        var chainPredecessors = new Dictionary<int, int>(); // key=後続ID, value=前番組ID
-        var chainSuccessors = new Dictionary<int, int>();   // key=前番組ID, value=後続ID
-        var invalidChainReservationIds = new HashSet<int>();
-
-        // CHAIN_TOPOLOGY_SINGLE_SOURCE_INVARIANT:
-        // 割当候補の状態集合からチェーン構造を作り直さない。
-        // チェーンボタンで保存された IsUserChain / UserChainPreviousId / UserChainRootId を唯一の正本とし、
-        // Scheduled / Recording / Stopping / Completed の遷移はトポロジー変更として扱わない。
+        // Canonical persisted lineage is validated by the same pure contract used by
+        // recording admission, boundary execution, EPG, Wake and presentation.
+        // Ancestor lifecycle cannot destroy a valid child edge; broken/mismatched/branched
+        // topology cannot silently receive a physical tuner or a shared capture.
         var allChainReservationsById = GetAll()
             .Where(r => r.Source != ReservationSource.Epg)
-            .GroupBy(r => r.Id)
-            .ToDictionary(g => g.Key, g => g.First());
+            .ToDictionary(r => r.Id);
+        var chainPredecessors = continuousChainPlanning
+            ? ChainReservationEligibilityContract.ProjectPersistedPredecessors(
+                allChainReservationsById, operationalOnly: true,
+                featureEnabled: configuredChainFeature,
+                activeSharedCaptureRootIds: activeSharedCaptureRootIds)
+            : new Dictionary<int, int>();
+        var chainSuccessors = chainPredecessors.ToDictionary(kv => kv.Value, kv => kv.Key);
 
-        var activeChainSuccessorStatuses = new HashSet<ReservationStatus>
+        var userChainLockedTunerById = new Dictionary<int, string>();
+        foreach (var chainReservation in scheduled.Where(x => chainPredecessors.ContainsKey(x.Id)))
         {
-            ReservationStatus.Scheduled,
-            ReservationStatus.Starting,
-            ReservationStatus.Recording,
-            ReservationStatus.Stopping
-        };
-
-        if (continuousChainPlanning)
-        {
-            var forcedCandidates = allChainReservationsById.Values
-                .Where(r => r.IsEnabled)
-                .Where(r => r.IsUserChain && r.UserChainPreviousId.HasValue)
-                .Where(r => activeChainSuccessorStatuses.Contains(r.Status))
-                .OrderBy(r => r.StartTime)
-                .ThenBy(r => r.Id)
-                .ToList();
-
-            foreach (var branch in forcedCandidates
-                .GroupBy(r => r.UserChainPreviousId!.Value)
-                .Where(g => g.Count() > 1))
-            {
-                var memberIds = branch.Select(x => x.Id).OrderBy(x => x).ToArray();
-                invalidChainReservationIds.UnionWith(memberIds);
-                invalidChainReservationIds.Add(branch.Key);
-                log.Add("CHAIN_CONTRACT_AUDIT", $"R{branch.Key}",
-                    $"result=REJECTED_AT_ALLOC_ROUTE reason=chain_branch_detected predecessor=R{branch.Key} successors={string.Join(',', memberIds.Select(x => $"R{x}"))} rule=release_contract");
-            }
-
-            foreach (var forced in forcedCandidates)
-            {
-                var predId = forced.UserChainPreviousId!.Value;
-                if (invalidChainReservationIds.Contains(forced.Id) || invalidChainReservationIds.Contains(predId))
-                    continue;
-
-                if (!allChainReservationsById.TryGetValue(predId, out var pred))
-                {
-                    invalidChainReservationIds.Add(forced.Id);
-                    log.Add("CHAIN_CONTRACT_AUDIT", $"R{forced.Id}",
-                        $"result=REJECTED_AT_ALLOC_ROUTE reason=chain_broken_predecessor predecessor=R{predId} rule=release_contract");
-                    continue;
-                }
-
-                if (pred.Status == ReservationStatus.Cancelled)
-                {
-                    invalidChainReservationIds.Add(forced.Id);
-                    log.Add("CHAIN_CONTRACT_AUDIT", $"R{forced.Id}",
-                        $"result=REJECTED_AT_ALLOC_ROUTE reason=predecessor_cancelled predecessor=R{predId} rule=release_contract");
-                    continue;
-                }
-
-                if (!ChainReservationEligibilityContract.IsPersistedExplicitRuntimePair(pred, forced))
-                {
-                    invalidChainReservationIds.Add(forced.Id);
-                    log.Add("CHAIN_CONTRACT_AUDIT", $"R{forced.Id}",
-                        $"result=REJECTED_AT_ALLOC_ROUTE reason=not_same_sid_or_runtime_continuous predecessor=R{predId} prevNid={pred.NetworkId} prevTsid={pred.TransportStreamId} prevSid={pred.ServiceId} nextNid={forced.NetworkId} nextTsid={forced.TransportStreamId} nextSid={forced.ServiceId} gapSec={(int)Math.Round((forced.StartTime - pred.EndTime).TotalSeconds)} rule=release_contract");
-                    continue;
-                }
-
-                if (!IsExactContinuousPair(pred, forced))
-                {
-                    log.Add("CHAIN_CONTRACT_AUDIT", $"R{forced.Id}",
-                        $"result=PRESERVED_AT_ALLOC_ROUTE reason=time_follow_overlap_on_persisted_explicit_chain predecessor=R{predId} root=R{forced.UserChainRootId} gapSec={(int)Math.Round((forced.StartTime - pred.EndTime).TotalSeconds)} additionalTuner=0 physicalRetune=False workerRestart=False recordingEpgSupplement=unchanged rule=chain_time_follow_overlap_contract");
-                }
-
-                chainPredecessors[forced.Id] = predId;
-            }
-
-            foreach (var branch in chainPredecessors.GroupBy(kv => kv.Value).Where(g => g.Count() > 1))
-            {
-                foreach (var member in branch)
-                    invalidChainReservationIds.Add(member.Key);
-            }
-
-            foreach (var successorId in chainPredecessors.Keys.ToList())
-            {
-                if (!allChainReservationsById.TryGetValue(successorId, out var successor))
-                    continue;
-
-                // 完了済み先祖をactive mapから落としてRootを付け替える旧誤りを禁止する。
-                // 永続化された全状態のpredecessorリンクで検証し、active mapは今回実行するedge選択だけに使う。
-                if (TryResolveCanonicalStoredChainRoot(successor, allChainReservationsById,
-                        out var canonicalRootId, out var invalidReason, out var depth))
-                    continue;
-
-                invalidChainReservationIds.Add(successorId);
-                log.Add("CHAIN_CONTRACT_AUDIT", $"R{successorId}",
-                    $"result=REJECTED_AT_ALLOC_ROUTE reason={invalidReason} storedRoot=R{(successor.UserChainRootId.HasValue ? successor.UserChainRootId.Value.ToString() : "-")} canonicalRoot=R{canonicalRootId} depth={depth} topologySource=persisted_all_statuses rule=release_contract");
-            }
-
-            if (invalidChainReservationIds.Count > 0)
-            {
-                foreach (var invalidId in invalidChainReservationIds)
-                    chainPredecessors.Remove(invalidId);
-            }
-
-            chainSuccessors = chainPredecessors
-                .Where(kv => !invalidChainReservationIds.Contains(kv.Value))
-                .ToDictionary(kv => kv.Value, kv => kv.Key);
+            var predecessor = allChainReservationsById[chainPredecessors[chainReservation.Id]];
+            var lockedTuner = ToRoleBindingTunerName(EffectiveTunerName(chainReservation), ResolveGroup(chainReservation));
+            if (string.IsNullOrWhiteSpace(lockedTuner) || lockedTuner == "-")
+                lockedTuner = ToRoleBindingTunerName(EffectiveTunerName(predecessor), ResolveGroup(chainReservation));
+            if (!string.IsNullOrWhiteSpace(lockedTuner) && lockedTuner != "-")
+                userChainLockedTunerById[chainReservation.Id] = lockedTuner;
         }
 
         // EPGエントリのis_conflictedは常にfalse。Final Planと同じTransactionで確定する。
@@ -6798,13 +6493,16 @@ WHERE id = $id
         // hard pinにできるのは現在のshared captureを所有するRecording段のActualTunerNameだけである。
         // FinalConflictPlanはイベント評価へ入る前に、全chain rootを共通物理時間軸上へ一度だけ配置し、
         // 同一rootの各イベントが処理順や再計算passによって別Tunerを選び直すことを禁止する。
+        bool OperationalMember(Reservation row)
+            => chainPredecessors.ContainsKey(row.Id) || chainSuccessors.ContainsKey(row.Id);
+
         var chainPlannedTunerPreferenceByRoot = new Dictionary<int, string>();
         // CHAIN_SLOT_SINGLE_SOURCE:
         // 今回のFinalConflictPlanで解決したroot単位の物理Tuner正本。
         // 最終投影・PreRecEpg・Wake・continuous capture実行は、このroot単位Mapから投影されたTunerNameを参照する。
         var chainResolvedTunerByRoot = new Dictionary<int, string>();
         foreach (var chainGroup in scheduled
-            .Where(x => continuousChainPlanning && (x.IsUserChain || chainSuccessors.ContainsKey(x.Id)))
+            .Where(x => continuousChainPlanning && OperationalMember(x))
             .GroupBy(ResolveStoredChainRootId))
         {
             var rootId = chainGroup.Key;
@@ -6852,8 +6550,7 @@ WHERE id = $id
             // PHYSICAL_OCCUPANCY_IDENTITY_SINGLE_SOURCE:
             // TunerPool上の実録画leaseとFinalConflictPlan上の将来Unitを同じID空間で比較する。
             // continuous chainだけがroot単位で1本の物理captureを共有し、通常予約は予約単位で独立占有する。
-            if (continuousChainPlanning
-                && (reservation.IsUserChain || chainSuccessors.ContainsKey(reservation.Id) || chainPredecessors.ContainsKey(reservation.Id)))
+            if (continuousChainPlanning && OperationalMember(reservation))
             {
                 var rootId = ResolveStoredChainRootId(reservation);
                 return $"{groupKey}:CHAIN_ROOT:{rootId}";
@@ -6867,7 +6564,7 @@ WHERE id = $id
         // hard pinは現在のRecording ownerのActualTunerNameだけから作る。
         // ただし外部予約との採否は通常の共通優先計算で再評価し、チェーンであることを優先度には使わない。
         var chainActivePinnedTunersByRoot = recordingReservations
-            .Where(r => r.IsUserChain || chainSuccessors.ContainsKey(r.Id) || chainPredecessors.ContainsKey(r.Id))
+            .Where(OperationalMember)
             .Select(r => new
             {
                 RootId = ResolveStoredChainRootId(r),
@@ -8076,7 +7773,7 @@ WHERE id = $id
         // 競合原因の予約取消後は、保存済みトポロジーを変更せず通常再計算だけで復活する。
         // IsConflictedの解除をチェーン再作成やRoot付替えと混同しないよう、復活を専用監査で可視化する。
         foreach (var restored in scheduled
-            .Where(r => r.IsUserChain && r.UserChainPreviousId.HasValue)
+            .Where(r => chainPredecessors.ContainsKey(r.Id))
             .Where(r => r.IsConflicted && !conflictedIds.Contains(r.Id))
             .OrderBy(r => r.StartTime)
             .ThenBy(r => r.Id))
@@ -8089,7 +7786,7 @@ WHERE id = $id
         // 一つの競合原因を取り消しても別の通常予約が残る場合、前半だけが復活し、
         // 最初の残存競合子以降は競合を維持する。これは復活漏れではなく再計算結果である。
         foreach (var chainGroup in scheduled
-            .Where(r => r.IsUserChain || chainSuccessors.ContainsKey(r.Id))
+            .Where(OperationalMember)
             .GroupBy(ResolveStoredChainRootId))
         {
             var previouslyConflicted = chainGroup.Where(r => r.IsConflicted).OrderBy(r => r.StartTime).ThenBy(r => r.Id).ToList();
@@ -8148,7 +7845,7 @@ WHERE id = $id
 
             var includedInEvaluation = scheduledIds.Contains(r.Id);
             var newConflicted = includedInEvaluation && conflictedIds.Contains(r.Id);
-            var isChainSlotMember = continuousChainPlanning && (r.IsUserChain || chainSuccessors.ContainsKey(r.Id));
+            var isChainSlotMember = continuousChainPlanning && OperationalMember(r);
             var resolvedChainRootId = isChainSlotMember ? ResolveStoredChainRootId(r) : 0;
             var resolvedChainPlanTuner = isChainSlotMember
                 && chainResolvedTunerByRoot.TryGetValue(resolvedChainRootId, out var chainTuner)
@@ -8173,7 +7870,7 @@ WHERE id = $id
         {
             var slotMembers = allScheduled
                 .Where(x => ResolveStoredChainRootId(x) == resolvedSlot.Key)
-                .Where(x => x.IsUserChain || chainSuccessors.ContainsKey(x.Id) || x.Id == resolvedSlot.Key)
+                .Where(x => OperationalMember(x) || x.Id == resolvedSlot.Key)
                 .OrderBy(x => x.StartTime)
                 .ThenBy(x => x.Id)
                 .ToList();

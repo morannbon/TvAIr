@@ -98,13 +98,6 @@ public sealed class ReservationAllocationRouteService
     private readonly LogRepository _log;
     private readonly IServiceProvider _serviceProvider;
 
-    // Pending work only; INI and ReservationStore remain the authoritative state.
-    private int _disabledChainConvergenceRequested;
-    public void RequestDisabledChainConvergence()
-        => Interlocked.Exchange(ref _disabledChainConvergenceRequested, 1);
-    internal bool HasPendingDisabledChainConvergence
-        => Volatile.Read(ref _disabledChainConvergenceRequested) != 0;
-
     private readonly object _singleFlightGate = new();
     private bool _singleFlightRunning;
     private int _singleFlightOwnerThreadId;
@@ -156,10 +149,10 @@ public sealed class ReservationAllocationRouteService
         return new(command,"accepted",!creator);
     }
 
-    private string _appliedChainMode;
     // Preview only. The command rechecks policy and SQLite scope inside this route.
     public IReadOnlyList<Reservation> GetReservationCancellationTargets(int id)
-        => _store.GetReservationCancellationTargets(id, _ini.AutomaticChainRecordingEnabled);
+        => _store.GetReservationCancellationTargets(id,
+            _ini.AutomaticChainRecordingEnabled || !_ini.UserChainRecordingEnabled);
 
     private string EffectiveChainMode => _ini.LaterProgramPriority ? _ini.ChainReservationMode : ChainModeContract.Disabled;
 
@@ -173,9 +166,6 @@ public sealed class ReservationAllocationRouteService
     {
         _store = store;
         _ini = ini;
-        // Startup adopts the configured policy without resetting stored connections.
-        // Automatic convergence still runs through the ordinary common allocation cycle.
-        _appliedChainMode=EffectiveChainMode;
         _tunerProfiles = tunerProfiles;
         _tunerPool = tunerPool;
         _log = log;
@@ -398,7 +388,7 @@ public sealed class ReservationAllocationRouteService
         long ownerEpoch)
     {
         using var eventScope = BeginTypedEventOutboxScope(out var commitEvents);
-        var currentRequest = firstRequest with { RetainChainConvergence = firstRequest.RetainChainConvergence || (firstRequest.ReevaluateAllocations && (EffectiveChainMode==ChainModeContract.Automatic || EffectiveChainMode!=_appliedChainMode)) };
+        var currentRequest = firstRequest with { RetainChainConvergence = firstRequest.RetainChainConvergence || (firstRequest.ReevaluateAllocations && (EffectiveChainMode==ChainModeContract.Automatic)) };
         var aggregateRequest = currentRequest;
         var mutationJournal = Resolve<ReservationMutationJournal>();
         CycleResult? finalCycle = null;
@@ -666,7 +656,8 @@ public sealed class ReservationAllocationRouteService
         {
             if (command is LabWithdrawalOperationCommand operation) operation.PrepareMode(_ini.AutomaticChainRecordingEnabled);
             if (command is ReservationCancellationCommand cancellation)
-                cancellation.PrepareCancellationPolicy(_ini.AutomaticChainRecordingEnabled);
+                cancellation.PrepareCancellationPolicy(
+                    _ini.AutomaticChainRecordingEnabled || !_ini.UserChainRecordingEnabled);
             var runtime = command.RequiresSchedulerContext
                 ? Resolve<ReservationScheduler>() ?? throw new InvalidOperationException("Reservation scheduler is unavailable.")
                 : null;
@@ -799,18 +790,6 @@ public sealed class ReservationAllocationRouteService
             }
 
             var mode=EffectiveChainMode;
-            if(!chainPending && mode!=_appliedChainMode)
-            {
-                // Mode switches preserve stored edges. Feature disable retains its existing detach path.
-                var requiresRebuild=mode==ChainModeContract.Disabled && _appliedChainMode==ChainModeContract.Automatic;
-                if(requiresRebuild)
-                {
-                    var scheduler=Resolve<ReservationScheduler>();
-                    chainPending=scheduler is null || !scheduler.PrepareChainModeRebuildCore(
-                        "ChainMode:"+_appliedChainMode+"->"+mode,()=>_appliedChainMode=mode);
-                }
-                else _appliedChainMode=mode; // manual <-> automatic, including startup: keep stored edges.
-            }
             if(mode==ChainModeContract.Automatic && !chainPending)
             {
                 var scheduler=Resolve<ReservationScheduler>();
@@ -853,34 +832,18 @@ public sealed class ReservationAllocationRouteService
                 }
             }
 
-            if (Interlocked.Exchange(ref _disabledChainConvergenceRequested, 0) != 0
-                && !_ini.UserChainRecordingEnabled)
-            {
-                try
-                {
-                    var lifecycle = Resolve<ChainLifecycleCoordinator>()
-                        ?? throw new InvalidOperationException("Chain lifecycle coordinator is unavailable.");
-                    var convergence = lifecycle.ConvergeDisabledFeature($"{request.Source}:{request.Action}");
-                    if (!convergence.DetachApplied)
-                        throw new InvalidOperationException($"Chain disable convergence failed: {convergence.Reason}");
-                }
-                catch
-                {
-                    Interlocked.Exchange(ref _disabledChainConvergenceRequested, 1);
-                    throw;
-                }
-            }
-
             var userChainPairs = _store.GetChainPredecessors();
             var effectiveLater = _ini.LaterProgramPriority;
             var configuredChainFeature = _ini.UserChainRecordingEnabled;
+            var activeSharedCaptureRoots = GetActiveSharedCaptureChainRootIds();
             var continuousChainPlanning = ChainReservationContract.ShouldPlanContinuousCapture(
-                configuredChainFeature, userChainPairs.Count);
+                configuredChainFeature, activeSharedCaptureRoots);
 
             _log.Add("ALLOC_POLICY", "Effective",
                 $"source={request.Source} action={request.Action} executionMode={request.ExecutionMode} later={effectiveLater} configuredChainFeature={configuredChainFeature} chainMode={_ini.ChainReservationMode} chainRecordingSetting={_ini.ChainRecordingEnabled} storedChainPairs={userChainPairs.Count} continuousChainPlanning={continuousChainPlanning} rule=common_allocation_route_contract");
 
-            var evaluation = EvaluateWithSingleRetry(effectiveLater, continuousChainPlanning, configuredChainFeature, request);
+            var evaluation = EvaluateWithSingleRetry(effectiveLater, continuousChainPlanning,
+                configuredChainFeature, activeSharedCaptureRoots, request);
             changes = evaluation.Changes.ToList();
             rowChanges = evaluation.RowChanges.ToList();
             AccumulateConflictChanges(committedConflictChanges, changes);
@@ -901,10 +864,12 @@ public sealed class ReservationAllocationRouteService
                 var userChainPairs = _store.GetChainPredecessors();
                 var effectiveLater = _ini.LaterProgramPriority;
                 var configuredChainFeature = _ini.UserChainRecordingEnabled;
+                var activeSharedCaptureRoots = GetActiveSharedCaptureChainRootIds();
                 var continuousChainPlanning = ChainReservationContract.ShouldPlanContinuousCapture(
-                    configuredChainFeature, userChainPairs.Count);
+                    configuredChainFeature, activeSharedCaptureRoots);
 
-                var finalEvaluation = EvaluateWithSingleRetry(effectiveLater, continuousChainPlanning, configuredChainFeature, request);
+                var finalEvaluation = EvaluateWithSingleRetry(effectiveLater, continuousChainPlanning,
+                    configuredChainFeature, activeSharedCaptureRoots, request);
                 changes = finalEvaluation.Changes.ToList();
                 rowChanges = finalEvaluation.RowChanges.ToList();
                 AccumulateConflictChanges(committedConflictChanges, changes);
@@ -1271,6 +1236,7 @@ public sealed class ReservationAllocationRouteService
         bool effectiveLater,
         bool continuousChainPlanning,
         bool configuredChainFeatureEnabled,
+        IReadOnlySet<int> activeSharedCaptureRootIds,
         ReservationAllocationRouteRequest request)
     {
         var first = _store.ReevaluateConflicts(
@@ -1280,7 +1246,7 @@ public sealed class ReservationAllocationRouteService
             configuredChainFeatureEnabled,
             _ini.PostEndMarginSeconds,
             _tunerPool,
-            _ini.PreStartMarginSeconds);
+            _ini.PreStartMarginSeconds, activeSharedCaptureRootIds);
 
         if (!first.RetryRequired) return first;
 
@@ -1294,9 +1260,12 @@ public sealed class ReservationAllocationRouteService
             configuredChainFeatureEnabled,
             _ini.PostEndMarginSeconds,
             _tunerPool,
-            _ini.PreStartMarginSeconds);
+            _ini.PreStartMarginSeconds, activeSharedCaptureRootIds);
     }
 
+
+    internal IReadOnlySet<int> GetActiveSharedCaptureChainRootIds()
+        => Resolve<ReservationScheduler>()?.GetActiveSharedCaptureChainRootIds() ?? new HashSet<int>();
 
     internal IReadOnlySet<int> GetActivePreRecordParentIds()
         => Resolve<ReservationScheduler>()?.GetActivePreRecordParentIds() ?? new HashSet<int>();

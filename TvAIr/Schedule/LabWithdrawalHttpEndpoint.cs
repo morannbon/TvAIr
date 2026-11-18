@@ -2,7 +2,7 @@
 using Microsoft.Data.Sqlite;
 using TvAIr.Core;
 namespace TvAIr.Schedule;
-// Existing DELETE entry's asynchronous registered-future branch; null preserves the legacy path.
+// Handles scheduled automatic-chain withdrawals and retries with a saved operation ID.
 public static class LabWithdrawalHttpEndpoint
 {
  public static async Task<IResult?> TryHandleAsync(HttpContext context,int id,Database db,IniSettingsService ini,

@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using TvAIrPlugin;
 using TvAIr.Core;
 
@@ -24,10 +24,19 @@ public sealed class RecordingResultStore
     public RecordingResultStore(Database database, LogRepository log)
     {
         this.log = log;
-        Files = new RecordingFileCatalog(database, log, Get);
+        Files = new RecordingFileCatalog(database, log, GetFinalizedForFile);
         Directory.CreateDirectory(database.DataDirectory);
         filePath = Path.Combine(database.DataDirectory, "recording-results.json");
         rows = Load();
+    }
+
+    internal TvAirRecordingResultDto? GetFinalizedForFile(string reservationId, string path)
+    {
+        var result = Get(reservationId);
+        return result?.ResultFinalized == true
+            && string.Equals(result.FilePath, path, StringComparison.OrdinalIgnoreCase)
+            ? result
+            : null;
     }
 
     public RecordingResultUpsertOutcome Upsert(TvAirRecordingResultDto result, RecordingTerminationEvidence? terminationEvidence = null)
@@ -154,28 +163,32 @@ public sealed class RecordingResultStore
             if (document.RootElement.ValueKind != JsonValueKind.Array)
                 throw new JsonException("recording-results root is not an array");
 
-            var first = document.RootElement.EnumerateArray().FirstOrDefault();
-            var isNewFormat = first.ValueKind == JsonValueKind.Object
-                && first.TryGetProperty(nameof(StoredRecordingResult.PublicResult), out _);
+            var entries = document.RootElement.EnumerateArray().ToArray();
+            if (entries.Length > 0 && entries.All(IsRetiredResultEntry))
+            {
+                var archivePath = filePath + ".retired-" + Guid.NewGuid().ToString("N");
+                File.Move(filePath, archivePath);
+                log.Add("RECORDING_RESULT_STORE_LOAD", "RecordingResultStore",
+                    $"result=RETIRED_ARCHIVED archive={Path.GetFileName(archivePath)} count={entries.Length}");
+                return new(StringComparer.OrdinalIgnoreCase);
+            }
 
-            List<StoredRecordingResult> list;
-            if (isNewFormat)
-            {
-                list = JsonSerializer.Deserialize<List<StoredRecordingResult>>(json, JsonOptions) ?? new();
-            }
-            else
-            {
-                var legacy = JsonSerializer.Deserialize<List<TvAirRecordingResultDto>>(json, JsonOptions) ?? new();
-                list = legacy.Select(x => new StoredRecordingResult { PublicResult = x }).ToList();
-            }
+            if (entries.Any(entry => entry.ValueKind != JsonValueKind.Object
+                || !entry.TryGetProperty(nameof(StoredRecordingResult.PublicResult), out var result)
+                || result.ValueKind != JsonValueKind.Object))
+                throw new JsonException("Invalid recording result ledger entry.");
+
+            var list = document.RootElement.Deserialize<List<StoredRecordingResult>>(JsonOptions)
+                ?? throw new JsonException("Invalid recording result ledger.");
+            if (list.Any(row => string.IsNullOrWhiteSpace(row.PublicResult.ReservationId)))
+                throw new JsonException("Recording result ledger entry has no reservation ID.");
 
             var loaded = list
-                .Where(x => x.PublicResult is not null && !string.IsNullOrWhiteSpace(x.PublicResult.ReservationId))
-                .GroupBy(x => x.PublicResult.ReservationId, StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(g => g.Key, g => NormalizeSucceeded(g.Last()), StringComparer.OrdinalIgnoreCase);
+                .GroupBy(row => row.PublicResult.ReservationId, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.Last(), StringComparer.OrdinalIgnoreCase);
 
             log.Add("RECORDING_RESULT_STORE_LOAD", "RecordingResultStore",
-                $"result=OK format={(isNewFormat ? "stored_result" : "legacy_public_result")} count={loaded.Count} migration=typed_succeeded_projection rule=recording_result_store_contract");
+                $"result=OK count={loaded.Count} rule=recording_result_store_contract");
             return loaded;
         }
         catch (FileNotFoundException) when (allowMissing)
@@ -196,27 +209,14 @@ public sealed class RecordingResultStore
     }
 
 
-    // Legacy recording-results predate the typed Succeeded field. The store is the compatibility
-    // boundary: infer the historical value once from the old finalized terminal result and expose
-    // only the typed value to plugins. New writes always carry Succeeded directly.
-    private static StoredRecordingResult NormalizeSucceeded(StoredRecordingResult row)
-    {
-        var source = row.PublicResult;
-        if (source.Succeeded || !source.ResultFinalized || !string.Equals(source.Result, "Completed", StringComparison.OrdinalIgnoreCase))
-            return row;
-        row.PublicResult = new TvAirRecordingResultDto
-        {
-            ReservationId = source.ReservationId, RecordingId = source.RecordingId, ServiceName = source.ServiceName, EventTitle = source.EventTitle,
-            NetworkId = source.NetworkId, TransportStreamId = source.TransportStreamId, ServiceId = source.ServiceId, EventId = source.EventId,
-            ScheduledStartTime = source.ScheduledStartTime, Genre = source.Genre, GenreCodes = source.GenreCodes, ActualStartTime = source.ActualStartTime,
-            ActualEndTime = source.ActualEndTime, Result = source.Result, EndReason = source.EndReason, FilePath = source.FilePath, FileCreated = source.FileCreated,
-            Drop = source.Drop, Error = source.Error, Scramble = source.Scramble, QualityDataAvailable = source.QualityDataAvailable,
-            QualityCompleteness = source.QualityCompleteness, QualitySource = source.QualitySource, ResourceReleaseState = source.ResourceReleaseState,
-            ResultFinalized = source.ResultFinalized, Succeeded = true
-        };
-        return row;
-    }
-
+    private static bool IsRetiredResultEntry(JsonElement entry)
+        => entry.ValueKind == JsonValueKind.Object
+            && !entry.TryGetProperty(nameof(StoredRecordingResult.PublicResult), out _)
+            && entry.TryGetProperty(nameof(TvAirRecordingResultDto.ReservationId), out var reservationId)
+            && reservationId.ValueKind == JsonValueKind.String
+            && !string.IsNullOrWhiteSpace(reservationId.GetString())
+            && entry.TryGetProperty(nameof(TvAirRecordingResultDto.ResultFinalized), out var finalized)
+            && finalized.ValueKind is JsonValueKind.True or JsonValueKind.False;
 
     private static bool IsSameRecordingOccurrence(TvAirRecordingResultDto existing, TvAirRecordingResultDto incoming)
     {

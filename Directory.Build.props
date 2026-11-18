@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project>
   <PropertyGroup>
-    <TvAIrProductVersion>1.2.16</TvAIrProductVersion>
-    <TvAIrFileVersion>1.2.16.0</TvAIrFileVersion>
-    <TvAIrAssemblyVersion>1.2.16.0</TvAIrAssemblyVersion>
+    <TvAIrProductVersion>1.3.0</TvAIrProductVersion>
+    <TvAIrFileVersion>1.3.0.0</TvAIrFileVersion>
+    <TvAIrAssemblyVersion>1.3.0.0</TvAIrAssemblyVersion>
     <TreatWarningsAsErrors Condition="'$(Configuration)' == 'Release'">true</TreatWarningsAsErrors>
     <TvAIrPluginSdkVersion>1.1.19</TvAIrPluginSdkVersion>
     <TvAIrPluginSdkAssemblyVersion>1.0.0.0</TvAIrPluginSdkAssemblyVersion>

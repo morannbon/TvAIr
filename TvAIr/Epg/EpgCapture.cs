@@ -786,23 +786,10 @@ public sealed class EpgCapture
             Log("EPG_ENDING_PHASE", "EPG",
                 $"enter completed={completedGroups.Count}/{groups.Count} imported={totalImported} note=serialize_exit_release_cleanup");
 
-            var elapsed = (int)(DateTime.Now - started).TotalSeconds;
             var totalGroups = groups.Count;
             var completedCount = completedGroups.Count;
             var missingGroups = Math.Max(0, totalGroups - completedCount);
             var missingGroupDetails = FormatMissingGroupDetails(groups, completedGroups);
-            var missingScopes = string.Join(",", groups
-                .Where(g => !completedGroups.Contains(g.Key))
-                .Select(g => g.Group)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
-            var completedScopes = string.Join(",", groups
-                .GroupBy(g => g.Group, StringComparer.OrdinalIgnoreCase)
-                .Where(scopeGroups => scopeGroups.Any()
-                    && scopeGroups.All(g => completedGroups.Contains(g.Key)))
-                .Select(scopeGroups => scopeGroups.Key)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
             var failureSummary = FormatCaptureFailureSummary(groups, completedGroups, runId);
             var blockedReason = ResolveEpgRunBlockedReason(groups, completedCount, totalGroups, runId);
             var runResult = !string.IsNullOrWhiteSpace(blockedReason)
@@ -810,10 +797,10 @@ public sealed class EpgCapture
                 : completedCount == totalGroups && totalGroups > 0
                     ? "OK"
                     : "FAILED";
-            var detailCore = $"result={runResult} targetScope={normalizedScope} runDepth={normalizedDepth} completed={completedCount}/{totalGroups} imported={totalImported} completedScopes={completedScopes} missingGroups={missingGroups} missingScopes={missingScopes} missingGroupDetails=[{missingGroupDetails}] failureSummary=[{failureSummary}]";
+            var detailCore = $"result={runResult} targetScope={normalizedScope} runDepth={normalizedDepth} completed={completedCount}/{totalGroups} imported={totalImported} missingGroups={missingGroups} missingGroupDetails=[{missingGroupDetails}] failureSummary=[{failureSummary}]";
             var detailExtra = $"blockedReason={SafeLogValue(blockedReason)}";
             var detail = detailCore + " " + detailExtra;
-            var captureResultDetail = $"blockedReason={SafeLogValue(blockedReason)}; completedScopes={completedScopes}; missingScopes={missingScopes}; missingGroupDetails={missingGroupDetails}; failureSummary={failureSummary}";
+            var captureResultDetail = $"blockedReason={SafeLogValue(blockedReason)}; missingGroupDetails={missingGroupDetails}; failureSummary={failureSummary}";
             var userFailureReason = EpgFailurePresentationContract.Combine(groups
                 .Where(g => !completedGroups.Contains(g.Key))
                 .Select(g => currentRunCaptureFailures.TryGetValue(RunDiagnosticKey(runId, g.Key), out var failure)
@@ -828,9 +815,6 @@ public sealed class EpgCapture
             var runTitle = runResult == "OK" ? "EPG" : runResult == "BLOCKED" ? "BLOCKED" : "FAILED";
             Log(runEvent, runTitle, msg.Replace("\n", " / ") + " " + detail + " rule=release_contract");
             Log("EPG_RUN_END", runResult, detail + " rule=release_contract");
-            var grGroupKeys = groups.Where(g => IsEpgGroupWave(g, "GR")).Select(g => g.Key).ToList();
-            if (grGroupKeys.Count > 0 && !grGroupKeys.Any(k => completedGroups.Contains(k)))
-                Log("EPG_GR_ALL_EMPTY", "WARN", $"result=WARN grGroups={grGroupKeys.Count} grCompleted=0 rule=release_contract");
 
             var finalPhase = runResult == "OK" ? "completed" : runResult == "BLOCKED" ? "blocked" : "failed";
             var finalProgress = totalGroups <= 0
@@ -934,8 +918,6 @@ public sealed class EpgCapture
 #endif
             return new EpgCaptureResult(string.Equals(runResult, "OK", StringComparison.OrdinalIgnoreCase), completedCount, totalGroups, totalImported, runResult, missingGroups, msg, captureResultDetail)
             {
-                MissingScopes = missingScopes,
-                CompletedScopes = completedScopes,
                 PreRecordEvents = Array.Empty<EpgEvent>(),
                 UserFailureReason = userFailureReason
             };
@@ -1083,8 +1065,6 @@ public sealed class EpgCapture
             "録画前時刻確認を終了しました",
             failureDetail)
         {
-            CompletedScopes = success ? normalizedScope : string.Empty,
-            MissingScopes = success ? string.Empty : normalizedScope,
             PreRecordEvents = snapshot,
             PreRecordFailureReason = terminalReason switch
             {
@@ -6748,8 +6728,6 @@ public sealed record EpgCaptureResult(
     string Message,
     string Detail)
 {
-    public string MissingScopes { get; init; } = string.Empty;
-    public string CompletedScopes { get; init; } = string.Empty;
     public IReadOnlyList<EpgEvent> PreRecordEvents { get; init; } = Array.Empty<EpgEvent>();
     public EpgUserFailureReason UserFailureReason { get; init; } = EpgUserFailureReason.Unspecified;
     internal PreRecordEpgFailureReason PreRecordFailureReason { get; init; } = PreRecordEpgFailureReason.Unspecified;

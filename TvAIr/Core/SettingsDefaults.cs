@@ -1,4 +1,4 @@
-namespace TvAIr.Core;
+﻿namespace TvAIr.Core;
 
 /// <summary>
 /// TvAIr settings defaults shared by persistence, API DTOs, UI projection, and runtime settings.
@@ -20,7 +20,6 @@ public static class SettingsDefaults
     public const bool EpgDisableImmediateRetry = true;
 
     public const bool LaterProgramPriority = false;
-    public const bool ChainRecordingEnabled = false;
     public const int PreStartMarginSeconds = 30;
     public const int PostEndMarginSeconds = 30;
     public const int WakeMinutesBefore = 10;

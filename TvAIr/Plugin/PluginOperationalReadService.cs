@@ -34,7 +34,7 @@ internal sealed class PluginOperationalReadService
     private static bool IsProgramGuideUpdateLog(LogEntry entry)
     {
         var text = $"{entry.Event} {entry.Title} {entry.Message}";
-        return ContainsAny(text, "EPG_RUN_OK", "EPG_RUN_PARTIAL", "PROGRAM_GUIDE_UPDATED", "EPG_IMPORTED", "EPG_COMPLETION");
+        return ContainsAny(text, "EPG_RUN_OK", "PROGRAM_GUIDE_UPDATED", "EPG_IMPORTED", "EPG_COMPLETION");
     }
 
     private static bool ContainsAny(string text, params string[] values)

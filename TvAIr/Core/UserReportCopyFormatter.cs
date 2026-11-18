@@ -19,7 +19,7 @@ internal static class UserReportCopyFormatter
     [
         "state.before", "state.after", "blockedReason", "failureReason", "recordingFailureCause", "reason", "phase",
         "result", "runResult", "targetScope", "completedGroups", "imported", "missingGroups",
-        "retryDeadline", "errorCode", "terminalReason", "startReason", "stopReason"
+        "errorCode", "terminalReason", "startReason", "stopReason"
     ];
     private static readonly HashSet<string> AllowedDetail = new(SafeDetailKeys, StringComparer.OrdinalIgnoreCase);
     private static readonly string[] Fields =

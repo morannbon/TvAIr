@@ -5,7 +5,7 @@ namespace TvAIr.Core;
 ///
 /// - TVTest.ini を書き換えない。
 /// - RecordFolder と同じく、TvAIr 側で勝手な保存先・命名規則を既定化しない。
-/// - 空欄時だけ録画直前に同じキーを直読みにする保険を持つ。
+/// - 初期化されていない場合はTryResolveで同じRecordFileNameキーを読み込む。
 /// </summary>
 public static class TvTestRecordFileNameTemplateResolver
 {

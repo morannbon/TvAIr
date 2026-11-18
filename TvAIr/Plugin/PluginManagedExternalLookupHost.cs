@@ -28,7 +28,6 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
 
     private readonly LogRepository _log;
     private readonly PluginInternetAccessGate _internetAccess;
-    private readonly PluginExternalLookupCredentialStore _credentialStore;
     private readonly IPluginExternalLookupGateway _gateway;
     private readonly IReadOnlyDictionary<string, ProviderDefinition> _providers;
     private readonly SemaphoreSlim _globalGate = new(GlobalConcurrency, GlobalConcurrency);
@@ -36,11 +35,10 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
     private readonly CancellationTokenSource _shutdown = new();
     private int _disposed;
 
-    public PluginManagedExternalLookupHost(LogRepository log, PluginInternetAccessGate internetAccess, PluginExternalLookupCredentialStore credentialStore, IPluginExternalLookupGateway gateway)
+    public PluginManagedExternalLookupHost(LogRepository log, PluginInternetAccessGate internetAccess, IPluginExternalLookupGateway gateway)
     {
         _log = log;
         _internetAccess = internetAccess;
-        _credentialStore = credentialStore;
         _gateway = gateway;
         _providers = BuildProviderCatalog();
     }
@@ -51,7 +49,6 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
     {
         if (!_gateway.Enabled) return Array.Empty<TvAirExternalLookupProviderDto>();
         return _providers.Values
-            .Where(IsRuntimeAvailable)
             .Select(x => new TvAirExternalLookupProviderDto
             {
                 ProviderId = x.ProviderId,
@@ -69,16 +66,12 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
             .ToArray();
     }
 
-    private bool IsRuntimeAvailable(ProviderDefinition provider)
-        => provider.RuntimeEnabled
-           && (!provider.RequiresCredential || _credentialStore.HasCredential(provider.ProviderId));
-
     public bool IsUserAllowed(string pluginId) => _internetAccess.IsUserAllowed(pluginId);
 
     public bool IsPluginAccessEffective(string pluginId, bool descriptorPermission)
         => _gateway.Enabled
            && _internetAccess.IsEffective(PluginIdentity.Normalize(pluginId), descriptorPermission)
-           && _providers.Values.Any(IsRuntimeAvailable);
+           && _providers.Count != 0;
 
     public IReadOnlyList<PluginExternalLookupProviderHostStatusDto> GetProviderHostStatus()
     {
@@ -88,11 +81,7 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
             {
                 ProviderId = x.ProviderId,
                 DisplayName = x.DisplayName,
-                WebsiteUrl = x.WebsiteUrl,
-                RequiresCredential = x.RequiresCredential,
-                CredentialConfigured = !x.RequiresCredential || _credentialStore.HasCredential(x.ProviderId),
-                RuntimeEnabled = x.RuntimeEnabled,
-                UnavailableReason = x.RuntimeEnabled ? string.Empty : x.UnavailableReason
+                WebsiteUrl = x.WebsiteUrl
             })
             .ToArray();
     }
@@ -131,17 +120,9 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
         if (validation is not null)
             return Result(TvAirExternalLookupResultCode.InvalidRequest, providerId, operation, validation);
 
-        var credential = provider.RequiresCredential ? _credentialStore.GetCredential(provider.ProviderId) : null;
-        if (provider.RequiresCredential && string.IsNullOrWhiteSpace(credential))
-            return Result(TvAirExternalLookupResultCode.ProviderNotAllowed, providerId, operation, "Host credential is not configured for this provider.");
-        if (!provider.RuntimeEnabled)
-            return Result(TvAirExternalLookupResultCode.ProviderNotAllowed, providerId, operation, provider.UnavailableReason);
-
-        ProviderRequestPlan requestPlan;
-        try { requestPlan = operationDefinition.BuildRequest(parameters, credential); }
+        Uri uri;
+        try { uri = operationDefinition.BuildRequest(parameters); }
         catch (Exception ex) { return Result(TvAirExternalLookupResultCode.InvalidRequest, providerId, operation, ex.Message); }
-
-        var uri = requestPlan.Uri;
         var destinationCheck = ValidateProviderUri(provider, uri);
         if (destinationCheck is not null) return Result(destinationCheck.Value.Code, providerId, operation, destinationCheck.Value.Message);
 
@@ -166,9 +147,7 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
             {
                 var response = await _gateway.SendAsync(new PluginExternalLookupGatewayRequest
                 {
-                    Uri = current,
-                    Method = operationDefinition.Method,
-                    BearerToken = requestPlan.BearerToken
+                    Uri = current
                 }, linked.Token).ConfigureAwait(false);
                 using (response)
                 {
@@ -188,55 +167,32 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
 
                     var status = (int)response.StatusCode;
                     var mediaType = response.Content.Headers.ContentType?.MediaType ?? string.Empty;
-                    if (operationDefinition.Method == HttpMethod.Head)
-                    {
-                        if (response.StatusCode == HttpStatusCode.TooManyRequests)
-                        {
-                            LogHttpFailure(pluginDisplayName, id, provider, providerId, operation, operationDefinition.Method, current, TvAirExternalLookupResultCode.RateLimited, status, mediaType, responseBytes: 0, bodyPresent: false);
-                            return Result(TvAirExternalLookupResultCode.RateLimited, providerId, operation, "Provider rate limit exceeded.", status, mediaType);
-                        }
-                        if (!response.IsSuccessStatusCode)
-                        {
-                            LogHttpFailure(pluginDisplayName, id, provider, providerId, operation, operationDefinition.Method, current, TvAirExternalLookupResultCode.HttpError, status, mediaType, responseBytes: 0, bodyPresent: false);
-                            return Result(TvAirExternalLookupResultCode.HttpError, providerId, operation, $"HTTP status {status}.", status, mediaType);
-                        }
-                        return new TvAirExternalLookupResultDto
-                        {
-                            Code = TvAirExternalLookupResultCode.Success,
-                            HttpStatusCode = status,
-                            ContentType = mediaType,
-                            Body = string.Empty,
-                            ProviderId = providerId,
-                            Operation = operation,
-                            CompletedAt = DateTimeOffset.Now
-                        };
-                    }
                     if (response.StatusCode == HttpStatusCode.TooManyRequests)
                     {
-                        LogHttpFailure(pluginDisplayName, id, provider, providerId, operation, operationDefinition.Method, current, TvAirExternalLookupResultCode.RateLimited, status, mediaType, responseBytes: 0, bodyPresent: response.Content.Headers.ContentLength is > 0);
+                        LogHttpFailure(pluginDisplayName, id, provider, providerId, operation, current, TvAirExternalLookupResultCode.RateLimited, status, mediaType, responseBytes: 0, bodyPresent: response.Content.Headers.ContentLength is > 0);
                         return Result(TvAirExternalLookupResultCode.RateLimited, providerId, operation, "Provider rate limit exceeded.", status, mediaType);
                     }
                     if (!operationDefinition.AllowedContentTypes.Contains(mediaType))
                     {
-                        LogHttpFailure(pluginDisplayName, id, provider, providerId, operation, operationDefinition.Method, current, TvAirExternalLookupResultCode.InvalidResponse, status, mediaType, responseBytes: response.Content.Headers.ContentLength is long declaredLength && declaredLength <= int.MaxValue ? (int)declaredLength : -1, bodyPresent: response.Content.Headers.ContentLength is > 0);
+                        LogHttpFailure(pluginDisplayName, id, provider, providerId, operation, current, TvAirExternalLookupResultCode.InvalidResponse, status, mediaType, responseBytes: response.Content.Headers.ContentLength is long declaredLength && declaredLength <= int.MaxValue ? (int)declaredLength : -1, bodyPresent: response.Content.Headers.ContentLength is > 0);
                         return Result(TvAirExternalLookupResultCode.InvalidResponse, providerId, operation, "Response Content-Type is not allowed.", status, mediaType);
                     }
                     var bodyResult = await ReadBoundedBodyAsync(response, operationDefinition.MaxResponseBytes, linked.Token).ConfigureAwait(false);
                     if (!bodyResult.Success)
                     {
-                        LogHttpFailure(pluginDisplayName, id, provider, providerId, operation, operationDefinition.Method, current, bodyResult.Code, status, mediaType, responseBytes: -1, bodyPresent: response.Content.Headers.ContentLength is > 0);
+                        LogHttpFailure(pluginDisplayName, id, provider, providerId, operation, current, bodyResult.Code, status, mediaType, responseBytes: -1, bodyPresent: response.Content.Headers.ContentLength is > 0);
                         return Result(bodyResult.Code, providerId, operation, bodyResult.Message, status, mediaType);
                     }
                     var responseBytes = Encoding.UTF8.GetByteCount(bodyResult.Body);
                     var payloadValidation = ValidatePayload(mediaType, bodyResult.Body);
                     if (payloadValidation is not null)
                     {
-                        LogHttpFailure(pluginDisplayName, id, provider, providerId, operation, operationDefinition.Method, current, TvAirExternalLookupResultCode.InvalidResponse, status, mediaType, responseBytes, bodyPresent: responseBytes > 0);
+                        LogHttpFailure(pluginDisplayName, id, provider, providerId, operation, current, TvAirExternalLookupResultCode.InvalidResponse, status, mediaType, responseBytes, bodyPresent: responseBytes > 0);
                         return Result(TvAirExternalLookupResultCode.InvalidResponse, providerId, operation, payloadValidation, status, mediaType);
                     }
                     if (!response.IsSuccessStatusCode)
                     {
-                        LogHttpFailure(pluginDisplayName, id, provider, providerId, operation, operationDefinition.Method, current, TvAirExternalLookupResultCode.HttpError, status, mediaType, responseBytes, bodyPresent: responseBytes > 0);
+                        LogHttpFailure(pluginDisplayName, id, provider, providerId, operation, current, TvAirExternalLookupResultCode.HttpError, status, mediaType, responseBytes, bodyPresent: responseBytes > 0);
                         return Result(TvAirExternalLookupResultCode.HttpError, providerId, operation, $"HTTP status {status}.", status, mediaType);
                     }
 
@@ -261,33 +217,33 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
         {
             if (_shutdown.IsCancellationRequested)
             {
-                LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, operationDefinition.Method, current, TvAirExternalLookupResultCode.HostShuttingDown, ex, timeout: false);
+                LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, current, TvAirExternalLookupResultCode.HostShuttingDown, ex, timeout: false);
                 return Result(TvAirExternalLookupResultCode.HostShuttingDown, providerId, operation, "TvAIr is shutting down.");
             }
             if (state.Stop.IsCancellationRequested)
             {
-                LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, operationDefinition.Method, current, TvAirExternalLookupResultCode.PluginStopping, ex, timeout: false);
+                LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, current, TvAirExternalLookupResultCode.PluginStopping, ex, timeout: false);
                 return Result(TvAirExternalLookupResultCode.PluginStopping, providerId, operation, "Plugin communication was stopped.");
             }
             if (timeoutCts.IsCancellationRequested)
             {
-                LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, operationDefinition.Method, current, TvAirExternalLookupResultCode.Timeout, ex, timeout: true);
+                LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, current, TvAirExternalLookupResultCode.Timeout, ex, timeout: true);
                 return Result(TvAirExternalLookupResultCode.Timeout, providerId, operation, "External lookup timed out.");
             }
-            LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, operationDefinition.Method, current, TvAirExternalLookupResultCode.Cancelled, ex, timeout: false);
+            LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, current, TvAirExternalLookupResultCode.Cancelled, ex, timeout: false);
             return Result(TvAirExternalLookupResultCode.Cancelled, providerId, operation, "External lookup was cancelled.");
         }
-        catch (AuthenticationException ex) { LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, operationDefinition.Method, current, TvAirExternalLookupResultCode.TlsFailure, ex, timeout: false); return Result(TvAirExternalLookupResultCode.TlsFailure, providerId, operation, ex.Message); }
-        catch (PluginExternalLookupGatewayDisabledException ex) { LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, operationDefinition.Method, current, TvAirExternalLookupResultCode.ProviderNotAllowed, ex, timeout: false); return Result(TvAirExternalLookupResultCode.ProviderNotAllowed, providerId, operation, ex.Message); }
-        catch (PluginExternalLookupDestinationRejectedException ex) { LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, operationDefinition.Method, current, TvAirExternalLookupResultCode.DestinationRejected, ex, timeout: false); return Result(TvAirExternalLookupResultCode.DestinationRejected, providerId, operation, ex.Message); }
-        catch (DestinationRejectedException ex) { LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, operationDefinition.Method, current, TvAirExternalLookupResultCode.DestinationRejected, ex, timeout: false); return Result(TvAirExternalLookupResultCode.DestinationRejected, providerId, operation, ex.Message); }
+        catch (AuthenticationException ex) { LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, current, TvAirExternalLookupResultCode.TlsFailure, ex, timeout: false); return Result(TvAirExternalLookupResultCode.TlsFailure, providerId, operation, ex.Message); }
+        catch (PluginExternalLookupGatewayDisabledException ex) { LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, current, TvAirExternalLookupResultCode.ProviderNotAllowed, ex, timeout: false); return Result(TvAirExternalLookupResultCode.ProviderNotAllowed, providerId, operation, ex.Message); }
+        catch (PluginExternalLookupDestinationRejectedException ex) { LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, current, TvAirExternalLookupResultCode.DestinationRejected, ex, timeout: false); return Result(TvAirExternalLookupResultCode.DestinationRejected, providerId, operation, ex.Message); }
+        catch (DestinationRejectedException ex) { LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, current, TvAirExternalLookupResultCode.DestinationRejected, ex, timeout: false); return Result(TvAirExternalLookupResultCode.DestinationRejected, providerId, operation, ex.Message); }
         catch (SocketException ex) when (ex.SocketErrorCode == SocketError.HostNotFound || ex.SocketErrorCode == SocketError.TryAgain)
-        { LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, operationDefinition.Method, current, TvAirExternalLookupResultCode.DnsFailure, ex, timeout: false); return Result(TvAirExternalLookupResultCode.DnsFailure, providerId, operation, ex.Message); }
+        { LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, current, TvAirExternalLookupResultCode.DnsFailure, ex, timeout: false); return Result(TvAirExternalLookupResultCode.DnsFailure, providerId, operation, ex.Message); }
         catch (HttpRequestException ex) when (ex.InnerException is DestinationRejectedException || ex.InnerException is PluginExternalLookupDestinationRejectedException || ex.Message.Contains("prohibited IP", StringComparison.OrdinalIgnoreCase))
-        { LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, operationDefinition.Method, current, TvAirExternalLookupResultCode.DestinationRejected, ex, timeout: false); return Result(TvAirExternalLookupResultCode.DestinationRejected, providerId, operation, ex.Message); }
-        catch (HttpRequestException ex) { LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, operationDefinition.Method, current, TvAirExternalLookupResultCode.ConnectionFailure, ex, timeout: false); return Result(TvAirExternalLookupResultCode.ConnectionFailure, providerId, operation, ex.Message); }
-        catch (SocketException ex) { LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, operationDefinition.Method, current, TvAirExternalLookupResultCode.ConnectionFailure, ex, timeout: false); return Result(TvAirExternalLookupResultCode.ConnectionFailure, providerId, operation, ex.Message); }
-        catch (Exception ex) { LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, operationDefinition.Method, current, TvAirExternalLookupResultCode.InvalidResponse, ex, timeout: false); return Result(TvAirExternalLookupResultCode.InvalidResponse, providerId, operation, ex.Message); }
+        { LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, current, TvAirExternalLookupResultCode.DestinationRejected, ex, timeout: false); return Result(TvAirExternalLookupResultCode.DestinationRejected, providerId, operation, ex.Message); }
+        catch (HttpRequestException ex) { LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, current, TvAirExternalLookupResultCode.ConnectionFailure, ex, timeout: false); return Result(TvAirExternalLookupResultCode.ConnectionFailure, providerId, operation, ex.Message); }
+        catch (SocketException ex) { LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, current, TvAirExternalLookupResultCode.ConnectionFailure, ex, timeout: false); return Result(TvAirExternalLookupResultCode.ConnectionFailure, providerId, operation, ex.Message); }
+        catch (Exception ex) { LogExceptionFailure(pluginDisplayName, id, provider, providerId, operation, current, TvAirExternalLookupResultCode.InvalidResponse, ex, timeout: false); return Result(TvAirExternalLookupResultCode.InvalidResponse, providerId, operation, ex.Message); }
         finally
         {
             if (enteredGlobal) _globalGate.Release();
@@ -315,7 +271,6 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
         ProviderDefinition provider,
         string providerId,
         string operation,
-        HttpMethod method,
         Uri uri,
         TvAirExternalLookupResultCode code,
         int status,
@@ -325,7 +280,7 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
     {
 #if TVAIR_DEVELOPER_DIAGNOSTICS
         _log.Add("PLUGIN_EXTERNAL_LOOKUP", pluginDisplayName,
-            $"result=ERROR pluginId={Safe(pluginId)} provider={Safe(providerId)} operation={Safe(operation)} code={code} method={Safe(method.Method)} host={Safe(uri.IdnHost)} path={Safe(uri.AbsolutePath)} status={status} contentType={Safe(contentType)} bytes={responseBytes} bodyPresent={bodyPresent} timeout=False exception=- destination={Safe(provider.DisplayName)} rule=plugin_managed_external_lookup_contract");
+            $"result=ERROR pluginId={Safe(pluginId)} provider={Safe(providerId)} operation={Safe(operation)} code={code} method=GET host={Safe(uri.IdnHost)} path={Safe(uri.AbsolutePath)} status={status} contentType={Safe(contentType)} bytes={responseBytes} bodyPresent={bodyPresent} timeout=False exception=- destination={Safe(provider.DisplayName)} rule=plugin_managed_external_lookup_contract");
 #endif
     }
 
@@ -336,7 +291,6 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
         ProviderDefinition provider,
         string providerId,
         string operation,
-        HttpMethod method,
         Uri uri,
         TvAirExternalLookupResultCode code,
         Exception exception,
@@ -344,7 +298,7 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
     {
 #if TVAIR_DEVELOPER_DIAGNOSTICS
         _log.Add("PLUGIN_EXTERNAL_LOOKUP", pluginDisplayName,
-            $"result=ERROR pluginId={Safe(pluginId)} provider={Safe(providerId)} operation={Safe(operation)} code={code} method={Safe(method.Method)} host={Safe(uri.IdnHost)} path={Safe(uri.AbsolutePath)} status=- contentType=- bytes=-1 bodyPresent=False timeout={timeout} exception={Safe(exception.GetType().Name)} destination={Safe(provider.DisplayName)} rule=plugin_managed_external_lookup_contract");
+            $"result=ERROR pluginId={Safe(pluginId)} provider={Safe(providerId)} operation={Safe(operation)} code={code} method=GET host={Safe(uri.IdnHost)} path={Safe(uri.AbsolutePath)} status=- contentType=- bytes=-1 bodyPresent=False timeout={timeout} exception={Safe(exception.GetType().Name)} destination={Safe(provider.DisplayName)} rule=plugin_managed_external_lookup_contract");
 #endif
     }
 
@@ -429,7 +383,7 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
     {
         // EXTERNAL_LOOKUP_PROVIDER_SINGLE_SOURCE_CONTRACT:
         // Provider registration is Host-owned. Plugins can choose only ProviderId/Operation and bounded parameters.
-        // Domains, concrete URLs, methods, credentials and security policy never come from plugin input.
+        // Domains, concrete URLs, HTTP method and security policy never come from plugin input.
         return new Dictionary<string, ProviderDefinition>(StringComparer.OrdinalIgnoreCase)
         {
             [TvMazeProviderId] = new ProviderDefinition
@@ -438,8 +392,6 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
                 DisplayName = "TVmaze",
                 WebsiteUrl = TvMazeWebsiteUrl,
                 AllowedHosts = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { TvMazeApiHost },
-                RequiresCredential = false,
-                RuntimeEnabled = true,
                 Operations = new Dictionary<string, OperationDefinition>(StringComparer.OrdinalIgnoreCase)
                 {
                     ["SearchShow"] = new OperationDefinition
@@ -447,17 +399,17 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
                         MaxResponseBytes = 512 * 1024,
                         Parameters = new[]{new TvAirExternalLookupParameterDto{Name="query",Required=true,Kind=TvAirExternalLookupParameterKind.Text,MinLength=1,MaxLength=160}},
                         ResultScope = TvAirExternalLookupResultScope.SearchResults,
-                        BuildRequest = (p, _) => new ProviderRequestPlan(HttpsUri(TvMazeApiHost, "/search/shows", new Dictionary<string, string> { ["q"] = p["query"].Trim() }))
+                        BuildRequest = p => HttpsUri(TvMazeApiHost, "/search/shows", new Dictionary<string, string> { ["q"] = p["query"].Trim() })
                     },
                     ["GetEpisodes"] = new OperationDefinition
                     {
                         MaxResponseBytes = 768 * 1024,
                         Parameters = new[]{PositiveParameter("showId")},
                         ResultScope = TvAirExternalLookupResultScope.CompleteCollection,
-                        BuildRequest = (p, _) =>
+                        BuildRequest = p =>
                         {
                             var showId = CanonicalInteger(p,"showId");
-                            return new ProviderRequestPlan(HttpsUri(TvMazeApiHost, $"/shows/{showId}/episodes"));
+                            return HttpsUri(TvMazeApiHost, $"/shows/{showId}/episodes");
                         }
                     },
                     ["GetSeasons"] = new OperationDefinition
@@ -465,25 +417,25 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
                         MaxResponseBytes = 256 * 1024,
                         Parameters = new[]{PositiveParameter("showId")},
                         ResultScope = TvAirExternalLookupResultScope.CompleteCollection,
-                        BuildRequest = (p, _) => new ProviderRequestPlan(HttpsUri(TvMazeApiHost,$"/shows/{CanonicalInteger(p,"showId")}/seasons"))
+                        BuildRequest = p => HttpsUri(TvMazeApiHost,$"/shows/{CanonicalInteger(p,"showId")}/seasons")
                     },
                     ["GetEpisodeByNumber"] = new OperationDefinition
                     {
                         MaxResponseBytes = 128 * 1024,
                         Parameters = new[]{PositiveParameter("showId"),PositiveParameter("season"),PositiveParameter("number")},
                         ResultScope = TvAirExternalLookupResultScope.SingleItem,
-                        BuildRequest = (p, _) => new ProviderRequestPlan(HttpsUri(TvMazeApiHost,$"/shows/{CanonicalInteger(p,"showId")}/episodebynumber",
-                            new Dictionary<string,string>{{"season",CanonicalInteger(p,"season")},{"number",CanonicalInteger(p,"number")}}))
+                        BuildRequest = p => HttpsUri(TvMazeApiHost,$"/shows/{CanonicalInteger(p,"showId")}/episodebynumber",
+                            new Dictionary<string,string>{{"season",CanonicalInteger(p,"season")},{"number",CanonicalInteger(p,"number")}})
                     },
                     ["GetAliases"] = new OperationDefinition
                     {
                         MaxResponseBytes = 256 * 1024,
                         Parameters = new[]{PositiveParameter("showId")},
                         ResultScope = TvAirExternalLookupResultScope.CompleteCollection,
-                        BuildRequest = (p, _) =>
+                        BuildRequest = p =>
                         {
                             var showId = CanonicalInteger(p,"showId");
-                            return new ProviderRequestPlan(HttpsUri(TvMazeApiHost, $"/shows/{showId}/akas"));
+                            return HttpsUri(TvMazeApiHost, $"/shows/{showId}/akas");
                         }
                     }
                 }
@@ -526,19 +478,15 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
         public required string DisplayName { get; init; }
         public required string WebsiteUrl { get; init; }
         public required HashSet<string> AllowedHosts { get; init; }
-        public bool RequiresCredential { get; init; }
-        public bool RuntimeEnabled { get; init; } = true;
-        public string UnavailableReason { get; init; } = "Provider is not currently available.";
         public required IReadOnlyDictionary<string, OperationDefinition> Operations { get; init; }
     }
 
     internal sealed class OperationDefinition
     {
-        public HttpMethod Method { get; init; } = HttpMethod.Get;
         public int MaxResponseBytes { get; init; } = DefaultMaxResponseBytes;
         public TimeSpan? Timeout { get; init; }
         public HashSet<string> AllowedContentTypes { get; init; } = new(StringComparer.OrdinalIgnoreCase) { "application/json" };
-        public required Func<IReadOnlyDictionary<string, string>, string?, ProviderRequestPlan> BuildRequest { get; init; }
+        public required Func<IReadOnlyDictionary<string, string>, Uri> BuildRequest { get; init; }
         public required IReadOnlyList<TvAirExternalLookupParameterDto> Parameters { get; init; }
         public TvAirExternalLookupResultScope ResultScope { get; init; }
         public string? ValidateParameters(IReadOnlyDictionary<string,string> values)
@@ -562,8 +510,6 @@ public sealed class PluginManagedExternalLookupHost : IDisposable
             return null;
         }
     }
-
-    internal readonly record struct ProviderRequestPlan(Uri Uri, string? BearerToken = null);
 
     private sealed class PluginState : IDisposable
     {
@@ -606,8 +552,4 @@ public sealed class PluginExternalLookupProviderHostStatusDto
     public string ProviderId { get; init; } = string.Empty;
     public string DisplayName { get; init; } = string.Empty;
     public string WebsiteUrl { get; init; } = string.Empty;
-    public bool RequiresCredential { get; init; }
-    public bool CredentialConfigured { get; init; }
-    public bool RuntimeEnabled { get; init; }
-    public string UnavailableReason { get; init; } = string.Empty;
 }

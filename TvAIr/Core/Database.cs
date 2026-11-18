@@ -50,8 +50,6 @@ public sealed class Database
             pragma.ExecuteNonQuery();
         }
         CreateTables(con);
-        Migrate(con);
-        CreatePostMigrationIndexes(con);
         using var bindingTransaction = con.BeginTransaction();
         using var bindingTrigger = con.CreateCommand();
         bindingTrigger.Transaction = bindingTransaction;
@@ -150,7 +148,9 @@ public sealed class Database
                 data_version        INTEGER NOT NULL DEFAULT 0,
                 reservation_intent   TEXT    NOT NULL DEFAULT 'unspecified',
                 created_through      TEXT    NOT NULL DEFAULT '',
-                created_by_plugin_id TEXT    NOT NULL DEFAULT ''
+                created_by_plugin_id TEXT    NOT NULL DEFAULT '',
+                chain_finalization_receipt TEXT NOT NULL DEFAULT '',
+                chain_stop_receipt TEXT NOT NULL DEFAULT ''
             );
 
             CREATE INDEX IF NOT EXISTS idx_reservations_start
@@ -353,6 +353,12 @@ public sealed class Database
             CREATE INDEX IF NOT EXISTS idx_user_event_logs_severity
                 ON user_event_logs (severity, created_at);
 
+            CREATE INDEX IF NOT EXISTS idx_user_event_logs_recovery_chain
+                ON user_event_logs (recording_recovery_chain_id, created_at);
+
+            CREATE INDEX IF NOT EXISTS idx_user_event_logs_resume_cycle
+                ON user_event_logs (power_resume_cycle_id, created_at);
+
             -- EPG取得ベースライン（TSごとの最大取得件数・平均取得件数を蓄積）
             -- 目的: 各TSが過去どれくらい取れているかを記録し、run完了時に達成率を
             -- ログ出力することで取りこぼし傾向を可視化する。運用中の実測から
@@ -373,200 +379,4 @@ public sealed class Database
         cmd.ExecuteNonQuery();
     }
 
-    private static void CreatePostMigrationIndexes(SqliteConnection con)
-    {
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = """
-            CREATE INDEX IF NOT EXISTS idx_user_event_logs_recovery_chain
-                ON user_event_logs (recording_recovery_chain_id, created_at);
-
-            CREATE INDEX IF NOT EXISTS idx_user_event_logs_resume_cycle
-                ON user_event_logs (power_resume_cycle_id, created_at);
-            """;
-        cmd.ExecuteNonQuery();
-    }
-
-    /// <summary>
-    /// カラム追加などの後方互換マイグレーション。
-    /// テーブルが存在する前提で、不足カラムのみADD COLUMNする。
-    /// ※ CreateTables() で定義済みのカラムはここに記載不要だが、
-    ///    既存DBからの移行互換のため保持する。
-    /// </summary>
-    private static void Migrate(SqliteConnection con)
-    {
-
-
-        // EPG DB is a disposable capture cache. Ensure the current pure-EPG schema even when a previous cache file remains.
-        EnsureColumn(con, "epg_events", "network_id", "INTEGER NOT NULL DEFAULT 0");
-        EnsureColumn(con, "epg_events", "transport_stream_id", "INTEGER NOT NULL DEFAULT 0");
-        EnsureColumn(con, "epg_events", "service_name", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "epg_events", "genre", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "epg_events", "genre_codes", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "epg_events", "table_id", "INTEGER NOT NULL DEFAULT 0");
-        EnsureColumn(con, "epg_events", "section_number", "INTEGER NOT NULL DEFAULT 0");
-        EnsureColumn(con, "epg_events", "version_number", "INTEGER NOT NULL DEFAULT 0");
-        EnsureColumn(con, "epg_events", "raw_descriptor_loop", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "epg_events", "raw_short_event_descriptor", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "epg_events", "raw_extended_event_descriptor", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "epg_events", "raw_content_descriptor", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "epg_events", "other_schedule_seen", "INTEGER NOT NULL DEFAULT 0");
-
-        // 実行時ストアの不足カラムを補う。DBファイル自体の持ち越しは前提にしない。
-        EnsureColumn(con, "reservations", "network_id",          "INTEGER NOT NULL DEFAULT 0");
-        EnsureColumn(con, "reservations", "transport_stream_id", "INTEGER NOT NULL DEFAULT 0");
-        EnsureColumn(con, "reservations", "source",              "TEXT NOT NULL DEFAULT 'manual'");
-        EnsureColumn(con, "reservations", "channel_argument",    "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "reservations", "is_conflicted",       "INTEGER NOT NULL DEFAULT 0");
-        EnsureColumn(con, "reservations", "is_enabled",          "INTEGER NOT NULL DEFAULT 1");
-        EnsureColumn(con, "reservations", "tuner_name",          "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "reservations", "actual_tuner_name",   "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "reservations", "recording_started_at","TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "reservations", "recording_finished_at","TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "reservations", "service_name",        "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "reservations", "scheduled_start_time","TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "reservations", "source_rule_id",     "INTEGER NULL");
-        EnsureColumn(con, "reservations", "source_rule_name",   "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "reservations", "plugin_binding_json", "TEXT NOT NULL DEFAULT '[]'");
-        EnsureColumn(con, "keyword_rules", "plugin_binding_json", "TEXT NOT NULL DEFAULT '[]'");
-        EnsureColumn(con, "reservations", "is_user_chain",     "INTEGER NOT NULL DEFAULT 0");
-        EnsureColumn(con, "reservations", "user_chain_previous_id", "INTEGER NULL");
-        EnsureColumn(con, "reservations", "user_chain_root_id", "INTEGER NULL");
-        EnsureColumn(con, "reservations", "recording_recovery_chain_id", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "reservations", "recovery_parent_reservation_id", "INTEGER NULL");
-        EnsureColumn(con, "reservations", "data_version", "INTEGER NOT NULL DEFAULT 0");
-        EnsureColumn(con, "reservations", "chain_finalization_receipt", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "reservations", "chain_stop_receipt", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "reservations", "reservation_intent", "TEXT NOT NULL DEFAULT 'unspecified'");
-        EnsureColumn(con, "reservations", "created_through", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "reservations", "created_by_plugin_id", "TEXT NOT NULL DEFAULT ''");
-
-        // 既存形式のPlugin予約は、起動時に一度だけ構造化された所有者へ移行する。
-        // 実行時の操作可否・更新・取消は CreatedThrough / CreatedByPluginId だけを参照する。
-        using (var migratePluginReservationOwner = con.CreateCommand())
-        {
-            migratePluginReservationOwner.CommandText = """
-                UPDATE reservations
-                SET created_through = 'Plugin',
-                    created_by_plugin_id = trim(substr(source_rule_name, 8))
-                WHERE created_through = ''
-                  AND created_by_plugin_id = ''
-                  AND lower(source_rule_name) LIKE 'plugin:%'
-                  AND trim(substr(source_rule_name, 8)) <> '';
-
-                UPDATE reservations
-                SET source_rule_name = ''
-                WHERE lower(created_through) = 'plugin'
-                  AND created_by_plugin_id <> ''
-                  AND lower(source_rule_name) = lower('Plugin:' || created_by_plugin_id);
-                """;
-            migratePluginReservationOwner.ExecuteNonQuery();
-        }
-
-        // 既存DBのSystem EPG行にreservation_intentが無い場合だけ、一度構造化して正本へ揃える。
-        // 通常実行・表示はreservation_intentだけを参照し、Title / SourceRuleNameを判定fallbackに使わない。
-        using (var migrateSystemEpgIntent = con.CreateCommand())
-        {
-            migrateSystemEpgIntent.CommandText = """
-                UPDATE reservations
-                SET reservation_intent = $preRecordIntent
-                WHERE source = 'epg'
-                  AND reservation_intent IN ('unspecified', 'system')
-                  AND (source_rule_name = 'PreRecEpg'
-                       OR title LIKE 'EPG確認%'
-                       OR title LIKE '録画前EPG確認%');
-
-                UPDATE reservations
-                SET reservation_intent = $dailyIntent
-                WHERE source = 'epg'
-                  AND reservation_intent IN ('unspecified', 'system')
-                  AND title LIKE 'EPG取得%';
-
-                UPDATE reservations
-                SET source_rule_name = ''
-                WHERE source = 'epg'
-                  AND reservation_intent IN ($preRecordIntent, $dailyIntent);
-                """;
-            migrateSystemEpgIntent.Parameters.AddWithValue("$preRecordIntent", ReservationIntentContract.SystemPreRecordEpgStorageValue);
-            migrateSystemEpgIntent.Parameters.AddWithValue("$dailyIntent", ReservationIntentContract.SystemDailyEpgStorageValue);
-            migrateSystemEpgIntent.ExecuteNonQuery();
-        }
-
-        EnsureColumn(con, "manual_stopped_occurrences", "event_id", "INTEGER NOT NULL DEFAULT 0");
-
-        // release_contract: ユーザー運用ログは /api/log からの推測ではなく、
-        // UserOperationEvent 正本として報告用メタ属性を保持する。
-        EnsureColumn(con, "user_event_logs", "operation_id", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "user_event_logs", "app_version", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "user_event_logs", "previous_app_version", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "user_event_logs", "version_changed", "INTEGER NOT NULL DEFAULT 0");
-        EnsureColumn(con, "user_event_logs", "story_context", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "user_event_logs", "origin", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "user_event_logs", "event_trigger", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "user_event_logs", "story_role", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "user_event_logs", "target_kind", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "user_event_logs", "actionability", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "user_event_logs", "reservation_source", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "user_event_logs", "program_title", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "user_event_logs", "reservation_id", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "user_event_logs", "recording_id", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "user_event_logs", "recording_recovery_chain_id", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "user_event_logs", "power_resume_cycle_id", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "user_event_logs", "service_name", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "user_event_logs", "scheduled_start", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "user_event_logs", "scheduled_end", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "user_event_logs", "actual_start", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "user_event_logs", "actual_end", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "user_event_logs", "drop_count", "INTEGER NULL");
-        EnsureColumn(con, "user_event_logs", "error_count", "INTEGER NULL");
-        EnsureColumn(con, "user_event_logs", "scramble_count", "INTEGER NULL");
-        EnsureColumn(con, "user_event_logs", "file_path", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "user_event_logs", "completion_reason", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "user_event_logs", "details_json", "TEXT NOT NULL DEFAULT '{}'");
-        EnsureColumn(con, "user_event_logs", "detail", "TEXT NOT NULL DEFAULT ''");
-        // keyword_rules はJSON export/importで持ち越すユーザー資産。
-        EnsureColumn(con, "keyword_rules", "exclude_pattern", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "keyword_rules", "search_title",    "INTEGER NOT NULL DEFAULT 1");
-        EnsureColumn(con, "keyword_rules", "search_outline",  "INTEGER NOT NULL DEFAULT 1");
-        EnsureColumn(con, "keyword_rules", "search_detail",   "INTEGER NOT NULL DEFAULT 1");
-        EnsureColumn(con, "keyword_rules", "search_cast",     "INTEGER NOT NULL DEFAULT 1");
-        EnsureColumn(con, "keyword_rules", "use_all_channels","INTEGER NOT NULL DEFAULT 1");
-        EnsureColumn(con, "keyword_rules", "target_genres",   "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "keyword_rules", "target_services", "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "keyword_rules", "target_days",     "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "keyword_rules", "use_time_range",  "INTEGER NOT NULL DEFAULT 0");
-        EnsureColumn(con, "keyword_rules", "start_time",      "TEXT NOT NULL DEFAULT '00:00'");
-        EnsureColumn(con, "keyword_rules", "end_time",        "TEXT NOT NULL DEFAULT '23:59'");
-        EnsureColumn(con, "keyword_rules", "sort_order",      "INTEGER NOT NULL DEFAULT 0");
-        EnsureColumn(con, "keyword_rules", "expires_on",      "TEXT NOT NULL DEFAULT ''");
-        EnsureColumn(con, "keyword_rules", "record_current_service_only", "INTEGER NOT NULL DEFAULT 1");
-        EnsureColumn(con, "keyword_rules", "record_subtitles", "INTEGER NOT NULL DEFAULT 1");
-        EnsureColumn(con, "keyword_rules", "auto_chain_reservations", "INTEGER NOT NULL DEFAULT 0");
-
-        using (var fillSort = con.CreateCommand())
-        {
-            fillSort.CommandText = "UPDATE keyword_rules SET sort_order = id WHERE sort_order = 0;";
-            fillSort.ExecuteNonQuery();
-        }
-    }
-
-    /// <summary>指定カラムが存在しない場合のみADD COLUMN</summary>
-    internal static void EnsureColumn(SqliteConnection con, string table, string column, string definition)
-    {
-        var existing = GetColumns(con, table);
-        if (existing.Contains(column)) return;
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition};";
-        cmd.ExecuteNonQuery();
-    }
-
-    private static HashSet<string> GetColumns(SqliteConnection con, string table)
-    {
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = $"PRAGMA table_info({table});";
-        using var reader = cmd.ExecuteReader();
-        var cols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        while (reader.Read())
-            cols.Add(reader.GetString(1));
-        return cols;
-    }
 }

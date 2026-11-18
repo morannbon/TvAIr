@@ -2,7 +2,7 @@
   "Name": "TvAIr",
   "Solution": "TvAIr.sln",
   "Dll": "TvAIr.dll",
-  "Version": "1.2.16",
+  "Version": "1.3.0",
   "Project": "TvAIr",
   "Framework": "net8.0-windows"
 }

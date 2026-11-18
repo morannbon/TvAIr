@@ -127,9 +127,8 @@ public sealed class EpgScheduler : BackgroundService
     private DateTime? suspendedDailyDate;
     private int externalSchedulerSignalsSubscribed;
 
-    // 定時EPGは設定時刻を正本とする可動枠。録画予約は動かさず、Daily All全体が
-    // 完走できる単一の連続占有枠を最大3時間の範囲で後方へ移動する。枠は分割せず、
-    // 放送波別の部分実行・部分成功は持たない。実行開始後は明示キャンセルまたは実エラー以外で中断しない。
+    // 定時EPGは設定時刻から最大3時間の範囲でAllの単一連続枠を決める。
+    // 録画予約は動かさず、実行開始後は明示キャンセルまたは実エラー以外で中断しない。
     private static readonly TimeSpan ScheduledEpgMovementLimit = TimeSpan.FromHours(3);
     private static readonly TimeSpan EpgStartEstimateSafetyMargin = TimeSpan.FromMinutes(2);
 
@@ -204,13 +203,15 @@ public sealed class EpgScheduler : BackgroundService
 
     /// <summary>
     /// Planner結果をDaily stateへ写す唯一の境界。Scheduled Dailyは1日1本のAll計画だけを持つ。
-    /// Running以降は計画・設定snapshotを変更せず、意味的に同一のplanなら永続化しない。
+    /// Running/Finalizing/Succeeded/Failed/Cancelledは計画を変更しない。
+    /// Expiredは明示された深度変更のみ記録し、完走可能ならPlannedへ戻す。
     /// </summary>
     private bool TryCommitDailyPlannerResult(
         DateTime targetDate,
         DailyEpgConfigSnapshot configSnapshot,
         DailyEpgPlanResult plan,
-        DateTime updatedAt)
+        DateTime updatedAt,
+        bool allowExpiredDepthRevision = false)
     {
         lock (dailyRunStateGate)
         {
@@ -235,24 +236,32 @@ public sealed class EpgScheduler : BackgroundService
             }
 
             var current = currentDailyRunState;
-            if (current.State is DailyEpgRunPhase.Running or DailyEpgRunPhase.Finalizing
-                or DailyEpgRunPhase.Succeeded or DailyEpgRunPhase.Failed
-                or DailyEpgRunPhase.Expired or DailyEpgRunPhase.Cancelled)
+            // Expiredは設定変更の入口に限って深度を再評価する。
+            // 取得枠がなくても新しい深度を永続正本へ保存し、後日の予約取消などで
+            // 同じ深度のまま自動的に当日runを復活させない。
+            var depthRevision = current.State == DailyEpgRunPhase.Expired
+                && allowExpiredDepthRevision
+                && DailyEpgDepthReplanPolicy.CanApplyDepthRevision(current, configSnapshot, plan, updatedAt);
+            var reopen = depthRevision
+                && DailyEpgDepthReplanPolicy.CanReopen(current, configSnapshot, plan, updatedAt);
+            if (current.State != DailyEpgRunPhase.Planned && !depthRevision)
                 return false;
 
             var planChanged = !DailyEpgPlanSemantics.SamePlan(current, plan);
             var configChanged = current.Config != configSnapshot;
-            if (!planChanged && !configChanged) return false;
+            if (!depthRevision && !planChanged && !configChanged) return false;
 
+            var retainExpired = depthRevision && !reopen;
             var nextState = current with
             {
+                State = retainExpired ? DailyEpgRunPhase.Expired : DailyEpgRunPhase.Planned,
                 Config = configSnapshot,
                 CanonicalStart = plan.CanonicalStart,
-                PlannedStart = plan.PlannedStart,
-                PlannedEnd = plan.PlannedEnd,
+                PlannedStart = retainExpired ? null : plan.PlannedStart,
+                PlannedEnd = retainExpired ? null : plan.PlannedEnd,
                 MovementDeadline = plan.MovementDeadline,
                 RequiredSeconds = plan.RequiredSeconds,
-                Placement = plan.Placement,
+                Placement = retainExpired ? DailyEpgPlacementState.Unplaced : plan.Placement,
                 UpdatedAt = updatedAt
             };
             dailyRunStateStore.Save(nextState);
@@ -339,20 +348,22 @@ public sealed class EpgScheduler : BackgroundService
         }
     }
 
-    /// <summary>最大3時間内にAllが完走できる連続枠が無い場合だけExpiredへ進める。</summary>
-    private void CommitDailyExpired(DateTime updatedAt)
+    /// <summary>
+    /// Plannerが未配置を確定し、残り時間でAllを完走できなくなった時だけExpiredへ進める。
+    /// 完走可能性の境界はPlannerと待機計算が共有する正本を参照する。
+    /// </summary>
+    private bool CommitDailyExpired(DateTime updatedAt)
     {
         lock (dailyRunStateGate)
         {
             var current = currentDailyRunState;
-            if (current is null || current.State != DailyEpgRunPhase.Planned
-                || current.Placement != DailyEpgPlacementState.Unplaced
-                || updatedAt < current.MovementDeadline)
-                return;
+            if (current is null || !DailyEpgExecutionWindow.IsUnplacedExhausted(current, updatedAt))
+                return false;
             var next = current with { State = DailyEpgRunPhase.Expired, UpdatedAt = updatedAt };
             dailyRunStateStore.Save(next);
             currentDailyRunState = next;
             systemEpgResponsibilityPlan.UpdateDailyState(next);
+            return true;
         }
     }
 
@@ -498,7 +509,9 @@ public sealed class EpgScheduler : BackgroundService
     }
 
     /// <summary>
-    /// Failed/Expired/Cancelled は当日再実行しないが、翌日は同じDaily契約から新規開始する。
+    /// Failed/Cancelledおよび通常のExpiredは当日再実行しない。
+    /// Expiredだけは新しい取得深度で完走可能となった時の明示的な再計画を許す。
+    /// 翌日は同じDaily契約から新規開始する。
     /// terminal stateを今日の正本として保持したまま、翌日SystemDailyEpgを投影した後、
     /// その新しいDaily境界を正本としてPreRec責務を再materializeし、Wakeまで共通routeで収束させる。
     /// </summary>
@@ -512,7 +525,7 @@ public sealed class EpgScheduler : BackgroundService
                 terminalState.Date.Date.AddDays(1),
                 terminalState.Config,
                 refreshAllocationRoute: false);
-            RefreshDailyTerminalResponsibilityProjection(source);
+            RefreshDailyResponsibilityProjection(source);
             log.Add("EPG_DAILY_STATE", "EPG",
                 $"result=TOMORROW_ENSURED terminal={terminalState.State} targetDate={terminalState.Date:yyyy-MM-dd} tomorrow={terminalState.Date.AddDays(1):yyyy-MM-dd} source={source} action=keep_today_terminal_project_fresh_tomorrow_and_prerec rule=daily_epg_single_state_contract");
         }
@@ -569,7 +582,7 @@ public sealed class EpgScheduler : BackgroundService
 
             try
             {
-                RefreshDailyTerminalResponsibilityProjection("DailySucceededTerminalProjection");
+                RefreshDailyResponsibilityProjection("DailySucceededTerminalProjection");
             }
             catch (Exception ex)
             {
@@ -793,29 +806,25 @@ public sealed class EpgScheduler : BackgroundService
             return false;
         }
 
-        var isScheduledDaily = normalizedSource.Equals("Scheduler.Daily", StringComparison.OrdinalIgnoreCase);
-        if (!isScheduledDaily)
+        // Scheduled Daily can only start from the committed All planner lifecycle.
+        // The interactive entry must never spoof that owner or bypass the occupancy check.
+        if (normalizedSource.Equals("Scheduler.Daily", StringComparison.OrdinalIgnoreCase))
         {
-            // INTERACTIVE_EPG_ADMISSION_INVARIANT:
-            // ユーザーが今すぐ開始する通常EPG / サイレントEPGは、開始後に録画予約を避けたり
-            // workerを途中停止したりしない。その代わり、開始前に対象波の必要連続枠を一度だけ計算し、
-            // 有効な録画占有（開始前/終了後マージン込み）が1件でも重なる場合はrun自体を開始しない。
-            // 自動後方移動・分割取得・再試行は行わない。
-            if (TryGetInteractiveEpgOccupancyBlock(normalizedScope, DateTime.Now, out var interactiveReason, out var interactiveUntil, out var interactiveGroup, out var interactiveOwner))
-            {
-                RememberStartBlock(normalizedScope, normalizedSource, silent, interactiveReason, interactiveUntil, interactiveGroup, interactiveOwner);
-                var displayMessage = EpgStartBlockMessage.FromReason(interactiveReason);
-                log.Add("EPG_RUN_BLOCKED", "BLOCKED",
-                    $"{displayMessage}。targetScope={normalizedScope} blockedGroup={interactiveGroup} blockedUntil={(interactiveUntil.HasValue ? interactiveUntil.Value.ToString("MM/dd HH:mm:ss") : "-")} blockedReason={interactiveReason} owner={interactiveOwner} silent={silent} source={normalizedSource} action=reject_interactive_epg_before_run rule=interactive_epg_occupancy_admission_contract");
-                userEvents.AddScheduledEpgCompleted(normalizedScope, normalizedSource, silent, "BLOCKED", 0, 0, 0, 0, $"blockedReason={interactiveReason}; blockedGroup={interactiveGroup}; owner={interactiveOwner}; interactiveAdmission=True");
-                return false;
-            }
+            log.Add("EPG_RUN_GUARD", "EPG",
+                $"result=REJECTED requestedSource={normalizedSource} requestedScope={normalizedScope} reason=daily_planner_only rule=daily_epg_single_state_contract");
+            return false;
         }
-        else
+
+        // Interactive EPG must fit its complete selected scope before it starts.
+        // Scheduled Daily uses its separate committed All plan.
+        if (TryGetInteractiveEpgOccupancyBlock(normalizedScope, DateTime.Now, out var interactiveReason, out var interactiveUntil, out var interactiveGroup, out var interactiveOwner))
         {
-            // Scheduler.Daily は可動枠Plannerだけが開始Admissionを所有する。
-            // TriggerNow到達後に録画近接・LifecycleGateを再判定すると、Plannerが確保した連続枠を
-            // 実行時の別判断で壊すため禁止する。予約変化は開始前の次回Planner再計算へ反映する。
+            RememberStartBlock(normalizedScope, normalizedSource, silent, interactiveReason, interactiveUntil, interactiveGroup, interactiveOwner);
+            var displayMessage = EpgStartBlockMessage.FromReason(interactiveReason);
+            log.Add("EPG_RUN_BLOCKED", "BLOCKED",
+                $"{displayMessage}。targetScope={normalizedScope} blockedGroup={interactiveGroup} blockedUntil={(interactiveUntil.HasValue ? interactiveUntil.Value.ToString("MM/dd HH:mm:ss") : "-")} blockedReason={interactiveReason} owner={interactiveOwner} silent={silent} source={normalizedSource} action=reject_interactive_epg_before_run rule=interactive_epg_occupancy_admission_contract");
+            userEvents.AddScheduledEpgCompleted(normalizedScope, normalizedSource, silent, "BLOCKED", 0, 0, 0, 0, $"blockedReason={interactiveReason}; blockedGroup={interactiveGroup}; owner={interactiveOwner}; interactiveAdmission=True");
+            return false;
         }
         CancellationTokenSource cts;
         TaskCompletionSource<bool> runStartGate;
@@ -1187,27 +1196,23 @@ public sealed class EpgScheduler : BackgroundService
 
         if (enabled)
         {
-            // Daily設定のcommit後はschedulerと同じPlanner/State経路へ収束させる。
-            // 当日がすでにterminalならその日を復活させず、変更後設定は翌日責務へ反映する。
-            // Projectionを設定値から直接作ってDaily正本より先行させない。
+            // 保存済み設定から現在の連続取得枠を再計画し、Daily正本へ先にcommitする。
+            // Expiredからの復帰は深度短縮かつ完走可能な場合だけ同じcommit入口で成立する。
+            // 当日terminalが残る場合は翌日の投影だけを更新する。
+            // PreRec/割当/Wakeは設定保存元の単一Routeで、このcommit後に一括再評価する。
             var now = DateTime.Now;
             var snapshot = new DailyEpgConfigSnapshot(
                 true, normalizedHour, normalizedMinute, SettingsDefaults.NormalizeEpgDepth(_currentDepth));
-            var stateBeforeUpdate = GetDailyRunStateSnapshot();
-            if (stateBeforeUpdate is not null
-                && stateBeforeUpdate.Date.Date == now.Date
-                && IsDailyRunTerminal(stateBeforeUpdate.State))
-            {
-                EnsureDailyResponsibility(now.Date.AddDays(1), snapshot, refreshAllocationRoute);
-            }
-            else
-            {
-                var plan = BuildDailyEpgPlanResult(now.Date, snapshot, now);
-                var changed = TryCommitDailyPlannerResult(now.Date, snapshot, plan, now);
-                var state = GetDailyRunStateSnapshot();
-                if (state is not null && state.Date.Date == now.Date && !IsDailyRunTerminal(state.State))
-                    EnsureDailyProjection(state, refreshAllocationRoute && changed);
-            }
+            var plan = BuildDailyEpgPlanResult(now.Date, snapshot, now);
+            var changed = TryCommitDailyPlannerResult(
+                now.Date, snapshot, plan, now, allowExpiredDepthRevision: depthChanged);
+            var expiredNow = plan.Placement == DailyEpgPlacementState.Unplaced && CommitDailyExpired(now);
+            var state = GetDailyRunStateSnapshot();
+            if (state is not null && state.Date.Date == now.Date && (changed || expiredNow))
+                EnsureDailyProjection(state, refreshAllocationRoute: false);
+
+            if (state is not null && state.Date.Date == now.Date && IsDailyRunTerminal(state.State))
+                EnsureDailyResponsibility(now.Date.AddDays(1), snapshot, refreshAllocationRoute: false);
         }
         else
         {
@@ -1220,22 +1225,13 @@ public sealed class EpgScheduler : BackgroundService
             }
             catch (Exception ex) { log.Add("EPG_SCHEDULER", "EpgEntry", $"EPGエントリ削除エラー: {ex.Message}"); }
 
-            // EPG_UPDATE_CONFIG_ROUTE_OWNERSHIP_CONTRACT
-            // refreshAllocationRoute=true はON側のUpsertだけでなくOFF側のDaily行削除にも適用する。
-            // OFF切替後はFinalAllocation/Wakeを現在の予約状態へ再同期する。
-            // 設定保存は後続のSettings単一Routeへ合流するためfalseを明示する。
-            if (refreshAllocationRoute)
-            {
-                try
-                {
-                    ReevaluateAndLog("EpgEntryDisabled", refreshWakeTask: true);
-                }
-                catch (Exception ex)
-                {
-                    log.Add("EPG_SCHEDULER", "EpgEntry", $"定時EPG設定OFF後の競合評価/Wake再構築エラー: {ex.Message}");
-                }
-            }
         }
+
+        // 呼出元が割当更新を所有する場合だけ、ON/OFF/深度変更のすべてを
+        // 同じPreRec/割当/Wake正本経路で確定する。設定保存元はfalseで呼び、
+        // その保存トランザクションの共通Routeが一度だけ実行する。
+        if (refreshAllocationRoute)
+            RefreshDailyResponsibilityProjection("DailyConfigChanged");
 
         // 現在の待機を中断して次回時刻を再計算させる
         SignalSchedulerWake();
@@ -1418,20 +1414,19 @@ public sealed class EpgScheduler : BackgroundService
                      && r.IsEnabled && !r.IsConflicted
                      && r.Status is not ReservationStatus.Completed and not ReservationStatus.Cancelled and not ReservationStatus.Failed)
             .Select(r => new DailyEpgRecordingBlock(
-                NormalizeEpgScheduleGroup(ResolveReservationGroup(r)),
                 EpgRecordingHandoffPolicy.LatestNormalEpgEndBeforeRecording(r.StartTime, ini.PreStartMarginSeconds),
                 r.EndTime + post,
                 r.Id))
-            .Where(x => x.Group is "GR" or "BSCS" or "CATV")
             .ToArray();
 
         var required = TimeSpan.FromSeconds(requiredSeconds);
+        var lastPossibleStart = DailyEpgExecutionWindow.LastPossibleStart(movementDeadline, requiredSeconds);
         var candidate = canonicalStart < now ? now : canonicalStart;
         var reason = candidate > canonicalStart ? "canonical_time_passed" : "canonical_slot";
-        while (candidate.Add(required) <= movementDeadline)
+        while (candidate <= lastPossibleStart)
         {
             var candidateEnd = candidate.Add(required);
-            // All Dailyはどちらの放送グループの録画占有とも重ならない連続枠だけを採用する。
+            // Daily Allは有効な録画予約すべての占有区間と重ならない連続枠だけを採用する。
             var overlap = blocks
                 .Where(x => x.OccupyEnd > candidate && x.SafeStart < candidateEnd)
                 .OrderBy(x => x.OccupyEnd)
@@ -1505,18 +1500,14 @@ public sealed class EpgScheduler : BackgroundService
         return true;
     }
 
-    private IReadOnlyList<TunerProfile> GetScheduledRecordingTuners(string group)
-    {
-        var normalized = NormalizeEpgScheduleGroup(group);
-        return tunerProfiles
-            .Where(t => !string.Equals(IniSettingsService.NormalizeTunerRole(t.Role), "Viewing", StringComparison.OrdinalIgnoreCase))
-            // Match TunerPool.MatchGroup: HYBRID recording tuners can serve both
-            // GR and BSCS. Do not infer the broadcast type from a cable ONID here.
-            .Where(t => string.Equals(NormalizeEpgScheduleGroup(t.Group), normalized, StringComparison.OrdinalIgnoreCase)
-                     || (string.Equals(NormalizeEpgScheduleGroup(t.Group), "HYBRID", StringComparison.OrdinalIgnoreCase)
-                         && (normalized is "GR" or "BSCS")))
+    // Project the single Daily All plan to each configured physical recording tuner.
+    private IReadOnlyList<TunerProfile> GetScheduledRecordingTuners()
+        => tunerProfiles
+            .Where(t => string.Equals(IniSettingsService.NormalizeTunerRole(t.Role), "Recording", StringComparison.OrdinalIgnoreCase)
+                     && TunerDisplayName.IsKnownGroup(t.Group))
+            .GroupBy(t => t.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
             .ToArray();
-    }
 
     /// <summary>
     /// SYSTEM_EPG_DAILY_PROJECTION_INVARIANT:
@@ -1533,48 +1524,32 @@ public sealed class EpgScheduler : BackgroundService
         var changed = systemEpgResponsibilityPlan.CommitWithReservationProjection(
             () => EnsureDailyProjectionCore(state));
         if (refreshAllocationRoute && changed > 0)
-            ReevaluateAndLog("EpgDailyProjection", refreshWakeTask: true);
+            RefreshDailyResponsibilityProjection("EpgDailyProjection");
         return changed;
     }
 
     private int EnsureDailyProjectionCore(DailyEpgRunState state)
     {
         var changed = 0;
-        var recordingTunersByGroup = new[] { "GR", "BSCS", "HYBRID", "CATV" }
-            .ToDictionary(
-                group => group,
-                group => GetScheduledRecordingTuners(group).Where(t => NormalizeEpgScheduleGroup(t.Group) == group).ToArray(),
-                StringComparer.OrdinalIgnoreCase);
+        var recordingTuners = GetScheduledRecordingTuners();
 
         if (state.State is not (DailyEpgRunPhase.Planned or DailyEpgRunPhase.Running)
             || state.Placement == DailyEpgPlacementState.Unplaced)
         {
-            foreach (var tuner in recordingTunersByGroup.Values
-                         .SelectMany(x => x)
-                         .GroupBy(t => t.Name, StringComparer.OrdinalIgnoreCase)
-                         .Select(g => g.First()))
-            {
+            foreach (var tuner in recordingTuners)
                 changed += reservationStore.DeleteScheduledDailyEpgEntriesForTuner(tuner.Name, state.Date);
-            }
         }
         else
         {
-            var start = state.Placement == DailyEpgPlacementState.Placed && state.PlannedStart.HasValue
-                ? state.PlannedStart.Value
-                : state.CanonicalStart;
-            var end = state.Placement == DailyEpgPlacementState.Placed && state.PlannedEnd.HasValue
-                ? state.PlannedEnd.Value
-                : start.AddSeconds(Math.Max(1, state.RequiredSeconds));
+            var start = state.PlannedStart ?? state.CanonicalStart;
+            var end = state.PlannedEnd ?? start.AddSeconds(Math.Max(1, state.RequiredSeconds));
 
-            // System EPGは6物理録画Tuner責務を維持するが、Daily予定時刻は全Tunerで同じ単一All planを投影する。
-            foreach (var pair in recordingTunersByGroup)
+            // 同じAll予定時刻を全録画チューナーへ投影する。
+            foreach (var tuner in recordingTuners)
             {
-                foreach (var tuner in pair.Value)
-                {
-                    if (reservationStore.UpsertEpgScheduleEntry(pair.Key, start, end,
-                        $"EPG取得（{tuner.Name}）", tuner.Name))
-                        changed++;
-                }
+                if (reservationStore.UpsertEpgScheduleEntry(TunerDisplayName.NormalizeGroup(tuner.Group), start, end,
+                    $"EPG取得（{tuner.Name}）", tuner.Name))
+                    changed++;
             }
         }
 
@@ -1634,8 +1609,27 @@ public sealed class EpgScheduler : BackgroundService
         EpgScheduleConfig initCfg;
         lock (configGate) initCfg = config;
         var startupDailyState = GetDailyRunStateSnapshot();
+        // INI保存直後にプロセスが終了した場合も、永続Expiryと現在の取得深度を
+        // 同じ再計画条件で照合する。Cancelled/Failed/Succeededを復活させない。
+        // 当日の成功した再計画だけを正式Plannedへcommitし、後続StartupFinalizeで
+        // PreRec/割当/Wakeを一括再構築する。
+        if (initCfg.Enabled && startupDailyState is { State: DailyEpgRunPhase.Expired }
+            && startupDailyState.Date.Date == DateTime.Today)
+        {
+            var recoveryNow = DateTime.Now;
+            var recoverySnapshot = new DailyEpgConfigSnapshot(
+                true, initCfg.Hour, initCfg.Minute, SettingsDefaults.NormalizeEpgDepth(_currentDepth));
+            if (!string.Equals(startupDailyState.Config.Depth, recoverySnapshot.Depth, StringComparison.OrdinalIgnoreCase))
+            {
+                var recoveryPlan = BuildDailyEpgPlanResult(recoveryNow.Date, recoverySnapshot, recoveryNow);
+                TryCommitDailyPlannerResult(
+                    recoveryNow.Date, recoverySnapshot, recoveryPlan, recoveryNow,
+                    allowExpiredDepthRevision: true);
+                startupDailyState = GetDailyRunStateSnapshot();
+            }
+        }
         var todayAlreadyTerminal = startupDailyState is not null
-            && startupDailyState.Date.Date == DateTime.Now.Date
+            && startupDailyState.Date.Date == DateTime.Today
             && IsDailyRunTerminal(startupDailyState.State);
         if (initCfg.Enabled)
         {
@@ -1646,9 +1640,15 @@ public sealed class EpgScheduler : BackgroundService
                     initCfg.Enabled, initCfg.Hour, initCfg.Minute, SettingsDefaults.NormalizeEpgDepth(_currentDepth));
                 var startupPlan = BuildDailyEpgPlanResult(startupNow.Date, startupConfig, startupNow);
                 TryCommitDailyPlannerResult(startupNow.Date, startupConfig, startupPlan, startupNow);
+                // 起動時に最後の開始可能時刻を過ぎた未配置Dailyを復活させない。
+                // StartupFinalizeが直後にPreRec・割当・Wakeを一括で確定する。
+                var expiredAtStartup = startupPlan.Placement == DailyEpgPlacementState.Unplaced
+                    && CommitDailyExpired(startupNow);
                 var projectionState = GetDailyRunStateSnapshot();
                 if (projectionState is not null && projectionState.Date.Date == startupNow.Date)
                     EnsureDailyProjection(projectionState, refreshAllocationRoute: false);
+                if (expiredAtStartup)
+                    EnsureDailyResponsibility(startupNow.Date.AddDays(1), startupConfig, refreshAllocationRoute: false);
             }
             else
             {
@@ -1773,24 +1773,20 @@ public sealed class EpgScheduler : BackgroundService
                 var plan = BuildDailyEpgPlanResult(now.Date, configSnapshot, now);
                 var planChanged = TryCommitDailyPlannerResult(now.Date, configSnapshot, plan, now);
 
-                var expiredChanged = false;
-                if (plan.Placement == DailyEpgPlacementState.Unplaced && now >= plan.MovementDeadline)
+                var expiredChanged = plan.Placement == DailyEpgPlacementState.Unplaced
+                    && CommitDailyExpired(now);
+                if (expiredChanged)
                 {
-                    var before = GetDailyRunStateSnapshot();
-                    CommitDailyExpired(now);
-                    var after = GetDailyRunStateSnapshot();
-                    expiredChanged = !Equals(before, after);
-                    if (expiredChanged)
-                    {
-                        log.Add("EPG_SCHEDULED_DAILY_SKIP", "All",
-                            $"result=SKIPPED targetScope=All canonical={plan.CanonicalStart:yyyy-MM-dd HH:mm:ss} movementDeadline={plan.MovementDeadline:yyyy-MM-dd HH:mm:ss} reason={plan.Reason} action=terminal_after_actual_deadline rule=scheduled_epg_all_movable_slot_contract");
-                    }
+                    log.Add("EPG_SCHEDULED_DAILY_SKIP", "All",
+                        $"result=SKIPPED targetScope=All canonical={plan.CanonicalStart:yyyy-MM-dd HH:mm:ss} lastPossibleStart={DailyEpgExecutionWindow.LastPossibleStart(plan.MovementDeadline, plan.RequiredSeconds):yyyy-MM-dd HH:mm:ss} movementDeadline={plan.MovementDeadline:yyyy-MM-dd HH:mm:ss} reason={plan.Reason} action=terminal_when_full_run_cannot_finish rule=scheduled_epg_all_movable_slot_contract");
                 }
 
                 var dailyState = GetDailyRunStateSnapshot();
                 if (dailyState is not null && dailyState.Date.Date == now.Date && (planChanged || expiredChanged))
                 {
-                    EnsureDailyProjection(dailyState, refreshAllocationRoute: true);
+                    // 終端時は古いDaily行を退役させた後、翌日Daily・PreRec・Wakeを
+                    // 単一の共通割当経路で再確定する。途中で別のWake/割当を走らせない。
+                    EnsureDailyProjection(dailyState, refreshAllocationRoute: !expiredChanged);
                     if (expiredChanged)
                         EnsureTomorrowAfterDailyTerminal(dailyState, "DailyExpired");
                     if (dailyState.State == DailyEpgRunPhase.Planned)
@@ -1832,10 +1828,11 @@ public sealed class EpgScheduler : BackgroundService
                         next = dailyState.PlannedStart.Value;
                         nextKind = "PLANNED_START";
                     }
-                    else if (dailyState.Placement == DailyEpgPlacementState.Unplaced && now < dailyState.MovementDeadline)
+                    else if (dailyState.Placement == DailyEpgPlacementState.Unplaced
+                             && now < DailyEpgExecutionWindow.LastPossibleStart(dailyState.MovementDeadline, dailyState.RequiredSeconds))
                     {
-                        next = dailyState.MovementDeadline;
-                        nextKind = "MOVEMENT_DEADLINE";
+                        next = DailyEpgExecutionWindow.LastPossibleStart(dailyState.MovementDeadline, dailyState.RequiredSeconds);
+                        nextKind = "LAST_POSSIBLE_START";
                     }
                     else
                     {
@@ -1894,7 +1891,7 @@ public sealed class EpgScheduler : BackgroundService
 
     /// <summary>
     /// 次の意味のある絶対時刻をDailyRunStateから求める。30秒周期pollingは行わず、
-    /// PlannedStart / 未配置waveのdeadline / 日付境界のいずれか最短まで待機する。
+    /// PlannedStart / 未配置waveの最終開始時刻 / 日付境界のいずれか最短まで待機する。
     /// state変更はSignalSchedulerWakeが待機を中断するため、ここで外部状態を推測しない。
     /// </summary>
     private DateTime ComputeNextDailyEvaluationTime(DateTime now, EpgScheduleConfig cfg)
@@ -1919,7 +1916,10 @@ public sealed class EpgScheduler : BackgroundService
         }
 
         if (state.Placement == DailyEpgPlacementState.Unplaced)
-            return state.MovementDeadline > now ? state.MovementDeadline : now;
+        {
+            var lastPossibleStart = DailyEpgExecutionWindow.LastPossibleStart(state.MovementDeadline, state.RequiredSeconds);
+            return lastPossibleStart > now ? lastPossibleStart : now;
+        }
 
         return nextDayBoundary;
     }
@@ -2251,7 +2251,7 @@ public sealed class EpgScheduler : BackgroundService
         var captureRunId = $"normal-epg-{runGeneration}-{targetScope}";
         try
         {
-            var isDailyRun = string.Equals(requestedBy, "Scheduler.Daily", StringComparison.OrdinalIgnoreCase);
+            var isDailyRun = scheduledPlan is not null;
 
             var routeAction = BuildManualEpgRouteAction(requestedBy, silent);
             BeginNormalEpgWaveOccupation(targetScope, requestedBy, silent, runGeneration, scheduledPlan);
@@ -2319,7 +2319,7 @@ public sealed class EpgScheduler : BackgroundService
                         EnsureDailyProjection(failedState, refreshAllocationRoute: false);
                     EnsureTomorrowAfterDailyTerminal(failedState, "DailyCaptureFailed");
                     log.Add("EPG_SCHEDULED_DAILY_TERMINAL", "All",
-                        $"result=FAILED source={requestedBy} targetScope=All completed={captureResult.CompletedGroups}/{captureResult.TotalGroups} missingGroups={captureResult.MissingGroups} missingScopes={captureResult.MissingScopes} action=no_retry_no_partial_continuation rule=scheduled_epg_all_execution_owner_contract");
+                        $"result=FAILED source={requestedBy} targetScope=All completed={captureResult.CompletedGroups}/{captureResult.TotalGroups} missingGroups={captureResult.MissingGroups} action=no_retry_no_partial_continuation rule=scheduled_epg_all_execution_owner_contract");
                 }
             }
 
@@ -2391,9 +2391,7 @@ public sealed class EpgScheduler : BackgroundService
                     ["completedGroups"] = captureResult.CompletedGroups.ToString(),
                     ["totalGroups"] = captureResult.TotalGroups.ToString(),
                     ["importedEvents"] = captureResult.ImportedEvents.ToString(),
-                    ["completedScopes"] = captureResult.CompletedScopes,
                     ["missingGroups"] = captureResult.MissingGroups.ToString(),
-                    ["missingScopes"] = captureResult.MissingScopes,
                     ["failureReason"] = EpgFailurePresentationContract.Code(captureResult.UserFailureReason),
                     ["message"] = EpgFailurePresentationContract.RunMessage(
                         typedResult, captureResult.UserFailureReason,
@@ -2754,7 +2752,9 @@ public sealed class EpgScheduler : BackgroundService
         // Manual は番組表からの通常予約であり、録画前EPG確認の正式対象。
         // 無効(IsEnabled=false)と競合(IsConflicted=true)予約はEPG確認対象外
         // (録画されない予約のためにEPGセッションを発生させる意味がない)
-        var staleCleanup = reservationStore.DeleteInvalidScheduledPreRecordEpgEntries();
+        var operationalChainChildren = reservationStore.GetOperationalChainPredecessors(
+            ini.UserChainRecordingEnabled, allocationRoute.GetActiveSharedCaptureChainRootIds()).Keys.ToHashSet();
+        var staleCleanup = reservationStore.DeleteInvalidScheduledPreRecordEpgEntries(operationalChainChildren);
         if (staleCleanup.Deleted > 0)
         {
             log.Add("PRE_REC_EPG_PARENT_CLEANUP", "Summary",
@@ -2769,7 +2769,7 @@ public sealed class EpgScheduler : BackgroundService
             // ユーザー明示チェーンはroot親だけを対象にする。子は親の確認結果から系列時間追従を受け、
             // 子ごとの独立確認workerを作らない。is_user_chainだけで除外するとroot親まで失うため、previous有無で判定する。
             .Where(r => (r.Source == ReservationSource.Manual || r.Source == ReservationSource.KeywordSearch || r.Source == ReservationSource.Keyword)
-                     && (!r.IsUserChain || !r.UserChainPreviousId.HasValue)
+                     && !operationalChainChildren.Contains(r.Id)
                      && r.IsEnabled
                      && !r.IsConflicted
                      && serviceAccessSnapshot.IsOperationalForRecording(r, recordableTuners))
@@ -2783,14 +2783,14 @@ public sealed class EpgScheduler : BackgroundService
                      || r.Source == ReservationSource.KeywordSearch
                      || r.Source == ReservationSource.Keyword)
             .ToList();
-        var skippedUserChainChild = preRecordSourceCandidates.Count(r => r.IsUserChain && r.UserChainPreviousId.HasValue);
+        var skippedUserChainChild = preRecordSourceCandidates.Count(r => operationalChainChildren.Contains(r.Id));
         var skippedDisabled = preRecordSourceCandidates.Count(r => !r.IsEnabled
-            && !(r.IsUserChain && r.UserChainPreviousId.HasValue));
+            && !operationalChainChildren.Contains(r.Id));
         var skippedConflicted = preRecordSourceCandidates.Count(r => r.IsEnabled
-            && (!r.IsUserChain || !r.UserChainPreviousId.HasValue)
+            && !operationalChainChildren.Contains(r.Id)
             && r.IsConflicted);
         var skippedServiceUnavailable = preRecordSourceCandidates.Count(r => r.IsEnabled
-            && (!r.IsUserChain || !r.UserChainPreviousId.HasValue)
+            && !operationalChainChildren.Contains(r.Id)
             && !r.IsConflicted
             && !serviceAccessSnapshot.IsOperationalForRecording(r, recordableTuners));
         var excludedSource = scheduledAll.Count(r => r.Source != ReservationSource.Epg
@@ -3047,7 +3047,9 @@ public sealed class EpgScheduler : BackgroundService
         var changed = EnsureDailyProjection(projectionState, refreshAllocationRoute);
 
         var status = plan.Placement == DailyEpgPlacementState.Unplaced
-            ? (date.Date == now.Date && now >= plan.MovementDeadline ? "SKIPPED" : "UNPLACED_PENDING_DEADLINE")
+            ? (date.Date == now.Date
+               && now >= DailyEpgExecutionWindow.LastPossibleStart(plan.MovementDeadline, plan.RequiredSeconds)
+                ? "SKIPPED" : "UNPLACED_PENDING_DEADLINE")
             : "PLACED";
         var slot = plan.PlannedStart.HasValue && plan.PlannedEnd.HasValue
             ? $"{plan.PlannedStart:MM/dd HH:mm:ss}〜{plan.PlannedEnd:MM/dd HH:mm:ss}"
@@ -3056,17 +3058,6 @@ public sealed class EpgScheduler : BackgroundService
             $"定時EPGエントリ: targetScope=All result={status} canonical={plan.CanonicalStart:MM/dd HH:mm:ss} " +
             $"slot={slot} requiredSeconds={plan.RequiredSeconds} movementDeadline={plan.MovementDeadline:MM/dd HH:mm:ss} reason={plan.Reason} source=daily_state_projection rule=scheduled_epg_all_movable_slot_contract");
         return changed;
-    }
-
-    private static string NormalizeEpgScheduleGroup(string? group)
-    {
-        var g = (group ?? string.Empty).Trim().ToUpperInvariant();
-        return g switch
-        {
-            "BS" or "CS" or "BSCS" or "BS/CS" => "BSCS",
-            "GR" => "GR",
-            var raw => raw
-        };
     }
 
     private static string SafeValue(string? value)
@@ -3120,11 +3111,10 @@ public sealed class EpgScheduler : BackgroundService
     }
 
     /// <summary>
-    /// Daily terminal後は翌日Daily境界が確定した時点で既存のSystem EPG候補を再評価し、
-    /// PreRec System行を再投影する。責務選択規則は変更せず、
-    /// AllocationRouteを唯一の再構築/Wake所有者として使う。
+    /// 定時EPGの日次状態が切り替わった後、共通割当経路で
+    /// PreRec子予約・所有優先度・表示・Wakeを同じ正本に収束させる。
     /// </summary>
-    private void RefreshDailyTerminalResponsibilityProjection(string action)
+    private void RefreshDailyResponsibilityProjection(string action)
     {
         allocationRoute.Run(new ReservationAllocationRouteRequest(
             Source: "EpgScheduler",

@@ -19,19 +19,19 @@ public sealed class RecordingFileCatalog
     private readonly LogRepository log;
     private readonly Database database;
     private readonly LabWithdrawalJournal withdrawalJournal;
-    private readonly Func<string,TvAirRecordingResultDto?>? legacyResult;
+    private readonly Func<string, string, TvAirRecordingResultDto?> getFinalizedForFile;
     private readonly object gate = new();
     private bool schemaReady;
     public string PendingControlDirectory { get; }
     private int controlOffset;
     internal CancellationToken StopToken { get; set; }
     private readonly SemaphoreSlim workAvailable = new(0, 1);
-    public RecordingFileCatalog(Database database, LogRepository log, Func<string,TvAirRecordingResultDto?>? legacyResult = null)
+    public RecordingFileCatalog(Database database, LogRepository log, Func<string, string, TvAirRecordingResultDto?> getFinalizedForFile)
     {
         this.log = log;
         this.database = database;
         withdrawalJournal = new LabWithdrawalJournal(database);
-        this.legacyResult = legacyResult;
+        this.getFinalizedForFile = getFinalizedForFile;
         PendingControlDirectory = Path.Combine(database.DataDirectory,"recording-file-controls");
         connectionString = new SqliteConnectionStringBuilder {
             DataSource = Path.Combine(database.DataDirectory,"recording-files.db"), DefaultTimeout = 1
@@ -193,12 +193,11 @@ public sealed class RecordingFileCatalog
                     {
                         StopToken.ThrowIfCancellationRequested();
                         var m=JsonSerializer.Deserialize<RecordingFileManifest>(rows.GetString(0),Json)!;
-                        var legacyReady = legacyResult?.Invoke(m.ReservationId) is {ResultFinalized:true} legacy
-                            && string.Equals(legacy.FilePath,m.OutputPath,StringComparison.OrdinalIgnoreCase);
+                        var finalizedForFile = getFinalizedForFile(m.ReservationId, m.OutputPath);
                         var orphanSettled = m.ReservationId.StartsWith("R",StringComparison.Ordinal)
                             && int.TryParse(m.ReservationId.AsSpan(1),out var reservationId)
                             && ReservationStore.IsControlRecoverySettled(database,reservationId,HostAlive(m.HostPid,m.HostStartTicks));
-                        if(rows.GetInt32(1)==1 && !legacyReady && !orphanSettled)
+                        if(rows.GetInt32(1)==1 && finalizedForFile is null && !orphanSettled)
                         {cleanupReady=false;break;}
                     }
                 }

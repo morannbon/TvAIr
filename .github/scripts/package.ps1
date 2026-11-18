@@ -1,5 +1,6 @@
 param([Parameter(Mandatory=$true)][ValidateSet('x64','x86')][string]$Platform,[Parameter(Mandatory=$true)][string]$RefName)
 $ErrorActionPreference='Stop'
+Set-Location -LiteralPath (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent)
 $spec=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'package-spec.json') -Raw|ConvertFrom-Json
 if($RefName.StartsWith('v') -and $RefName -cne "v$($spec.Version)"){throw 'Tag/version mismatch'}
 if((Get-FileHash README.md).Hash -ne (Get-FileHash README.txt).Hash){throw 'README mismatch'}
@@ -52,13 +53,11 @@ if($spec.Name -eq 'TvAIr'){
  $notices.Add('Microsoft.Data.Sqlite 8.0.7 license: https://github.com/dotnet/efcore/tree/0d1256be4658567c8a24b4c027bdbb3dbd6de656')
  $notices|Set-Content -LiteralPath (Join-Path $out 'THIRD_PARTY_NOTICES.txt') -Encoding utf8
 }
-$instructions='ZIPを展開したフォルダ一式を配置してTvAIr.exeを起動してください。更新後はTvAIrの設定メニューで「TVTest」を開いてください。「連携するTVTestプラグインフォルダ」にTVTest内の Plugins フォルダを指定して保存してください。'
 @"
-$($spec.Name) v$($spec.Version) ($Platform) - ビルド済み配布
+$($spec.Name) v$($spec.Version) ($Platform)
 
-Visual Studioによるビルドは不要です。必要なランタイムと利用条件はREADMEをご確認ください。
-$instructions
-更新時はTvAIrを終了して新しいファイルを今までのフォルダへ上書きしてください。
-外部アプリやプラグインが必要な機能はREADMEの条件に従って設定してください。
-"@|Set-Content -LiteralPath (Join-Path $out 'INSTALL.txt') -Encoding utf8
+Visual Studioによるビルドは不要です。
+READMEの「v1.3.0への移行」と動作環境を確認してから導入してください。TVTest 0.10.0以降でのチャンネルスキャンが必要です。
+詳しい導入方法と利用条件はREADMEを確認してください。
+"@ | Set-Content -LiteralPath (Join-Path $out 'INSTALL.txt') -Encoding utf8
 Compress-Archive -Path "$out/*" -DestinationPath "package/$($spec.Name)_v$($spec.Version)_$Platform.zip"

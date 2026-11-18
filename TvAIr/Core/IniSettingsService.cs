@@ -7,12 +7,6 @@
 public sealed class IniSettingsService
 {
     private const int CurrentSettingsSchemaVersion = 1;
-    // SETTINGS_MIGRATION_SOURCE_CONTRACT
-    // スキーマ番号が保存されていない既存設定は0として現行形式へ移行する。
-    // 製品バージョン文字列では判定せず、INI schema と既知の旧キー/旧セクションを移行元の識別子にする。
-    // 将来版でもこの schema=0 -> 現行schema の直接移行経路を累積維持し、中間版の順次起動を要求しない。
-    private const int LegacyPublicReleaseSettingsSchemaVersion = 0;
-    private const string PendingLegacyCleanupState = "PendingLegacyCleanup";
     private readonly string _iniPath;
     private readonly string _baseDirectory;
 
@@ -51,12 +45,11 @@ public sealed class IniSettingsService
     public int    EpgPreRecordMinutes       { get; private set; } = SettingsDefaults.EpgPreRecordMinutes;
     public bool   LaterProgramPriority  { get; private set; } = SettingsDefaults.LaterProgramPriority;
     public string ChainReservationMode { get; private set; } = ChainModeContract.Disabled;
-    public bool ChainRecordingEnabled { get => ChainReservationMode != ChainModeContract.Disabled;
-        private set => ChainReservationMode = value ? ChainModeContract.Manual : ChainModeContract.Disabled; }
-    public bool ManualChainRecordingEnabled => LaterProgramPriority && ChainReservationMode == ChainModeContract.Manual;
+    public bool ChainRecordingEnabled => ChainReservationMode != ChainModeContract.Disabled;
+    public bool ManualChainRecordingEnabled => ChainModeContract.IsManualEnabled(LaterProgramPriority, ChainReservationMode);
     public bool AutomaticChainRecordingEnabled => LaterProgramPriority && ChainReservationMode == ChainModeContract.Automatic;
+    public bool UserChainRecordingEnabled => ChainReservationContract.IsFeatureEnabled(LaterProgramPriority, ChainRecordingEnabled);
     /// <summary>ユーザー明示チェーン機能の有効状態。</summary>
-    public bool   UserChainRecordingEnabled => ChainReservationContract.IsFeatureEnabled(LaterProgramPriority, ChainRecordingEnabled);
     public int    PreStartMarginSeconds { get; private set; } = SettingsDefaults.PreStartMarginSeconds;
     public int    PostEndMarginSeconds  { get; private set; } = SettingsDefaults.PostEndMarginSeconds;
     public int    WakeMinutesBefore     { get; private set; } = SettingsDefaults.WakeMinutesBefore;
@@ -116,9 +109,6 @@ public sealed class IniSettingsService
     /// <summary>ini ファイルが存在しなかった（初回起動）場合 true</summary>
     public bool IsFirstRun { get; private set; } = false;
 
-    /// <summary>旧設定から現行キーの作成が完了し、1回だけ再起動が必要な場合 true。</summary>
-    public bool SettingsMigrationRestartRequired { get; private set; } = false;
-
     public IniSettingsService(string baseDirectory, string? firstRunDataDirectory, int firstRunPort)
     {
         _baseDirectory = baseDirectory;
@@ -164,23 +154,9 @@ public sealed class IniSettingsService
         if (!File.Exists(iniPath))
             return SettingsDefaults.NormalizePort(fallbackPort);
 
-        var values = ReadRawIniValues(iniPath);
+        var values = ReadCurrentIniValues(iniPath);
+        EnsureCurrentSettingsSchema(values);
         return SettingsDefaults.NormalizePort(GetInt(values, "Port", fallbackPort));
-    }
-
-    private static Dictionary<string, string> ReadRawIniValues(string iniPath)
-    {
-        var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var raw in File.ReadAllLines(iniPath))
-        {
-            var line = raw.Trim();
-            if (line.StartsWith(';') || line.StartsWith('#') || !line.Contains('=')) continue;
-            var eq = line.IndexOf('=');
-            var key = line[..eq].Trim();
-            var val = line[(eq + 1)..].Trim();
-            dict[key] = val;
-        }
-        return dict;
     }
 
     private static Dictionary<string, string> ReadCurrentIniValues(string iniPath)
@@ -238,7 +214,6 @@ public sealed class IniSettingsService
                 || key.Equals("PostEndMarginSeconds", StringComparison.OrdinalIgnoreCase)
                 || key.Equals("WakeMinutesBefore", StringComparison.OrdinalIgnoreCase)
                 || key.Equals("WakeAdditionalSeconds", StringComparison.OrdinalIgnoreCase)
-                || key.Equals("ChainRecordingEnabled", StringComparison.OrdinalIgnoreCase)
                 || key.Equals("ChainReservationMode", StringComparison.OrdinalIgnoreCase)
                 || key.Equals("RecordingAfterAction", StringComparison.OrdinalIgnoreCase)
                 || key.Equals("RecordingAfterActionDelayMinutes", StringComparison.OrdinalIgnoreCase),
@@ -282,41 +257,6 @@ public sealed class IniSettingsService
             return;
         }
 
-        var rawValues = ReadRawIniValues(_iniPath);
-
-        // SETTINGS_TWO_PHASE_MIGRATION_CONTRACT
-        // 旧設定は1回目の起動で現行キーを追加するだけに留め、旧キーを同時に消さない。
-        // そのプロセスは通常起動へ進まず、DB・予約・EPG・allocation等へ一切触れない。
-        // 2回目の起動で現行キーが読み戻せることを確認してから旧キー/旧セクションを削除する。
-        var persistedSchemaVersion = GetInt(rawValues, "SettingsSchemaVersion", LegacyPublicReleaseSettingsSchemaVersion);
-        if (persistedSchemaVersion > CurrentSettingsSchemaVersion)
-            throw new InvalidDataException($"TvAIr.ini の設定形式はこのTvAIrより新しいため起動できません。currentSchema={CurrentSettingsSchemaVersion} iniSchema={persistedSchemaVersion}");
-
-        var migrationState = GetStr(rawValues, "SettingsMigrationState", "");
-        if (string.Equals(migrationState, PendingLegacyCleanupState, StringComparison.OrdinalIgnoreCase))
-        {
-            // 1回目の移行後に中間版を起動せず、さらに新しいTvAIrへ差し替えられる場合もある。
-            // その場合は旧キーをまだ保持しているため、古いtarget schemaのままcleanupせず、
-            // 旧設定を正本として「そのTvAIrの現行schema」へもう一度直接stageする。
-            if (persistedSchemaVersion < CurrentSettingsSchemaVersion)
-            {
-                StageLegacySettingsMigration(rawValues);
-                SettingsMigrationRestartRequired = true;
-                return;
-            }
-
-            // 2回目起動では、旧キーを消す前に「現行キーだけで旧設定と同じ意味になる」ことを検証する。
-            // 検証に失敗した場合は旧キーを残したまま停止し、通常起動へ進めない。
-            VerifyPendingLegacyMigrationAgainstCurrentSchema(rawValues);
-            CleanupLegacySettingsAfterVerifiedMigration();
-        }
-        else if (NeedsLegacySettingsMigration(rawValues) || HasIniSection(_iniPath, "App2"))
-        {
-            StageLegacySettingsMigration(rawValues);
-            SettingsMigrationRestartRequired = true;
-            return;
-        }
-
         var dict = ReadCurrentIniValues(_iniPath);
         EnsureCurrentSettingsSchema(dict);
 
@@ -340,8 +280,7 @@ public sealed class IniSettingsService
         EpgDepth             = SettingsDefaults.NormalizeEpgDepth(GetStr(dict, "EpgDepth", EpgDepth));
         EpgPreRecordMinutes  = SettingsDefaults.NormalizeEpgPreRecordMinutes(GetInt(dict, "EpgPreRecordMinutes", EpgPreRecordMinutes));
         LaterProgramPriority = GetBool(dict, "LaterProgramPriority", LaterProgramPriority);
-        ChainRecordingEnabled     = GetBool(dict, "ChainRecordingEnabled",     ChainRecordingEnabled);
-        ChainReservationMode = ChainModeContract.Normalize(dict.TryGetValue("ChainReservationMode", out var mode) ? mode : null, ChainRecordingEnabled);
+        ChainReservationMode = ChainModeContract.Normalize(dict.TryGetValue("ChainReservationMode", out var mode) ? mode : null, ChainModeContract.Disabled);
         PreStartMarginSeconds = SettingsDefaults.NormalizePreStartMarginSeconds(GetInt(dict, "PreStartMarginSeconds", PreStartMarginSeconds));
         PostEndMarginSeconds  = SettingsDefaults.NormalizePostEndMarginSeconds(GetInt(dict, "PostEndMarginSeconds", PostEndMarginSeconds));
         WakeMinutesBefore     = SettingsDefaults.NormalizeWakeMinutesBefore(GetInt(dict, "WakeMinutesBefore", WakeMinutesBefore));
@@ -406,268 +345,6 @@ public sealed class IniSettingsService
         NormalizeTunerDeviceNumbers();
     }
 
-    private static readonly IReadOnlyDictionary<string, string> LegacySettingKeyRenames =
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["PseudoContinuousRecording"] = "ChainRecordingEnabled",
-            ["UserLogExtendedEnabled"] = "UserLogDetailEnabled",
-            ["UserLogShowReservationSource"] = "UserLogDetailReservationSource",
-            ["UserLogShowSchedule"] = "UserLogDetailScheduledTime",
-            ["UserLogShowActualTime"] = "UserLogDetailActualRecordingTime",
-            ["UserLogShowQuality"] = "UserLogDetailRecordingQuality",
-            ["UserLogShowStateChange"] = "UserLogDetailStateChange",
-            ["UserLogShowReason"] = "UserLogDetailEndOrFailureReason",
-        };
-
-    private static bool NeedsLegacySettingsMigration(Dictionary<string, string> values)
-    {
-        // スキーマ番号のない設定も現在のスキーマへ直接移行する。
-        // 将来CurrentSettingsSchemaVersionが進んでも、version文字列による隣接版限定にはしない。
-        if (GetInt(values, "SettingsSchemaVersion", LegacyPublicReleaseSettingsSchemaVersion) < CurrentSettingsSchemaVersion)
-            return true;
-        if (LegacySettingKeyRenames.Keys.Any(values.ContainsKey))
-            return true;
-        return false;
-    }
-
-    private static bool HasIniSection(string iniPath, string sectionName)
-        => File.ReadLines(iniPath).Any(line => line.Trim().Equals($"[{sectionName}]", StringComparison.OrdinalIgnoreCase));
-
-    private void StageLegacySettingsMigration(Dictionary<string, string> legacyValues)
-    {
-        var lines = File.ReadAllLines(_iniPath).ToList();
-
-        // 保存済みの旧スキーマから現在のスキーマへ一段階で移行候補を作る。
-        // スキーマ移行時に中間版の実行を要求しない。
-        // 旧schemaで起動している以上、旧キーの実効値を移行元の正本とする。
-        // 以前の移行試行等で同名の現行キーが残っていても信用せず、旧キーから必ず再生成する。
-        // 旧キー自体はrollback用に次回起動まで保持する。
-        foreach (var pair in LegacySettingKeyRenames)
-        {
-            if (!legacyValues.TryGetValue(pair.Key, out var legacyValue)) continue;
-            UpsertKeyInSection(lines, ResolveCanonicalSection(pair.Value), pair.Value, legacyValue);
-        }
-
-        // [App2] のStartup系はキー名自体は現行と同じため、現行 [Startup] セクションへ複製する。
-        // 1回目では [App2] を削除しない。
-        var sectionValues = ReadIniSectionValues(lines);
-        if (sectionValues.TryGetValue("App2", out var app2))
-        {
-            foreach (var key in new[] { "StartupEnabled", "TaskUserName", "TaskPasswordEncrypted" })
-            {
-                if (app2.TryGetValue(key, out var value))
-                    UpsertKeyInSection(lines, "Startup", key, value);
-            }
-        }
-
-        UpsertKeyInSection(lines, "App", "SettingsSchemaVersion", CurrentSettingsSchemaVersion.ToString());
-        UpsertKeyInSection(lines, "App", "SettingsMigrationState", PendingLegacyCleanupState);
-        WriteIniAtomically(lines);
-
-        // 書込み後に現行キーが実際に読めることを確認する。失敗時は旧キーを残したまま停止する。
-        var verify = ReadRawIniValues(_iniPath);
-        if (GetInt(verify, "SettingsSchemaVersion", 0) != CurrentSettingsSchemaVersion
-            || !string.Equals(GetStr(verify, "SettingsMigrationState", ""), PendingLegacyCleanupState, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("TvAIr.ini の設定形式更新を確認できませんでした。旧設定は削除していません。");
-
-        foreach (var pair in LegacySettingKeyRenames)
-        {
-            if (!legacyValues.TryGetValue(pair.Key, out var legacyValue)) continue;
-            if (!verify.TryGetValue(pair.Value, out var canonicalValue)
-                || !string.Equals(canonicalValue.Trim(), legacyValue.Trim(), StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException($"TvAIr.ini の現行設定キー {pair.Value} を確認できませんでした。旧設定は削除していません。");
-        }
-    }
-
-    private void VerifyPendingLegacyMigrationAgainstCurrentSchema(Dictionary<string, string> legacyAndCurrentValues)
-    {
-        var currentValues = ReadCurrentIniValues(_iniPath);
-        EnsureCurrentSettingsSchema(currentValues);
-
-        // 名前変更された設定は文字列表現ではなく設定型として比較し、旧/新で実効値が同じことを確認する。
-        foreach (var pair in LegacySettingKeyRenames)
-        {
-            if (!legacyAndCurrentValues.TryGetValue(pair.Key, out var legacyValue)) continue;
-            if (!currentValues.TryGetValue(pair.Value, out var currentValue))
-                throw new InvalidOperationException($"TvAIr.ini の現行設定キー {pair.Value} がないため、旧設定は削除しませんでした。");
-
-            if (IsBooleanMigrationKey(pair.Key, pair.Value))
-            {
-                var legacyBool = ParseBoolStrict(legacyValue, pair.Key);
-                var currentBool = ParseBoolStrict(currentValue, pair.Value);
-                if (legacyBool != currentBool)
-                    throw new InvalidOperationException($"TvAIr.ini の設定移行結果が一致しません。key={pair.Value} 旧設定は削除していません。");
-            }
-            else if (!string.Equals(currentValue.Trim(), legacyValue.Trim(), StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidOperationException($"TvAIr.ini の設定移行結果が一致しません。key={pair.Value} 旧設定は削除していません。");
-            }
-        }
-
-        // チェーン予約は単一キーではなく LaterProgramPriority との組合せが実効状態の正本。
-        if (legacyAndCurrentValues.TryGetValue("PseudoContinuousRecording", out var legacyChainRaw))
-        {
-            var legacyLater = GetBool(legacyAndCurrentValues, "LaterProgramPriority", SettingsDefaults.LaterProgramPriority);
-            var legacyChain = ParseBoolStrict(legacyChainRaw, "PseudoContinuousRecording");
-            var currentLater = GetBool(currentValues, "LaterProgramPriority", SettingsDefaults.LaterProgramPriority);
-            var currentChain = GetBool(currentValues, "ChainRecordingEnabled", SettingsDefaults.ChainRecordingEnabled);
-            var legacyEffective = ChainReservationContract.IsFeatureEnabled(legacyLater, legacyChain);
-            var currentEffective = ChainReservationContract.IsFeatureEnabled(currentLater, currentChain);
-            if (legacyEffective != currentEffective)
-                throw new InvalidOperationException("TvAIr.ini のチェーン予約設定を同じ状態で移行できないため、旧設定は削除していません。");
-        }
-
-        var sections = ReadIniSectionValues(File.ReadAllLines(_iniPath));
-        if (sections.TryGetValue("App2", out var oldStartup))
-        {
-            if (!sections.TryGetValue("Startup", out var currentStartup))
-                throw new InvalidOperationException("TvAIr.ini の [Startup] を確認できないため、旧 [App2] は削除しませんでした。");
-            foreach (var key in new[] { "StartupEnabled", "TaskUserName", "TaskPasswordEncrypted" })
-            {
-                if (!oldStartup.TryGetValue(key, out var oldValue)) continue;
-                if (!currentStartup.TryGetValue(key, out var currentValue)
-                    || !string.Equals(oldValue.Trim(), currentValue.Trim(), StringComparison.Ordinal))
-                    throw new InvalidOperationException($"TvAIr.ini の起動設定を同じ状態で移行できないため、旧設定は削除していません。key={key}");
-            }
-        }
-    }
-
-    private static bool IsBooleanMigrationKey(string legacyKey, string currentKey)
-        => legacyKey.Equals("PseudoContinuousRecording", StringComparison.OrdinalIgnoreCase)
-           || legacyKey.StartsWith("UserLog", StringComparison.OrdinalIgnoreCase)
-           || currentKey.Equals("ChainRecordingEnabled", StringComparison.OrdinalIgnoreCase)
-           || currentKey.StartsWith("UserLogDetail", StringComparison.OrdinalIgnoreCase);
-
-    private static bool ParseBoolStrict(string raw, string key)
-    {
-        if (bool.TryParse(raw.Trim(), out var value)) return value;
-        if (raw.Trim() == "1") return true;
-        if (raw.Trim() == "0") return false;
-        throw new InvalidOperationException($"TvAIr.ini の設定値を確認できません。key={key}");
-    }
-
-    private void CleanupLegacySettingsAfterVerifiedMigration()
-    {
-        var lines = File.ReadAllLines(_iniPath).ToList();
-        var values = ReadRawIniValues(_iniPath);
-        if (GetInt(values, "SettingsSchemaVersion", 0) != CurrentSettingsSchemaVersion)
-            throw new InvalidOperationException("TvAIr.ini の現行設定形式を確認できないため、旧設定は削除しませんでした。");
-
-        // 現行キーが揃っていることを確認してから旧名だけを消す。
-        foreach (var pair in LegacySettingKeyRenames)
-        {
-            if (!values.ContainsKey(pair.Key)) continue;
-            if (!values.ContainsKey(pair.Value))
-                throw new InvalidOperationException($"TvAIr.ini の現行設定キー {pair.Value} がないため、旧設定 {pair.Key} は削除しませんでした。");
-        }
-
-        var sections = ReadIniSectionValues(lines);
-        if (sections.TryGetValue("App2", out var oldStartup))
-        {
-            if (!sections.TryGetValue("Startup", out var currentStartup))
-                throw new InvalidOperationException("TvAIr.ini の [Startup] を確認できないため、旧 [App2] は削除しませんでした。");
-            foreach (var key in new[] { "StartupEnabled", "TaskUserName", "TaskPasswordEncrypted" })
-            {
-                if (oldStartup.ContainsKey(key) && !currentStartup.ContainsKey(key))
-                    throw new InvalidOperationException($"TvAIr.ini の [Startup] {key} を確認できないため、旧 [App2] は削除しませんでした。");
-            }
-        }
-
-        RemoveKeys(lines, LegacySettingKeyRenames.Keys);
-        RemoveSection(lines, "App2");
-        RemoveKeys(lines, new[] { "SettingsMigrationState" });
-        ReplaceExactComment(lines,
-            "; ジャンル色はSettingsDefaultsのテーマ共通正本から投影し、schema更新時だけ一度移行する。",
-            "; ジャンル色はSettingsDefaultsのテーマ共通正本を基準に保存する。");
-        WriteIniAtomically(lines);
-    }
-
-    private static string ResolveCanonicalSection(string key)
-        => key.StartsWith("UserLogDetail", StringComparison.OrdinalIgnoreCase) ? "Log" : "Recording";
-
-    private static Dictionary<string, Dictionary<string, string>> ReadIniSectionValues(IReadOnlyList<string> lines)
-    {
-        var result = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
-        var section = "";
-        foreach (var raw in lines)
-        {
-            var line = raw.Trim();
-            if (line.StartsWith('[') && line.EndsWith(']') && line.Length > 2)
-            {
-                section = line[1..^1].Trim();
-                if (!result.ContainsKey(section))
-                    result[section] = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                continue;
-            }
-            if (line.StartsWith(';') || line.StartsWith('#')) continue;
-            var eq = line.IndexOf('=');
-            if (eq <= 0 || string.IsNullOrWhiteSpace(section)) continue;
-            if (!result.TryGetValue(section, out var values))
-            {
-                values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                result[section] = values;
-            }
-            values[line[..eq].Trim()] = line[(eq + 1)..].Trim();
-        }
-        return result;
-    }
-
-    private static void UpsertKeyInSection(List<string> lines, string sectionName, string key, string value)
-    {
-        var sectionStart = lines.FindIndex(line => line.Trim().Equals($"[{sectionName}]", StringComparison.OrdinalIgnoreCase));
-        if (sectionStart < 0)
-        {
-            if (lines.Count > 0 && !string.IsNullOrWhiteSpace(lines[^1])) lines.Add("");
-            lines.Add($"[{sectionName}]");
-            lines.Add($"{key} = {value}");
-            return;
-        }
-
-        var sectionEnd = sectionStart + 1;
-        while (sectionEnd < lines.Count && !lines[sectionEnd].TrimStart().StartsWith('[')) sectionEnd++;
-        for (var i = sectionStart + 1; i < sectionEnd; i++)
-        {
-            var eq = lines[i].IndexOf('=');
-            if (eq <= 0) continue;
-            if (!lines[i][..eq].Trim().Equals(key, StringComparison.OrdinalIgnoreCase)) continue;
-            lines[i] = $"{key} = {value}";
-            return;
-        }
-        lines.Insert(sectionEnd, $"{key} = {value}");
-    }
-
-    private static void RemoveKeys(List<string> lines, IEnumerable<string> keys)
-    {
-        var remove = new HashSet<string>(keys, StringComparer.OrdinalIgnoreCase);
-        for (var i = lines.Count - 1; i >= 0; i--)
-        {
-            var eq = lines[i].IndexOf('=');
-            if (eq <= 0) continue;
-            if (remove.Contains(lines[i][..eq].Trim()))
-                lines.RemoveAt(i);
-        }
-    }
-
-    private static void RemoveSection(List<string> lines, string sectionName)
-    {
-        var start = lines.FindIndex(line => line.Trim().Equals($"[{sectionName}]", StringComparison.OrdinalIgnoreCase));
-        if (start < 0) return;
-        var end = start + 1;
-        while (end < lines.Count && !lines[end].TrimStart().StartsWith('[')) end++;
-        lines.RemoveRange(start, end - start);
-        while (start < lines.Count && start > 0 && string.IsNullOrWhiteSpace(lines[start]) && string.IsNullOrWhiteSpace(lines[start - 1]))
-            lines.RemoveAt(start);
-    }
-
-    private static void ReplaceExactComment(List<string> lines, string before, string after)
-    {
-        for (var i = 0; i < lines.Count; i++)
-        {
-            if (lines[i].Trim().Equals(before, StringComparison.Ordinal))
-                lines[i] = after;
-        }
-    }
-
     private void NormalizeTunerDeviceNumbers()
     {
         var counters = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -723,7 +400,7 @@ public sealed class IniSettingsService
         EpgDepth             = SettingsDefaults.NormalizeEpgDepth(dto.EpgDepth);
         EpgPreRecordMinutes       = SettingsDefaults.NormalizeEpgPreRecordMinutes(dto.EpgPreRecordMinutes);
         LaterProgramPriority  = dto.LaterProgramPriority;
-        ChainReservationMode = ChainModeContract.Requested(dto.ChainReservationMode, dto.ChainRecordingEnabled, ChainReservationMode);
+        ChainReservationMode = ChainModeContract.Normalize(dto.ChainReservationMode, ChainReservationMode);
         PreStartMarginSeconds = SettingsDefaults.NormalizePreStartMarginSeconds(dto.PreStartMarginSeconds);
         PostEndMarginSeconds  = SettingsDefaults.NormalizePostEndMarginSeconds(dto.PostEndMarginSeconds);
         WakeMinutesBefore     = SettingsDefaults.NormalizeWakeMinutesBefore(dto.WakeMinutesBefore);
@@ -858,7 +535,6 @@ public sealed class IniSettingsService
             $"PostEndMarginSeconds  = {PostEndMarginSeconds}",
             $"WakeMinutesBefore     = {WakeMinutesBefore}",
             $"WakeAdditionalSeconds = {WakeAdditionalSeconds}",
-            $"ChainRecordingEnabled     = {(ChainRecordingEnabled ? "true" : "false")}",
             $"ChainReservationMode = {ChainReservationMode}",
             $"RecordingAfterAction = {RecordingAfterAction}",
             $"RecordingAfterActionDelayMinutes = {RecordingAfterActionDelayMinutes}",
@@ -979,7 +655,7 @@ public sealed class IniSettingsService
         TvTestPluginsDirectory, TvTestExecutablePath, BonDriverDirectory, ViewingTvTestExecutablePath,
         GrChannelFilePath, GrChSetFilePath, BscsChannelFilePath, BscsChSetFilePath,
         DataDirectory, SystemTheme, Port, EpgEnabled, EpgHour, EpgMinute, EpgDepth, EpgPreRecordMinutes,
-        LaterProgramPriority, ChainRecordingEnabled, ChainReservationMode,
+        LaterProgramPriority, ChainReservationMode,
         PreStartMarginSeconds, PostEndMarginSeconds, WakeMinutesBefore,
         WakeAdditionalSeconds, UseMinOption, UseNodshowOption,
         ShowTvAIrEpgRecTaskbarIcon, StartupEnabled, NetworkUsageEnabled, NetworkLanAccessEnabled,
@@ -1011,7 +687,6 @@ public sealed class IniSettingsService
         EpgDepth = state.EpgDepth;
         EpgPreRecordMinutes = state.EpgPreRecordMinutes;
         LaterProgramPriority = state.LaterProgramPriority;
-        ChainRecordingEnabled = state.ChainRecordingEnabled;
         ChainReservationMode = state.ChainReservationMode;
         PreStartMarginSeconds = state.PreStartMarginSeconds;
         PostEndMarginSeconds = state.PostEndMarginSeconds;
@@ -1055,7 +730,7 @@ public sealed class IniSettingsService
         string TvTestPluginsDirectory, string TvTestExecutablePath, string BonDriverDirectory, string ViewingTvTestExecutablePath,
         string GrChannelFilePath, string GrChSetFilePath, string BscsChannelFilePath, string BscsChSetFilePath,
         string DataDirectory, string SystemTheme, int Port, bool EpgEnabled, int EpgHour, int EpgMinute,
-        string EpgDepth, int EpgPreRecordMinutes, bool LaterProgramPriority, bool ChainRecordingEnabled, string ChainReservationMode,
+        string EpgDepth, int EpgPreRecordMinutes, bool LaterProgramPriority, string ChainReservationMode,
         int PreStartMarginSeconds, int PostEndMarginSeconds,
         int WakeMinutesBefore, int WakeAdditionalSeconds,
         bool UseMinOption, bool UseNodshowOption, bool ShowTvAIrEpgRecTaskbarIcon, bool StartupEnabled,
@@ -1099,7 +774,6 @@ public sealed class IniSettingsService
         EpgDepth             = EpgDepth,
         EpgPreRecordMinutes       = EpgPreRecordMinutes,
         LaterProgramPriority  = LaterProgramPriority,
-        ChainRecordingEnabled     = ChainRecordingEnabled,
         ChainReservationMode = ChainReservationMode,
         PreStartMarginSeconds = PreStartMarginSeconds,
         PostEndMarginSeconds  = PostEndMarginSeconds,
@@ -1174,7 +848,6 @@ public sealed class IniSettingsService
             EpgDepth = current.EpgDepth,
             EpgPreRecordMinutes = current.EpgPreRecordMinutes,
             LaterProgramPriority = current.LaterProgramPriority,
-            ChainRecordingEnabled = current.ChainRecordingEnabled,
             ChainReservationMode = current.ChainReservationMode,
             PreStartMarginSeconds = current.PreStartMarginSeconds,
             PostEndMarginSeconds = current.PostEndMarginSeconds,
@@ -1282,7 +955,6 @@ public sealed class IniSettingsService
         var result = CloneTuners(Tuners);
         foreach (var tuner in result)
         {
-            // Keep compatibility with previously delivered developer configurations.
             if (!string.IsNullOrWhiteSpace(tuner.ChannelCh2Path)) continue;
             var group = TunerDisplayName.NormalizeGroup(tuner.Group);
             var automatic = group is "HYBRID" or "CATV"
@@ -1498,7 +1170,6 @@ public class IniSettingsValuesDto
     public string EpgDepth             { get; set; } = SettingsDefaults.EpgDepth;
     public int    EpgPreRecordMinutes  { get; set; } = SettingsDefaults.EpgPreRecordMinutes;
     public bool   LaterProgramPriority { get; set; } = SettingsDefaults.LaterProgramPriority;
-    public bool   ChainRecordingEnabled { get; set; } = SettingsDefaults.ChainRecordingEnabled;
     public string? ChainReservationMode { get; set; }
     public int    PreStartMarginSeconds { get; set; } = SettingsDefaults.PreStartMarginSeconds;
     public int    PostEndMarginSeconds  { get; set; } = SettingsDefaults.PostEndMarginSeconds;
@@ -1548,7 +1219,6 @@ public class WebSettingsValuesDto
     public string EpgDepth { get; set; } = SettingsDefaults.EpgDepth;
     public int EpgPreRecordMinutes { get; set; } = SettingsDefaults.EpgPreRecordMinutes;
     public bool LaterProgramPriority { get; set; } = SettingsDefaults.LaterProgramPriority;
-    public bool ChainRecordingEnabled { get; set; } = SettingsDefaults.ChainRecordingEnabled;
     public string? ChainReservationMode { get; set; }
     public int PreStartMarginSeconds { get; set; } = SettingsDefaults.PreStartMarginSeconds;
     public int PostEndMarginSeconds { get; set; } = SettingsDefaults.PostEndMarginSeconds;

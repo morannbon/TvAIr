@@ -155,7 +155,6 @@ internal static class EpgFailurePresentationContract
         {
             "OK" => "EPG取得を完了しました",
             "BLOCKED" => EpgStartBlockMessage.FromReason(blockedReason),
-            "PARTIAL" or "INCOMPLETE" => "EPGを一部取得しました",
             "FAILED" when completedGroups > 0 && completedGroups < totalGroups
                 => "EPGを一部取得しましたが、" + Message(reason),
             _ => Message(reason)

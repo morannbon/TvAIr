@@ -6,21 +6,21 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>自動検索予約リスト — TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.16"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.16"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.3.0"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.3.0"/>
 
-<link href="/tvair-ui-foundation.css?v=1.2.16" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.16" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.16" rel="stylesheet"/>
-<link href="/tvair-list-module.css?v=1.2.16" rel="stylesheet"/>
-<link href="/tvair-program-rules.css?v=1.2.16" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.16" rel="stylesheet"/>
-<link href="/tvair-settings-host.css?v=1.2.16" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.3.0" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.3.0" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.3.0" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.3.0" rel="stylesheet"/>
+<link href="/tvair-program-rules.css?v=1.3.0" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.3.0" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.3.0" rel="stylesheet"/>
 
-<script src="/tvair-theme.js?v=1.2.16"></script>
-<script src="/tvair-page-view-state.js?v=1.2.16"></script>
-<script src="/tvair-action-button-state.js?v=1.2.16"></script>
-<script src="/tvair-search-enter.js?v=1.2.16"></script>
+<script src="/tvair-theme.js?v=1.3.0"></script>
+<script src="/tvair-page-view-state.js?v=1.3.0"></script>
+<script src="/tvair-action-button-state.js?v=1.3.0"></script>
+<script src="/tvair-search-enter.js?v=1.3.0"></script>
 
 
 
@@ -432,7 +432,7 @@ async function loadChainFeatureAvailability(){
     if(!res.ok) throw new Error(`HTTP ${res.status}`);
     const d=await res.json();
     if(generation!==chainSettingsLoadGeneration) return;
-    chainConfiguredMode=d.chainReservationMode || (d.chainRecordingEnabled===true?"manual":"disabled");
+    chainConfiguredMode=d.chainReservationMode || "disabled";
     chainFeatureAvailable=d && d.laterProgramPriority===true && chainConfiguredMode==="manual";
   }catch(_){
     if(generation!==chainSettingsLoadGeneration) return;
@@ -539,12 +539,13 @@ Promise.all([loadChannels(), loadRules(), loadChainFeatureAvailability()])
 
 </script>
 
-<script src="/tvair-notification.js?v=1.2.16"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.16"></script>
-<script src="/tvair-settings-host.js?v=1.2.16"></script>
-<script src="/tvair-menu-spine.js?v=1.2.16"></script>
+<script src="/tvair-notification.js?v=1.3.0"></script>
+<script src="/tvair-epg-run-contract.js?v=1.3.0"></script>
+<script src="/tvair-settings-host.js?v=1.3.0"></script>
+<script src="/tvair-menu-spine.js?v=1.3.0"></script>
 </body>
 </html>
+
 
 
 

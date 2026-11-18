@@ -1,7 +1,7 @@
 ﻿using Microsoft.Data.Sqlite;
 using TvAIr.Core;
 namespace TvAIr.Schedule;
-// Isolated durable lifecycle experiment. All writes are invoked by the canonical route.
+// Stores the durable withdrawal lifecycle. Mutations originate in the common reservation route.
 public sealed class LabWithdrawalJournal(Database db)
 {
  internal static void EnsureSchema(SqliteConnection con,SqliteTransaction tx)
@@ -141,13 +141,3 @@ public sealed class LabWithdrawalJournal(Database db)
   using var con=db.Open();using var tx=con.BeginTransaction();using var cmd=con.CreateCommand();cmd.Transaction=tx;cmd.CommandText="UPDATE lab_withdrawal_operations SET state='aborted' WHERE operation=$op AND state='pending'";cmd.Parameters.AddWithValue("$op",operation);cmd.ExecuteNonQuery();cmd.CommandText="SELECT state FROM lab_withdrawal_operations WHERE operation=$op";var state=cmd.ExecuteScalar() as string??"unknown";tx.Commit();return state;
  }
 }
-public sealed class LabJournalCommand(Func<ReservationStore,bool> execute) : ReservationTopologyCommand
-{
- public bool? Result {get;private set;}
- internal override bool RequiresProjectionMetadata=>false;
- internal override bool IsRejected=>Result==false;
- internal override bool RequiresAllocationAfterCommit=>false;
- internal override void Apply(ReservationStore store,bool enabled,ReservationProjectionMetadataStore? metadataStore=null){if(Result is null)Result=execute(store);}
-}
-
-public sealed record LabWithdrawalRecoveryRow(string Operation,int Selected,string Payload,string State);

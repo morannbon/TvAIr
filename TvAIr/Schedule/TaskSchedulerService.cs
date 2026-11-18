@@ -38,6 +38,7 @@ public sealed class TaskSchedulerService
     private readonly UserEventLogService _userEvents;
     private readonly EpgScheduler _epgScheduler;
     private readonly ChannelServiceAccessPolicy _serviceAccess;
+    private readonly ReservationAllocationRouteService _allocationRoute;
 
     private static readonly TimeSpan FullValidationInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan WakeOverdueGrace = TimeSpan.FromMinutes(2);
@@ -82,7 +83,8 @@ public sealed class TaskSchedulerService
         LogRepository      log,
         UserEventLogService userEvents,
         EpgScheduler epgScheduler,
-        ChannelServiceAccessPolicy serviceAccess)
+        ChannelServiceAccessPolicy serviceAccess,
+        ReservationAllocationRouteService allocationRoute)
     {
         _store = store;
         _ini   = ini;
@@ -91,6 +93,7 @@ public sealed class TaskSchedulerService
         _userEvents = userEvents;
         _epgScheduler = epgScheduler;
         _serviceAccess = serviceAccess;
+        _allocationRoute = allocationRoute;
     }
 
     /// <summary>
@@ -374,11 +377,9 @@ public sealed class TaskSchedulerService
                 .FirstOrDefault();
             var failedTarget = firstFailed is null ? "none" : $"{firstFailed.When:MM/dd HH:mm:ss} {firstFailed.Name} {FormatWakeReservationId(firstFailed.ReservationId)} {CompactOneLine(firstFailed.Title)}";
 
-            // 
-            // Wake registration failures are Task Scheduler diagnostics, not routine user-operation events.
-            // Do not surface raw AccessDenied / kept / failed counters in the user log on every rebuild.
-            // A user-facing wake event must be emitted only from a future WakeCoverage guarantee layer
-            // when a concrete recording has no alternative wake coverage and user action is actually required.
+            // Wake registration failures are recorded here as Task Scheduler results.
+            // This event does not establish that a specific recording has lost all wake paths.
+            // User logs must not imply such an outcome without that evidence.
             _log.Add("TaskScheduler", "WAKE_REGISTER_CRITICAL",
                 $"result=FAILED failed={failedCount} deleteFailed={deleteFailedCount} firstFailed={failedTarget} userLogSuppressed=True suppressionReason=task_scheduler_diagnostic_not_user_actionable risk=sleep_resume_not_guaranteed action=internal_diagnose_wake_coverage rule=release_contract");
         }
@@ -769,10 +770,13 @@ public sealed class TaskSchedulerService
         // TvAIr内部に保持する。起床後の実処理判断は常駐TvAIrの共通割当/EPG経路へ戻す。
         // RECOVERYはTask Schedulerで予約ごとに膨らませず、録画中の本体監視/内部タイマー側へ寄せる。
         var coverageCandidates = new List<WakeCoverageItem>();
+        var operationalChainChildIds = _store.GetOperationalChainPredecessors(
+            _ini.UserChainRecordingEnabled, _allocationRoute.GetActiveSharedCaptureChainRootIds()).Keys.ToHashSet();
 
         void AddCoverage(string purpose, DateTime when, Reservation reservation)
         {
             if (when <= now) return;
+            var operationalChainChild = operationalChainChildIds.Contains(reservation.Id);
             coverageCandidates.Add(new WakeCoverageItem(
                 Purpose: purpose,
                 When: when,
@@ -780,9 +784,9 @@ public sealed class TaskSchedulerService
                 Title: reservation.Title,
                 StartTime: reservation.StartTime,
                 SourceLabel: NormalizeWakeSourceLabel(reservation),
-                Route: ResolveWakeCoverageRoute(reservation),
-                ChainRoot: reservation.UserChainRootId,
-                ChainPrev: reservation.UserChainPreviousId));
+                Route: operationalChainChild ? "user_chain" : ReservationOriginClassifier.GetOperationalRoute(reservation),
+                ChainRoot: operationalChainChild ? reservation.UserChainRootId : null,
+                ChainPrev: operationalChainChild ? reservation.UserChainPreviousId : null));
         }
 
         void AddSystemEpgCoverage(DateTime when, DateTime scheduledAt)
@@ -971,9 +975,6 @@ public sealed class TaskSchedulerService
 
     private static string NormalizeWakeSourceLabel(Reservation reservation)
         => ReservationOriginClassifier.GetUserSourceLabel(reservation);
-
-    private static string ResolveWakeCoverageRoute(Reservation reservation)
-        => reservation.IsUserChain ? "user_chain" : ReservationOriginClassifier.GetOperationalRoute(reservation);
 
     private static string FormatNullableId(int? id)
         => id.HasValue && id.Value > 0 ? $"R{id.Value}" : "-";

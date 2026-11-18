@@ -52,7 +52,7 @@ public static class TvTestRecordingDirectoryResolver
         {
             if (!_initialized || !string.Equals(_initializedTvTestExe, tvTestExecutablePath ?? string.Empty, StringComparison.OrdinalIgnoreCase))
             {
-                // 起動時初期化漏れの保険。ここでも推測探索はせず RecordFolder 直読みに限定する。
+                // 初回TryResolveではRecordFolderキーを直接読み込む。推測探索はしない。
                 _initializedTvTestExe = tvTestExecutablePath ?? string.Empty;
                 _success = TryReadRecordFolderCore(_initializedTvTestExe, out _directory, out _evidence);
                 _initialized = true;

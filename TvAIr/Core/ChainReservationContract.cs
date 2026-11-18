@@ -17,12 +17,15 @@
 ///    現在有効なsegment集合から再導出し、session / TunerPool lease / worker deadlineを延長・短縮の両方向へ収束させる。
 /// 6. チェーン長に固定段数上限を設けない。保存済み直列トポロジーを終端またはcycle検出まで辿る。
 /// 7. physical capture喪失時の復旧は通常の中断録画復旧契約へ戻す。チェーン専用の別worker/別Tuner救済経路を作らない。
-/// 8. チェーン機能を有効→無効へ切り替えた場合、未開始(Scheduled)の保存トポロジーは通常予約へdetachする。
-///    予約自体は削除せず、TunerNameを未確定へ戻して共通割当へ再投入する。競合は自動削除せず予約リストでユーザー判断に委ねる。
-///    Starting/Recordingへ入ったsegmentは設定変更だけで物理captureを切断せず、残る保存トポロジーをruntimeが最後まで実行する。
-/// 9. 正本の継ぎ目は Reservation topology → FinalConflictPlan → active ActualTuner/lease/PID → chain control → worker deadline の順で固定する。
+/// 8. 設定の無効化は保存済みprevious/rootを変更せず、実効チェーン投影だけを停止する。
+///    OFF中の未開始予約は独立して共通割当され、ON時は同一の保存済み連結がそのまま再適用される。
+///    OFFより前に開始したshared captureのrootのみ完走させ、他rootには継続を広げない。
+/// 9. 既存のprevious/rootリンクは先祖予約のCompleted/Cancelled等の状態遷移だけでは消失しない。
+///    新規チェーン作成には有効な先行予約が必要だが、既存チェーンの子は自身の有効状態と保存済み構造で評価する。
+///    明示取消/手動停止/削除だけが保存トポロジーを変更する。設定OFFは変更しない。
+/// 10. 正本の継ぎ目は Reservation topology → FinalConflictPlan → active ActualTuner/lease/PID → chain control → worker deadline の順で固定する。
 ///    topology mutation後はactive control/lifetimeを同じcanonical topologyへ再収束させ、その後に共通割当を再評価する。
-/// 判定条件、保存トポロジー、割当、競合伝播、取消、設定OFF detach、時間追従、segment境界、owner移管、物理寿命、復旧は一つの契約として扱う。
+/// 判定条件、保存トポロジー、割当、競合伝播、取消、設定OFF投影、時間追従、segment境界、owner移管、物理寿命、復旧は一つの契約として扱う。
 /// 結果または実行順序を変更する場合は、UI/API/Store/割当/worker実行境界を横断監査し、実境界で再検証する。
 /// </summary>
 public static class ChainReservationContract
@@ -41,14 +44,18 @@ public static class ChainReservationContract
         => laterProgramPriorityEnabled && chainRecordingEnabled;
 
     /// <summary>
-    /// FinalConflictPlan / runtime がcontinuous chainとして扱うべきか。
-    /// 設定OFF後もStarting/Recordingなど既に実行へ入った保存トポロジーは完走させるため、
-    /// persistedPairCount が残る間は設定値より保存トポロジーを優先する。
+    /// 保存済みリンクは設定OFFでも変更しない。実行投影だけは設定と生存中の
+    /// 連続収録ownerを参照する。録画中ownerの属するrootのみ設定OFF後も完走させる。
+    /// 他rootの未開始チェーンは独立予約として扱い、ONへ戻すと同じ保存リンクを再利用する。
     /// </summary>
+    public static bool IsOperationalRoot(
+        bool configuredFeatureEnabled, int storedRootId,
+        IReadOnlySet<int>? activeSharedCaptureRootIds)
+        => configuredFeatureEnabled || (activeSharedCaptureRootIds?.Contains(storedRootId) ?? false);
+
     public static bool ShouldPlanContinuousCapture(
-        bool configuredFeatureEnabled,
-        int persistedPairCount)
-        => configuredFeatureEnabled || persistedPairCount > 0;
+        bool configuredFeatureEnabled, IReadOnlySet<int>? activeSharedCaptureRootIds)
+        => configuredFeatureEnabled || activeSharedCaptureRootIds is { Count: > 0 };
 
     /// <summary>保存済み明示チェーンの後続行か。</summary>
     public static bool IsStoredSuccessor(Reservation reservation)

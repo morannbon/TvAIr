@@ -30,7 +30,7 @@ public sealed class TunerAllocationDebugSettings
     public bool LaterProgramPriority { get; set; }
 
     // Allocatorが使用したcontinuous-chain物理計画状態。設定値そのものではなく、
-    // 保存topologyを含むChainReservationContract.ShouldPlanContinuousCaptureの結果。
+    // 設定状態と実行中shared captureに基づくChainReservationContract.ShouldPlanContinuousCaptureの結果。
     public bool ContinuousChainPlanning { get; set; }
 
     // 新規チェーン作成を許可する現在の設定契約。監査専用でallocationを変更しない。

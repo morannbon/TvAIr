@@ -81,7 +81,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
         ViewerReservations = new ViewerReservationsApi(normalizedPluginId, viewerReservations, viewerReservationScheduler, serviceAccess, permissionGate);
         TimedTextStreams = new TimedTextStreamsApi(normalizedPluginId, timedTextStreams, log);
         Backup = UnavailableBackupApi.Instance;
-        var pluginDataDirectory = scopedServices.CreateFiles(normalizedPluginId).RootDirectory;
+        var pluginDataDirectory = scopedServices.GetPluginDataDirectory(normalizedPluginId);
         Settings = new SettingsApi(
             presentationReads,
             ini,
@@ -2950,7 +2950,6 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
     private static string ResolveProgramGuideChangeKind(LogEntry entry)
     {
         var text = $"{entry.Event} {entry.Title} {entry.Message}";
-        if (ContainsAny(text, "EPG_RUN_PARTIAL")) return "PartiallyUpdated";
         if (ContainsAny(text, "EPG_RUN_OK", "EPG_IMPORTED", "EPG_COMPLETION")) return "Updated";
         return "Changed";
     }
@@ -3121,7 +3120,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
 
         // RECORDING_RESULT_IMMUTABLE_AFTER_FINALIZE:
         // Plugin read-model projection must never mutate RecordingResultStore. A finalized recording
-        // result is immutable outcome evidence; missing legacy program metadata is completed only in
+        // result is immutable outcome evidence; missing program metadata is completed only in
         // this read projection from the Reservation / ProgramEvent authorities. This keeps reads
         // side-effect free and prevents later EPG changes from rewriting historical recording results.
         return (result, genre, genreCodes);
@@ -3130,7 +3129,7 @@ internal sealed class PluginCapabilityContext : ITvAirPluginContext
     // RECORDING_PLAYABILITY_SINGLE_SOURCE:
     // CanPlayRecording is a present-tense capability, so do not infer it from Reservation.Completed alone.
     // The finalized RecordingResult is the recording outcome authority, and the current filesystem is the
-    // file-availability authority. Legacy/missing/pending results therefore remain history but are not
+    // file-availability authority. Entries without a finalized result remain history and are not
     // advertised as playable until canonical evidence exists. Failed/Cancelled/System EPG rows are never
     // promoted to user-playable content by this projection.
     private static bool IsPlayableCompletedRecording(Reservation reservation, TvAirRecordingResultDto? result)

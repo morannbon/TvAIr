@@ -63,29 +63,138 @@ public static class ChainReservationEligibilityContract
             && ChainReservationContract.IsAdjacent(predecessor.EndTime, successor.StartTime);
 
     /// <summary>
-    /// Persisted explicit-chain runtime pair contract. New chain creation still requires normal
-    /// adjacency; after persistence, a temporary negative gap caused by predecessor-only
-    /// time-follow does not sever the explicit same-service topology. Positive gaps outside the
-    /// normal adjacency window remain invalid.
+    /// Existing-edge structural contract, independent of predecessor lifecycle or enabled state.
+    /// A cancelled/completed historical predecessor is still part of persisted ancestry; it is
+    /// not a new recording admission and cannot itself consume a tuner or start a worker.
+    /// A successor must independently qualify as an active executable reservation in its caller.
+    /// New chain creation still uses EvaluatePair / EvaluateTopologyPair and requires an active
+    /// predecessor. After persistence, predecessor-only time-follow may extend negative overlap;
+    /// positive gaps outside the normal adjacency window remain invalid.
     /// </summary>
     public static bool IsPersistedExplicitRuntimePair(Reservation predecessor, Reservation successor)
     {
-        if (!IsSameService(predecessor, successor.NetworkId, successor.TransportStreamId, successor.ServiceId))
+        // Persisted identity is mandatory even at an exactly adjacent boundary. Lifecycle
+        // state of the historical predecessor is deliberately not a structural input.
+        var predecessorRoot = predecessor.UserChainRootId ?? predecessor.Id;
+        if (!successor.IsUserChain || successor.UserChainPreviousId != predecessor.Id
+            || successor.UserChainRootId != predecessorRoot
+            || !IsSameService(predecessor, successor.NetworkId, successor.TransportStreamId, successor.ServiceId))
             return false;
 
         if (ChainReservationContract.IsAdjacent(predecessor.EndTime, successor.StartTime))
             return true;
 
-        var gapSeconds = (successor.StartTime - predecessor.EndTime).TotalSeconds;
-        if (gapSeconds >= ChainReservationContract.AdjacentMinGapSeconds)
-            return false;
+        // Persisted explicit time-follow may extend overlap into a negative gap.
+        // A positive break outside the normal adjacency window is never accepted.
+        return (successor.StartTime - predecessor.EndTime).TotalSeconds
+            < ChainReservationContract.AdjacentMinGapSeconds;
+    }
 
-        if (!successor.IsUserChain || successor.UserChainPreviousId != predecessor.Id)
-            return false;
+    /// <summary>
+    /// The persisted lineage is the sole source for a usable chain edge. A former root may
+    /// be Cancelled or Completed: status is not a structural property. Every stored edge,
+    /// including historical ancestors, must still agree on predecessor, root, service and
+    /// boundary. No new edge is inferred from adjacent times or a common tuner.
+    /// </summary>
+    public static bool TryResolvePersistedLineage(
+        Reservation reservation,
+        IReadOnlyDictionary<int, Reservation> allById,
+        out int rootId,
+        out string failureReason,
+        out int depth)
+    {
+        rootId = reservation.UserChainRootId
+            ?? (reservation.UserChainPreviousId.HasValue ? 0 : reservation.Id);
+        failureReason = string.Empty;
+        depth = 0;
 
-        var predecessorRoot = predecessor.UserChainRootId ?? predecessor.Id;
-        return successor.UserChainRootId.HasValue
-            && successor.UserChainRootId.Value == predecessorRoot;
+        var visited = new HashSet<int>();
+        var cursor = reservation;
+        while (cursor.UserChainPreviousId is int predecessorId)
+        {
+            if (!visited.Add(cursor.Id))
+            {
+                failureReason = "chain_cycle_detected";
+                return false;
+            }
+            depth++;
+            if (!allById.TryGetValue(predecessorId, out var predecessor))
+            {
+                failureReason = "chain_broken_predecessor";
+                return false;
+            }
+            if (!IsPersistedExplicitRuntimePair(predecessor, cursor))
+            {
+                failureReason = "chain_invalid_persisted_edge";
+                return false;
+            }
+            cursor = predecessor;
+        }
+
+        var lineageRootId = cursor.UserChainRootId ?? cursor.Id;
+        if (reservation.UserChainPreviousId.HasValue && !reservation.UserChainRootId.HasValue)
+        {
+            failureReason = "chain_root_missing";
+            return false;
+        }
+        if (rootId == 0) rootId = lineageRootId;
+        if (rootId != lineageRootId)
+        {
+            failureReason = "chain_root_mismatch";
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// All consumers (allocation, recording admission, physical boundary, EPG, Wake and
+    /// presentation) project the same verified persisted edges. Settings and active capture
+    /// ownership select execution, without modifying the stored graph. A branched active
+    /// predecessor is rejected as a whole, including its downstream descendants.
+    /// </summary>
+    public static Dictionary<int, int> ProjectPersistedPredecessors(
+        IReadOnlyDictionary<int, Reservation> allById,
+        bool includeTerminal = false,
+        bool includeDisabled = false,
+        bool operationalOnly = false,
+        bool featureEnabled = true,
+        IReadOnlySet<int>? activeSharedCaptureRootIds = null)
+    {
+        if (operationalOnly && !featureEnabled
+            && (activeSharedCaptureRootIds is null || activeSharedCaptureRootIds.Count == 0))
+            return new Dictionary<int, int>();
+
+        var eligible = allById.Values
+            .Where(r => r.Source != ReservationSource.Epg
+                && ChainReservationContract.IsStoredSuccessor(r)
+                && r.Status != ReservationStatus.Cancelled
+                && (includeTerminal || r.Status is not (ReservationStatus.Completed or ReservationStatus.Failed))
+                && (includeDisabled || r.IsEnabled)
+                && (!operationalOnly || ChainReservationContract.IsOperationalRoot(
+                    featureEnabled, r.UserChainRootId ?? r.Id, activeSharedCaptureRootIds)))
+            .Where(r => TryResolvePersistedLineage(r, allById, out _, out _, out _))
+            .ToArray();
+
+        var rejected = eligible.GroupBy(r => r.UserChainPreviousId!.Value)
+            .Where(g => g.Count() > 1)
+            .SelectMany(g => g.Select(r => r.Id))
+            .ToHashSet();
+
+        // Reject descendants of any ambiguous branch, rather than accepting a tail whose
+        // immediate predecessor cannot be represented by one physical chain owner.
+        bool changed;
+        do
+        {
+            changed = false;
+            foreach (var row in eligible)
+            {
+                if (row.UserChainPreviousId is int previousId && rejected.Contains(previousId))
+                    changed |= rejected.Add(row.Id);
+            }
+        } while (changed);
+
+        return eligible.Where(r => !rejected.Contains(r.Id))
+            .ToDictionary(r => r.Id, r => r.UserChainPreviousId!.Value);
     }
 
     private static Result EvaluatePairCore(

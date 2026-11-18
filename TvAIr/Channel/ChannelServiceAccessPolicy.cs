@@ -293,6 +293,15 @@ public sealed class ChannelServiceAccessSnapshot
     /// direct BonDriver tuning coordinates must only be chosen after tuner allocation.
     /// This method never exports coordinates from another driver's channel table.
     /// </summary>
+    // Use the same tuner snapshot that admitted the service for search and
+    // recording. Direct .ch2 routes deliberately return an empty argument until
+    // the assigned physical tuner is leased at recording start.
+    public bool TryResolveRecordingAdmission(
+        ushort networkId, ushort transportStreamId, ushort serviceId,
+        out string serviceName, out string channelArgument)
+        => TryResolveRecordingAdmission(networkId, transportStreamId, serviceId,
+            _configuredTuners, out serviceName, out channelArgument);
+
     public bool TryResolveRecordingAdmission(
         ushort networkId, ushort transportStreamId, ushort serviceId,
         IEnumerable<TunerProfileDto> configuredTuners,

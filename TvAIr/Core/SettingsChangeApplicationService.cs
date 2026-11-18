@@ -232,7 +232,6 @@ public sealed class SettingsChangeApplicationService
         EpgDepth = requested.EpgDepth,
         EpgPreRecordMinutes = requested.EpgPreRecordMinutes,
         LaterProgramPriority = requested.LaterProgramPriority,
-        ChainRecordingEnabled = requested.ChainRecordingEnabled,
         ChainReservationMode = requested.ChainReservationMode,
         PreStartMarginSeconds = requested.PreStartMarginSeconds,
         PostEndMarginSeconds = requested.PostEndMarginSeconds,
@@ -453,7 +452,7 @@ public sealed class SettingsChangeApplicationService
         // 後者だけの変更でFinalAllocationやPreRec再構築を走らせてはならない。
         var reservationActionUiPolicyChanged =
             before.LaterProgramPriority != after.LaterProgramPriority ||
-            before.ChainRecordingEnabled != after.ChainRecordingEnabled || before.ChainReservationMode != after.ChainReservationMode;
+            before.ChainReservationMode != after.ChainReservationMode;
         var recordingSchedulePolicyChanged =
             reservationActionUiPolicyChanged ||
             before.PreStartMarginSeconds != after.PreStartMarginSeconds ||
@@ -589,14 +588,8 @@ public sealed class SettingsChangeApplicationService
             // 保存後の再割当・PreRec・Wakeは新設定で再評価するが、開始済み録画の終了マージンは
             // RecordingSessionが開始時snapshotを保持する。保存値を実行中sessionへ後段上塗りしない。
             _log.Add("SETTINGS_HOT_RELOAD", "RecordingSchedulePolicy",
-                $"changed=True beforeLater={before.LaterProgramPriority} afterLater={after.LaterProgramPriority} beforeChain={before.ChainRecordingEnabled} afterChain={after.ChainRecordingEnabled} pre={before.PreStartMarginSeconds}->{after.PreStartMarginSeconds} post={before.PostEndMarginSeconds}->{after.PostEndMarginSeconds} activeRecordingMarginApply=future_session_only rule=release_contract");
+                $"changed=True beforeLater={before.LaterProgramPriority} afterLater={after.LaterProgramPriority} beforeChain={before.ChainReservationMode} afterChain={after.ChainReservationMode} pre={before.PreStartMarginSeconds}->{after.PreStartMarginSeconds} post={before.PostEndMarginSeconds}->{after.PostEndMarginSeconds} activeRecordingMarginApply=future_session_only rule=release_contract");
         }
-
-        var chainDisableRequested = ChainReservationContract.IsFeatureEnabled(
-            before.LaterProgramPriority, before.ChainRecordingEnabled)
-            && !ChainReservationContract.IsFeatureEnabled(after.LaterProgramPriority, after.ChainRecordingEnabled);
-        if (chainDisableRequested)
-            _allocationRoute.RequestDisabledChainConvergence();
 
         if (recordingCompletionPolicyChanged)
         {
@@ -649,10 +642,11 @@ public sealed class SettingsChangeApplicationService
         // したがって設定保存を理由にProgramRule予約を再生成しない。録画方針変更は既存予約の
         // Allocation／PreRec／Wakeだけを新設定で再評価する。ProgramRuleの作成・変更・削除側が同期責務を持つ。
         const bool programRuleSyncRequired = false;
-        // Daily EPGのON/OFF・時刻・深度変更はDaily行だけの責務であり、
-        // 録画前EPG確認行を削除・再生成する理由にはしない。
-        // PreRec再構築は録画スケジュール方針または録画前EPG確認時刻が変わった場合だけ行う。
-        var preRecordRefreshRequired = recordingSchedulePolicyChanged || preRecordEpgPolicyChanged;
+        // Dailyの取得深度・時刻・ON/OFFはPreRec担当とDaily fallbackを変え得る。
+        // 保存した設定でDailyの正本を再計画した後、同じ共通Routeで
+        // PreRec子予約・所有優先度・予約一覧・Wakeを一括再評価する。
+        var preRecordRefreshRequired = recordingSchedulePolicyChanged
+            || preRecordEpgPolicyChanged || dailyEpgScheduleChanged;
         var wakeRefreshRequired = allocationRefreshRequired || wakePolicyChanged;
         var conflictLogRequired = recordingSchedulePolicyChanged;
         // Route起動条件は、現在の包含関係（WakeがAllocationを内包する等）へ依存させない。
@@ -687,7 +681,7 @@ public sealed class SettingsChangeApplicationService
         var requiresRestart = topologyRestartPendingAfter || hostRestartPendingAfter;
 
         _log.Add("SETTINGS_SAVE", "Settings",
-            $"result=APPLIED persistedChanges={changedAreas.Count} areas=[{string.Join(',', changedAreas.OrderBy(x => x, StringComparer.Ordinal))}] persistedTopologyChanged={tunerTopologyChanged} runtimeTopologyPending={topologyRestartPendingAfter} runtimeHostPending={hostRestartPendingAfter} recordingSchedule={recordingSchedulePolicyChanged} chainDisableRequested={chainDisableRequested} chainConvergencePending={_allocationRoute.HasPendingDisabledChainConvergence} recordingCompletion={recordingCompletionPolicyChanged} workerPresentation={recordingWorkerPresentationChanged} epgDaily={dailyEpgScheduleChanged} epgPreRecord={preRecordEpgPolicyChanged} epgWorker={epgWorkerPolicyChanged} networkImmediate={networkAccessChanged} revokedSessions={revokedNetworkSessions} clearedLoginFailures={clearedNetworkLoginFailures} route={routeExecutionRequired} routeStage={(routeExecutionRequired ? "current_core_followup" : "not_requested")} syncProgram={programRuleSyncRequired} allocation={allocationRefreshRequired} preRecRefresh={preRecordRefreshRequired} wake={wakeRefreshRequired} conflictLog={conflictLogRequired} startupStage=after_common_owner postCommitWarnings={postCommitWarnings.Count} restart={requiresRestart} rule=settings_canonical_diff_contract");
+            $"result=APPLIED persistedChanges={changedAreas.Count} areas=[{string.Join(',', changedAreas.OrderBy(x => x, StringComparer.Ordinal))}] persistedTopologyChanged={tunerTopologyChanged} runtimeTopologyPending={topologyRestartPendingAfter} runtimeHostPending={hostRestartPendingAfter} recordingSchedule={recordingSchedulePolicyChanged} chainMode={after.ChainReservationMode} storedTopologyChanged=False recordingCompletion={recordingCompletionPolicyChanged} workerPresentation={recordingWorkerPresentationChanged} epgDaily={dailyEpgScheduleChanged} epgPreRecord={preRecordEpgPolicyChanged} epgWorker={epgWorkerPolicyChanged} networkImmediate={networkAccessChanged} revokedSessions={revokedNetworkSessions} clearedLoginFailures={clearedNetworkLoginFailures} route={routeExecutionRequired} routeStage={(routeExecutionRequired ? "current_core_followup" : "not_requested")} syncProgram={programRuleSyncRequired} allocation={allocationRefreshRequired} preRecRefresh={preRecordRefreshRequired} wake={wakeRefreshRequired} conflictLog={conflictLogRequired} startupStage=after_common_owner postCommitWarnings={postCommitWarnings.Count} restart={requiresRestart} rule=settings_canonical_diff_contract");
 
         // SETTINGS_SAVE_RESULT_MESSAGE_COMPOSITION_CONTRACT
         // 外部副作用の部分失敗と再起動待ちは同時に成立し得るため、優先順位で片方を隠さず加算して通知する。
@@ -740,8 +734,7 @@ public sealed class SettingsChangeApplicationService
             !EqualsIgnoreCase(current.EpgDepth, SettingsDefaults.NormalizeEpgDepth(requested.EpgDepth)) ||
             current.EpgPreRecordMinutes != SettingsDefaults.NormalizeEpgPreRecordMinutes(requested.EpgPreRecordMinutes) ||
             current.LaterProgramPriority != requested.LaterProgramPriority ||
-            current.ChainRecordingEnabled != requested.ChainRecordingEnabled ||
-            current.ChainReservationMode != ChainModeContract.Requested(requested.ChainReservationMode, requested.ChainRecordingEnabled, current.ChainReservationMode!) ||
+            current.ChainReservationMode != ChainModeContract.Normalize(requested.ChainReservationMode, current.ChainReservationMode!) ||
             current.PreStartMarginSeconds != SettingsDefaults.NormalizePreStartMarginSeconds(requested.PreStartMarginSeconds) ||
             current.PostEndMarginSeconds != SettingsDefaults.NormalizePostEndMarginSeconds(requested.PostEndMarginSeconds) ||
             current.WakeMinutesBefore != SettingsDefaults.NormalizeWakeMinutesBefore(requested.WakeMinutesBefore) ||

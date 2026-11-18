@@ -58,9 +58,7 @@ internal sealed class RecordingFileCatalogService(
         {
             var id=ParseId(file.ReservationId);
             var reservation=id>0?reservations.GetById(id):null;
-            var legacy=results.Get(file.ReservationId);
-            var matchingLegacy=legacy?.ResultFinalized==true
-                && string.Equals(legacy.FilePath,file.FilePath,StringComparison.OrdinalIgnoreCase);
+            var finalizedForFile = results.GetFinalizedForFile(file.ReservationId, file.FilePath);
             // The one-time schema baseline excludes old completed recordings. Wall clock or
             // Host session age must never discard a file committed before a crash.
             // Freshly confirmed files and a reservation just finalized by this startup remain eligible.
@@ -68,7 +66,7 @@ internal sealed class RecordingFileCatalogService(
                 && new DateTimeOffset(finished)>=HostStarted;
             if(results.Files.IsPublicationBaseline(file.Sequence) && !newlyTerminal)
             {
-                var historical=BuildEvent(file,manifest,reservation,matchingLegacy?legacy:null);
+                var historical=BuildEvent(file,manifest,reservation,finalizedForFile);
                 results.Files.StageFinalizedEvent(historical);
                 results.Files.CompletePublication(RecordingFileCatalog.PublicationKey(file.ReservationId,Path.GetFullPath(file.FilePath)));
                 continue;
@@ -77,16 +75,16 @@ internal sealed class RecordingFileCatalogService(
                 continue;
             // A live Host still owns its normal completion projection. Missing results from
             // an exited Host are reconstructed from physical release evidence, never success guesses.
-            if(!matchingLegacy && manifest is not null && manifest.PhysicalResultJson is null && IsHostAlive(manifest.HostPid,manifest.HostStartTicks))
+            if(finalizedForFile is null && manifest is not null && manifest.PhysicalResultJson is null && IsHostAlive(manifest.HostPid,manifest.HostStartTicks))
                 continue;
-            results.Files.StageFinalizedEvent(BuildEvent(file,manifest,reservation,matchingLegacy?legacy:null));
+            results.Files.StageFinalizedEvent(BuildEvent(file,manifest,reservation,finalizedForFile));
         }
     }
 
     private static TvAirEventDto BuildEvent(TvAirFinalizedRecordingFileDto file,RecordingFileManifest? manifest,
-        Reservation? reservation,TvAirRecordingResultDto? legacy)
+        Reservation? reservation,TvAirRecordingResultDto? finalizedForFile)
     {
-        var result=legacy ?? new TvAirRecordingResultDto
+        var result=finalizedForFile ?? new TvAirRecordingResultDto
         {
             ReservationId=file.ReservationId,RecordingId=file.RecordingFileId,
             ServiceName=file.ServiceName,EventTitle=file.ProgramTitle,

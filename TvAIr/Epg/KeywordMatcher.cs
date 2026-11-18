@@ -88,14 +88,19 @@ public sealed class KeywordMatcher
         var result = new KeywordRulePreviewResult();
         var now = DateTime.Now;
         var channelMap = _serviceAccess.Capture();
-        var channelTargets = channelMap.DisplayTargets.ToList();
         var events = GetFutureAutoReservationEvents(now, channelMap)
             .OrderBy(e => e.Start)
             .ThenBy(e => e.ServiceName)
             .ThenBy(e => e.Title);
         var existing = _rsvStore.GetAll()
-            .Where(r => r.Status == ReservationStatus.Scheduled || r.Status == ReservationStatus.Recording)
+            .Where(IsAuthoritativeExistingReservationForKeywordMatch)
+            .ToList();
+        var existingEvent = existing
+            .Where(r => r.EventId != 0)
             .Select(KeywordEventOccurrenceDedupeKey)
+            .ToHashSet(StringComparer.Ordinal);
+        var existingSchedule = existing
+            .Select(KeywordScheduleDedupeKey)
             .ToHashSet(StringComparer.Ordinal);
 
         var compiled = CompileRule(rule);
@@ -103,15 +108,16 @@ public sealed class KeywordMatcher
             return result;
 
         var targetCache = new Dictionary<(string EventKey, long StartTicks, long EndTicks, byte Mask), MatchTarget>();
-        var serviceNameMap = BuildServiceNameMap(channelTargets);
-
         foreach (var ev in events)
         {
-            if (!IsMatch(ev, compiled, targetCache))
+            if (!IsMatch(ev, compiled, targetCache)
+                || !channelMap.TryResolveRecordingAdmission(ev.NetworkId, ev.TransportStreamId,
+                    ev.ServiceId, out var serviceName, out _))
                 continue;
 
             var evKey = KeywordEventOccurrenceDedupeKey(ev);
-            var alreadyReserved = existing.Contains(evKey);
+            var alreadyReserved = existingEvent.Contains(evKey)
+                || existingSchedule.Contains(KeywordScheduleDedupeKey(ev));
             result.CandidateCount++;
             if (alreadyReserved)
                 result.AlreadyReservedCount++;
@@ -124,7 +130,7 @@ public sealed class KeywordMatcher
                     TransportStreamId = ev.TransportStreamId,
                     ServiceId = ev.ServiceId,
                     EventId = ev.EventId,
-                    ServiceName = ResolveCanonicalServiceName(ev, serviceNameMap),
+                    ServiceName = CanonicalRecordingServiceName(ev, serviceName),
                     Title = ev.Title,
                     Description = ev.ShortText,
                     Genre = ev.Genre,
@@ -300,10 +306,9 @@ public sealed class KeywordMatcher
         // TVTest .ch2 の有効状態(state!=0)を正本とし、ChSet経路または
         // 録画用BonDriverに明示的に結び付いた.ch2経路へ解決できるサービスに限定する。録画ファイルの「現在サービスのみ保存」とは独立した契約。
         var channelMap = _serviceAccess.Capture();
-        var channelTargets = channelMap.DisplayTargets.ToList();
         var safeFutureEvents = GetFutureSafeEvents(futureEvents, now);
         var events = safeFutureEvents
-            .Where(e => IsRecordingServiceAvailable(channelMap, e.NetworkId, e.TransportStreamId, e.ServiceId))
+            .Where(e => channelMap.IsAvailableForRecording(e.NetworkId, e.TransportStreamId, e.ServiceId))
             .ToList();
         var disabledFutureCount = safeFutureEvents.Count(e => channelMap.GetEligibility(e.NetworkId, e.TransportStreamId, e.ServiceId) == ChannelServiceEligibility.Disabled);
         var routeUnavailableFutureCount = safeFutureEvents.Count(e => channelMap.GetEligibility(e.NetworkId, e.TransportStreamId, e.ServiceId) == ChannelServiceEligibility.ActiveRouteUnavailable);
@@ -320,15 +325,10 @@ public sealed class KeywordMatcher
                 $"result=FILTERED safeFuture={safeFutureEvents.Count} activeFuture={events.Count} disabledFuture={disabledFutureCount} activeRouteUnavailableFuture={routeUnavailableFutureCount} unknownFuture={unknownFutureCount} inactiveScheduledPending={inactiveScheduledPending} identity=nid_tsid_sid activationSource=tvtest_ch2_state routeSource=chset action=keep_epg_filter_auto_search_reservation_recording rule=keyword_service_activation_contract");
         }
 
-        // ServiceId単独をキーにすると地上波とBS/CSでServiceIdが衝突した際に
-        // ToDictionaryが重複キー例外を投げる(Key: 161等で発生確認済み)。
-        // また ChannelArgument は (NetworkId, TSID, ServiceId) で一意に決まる設計上、
-        // ServiceId だけで引くのは本来不正確。EpgEventのキー(NetworkId,TSID,ServiceId)と
-        // 対応するタプルキーに変更し、同時に重複安全化する(同一3キーで複数あれば初出採用)。
-        var chArgMap = channelTargets
-            .GroupBy(t => (t.OriginalNetworkId, t.TransportStreamId, t.ServiceId))
-            .ToDictionary(g => g.Key, g => g.First().ChannelArgument);
-        var serviceNameMap = BuildServiceNameMap(channelTargets);
+        // Direct BonDriver/.ch2 sources have no global channel argument. The
+        // same recording-admission authority used by manual and Plugin bookings
+        // supplies a stable service identity; the physical lease supplies tuning
+        // coordinates only when the recording actually starts.
 
         // release_contract KeywordMatcherExistingReservationAuthority:
         // Matcher の「既存予約」判定は、現在も予約・録画責務を持つ行と、同一発生回の
@@ -679,68 +679,68 @@ public sealed class KeywordMatcher
                 continue;
             }
 
-                if (!chArgMap.TryGetValue((ev.NetworkId, ev.TransportStreamId, ev.ServiceId), out var chArg)
-                    || string.IsNullOrWhiteSpace(chArg))
-                {
-                    _log.Add("KEYWORD_MATCH_SERVICE_ELIGIBILITY", SafeKeywordEventTitle(ev),
-                        $"result=INVARIANT_MISS reason=active_service_missing_channel_argument nid={ev.NetworkId} tsid={ev.TransportStreamId} sid={ev.ServiceId} eid={ev.EventId} action=skip_auto_reservation rule=keyword_service_activation_contract");
-                    continue;
-                }
-                var canonicalServiceName = ResolveCanonicalServiceName(ev, serviceNameMap);
-                var safeTitle = SafeKeywordEventTitle(ev);
-                var rsv = new Reservation
-                {
-                    NetworkId = ev.NetworkId,
-                    TransportStreamId = ev.TransportStreamId,
-                    ServiceId = ev.ServiceId,
-                    EventId = ev.EventId,
-                    Title = safeTitle,
-                    StartTime = ev.Start,
-                    EndTime = ev.End,
-                    Status = ReservationStatus.Scheduled,
-                    Source = ReservationSource.Keyword,
-                    Intent = ReservationIntent.AutomaticSearch,
-                    CreatedThrough = "Host",
-                    CreatedByPluginId = string.Empty,
-                    ChannelArgument = chArg ?? "",
-                    ServiceName = canonicalServiceName,
-                    SourceRuleId = rule.Id,
-                    SourceRuleName = string.IsNullOrWhiteSpace(rule.Name) ? TrimRuleLabel(rule.Pattern) : rule.Name
-                };
+            if (!channelMap.TryResolveRecordingAdmission(ev.NetworkId, ev.TransportStreamId,
+                ev.ServiceId, out var resolvedServiceName, out var chArg))
+            {
+                _log.Add("KEYWORD_MATCH_SERVICE_ELIGIBILITY", SafeKeywordEventTitle(ev),
+                    $"result=INVARIANT_MISS reason=recording_admission_unavailable nid={ev.NetworkId} tsid={ev.TransportStreamId} sid={ev.ServiceId} eid={ev.EventId} action=skip_auto_reservation rule=keyword_service_activation_contract");
+                continue;
+            }
+            var canonicalServiceName = CanonicalRecordingServiceName(ev, resolvedServiceName);
+            var safeTitle = SafeKeywordEventTitle(ev);
+            var rsv = new Reservation
+            {
+                NetworkId = ev.NetworkId,
+                TransportStreamId = ev.TransportStreamId,
+                ServiceId = ev.ServiceId,
+                EventId = ev.EventId,
+                Title = safeTitle,
+                StartTime = ev.Start,
+                EndTime = ev.End,
+                Status = ReservationStatus.Scheduled,
+                Source = ReservationSource.Keyword,
+                Intent = ReservationIntent.AutomaticSearch,
+                CreatedThrough = "Host",
+                CreatedByPluginId = string.Empty,
+                ChannelArgument = chArg,
+                ServiceName = canonicalServiceName,
+                SourceRuleId = rule.Id,
+                SourceRuleName = string.IsNullOrWhiteSpace(rule.Name) ? TrimRuleLabel(rule.Pattern) : rule.Name
+            };
 
-                try
+            try
+            {
+                // BROADCAST_SLOT_EVENT_REBIND_INVARIANT:
+                // 自動検索も番組表/Pluginと同じatomic parent入口を通す。EventId差替えで同一放送枠の
+                // 同一番組の予約は既存ReservationIdへ収束させる。
+                var addResult = _rsvStore.AddOrGetActiveParent(
+                    rsv,
+                    new ReservationRecordingOptions(rule.RecordCurrentServiceOnly, rule.RecordSubtitles));
+                var reservationId = addResult.ReservationId;
+                _projectionMetadataStore.UpsertFromProjectedEvent(reservationId, ev);
+                if (string.Equals(ev.ProjectionState, ProjectedEventStates.OverlayOnly, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(ev.SourceKind, ProjectedEventSourceKinds.ExternalEpg, StringComparison.OrdinalIgnoreCase))
                 {
-                    // BROADCAST_SLOT_EVENT_REBIND_INVARIANT:
-                    // 自動検索も番組表/Pluginと同じatomic parent入口を通す。EventId差替えで同一放送枠の
-                    // 同一番組の予約は既存ReservationIdへ収束させる。
-                    var addResult = _rsvStore.AddOrGetActiveParent(
-                        rsv,
-                        new ReservationRecordingOptions(rule.RecordCurrentServiceOnly, rule.RecordSubtitles));
-                    var reservationId = addResult.ReservationId;
-                    _projectionMetadataStore.UpsertFromProjectedEvent(reservationId, ev);
-                    if (string.Equals(ev.ProjectionState, ProjectedEventStates.OverlayOnly, StringComparison.OrdinalIgnoreCase)
-                        || string.Equals(ev.SourceKind, ProjectedEventSourceKinds.ExternalEpg, StringComparison.OrdinalIgnoreCase))
-                    {
-                        _log.Add("PROJECTED_RESERVATION_METADATA", "Keyword",
-                            $"result=SAVED reservation=R{reservationId} projectionState={ev.ProjectionState} sourceKind={ev.SourceKind} sourcePluginId={SafeProjectedLogValue(ev.SourcePluginId)} sourceEventKey={SafeProjectedLogValue(ev.SourceEventKey)} projectedEventId={SafeProjectedLogValue(ev.Key.Value)} dbEventExists={ev.DbEventExists} nid={ev.NetworkId} tsid={ev.TransportStreamId} sid={ev.ServiceId} eid={ev.EventId} rule=projected_reservation_contract");
-                    }
-                    existing.Add(evKey);
-                    existingSchedule.Add(scheduleKey);
-                    if (addResult.Added)
-                    {
-                        totalAdded++;
-                        _log.Add("RESERVE_ENTRY", "Keyword", $"共通入口要求/確定 source=Keyword id=R{reservationId} title=[{safeTitle}] service=[{canonicalServiceName}] ruleId={rule.Id} rule=[{TrimRuleLabel(rule.Pattern)}] start={ev.Start:MM/dd HH:mm} end={ev.End:MM/dd HH:mm}");
-                        _log.Add("KEYWORD_MATCH", safeTitle, $"自動検索予約: id=R{reservationId} 「{safeTitle}」 ({ev.Start:MM/dd HH:mm}) ルール:「{TrimRuleLabel(rule.Pattern)}」");
-                    }
-                    else if (addResult.RefreshedBroadcastSlot)
-                    {
-                        _log.Add("RESERVE_ENTRY", "Keyword", $"共通入口要求/更新 source=Keyword id=R{reservationId} title=[{safeTitle}] service=[{canonicalServiceName}] ruleId={rule.Id} rule=[{TrimRuleLabel(rule.Pattern)}] start={ev.Start:MM/dd HH:mm} end={ev.End:MM/dd HH:mm} newReservationId=False broadcastSlotRefreshed=True rule=release_contract");
-                    }
+                    _log.Add("PROJECTED_RESERVATION_METADATA", "Keyword",
+                        $"result=SAVED reservation=R{reservationId} projectionState={ev.ProjectionState} sourceKind={ev.SourceKind} sourcePluginId={SafeProjectedLogValue(ev.SourcePluginId)} sourceEventKey={SafeProjectedLogValue(ev.SourceEventKey)} projectedEventId={SafeProjectedLogValue(ev.Key.Value)} dbEventExists={ev.DbEventExists} nid={ev.NetworkId} tsid={ev.TransportStreamId} sid={ev.ServiceId} eid={ev.EventId} rule=projected_reservation_contract");
                 }
-                catch (Exception ex)
+                existing.Add(evKey);
+                existingSchedule.Add(scheduleKey);
+                if (addResult.Added)
                 {
-                    _log.Add("KEYWORD_MATCH_ERROR", SafeKeywordEventTitle(ev), $"自動予約追加失敗: {ex.Message}");
+                    totalAdded++;
+                    _log.Add("RESERVE_ENTRY", "Keyword", $"共通入口要求/確定 source=Keyword id=R{reservationId} title=[{safeTitle}] service=[{canonicalServiceName}] ruleId={rule.Id} rule=[{TrimRuleLabel(rule.Pattern)}] start={ev.Start:MM/dd HH:mm} end={ev.End:MM/dd HH:mm}");
+                    _log.Add("KEYWORD_MATCH", safeTitle, $"自動検索予約: id=R{reservationId} 「{safeTitle}」 ({ev.Start:MM/dd HH:mm}) ルール:「{TrimRuleLabel(rule.Pattern)}」");
                 }
+                else if (addResult.RefreshedBroadcastSlot)
+                {
+                    _log.Add("RESERVE_ENTRY", "Keyword", $"共通入口要求/更新 source=Keyword id=R{reservationId} title=[{safeTitle}] service=[{canonicalServiceName}] ruleId={rule.Id} rule=[{TrimRuleLabel(rule.Pattern)}] start={ev.Start:MM/dd HH:mm} end={ev.End:MM/dd HH:mm} newReservationId=False broadcastSlotRefreshed=True rule=release_contract");
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.Add("KEYWORD_MATCH_ERROR", SafeKeywordEventTitle(ev), $"自動予約追加失敗: {ex.Message}");
+            }
 
         }
 
@@ -1006,14 +1006,9 @@ public sealed class KeywordMatcher
             ? string.Empty
             : text.Trim().Normalize(NormalizationForm.FormKC);
 
-    private bool IsRecordingServiceAvailable(ChannelServiceAccessSnapshot channelMap,
-        ushort networkId, ushort transportStreamId, ushort serviceId)
-        => channelMap.IsOperationalForConfiguredRecordingTuners(
-            networkId, transportStreamId, serviceId, _ini.GetEffectiveTuners());
-
     private IReadOnlyList<ProjectedProgramEvent> GetFutureAutoReservationEvents(DateTime now, ChannelServiceAccessSnapshot channelMap)
         => GetFutureSafeEvents(now)
-            .Where(e => IsRecordingServiceAvailable(channelMap, e.NetworkId, e.TransportStreamId, e.ServiceId))
+            .Where(e => channelMap.IsAvailableForRecording(e.NetworkId, e.TransportStreamId, e.ServiceId))
             .ToList();
 
     // This method runs under the matcher gate. Never enter the allocation route or
@@ -1028,22 +1023,9 @@ public sealed class KeywordMatcher
         return pending;
     }
 
-    private static Dictionary<(ushort Nid, ushort Tsid, ushort Sid), string> BuildServiceNameMap(IEnumerable<ChannelTarget> targets)
+    private static string CanonicalRecordingServiceName(ProjectedProgramEvent ev, string resolvedName)
     {
-        return targets
-            .Where(t => !string.IsNullOrWhiteSpace(t.Name))
-            .GroupBy(t => (t.OriginalNetworkId, t.TransportStreamId, t.ServiceId))
-            .ToDictionary(g => g.Key, g => g.First().Name.Trim());
-    }
-
-    private static string ResolveCanonicalServiceName(ProjectedProgramEvent ev, IReadOnlyDictionary<(ushort Nid, ushort Tsid, ushort Sid), string> serviceNameMap)
-    {
-        if (serviceNameMap.TryGetValue((ev.NetworkId, ev.TransportStreamId, ev.ServiceId), out var canonical)
-            && !string.IsNullOrWhiteSpace(canonical))
-        {
-            return canonical.Trim();
-        }
-
+        if (!string.IsNullOrWhiteSpace(resolvedName)) return resolvedName.Trim();
         var current = ev.ServiceName?.Trim() ?? string.Empty;
         return string.IsNullOrWhiteSpace(current) ? $"SID{ev.ServiceId}" : current;
     }

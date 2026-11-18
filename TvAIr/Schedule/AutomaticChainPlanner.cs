@@ -31,9 +31,9 @@ public static class AutomaticChainPlanner
             || added.Source == ReservationSource.Epg || added.StartTime <= now || added.EndTime <= added.StartTime)
             return Skip("added_reservation_unavailable");
         var active = reservations.Where(r => ChainReservationEligibilityContract.IsActivePredecessorStatus(r.Status)).ToArray();
-        // Completed/failed rows are historical members only, never new predecessor candidates.
+        // Terminal ancestors belong to saved topology but are never candidate recording owners.
         var members = reservations.Where(r => ChainReservationEligibilityContract.IsActivePredecessorStatus(r.Status)
-            || r.Status is ReservationStatus.Completed or ReservationStatus.Failed).ToArray();
+            || r.Status is ReservationStatus.Completed or ReservationStatus.Failed or ReservationStatus.Cancelled).ToArray();
         var children = members.Where(r => r.IsUserChain && r.UserChainPreviousId.HasValue)
             .GroupBy(r => r.UserChainPreviousId!.Value).ToDictionary(g => g.Key, g => g.ToArray());
         if (!allowExistingComponent && (added.IsUserChain || added.UserChainPreviousId.HasValue || added.UserChainRootId.HasValue
@@ -41,22 +41,19 @@ public static class AutomaticChainPlanner
 
         List<Reservation>? Component(Reservation seed)
         {
+            if (!ChainReservationEligibilityContract.TryResolvePersistedLineage(
+                    seed, byId, out var rootId, out _, out _) || !byId.TryGetValue(rootId, out var root))
+                return null;
             var visited = new HashSet<int>();
-            var root = seed;
-            while (root.UserChainPreviousId is { } previous)
-            {
-                if (!root.IsUserChain || !visited.Add(root.Id) || !byId.TryGetValue(previous, out var parent)) return null;
-                root = parent;
-            }
-            if ((root.UserChainRootId ?? root.Id) != root.Id) return null;
-            visited.Clear();
             var result = new List<Reservation>();
             var current = root;
             while (true)
             {
-                if (!visited.Add(current.Id) || !current.IsEnabled || current.Source == ReservationSource.Epg
+                if (!visited.Add(current.Id)
+                    || (!current.IsEnabled && current.Status != ReservationStatus.Cancelled)
+                    || current.Source == ReservationSource.Epg
                     || !(ChainReservationEligibilityContract.IsActivePredecessorStatus(current.Status)
-                        || current.Status is ReservationStatus.Completed or ReservationStatus.Failed)
+                        || current.Status is ReservationStatus.Completed or ReservationStatus.Failed or ReservationStatus.Cancelled)
                     || current.EndTime <= current.StartTime
                     || !ChainReservationEligibilityContract.IsSameService(root,current.NetworkId,current.TransportStreamId,current.ServiceId)) return null;
                 if (current.Id != root.Id && (!current.IsUserChain || current.UserChainRootId != root.Id)) return null;
@@ -66,13 +63,14 @@ public static class AutomaticChainPlanner
                 current = next[0];
             }
             if (members.Any(r => r.UserChainRootId == root.Id && !visited.Contains(r.Id))) return null;
-            // History must be a completed/failed prefix followed by a live owner. Do not revive
-            // finished chains or permit terminal rows inside the executable suffix.
-            if (result.Any(r => r.Status is ReservationStatus.Completed or ReservationStatus.Failed))
+            // A terminal ancestor is structural history only. A continued component must
+            // have a live recording owner and cannot contain terminal rows after that owner.
+            bool Historical(Reservation r) => r.Status is ReservationStatus.Completed or ReservationStatus.Failed or ReservationStatus.Cancelled;
+            if (result.Any(Historical))
             {
-                var live = result.SkipWhile(r => r.Status is ReservationStatus.Completed or ReservationStatus.Failed).ToArray();
+                var live = result.SkipWhile(Historical).ToArray();
                 if (live.Length == 0 || !live.Any(r => r.Status is ReservationStatus.Starting or ReservationStatus.Recording)
-                    || live.Any(r => r.Status is ReservationStatus.Completed or ReservationStatus.Failed)) return null;
+                    || live.Any(Historical)) return null;
             }
             for (var i=1;i<result.Count;i++)
                 if (!ChainReservationEligibilityContract.IsPersistedExplicitRuntimePair(result[i-1],result[i])) return null;

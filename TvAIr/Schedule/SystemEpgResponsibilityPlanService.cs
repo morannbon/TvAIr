@@ -39,6 +39,8 @@ public sealed class SystemEpgResponsibilityPlanService
     private readonly Dictionary<DateTime, DailyEpgRunState> _dailyStates = new();
     private readonly IniSettingsService _ini;
     private readonly Database _db;
+    private readonly ReservationStore _store;
+    private readonly ReservationAllocationRouteService _allocationRoute;
     private readonly object _ownershipGate = new();
 
     // EpgScheduler alone plans/commits Daily. Responsibility selection consumes that same state.
@@ -48,6 +50,13 @@ public sealed class SystemEpgResponsibilityPlanService
         {
             foreach (var date in _dailyStates.Keys.Where(d => d < DateTime.Today || d > DateTime.Today.AddDays(1)).ToArray())
                 _dailyStates.Remove(date);
+            // 翌日の暫定表示は当日terminal後にだけ必要。取得深度変更で当日が
+            // 正式Plannedに戻った場合、既存の翌日表示を同時に退役させる。
+            if (state.Date.Date == DateTime.Today && state.State == DailyEpgRunPhase.Planned)
+            {
+                foreach (var future in _dailyStates.Keys.Where(d => d > state.Date.Date).ToArray())
+                    _dailyStates.Remove(future);
+            }
             _dailyStates[state.Date.Date] = state;
         }
     }
@@ -75,13 +84,21 @@ public sealed class SystemEpgResponsibilityPlanService
         IniSettingsService ini,
         IReadOnlyList<TunerProfile> tunerProfiles,
         ChannelServiceAccessPolicy serviceAccess,
-        Database db)
+        Database db,
+        ReservationStore store,
+        ReservationAllocationRouteService allocationRoute)
     {
         _db = db;
+        _store = store;
+        _allocationRoute = allocationRoute;
         _ini = ini;
         _tunerProfiles = tunerProfiles;
         _serviceAccess = serviceAccess;
     }
+
+    private IReadOnlySet<int> GetOperationalChainChildIds()
+        => _store.GetOperationalChainPredecessors(_ini.UserChainRecordingEnabled,
+            _allocationRoute.GetActiveSharedCaptureChainRootIds()).Keys.ToHashSet();
 
     // All consumers (reservation list and wake planning included) read the last
     // committed logical owners. Reading must never allocate or delete an owner.
@@ -214,11 +231,12 @@ public sealed class SystemEpgResponsibilityPlanService
             .ToHashSet();
 
         var channelSnapshot = _serviceAccess.Capture();
+        var operationalChainChildren = GetOperationalChainChildIds();
         var candidates = reservations
             .Where(r => r.Source is ReservationSource.Manual or ReservationSource.KeywordSearch or ReservationSource.Keyword)
             .Where(r => r.Status == ReservationStatus.Scheduled)
             .Where(r => r.IsEnabled && !r.IsConflicted)
-            .Where(r => !r.IsUserChain || !r.UserChainPreviousId.HasValue)
+            .Where(r => !operationalChainChildren.Contains(r.Id))
             .Where(r => !completedParents.Contains(r.Id))
             .Select(r =>
             {
@@ -414,9 +432,10 @@ public sealed class SystemEpgResponsibilityPlanService
     // Both absolute wake scheduling and crossing detection consume the same
     // eligible reservation boundary definition. A wake arriving immediately
     // after the three-hour threshold must not silently drop that threshold.
-    private static IEnumerable<DateTime> ResolveStage1Boundaries(
+    private IEnumerable<DateTime> ResolveStage1Boundaries(
         IReadOnlyList<Reservation> reservations)
     {
+        var operationalChainChildren = GetOperationalChainChildIds();
         var completedParents = reservations
             .Where(IsPreRecordRow)
             .Where(r => r.Status == ReservationStatus.Completed)
@@ -427,7 +446,7 @@ public sealed class SystemEpgResponsibilityPlanService
             .Where(r => r.Source is ReservationSource.Manual or ReservationSource.KeywordSearch or ReservationSource.Keyword)
             .Where(r => r.Status == ReservationStatus.Scheduled)
             .Where(r => r.IsEnabled && !r.IsConflicted)
-            .Where(r => !r.IsUserChain || !r.UserChainPreviousId.HasValue)
+            .Where(r => !operationalChainChildren.Contains(r.Id))
             .Where(r => !completedParents.Contains(r.Id))
             .Select(r => r.StartTime.AddHours(-3))
             .Distinct()

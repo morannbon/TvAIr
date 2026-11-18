@@ -1,30 +1,30 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 
 <html lang="ja">
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width,initial-scale=1" name="viewport"/>
 <title>予約リスト — TvAIr</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.2.16"/>
-<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.2.16"/>
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.3.0"/>
+<link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=1.3.0"/>
 
-<link href="/tvair-ui-foundation.css?v=1.2.16" rel="stylesheet"/>
-<link href="/tvair-theme-contract.css?v=1.2.16" rel="stylesheet"/>
-<link href="/tvair-ui-modules.css?v=1.2.16" rel="stylesheet"/>
-<link href="/tvair-list-module.css?v=1.2.16" rel="stylesheet"/>
-<link href="/tvair-reservations.css?v=1.2.16" rel="stylesheet"/>
-<link href="/tvair-user-log.css?v=1.2.16" rel="stylesheet"/>
-<link href="/tvair-notification.css?v=1.2.16" rel="stylesheet"/>
-<link href="/tvair-settings-host.css?v=1.2.16" rel="stylesheet"/>
+<link href="/tvair-ui-foundation.css?v=1.3.0" rel="stylesheet"/>
+<link href="/tvair-theme-contract.css?v=1.3.0" rel="stylesheet"/>
+<link href="/tvair-ui-modules.css?v=1.3.0" rel="stylesheet"/>
+<link href="/tvair-list-module.css?v=1.3.0" rel="stylesheet"/>
+<link href="/tvair-reservations.css?v=1.3.0" rel="stylesheet"/>
+<link href="/tvair-user-log.css?v=1.3.0" rel="stylesheet"/>
+<link href="/tvair-notification.css?v=1.3.0" rel="stylesheet"/>
+<link href="/tvair-settings-host.css?v=1.3.0" rel="stylesheet"/>
 
-<script src="/tvair-theme.js?v=1.2.16"></script>
-<script src="/tvair-page-view-state.js?v=1.2.16"></script>
-<script src="/tvair-action-button-state.js?v=1.2.16"></script>
-<script src="/tvair-reservation-cancel-request.js?v=1.2.16"></script>
-<script src="/tvair-reservation-action-state.js?v=1.2.16"></script>
-<script src="/tvair-program-time-action.js?v=1.2.16"></script>
-<script src="/genre-shared.js?v=1.2.16"></script>
-<script src="/tvair-user-log.js?v=1.2.16"></script>
+<script src="/tvair-theme.js?v=1.3.0"></script>
+<script src="/tvair-page-view-state.js?v=1.3.0"></script>
+<script src="/tvair-action-button-state.js?v=1.3.0"></script>
+<script src="/tvair-reservation-cancel-request.js?v=1.3.0"></script>
+<script src="/tvair-reservation-action-state.js?v=1.3.0"></script>
+<script src="/tvair-program-time-action.js?v=1.3.0"></script>
+<script src="/genre-shared.js?v=1.3.0"></script>
+<script src="/tvair-user-log.js?v=1.3.0"></script>
 
 
 
@@ -239,11 +239,6 @@ function initialReservationFilterFromLocation(){
       ? TvAIrPageViewState.getField('reservations','filter',null)
       : null;
     if(stored) return normalizeReservationFilterValue(stored);
-    const legacyStored = sessionStorage.getItem('tvair_reservation_current_filter');
-    if(legacyStored){
-      if(window.TvAIrPageViewState) TvAIrPageViewState.setField('reservations','filter',legacyStored);
-      return normalizeReservationFilterValue(legacyStored);
-    }
   }catch(_){ }
   return 'active';
 }
@@ -252,7 +247,6 @@ function persistReservationFilterLocation(filter){
   const f = normalizeReservationFilterValue(filter);
   try{
     if(window.TvAIrPageViewState) TvAIrPageViewState.setField('reservations','filter',f);
-    sessionStorage.removeItem('tvair_reservation_current_filter');
   }catch(_){ }
   try{
     if(!window.history || !window.history.replaceState) return;
@@ -1712,7 +1706,7 @@ async function writeUserReportClipboard(report){
     try{
       await navigator.clipboard.writeText(report);
       return true;
-    }catch(_){ /* Try the legacy single-click copy route. */ }
+    }catch(_){ /* Use the local/LAN clipboard fallback. */ }
   }
   const field = document.createElement('textarea');
   field.value = report;
@@ -1906,12 +1900,13 @@ document.addEventListener('DOMContentLoaded', ()=>{
 });
 
 </script>
-<script src="/tvair-notification.js?v=1.2.16"></script>
-<script src="/tvair-epg-run-contract.js?v=1.2.16"></script>
-<script src="/tvair-settings-host.js?v=1.2.16"></script>
-<script src="/tvair-menu-spine.js?v=1.2.16"></script>
+<script src="/tvair-notification.js?v=1.3.0"></script>
+<script src="/tvair-epg-run-contract.js?v=1.3.0"></script>
+<script src="/tvair-settings-host.js?v=1.3.0"></script>
+<script src="/tvair-menu-spine.js?v=1.3.0"></script>
 </body>
 </html>
+
 
 
 

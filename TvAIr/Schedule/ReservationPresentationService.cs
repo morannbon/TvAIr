@@ -291,7 +291,8 @@ public sealed class ReservationPresentationService
 
     private IReadOnlyList<ReservationPresentationItem> BuildPresentationItems(IReadOnlyList<Reservation> reservations, IReadOnlyDictionary<int, string>? priorityOverrides = null, IReadOnlySet<int>? pendingDailyIds = null)
     {
-        var chainMap = BuildChainMap(_store.GetChainPredecessorsForPresentation(), _ini.ChainReservationMode);
+        var chainMap = BuildChainMap(_store.GetChainPredecessorsForPresentation(),
+            _ini.UserChainRecordingEnabled ? _ini.ChainReservationMode : ChainModeContract.Disabled);
         var items = new List<ReservationPresentationItem>(reservations.Count);
         var serviceAccessSnapshot = _serviceAccess.Capture();
         var recordingTuners = GetRecordingTuners();
@@ -364,7 +365,7 @@ public sealed class ReservationPresentationService
                     IsResolvedEventReservation = origin.IsResolvedEventReservation,
                     CanToggleEnabled = ReservationOperationPolicy.CanToggleEnabled(r),
                     CanCancel = ReservationOperationPolicy.CanCancel(r),
-                    IsUserChain = r.IsUserChain,
+                    IsUserChain = chainInfo is not null && r.IsUserChain,
                     ShowChainMark = chainInfo?.ShowMark ?? false,
                     ChainRole = chainInfo?.Role ?? string.Empty,
                     ChainLabel = chainInfo?.Label ?? string.Empty,
@@ -449,6 +450,7 @@ public sealed class ReservationPresentationService
         IReadOnlyDictionary<int, int> predecessors, string chainMode)
     {
         var result = new Dictionary<int, ReservationChainInfo>();
+        if (chainMode == ChainModeContract.Disabled) return result;
         foreach (var pair in predecessors)
         {
             var successorId = pair.Key;

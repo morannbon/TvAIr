@@ -18,8 +18,6 @@ public interface IPluginExternalLookupGateway
 public sealed class PluginExternalLookupGatewayRequest
 {
     public required Uri Uri { get; init; }
-    public HttpMethod Method { get; init; } = HttpMethod.Get;
-    public string? BearerToken { get; init; }
 }
 
 internal sealed class PluginExternalLookupGateway : IPluginExternalLookupGateway, IDisposable
@@ -42,12 +40,10 @@ internal sealed class PluginExternalLookupGateway : IPluginExternalLookupGateway
 
         using var networkCancellation = _networkUsage.CreateLinkedCancellation(cancellationToken);
 
-        using var message = new HttpRequestMessage(request.Method, request.Uri);
+        using var message = new HttpRequestMessage(HttpMethod.Get, request.Uri);
         message.Headers.UserAgent.ParseAdd($"TvAIr/{TvAIr.Core.TvAIrVersionContract.ProductVersion} PluginManagedExternalLookup");
         message.Headers.AcceptEncoding.Clear();
         message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-        if (!string.IsNullOrWhiteSpace(request.BearerToken))
-            message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", request.BearerToken);
 
         return await _httpClient.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, networkCancellation.Token).ConfigureAwait(false);
     }

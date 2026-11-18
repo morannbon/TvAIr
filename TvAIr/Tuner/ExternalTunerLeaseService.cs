@@ -555,10 +555,6 @@ internal sealed record ExternalTunerLeaseCompatibility(bool CanReuse, string Rea
     public static ExternalTunerLeaseCompatibility Blocked(string reason) => new(false, reason);
 }
 
-public sealed record ExternalTunerReleaseRequest(
-    string? LeaseId,
-    string? Source);
-
 public sealed record ExternalTunerLeaseDto(
     string LeaseId,
     string Source,

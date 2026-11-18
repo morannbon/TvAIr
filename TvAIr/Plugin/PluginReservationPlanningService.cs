@@ -1,4 +1,4 @@
-using TvAIr.Core;
+﻿using TvAIr.Core;
 
 namespace TvAIr.Plugin;
 
@@ -127,7 +127,10 @@ internal sealed class PluginReservationPlanningService
         var from = query.From ?? DateTime.Now.AddHours(-1);
         var to = query.To ?? DateTime.Now.AddDays(7);
 
-        var reservations = _readModels.GetReservations()
+        var completeSnapshot = _readModels.GetReservations();
+        var validSavedLinks = ChainReservationEligibilityContract.ProjectPersistedPredecessors(
+            completeSnapshot.ToDictionary(r => r.Id));
+        var reservations = completeSnapshot
             .Where(r => r.Source != ReservationSource.Epg && r.IsEnabled)
             .Where(r => r.EndTime > from && r.StartTime < to)
             .Where(r => !query.NetworkId.HasValue || r.NetworkId == query.NetworkId.Value)
@@ -153,7 +156,12 @@ internal sealed class PluginReservationPlanningService
                     current.ServiceId,
                     current.StartTime,
                     featureEnabled);
-                if (!eligibility.IsEligible && current.UserChainPreviousId != previous.Id)
+                var alreadyConnected = featureEnabled
+                    && validSavedLinks.TryGetValue(current.Id, out var previousId)
+                    && previousId == previous.Id;
+                var canCreate = eligibility.IsEligible && !current.UserChainPreviousId.HasValue
+                    && !validSavedLinks.ContainsValue(current.Id);
+                if (!canCreate && !alreadyConnected)
                     continue;
 
                 var sameTuner = !string.IsNullOrWhiteSpace(previous.TunerName)
@@ -167,7 +175,7 @@ internal sealed class PluginReservationPlanningService
                     "previous",
                     "end",
                     "前番組後半がカットされます",
-                    eligibility.IsEligible || current.UserChainPreviousId == previous.Id));
+                    canCreate || alreadyConnected));
             }
         }
 

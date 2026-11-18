@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Collections.Concurrent;
 using System.Management;
 using System.Text.Json;
@@ -359,17 +359,12 @@ private readonly ReservationStore _store;
         // Cancelled行に競合状態を残さず、予約一覧とログの終端状態を一致させる。
         ClearTerminalConflictResiduesSafe("startup_before_allocation");
 
-        // Reattach/recovery is complete before requesting convergence. The existing Init
-        // allocation route captures live runtime attachments and commits any detach itself.
-        if (!_ini.UserChainRecordingEnabled)
-            _allocationRoute.RequestDisabledChainConvergence();
-
         // 起動時に全scheduledの競合フラグを再評価（前回終了後の状態を反映）
         ReevaluateAndLog("Init");
         // 起動時のチェーン構成をログ出力
         try
         {
-            var initChains = _store.GetChains();
+            var initChains = _store.GetChains(_ini.UserChainRecordingEnabled, GetActiveSharedCaptureChainRootIds());
             if (initChains.Count > 0)
             {
                 var desc = string.Join(" / ", initChains.Select(c => string.Join("→", c.Select(id => $"R{id}"))));
@@ -496,23 +491,6 @@ private readonly ReservationStore _store;
         using var admission = exclusion!;
         publish();
         return true;
-    }
-
-    internal bool PrepareChainModeRebuildCore(string source,Action committed)
-    {
-        if(!_chainEditAdmission.TryEnterEdit(out var exclusion)) return false;
-        using var admission=exclusion!;
-        var protection=((IScheduledChainRuntimeProtectionSource)this).CaptureScheduledChainJoinRuntimeProtection(DateTime.Now);
-        if(!protection.ReadSucceeded) return false;
-        var protectedIds=protection.ProtectedReservationIds.Concat(GetRuntimeAttachedChainReservationIds(DateTime.Now)).ToHashSet();
-        var applied=false;
-        try
-        {
-            _store.DetachScheduledUserChainsForFeatureDisable(source,protectedIds,result=>
-            { if(result.Applied){applied=true;committed();admission.Dispose();} });
-        }
-        finally { if(applied) ReconcileActiveContinuousChainTopology(source); }
-        return applied;
     }
 
     internal void ExecuteAutomaticChainCore(ReservationStore store, int addedId, bool enabled,
@@ -1309,7 +1287,7 @@ private readonly ReservationStore _store;
     private static long CalculateMinimumViableCompletedRecordingBytes(double expectedSeconds)
     {
         // release_contract:
-        // 中断録画復旧でのみ使う低すぎる録画ファイルの保険値。
+        // 中断録画復旧で、録画完了と見なすファイル長の下限を判定する。
         // 通常停止・TS検証OK・軽微WARNの録画を落とすための判定ではない。
         // 0.5Mbps相当を下限にし、TV録画として明らかに短い部分ファイルだけを弾く。
         var seconds = Math.Max(1, expectedSeconds);
@@ -2362,7 +2340,7 @@ private readonly ReservationStore _store;
                 _log.Add("Scheduler", "Expire", $"放送終了予約を自動キャンセル: {expired}件");
 
                 // release_contract:
-                // Expire処理後の保険としてだけ実行する。通常Tickごとには走らせない。
+                // Expire処理で予約が変わった場合だけ競合の残存状態を整理する。
                 ClearTerminalConflictResiduesSafe("tick_after_expire");
             }
         }
@@ -2413,7 +2391,7 @@ private readonly ReservationStore _store;
         lock (_sessionGate) hasActiveChainRuntime = _activeSessions.Values.Any(x => x.IsRecordingCommitted);
         if (hasActiveChainRuntime)
         {
-            var chains = _store.GetChains();
+            var chains = _store.GetChains(_ini.UserChainRecordingEnabled, GetActiveSharedCaptureChainRootIds());
             if (chains.Count > 0)
             {
                 var chainDesc = string.Join(" / ", chains.Select(c =>
@@ -2732,10 +2710,10 @@ private readonly ReservationStore _store;
             return null;
         }
 
-        if (parent.IsUserChain && parent.UserChainPreviousId.HasValue)
+        if (parent.UserChainPreviousId is int predecessorId && IsChainContinuation(parent))
         {
             _log.Add("PRE_REC_EPG_DUE_SCAN", $"R{epg.Id}",
-                $"result=SKIP reason=user_chain_child epg=R{epg.Id} parent=R{parent.Id} predecessor=R{parent.UserChainPreviousId.Value} action=use_chain_root_prerec_time_follow rule=pre_record_epg_chain_root_contract");
+                $"result=SKIP reason=user_chain_child epg=R{epg.Id} parent=R{parent.Id} predecessor=R{predecessorId} action=use_chain_root_prerec_time_follow rule=pre_record_epg_chain_root_contract");
             TryCompletePreRecordEpgEntry(epg, "skip_user_chain_child");
             return null;
         }
@@ -2804,7 +2782,7 @@ private readonly ReservationStore _store;
         var configuredAdmissionBudgetSeconds = configuredPreRecordMinutes * 60;
         // 設定値は「最早何分前から確認を開始できるか」の予算。ここでは上限秒数だけを計画し、
         // 実行時に録画dueとの残時間から1つのhard deadlineへ凍結する。target/terminal判定はEpgCaptureだけが行う。
-        var probeCeilingSeconds = parent.IsUserChain
+        var probeCeilingSeconds = IsOperationalChainSeriesOwner(parent)
             ? Math.Max(PreRecordEpgMinimumProbeSeconds, Math.Min(ProtectedUserChainPreRecordProbeCeilingSeconds, maxAllowedSeconds))
             : Math.Max(PreRecordEpgMinimumProbeSeconds, Math.Min(configuredAdmissionBudgetSeconds, maxAllowedSeconds));
         // PRE_RECORD_EPG_ADMISSION_CLAIM_SSOT:
@@ -2891,7 +2869,7 @@ private readonly ReservationStore _store;
                 $"epg=R{epg.Id} parent=R{parent.Id} group={plan.Group} admissionGroup={plan.AdmissionGroup} tuner={LogTextContract.TrimOrDash(plan.RuntimeTunerName)} recordingTuner={LogTextContract.TrimOrDash(parent.TunerName)} epgAction=time_follow_probe window={epg.StartTime:MM/dd HH:mm:ss}〜{epg.EndTime:MM/dd HH:mm:ss} plannedProbeCeilingSeconds={plan.ProbeCeilingSeconds} executionProbeSeconds={executionProbeSeconds} hardDeadline={hardDeadline:MM/dd HH:mm:ss.fff} configuredPreRecordMinutes={plan.ConfiguredPreRecordMinutes} dueStart={plan.DueStart:MM/dd HH:mm:ss} stopBeforeDueSeconds={PreRecordEpgStopBeforeRecordingDueSeconds} service={LogTextContract.TrimOrDash(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} nid={parent.NetworkId} tsid={parent.TransportStreamId} sid={parent.ServiceId} eventId={parent.EventId} lifecycleOwner=EpgCapture rule=pre_record_epg_execution_lifecycle_contract");
 
             _log.Add("PRE_REC_EPG_RUNTIME_PLAN", $"R{epg.Id}",
-                $"parent=R{parent.Id} service={LogTextContract.TrimOrDash(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} group={executionContract.TargetScope} runtimeTuner={LogTextContract.TrimOrDash(executionContract.RuntimeTunerName)} expectedNid={executionContract.NetworkId} expectedTsid={executionContract.TransportStreamId} expectedSid={executionContract.ServiceId} expectedEventId={(executionContract.EventId?.ToString() ?? "-")} hardDeadline={executionContract.HardDeadline:MM/dd HH:mm:ss.fff} identitySource=parent_recording_reservation contractOwner=ReservationScheduler downstreamOwner=single_contract_reference chainScope={(parent.IsUserChain ? "root" : "single")} policy=time_follow_probe_runtime_tuner_no_pretune rule=pre_record_epg_runtime_tuner_contract");
+                $"parent=R{parent.Id} service={LogTextContract.TrimOrDash(parent.ServiceName)} title={ReservationDisplayTitle(parent.Title)} group={executionContract.TargetScope} runtimeTuner={LogTextContract.TrimOrDash(executionContract.RuntimeTunerName)} expectedNid={executionContract.NetworkId} expectedTsid={executionContract.TransportStreamId} expectedSid={executionContract.ServiceId} expectedEventId={(executionContract.EventId?.ToString() ?? "-")} hardDeadline={executionContract.HardDeadline:MM/dd HH:mm:ss.fff} identitySource=parent_recording_reservation contractOwner=ReservationScheduler downstreamOwner=single_contract_reference chainScope={(IsOperationalChainSeriesOwner(parent) ? "root" : "single")} policy=time_follow_probe_runtime_tuner_no_pretune rule=pre_record_epg_runtime_tuner_contract");
 
 
             // PRE_RECORD_EPG_INDEPENDENT_PROBE_CONTRACT:
@@ -2912,7 +2890,7 @@ private readonly ReservationStore _store;
                 ct,
                 executionContract,
                 admissionLease,
-                preserveUserChainDbSeriesFollow: parent.IsUserChain).ConfigureAwait(false);
+                preserveUserChainDbSeriesFollow: IsOperationalChainSeriesOwner(parent)).ConfigureAwait(false);
 
             // PRE_RECORD_EPG_SINGLE_ATTEMPT_INVARIANT:
             // 成功・失敗を問わず、この予定時刻でのworker/probe実行は一度だけで終了する。
@@ -2950,9 +2928,9 @@ private readonly ReservationStore _store;
                 followResults = _store.ApplyTimeFollowingDetailedFromObservedEvents(
                     followTargets,
                     result.PreRecordEvents,
-                    allowUserChainSeriesFollow: latestParent.IsUserChain);
+                    allowUserChainSeriesFollow: IsOperationalChainSeriesOwner(latestParent));
                 _log.Add("PRE_REC_EPG_FOLLOW_SOURCE", $"R{epg.Id}",
-                    $"result=OBSERVED_SNAPSHOT parent=R{latestParent.Id} observedEvents={result.PreRecordEvents.Count} dbReadForProbeResult=False chainScope={(latestParent.IsUserChain ? "root_series" : "single")} rule=pre_record_epg_probe_snapshot_contract");
+                    $"result=OBSERVED_SNAPSHOT parent=R{latestParent.Id} observedEvents={result.PreRecordEvents.Count} dbReadForProbeResult=False chainScope={(IsOperationalChainSeriesOwner(latestParent) ? "root_series" : "single")} rule=pre_record_epg_probe_snapshot_contract");
             }
             else
             {
@@ -2960,9 +2938,9 @@ private readonly ReservationStore _store;
                 followResults = _store.ApplyTimeFollowingDetailed(
                     followTargets,
                     _programEvents,
-                    allowUserChainSeriesFollow: latestParent.IsUserChain);
+                    allowUserChainSeriesFollow: IsOperationalChainSeriesOwner(latestParent));
                 _log.Add("PRE_REC_EPG_FOLLOW_SOURCE", $"R{epg.Id}",
-                    $"result=DB_FALLBACK_NO_OBSERVED_SNAPSHOT parent=R{latestParent.Id} observedEvents=0 chainScope={(latestParent.IsUserChain ? "root_series" : "single")} rule=pre_record_epg_probe_snapshot_contract");
+                    $"result=DB_FALLBACK_NO_OBSERVED_SNAPSHOT parent=R{latestParent.Id} observedEvents=0 chainScope={(IsOperationalChainSeriesOwner(latestParent) ? "root_series" : "single")} rule=pre_record_epg_probe_snapshot_contract");
             }
             LogPreRecordTimeFollow(epg, latestParent, followResults);
 
@@ -3060,7 +3038,8 @@ private readonly ReservationStore _store;
 
     private IReadOnlyList<Reservation> GetPreRecordTimeFollowTargets(Reservation parent)
     {
-        if (!parent.IsUserChain)
+        if (!ChainReservationContract.IsOperationalRoot(_ini.UserChainRecordingEnabled,
+                parent.UserChainRootId ?? parent.Id, GetActiveSharedCaptureChainRootIds()))
             return new[] { parent };
 
         // PRE_RECORD_EPG_CHAIN_SERIES_FOLLOW_INVARIANT:
@@ -4599,9 +4578,11 @@ private readonly ReservationStore _store;
         var capturePlannedEnd = plannedEnd;
         var chainSegments = new List<ChainCaptureSegmentPlan>();
         var allReservationsForChain = _store.GetAll();
+        var operationalLinks = _store.GetOperationalChainPredecessors(
+            _ini.UserChainRecordingEnabled, GetActiveSharedCaptureChainRootIds());
         var nextByPrevious = allReservationsForChain
-            .Where(candidate => candidate.IsUserChain && candidate.UserChainPreviousId.HasValue)
-            .GroupBy(candidate => candidate.UserChainPreviousId!.Value)
+            .Where(candidate => operationalLinks.ContainsKey(candidate.Id))
+            .GroupBy(candidate => operationalLinks[candidate.Id])
             .ToDictionary(grouping => grouping.Key, grouping => grouping.OrderBy(candidate => candidate.StartTime).First());
 
         var chainCursor = r;
@@ -5598,7 +5579,8 @@ private readonly ReservationStore _store;
     {
         try
         {
-            return _store.GetChainPredecessors().Any(kv =>
+            return _store.GetOperationalChainPredecessors(
+                _ini.UserChainRecordingEnabled, GetActiveSharedCaptureChainRootIds()).Any(kv =>
             {
                 if (kv.Value != r.Id) return false;
                 var next = _store.GetById(kv.Key);
@@ -5658,15 +5640,10 @@ private readonly ReservationStore _store;
         var actualTuner = LogTextContract.TrimOrDash(session.Lease.Name);
         var did = LogTextContract.TrimOrDash(session.Lease.Did);
         var bonDriver = LogTextContract.TrimOrDash(session.Lease.BonDriverFileName);
-        var nextReservation = next ?? _store.GetAll()
-            .Where(x => x.IsUserChain
-                && x.UserChainPreviousId == current.Id
-                && x.Status == ReservationStatus.Scheduled
-                && x.IsEnabled)
-            .OrderBy(x => x.StartTime)
-            .FirstOrDefault();
+        var directSuccessors = GetScheduledDirectChainSuccessors(current);
+        var nextReservation = next ?? (directSuccessors.Count == 1 ? directSuccessors[0] : null);
 
-        if (nextReservation is null && !current.IsUserChain)
+        if (nextReservation is null && !IsChainContinuation(current))
         {
             // chain topologyから外れたroot/currentの監査投影を残さない。runtime正本はRecordingSession/lease/controlであり、
             // このregistryは派生snapshotなのでcanonical topology消滅時に即時除去する。
@@ -5789,8 +5766,8 @@ private readonly ReservationStore _store;
         ct.ThrowIfCancellationRequested();
         PruneTerminalChainBoundaryExecutions(now);
 
-        // Runtimeの実行可否は設定値から再推測せず、現在保存されているexplicit-chain topologyを正本とする。
-        // 設定OFF遷移ではScheduled行を先にdetachするため、ここに残るpairはStarting/Recording等の完走対象だけである。
+        // 保存済みprevious/rootがトポロジー正本。実行可否は設定とactive shared capture rootから
+        // 共通判定し、OFF中の未開始チェーンを物理占有へ投影しない。
         List<RecordingSession> active;
         bool hasPendingResult;
         lock (_sessionGate)
@@ -5802,14 +5779,15 @@ private readonly ReservationStore _store;
                 && owners.Contains(x.PredecessorId));
         }
         if (active.Count == 0) return;
-        var chains = _store.GetChainPredecessors(); // key=後続ID, value=前番組ID
+        var chains = _store.GetOperationalChainPredecessors(
+            _ini.UserChainRecordingEnabled, GetActiveSharedCaptureChainRootIds()); // key=後続ID, value=前番組ID
         if (chains.Count == 0 && !hasPendingResult) return;
         var successorOf = chains.ToDictionary(kv => kv.Value, kv => kv.Key);
 
         // ACTIVE_SHARED_CAPTURE_LIFETIME_RECONCILIATION_INVARIANT:
         // Physical capture lifetime is derived from the currently connected persisted chain segments, not from
         // the historical maximum once observed by this process. Reconcile every active shared capture before
-        // boundary planning so cancellation, settings detach, disable, time-follow shortening and rebase can shrink
+        // boundary planning so cancellation, explicit disable, time-follow shortening and rebase can shrink
         // the worker/tuner lifetime just as additions/extensions can grow it.
         if (chains.Count > 0)
             foreach (var session in active)
@@ -5890,7 +5868,7 @@ private readonly ReservationStore _store;
         var latestSuccessor = _store.GetById(successor.Id);
         if (latestPredecessor is null || latestSuccessor is null
             || session.ReservationId != latestPredecessor.Id
-            || !latestSuccessor.IsUserChain
+            || !IsChainContinuation(latestSuccessor)
             || latestSuccessor.UserChainPreviousId != latestPredecessor.Id
             || !latestSuccessor.IsEnabled || latestSuccessor.IsConflicted
             || latestSuccessor.Status is not (ReservationStatus.Scheduled or ReservationStatus.Starting or ReservationStatus.Recording))
@@ -6054,9 +6032,9 @@ private readonly ReservationStore _store;
     }
 
     /// <summary>
-    /// Read-only evidence for future whole-component edits. Include provisional and single-sink
-    /// sessions and every enabled control segment, not only segments whose OpenAt has arrived.
-    /// This observation is not an atomic edit permit and must not be used as a commit token.
+    /// Chain join admission reads the active sessions and all enabled control segments,
+    /// including provisional and not-yet-opened sinks. This is a read-only observation,
+    /// not an atomic edit permit or a commit token.
     /// </summary>
     ScheduledChainRuntimeProtectionSnapshot IScheduledChainRuntimeProtectionSource.CaptureScheduledChainJoinRuntimeProtection(DateTime observedAt)
     {
@@ -6076,10 +6054,20 @@ private readonly ReservationStore _store;
     }
 
     /// <summary>
-    /// 設定OFF detachから保護すべき、すでにactive physical captureへ参加した予約IDを返す。
+    /// 保存トポロジーとは別に、すでにactive physical captureへ参加した予約IDを返す。
     /// Reservation statusだけではworkerがpre-marginでSinkを開いた直後の短い競合窓を表せないため、
     /// active chain controlのOpenAtもruntime正本として継ぎ目へ渡す。
     /// </summary>
+    public IReadOnlySet<int> GetActiveSharedCaptureChainRootIds()
+    {
+        lock (_sessionGate)
+            return _activeSessions.Values
+                .Where(x => x.IsRecordingCommitted && x.IsSharedChainCapture
+                    && x.SharedCaptureRootReservationId.HasValue)
+                .Select(x => x.SharedCaptureRootReservationId!.Value)
+                .ToHashSet();
+    }
+
     public IReadOnlySet<int> GetRuntimeAttachedChainReservationIds(DateTime now)
     {
         List<RecordingSession> active;
@@ -6112,7 +6100,7 @@ private readonly ReservationStore _store;
 
     /// <summary>
     /// Reservation topologyのcommit後にactive physical capture正本を即時収束させる継ぎ目。
-    /// 設定OFF detach / cancel / rebaseなどの永続変更側から呼び、control → lease → session → worker deadlineを
+    /// cancel / rebaseなどの永続変更側から呼び、control → lease → session → worker deadlineを
     /// 次の通常境界tickまで待たずcanonical topologyへ合わせる。
     /// </summary>
     public void ReconcileActiveContinuousChainTopology(string reason)
@@ -6418,7 +6406,7 @@ private readonly ReservationStore _store;
         using var runtimeAdmission = admission;
         var predecessorId = session.ReservationId;
         var connectedSuccessor = _store.GetById(successor.Id);
-        if (connectedSuccessor is null || !connectedSuccessor.IsUserChain
+        if (connectedSuccessor is null || !IsChainContinuation(connectedSuccessor)
             || connectedSuccessor.UserChainPreviousId != predecessorId)
             return false;
         successor = connectedSuccessor;
@@ -6487,9 +6475,8 @@ private readonly ReservationStore _store;
             return false;
         bool IsCurrentSuccessor(Reservation? candidate)
             => candidate is not null && candidate.IsEnabled && !candidate.IsConflicted
-                && candidate.IsUserChain && candidate.UserChainPreviousId == predecessorId
-                && candidate.UserChainRootId == (predecessor.UserChainRootId ?? predecessorId)
-                && IsSameServiceIdentity(predecessor, candidate)
+                && IsChainContinuation(candidate)
+                && candidate.UserChainPreviousId == predecessorId
                 && candidate.Status is ReservationStatus.Starting or ReservationStatus.Recording;
         if (predecessor.Status == ReservationStatus.Recording
             || (predecessor.Status == ReservationStatus.Stopping
@@ -7345,7 +7332,7 @@ private readonly ReservationStore _store;
             return true;
         }
 
-        if (reservation.IsUserChain)
+        if (IsChainContinuation(reservation))
         {
             foreach (var session in sessions)
             {
@@ -8520,6 +8507,8 @@ private readonly ReservationStore _store;
         // The active predecessor can be the root reservation itself. Root reservations are not marked
         // IsUserChain; only successors carry the explicit chain linkage. Resolve topology from the
         // canonical predecessor links instead of treating IsUserChain on the active row as membership.
+        var operationalLinks = _store.GetOperationalChainPredecessors(
+            _ini.UserChainRecordingEnabled, GetActiveSharedCaptureChainRootIds());
         var all = _store.GetAll();
         var result = new List<Reservation>();
         var currentId = activeReservation.Id;
@@ -8528,8 +8517,8 @@ private readonly ReservationStore _store;
         while (true)
         {
             var children = all
-                .Where(x => x.IsUserChain
-                    && x.UserChainPreviousId == currentId
+                .Where(x => operationalLinks.TryGetValue(x.Id, out var previousId)
+                    && previousId == currentId
                     && x.Status == ReservationStatus.Scheduled
                     && x.IsEnabled
                     && IsSameServiceIdentity(activeReservation, x))
@@ -8558,6 +8547,8 @@ private readonly ReservationStore _store;
         // The active reservation may be the chain root (IsUserChain=false). Successor/root identity is
         // authoritative, so do not suppress member follow based on the root row's IsUserChain flag.
         var rootId = activeReservation.UserChainRootId ?? activeReservation.Id;
+        if (!ChainReservationContract.IsOperationalRoot(_ini.UserChainRecordingEnabled,
+                rootId, GetActiveSharedCaptureChainRootIds())) return false;
         var targets = _store.GetAll()
             .Where(x => x.IsUserChain
                 && x.Id != activeReservation.Id
@@ -8618,9 +8609,11 @@ private readonly ReservationStore _store;
 
     private IReadOnlyList<Reservation> GetScheduledDirectChainSuccessors(Reservation predecessor)
     {
+        var operationalLinks = _store.GetOperationalChainPredecessors(
+            _ini.UserChainRecordingEnabled, GetActiveSharedCaptureChainRootIds());
         return _store.GetAll()
-            .Where(x => x.IsUserChain
-                && x.UserChainPreviousId == predecessor.Id
+            .Where(x => operationalLinks.TryGetValue(x.Id, out var priorId)
+                && priorId == predecessor.Id
                 && x.IsEnabled
                 && x.Status == ReservationStatus.Scheduled
                 && IsSameServiceIdentity(predecessor, x))
@@ -9299,7 +9292,7 @@ private readonly ReservationStore _store;
     {
         // Commit termination evidence before the background publisher can observe this result.
         // A failed save still stages delivery; a crash between save and staging is recovered
-        // from the file catalog plus the committed legacy result.
+        // from the file catalog and the persisted recording result.
         try { return _recordingResults.Upsert(result,evidence); }
         finally
         {
@@ -10337,20 +10330,28 @@ private readonly ReservationStore _store;
         return result;
     }
 
-    private static bool IsChainContinuation(Reservation r)
-        => ChainReservationContract.IsStoredSuccessor(r);
+    private bool IsOperationalChainSeriesOwner(Reservation r)
+        => _store.GetOperationalChainPredecessors(
+            _ini.UserChainRecordingEnabled, GetActiveSharedCaptureChainRootIds())
+            .Values.Contains(r.Id);
 
+    private bool IsChainContinuation(Reservation r)
+        => _store.GetOperationalChainPredecessors(
+            _ini.UserChainRecordingEnabled, GetActiveSharedCaptureChainRootIds())
+            .TryGetValue(r.Id, out var predecessorId)
+            && r.UserChainPreviousId == predecessorId;
 
     private int? TryResolveChainPredecessorId(Reservation r, out string source)
     {
         source = "none";
-        if (r.UserChainPreviousId.HasValue)
+        var operationalLinks = _store.GetOperationalChainPredecessors(
+            _ini.UserChainRecordingEnabled, GetActiveSharedCaptureChainRootIds());
+        if (operationalLinks.TryGetValue(r.Id, out var predecessorId)
+            && r.UserChainPreviousId == predecessorId)
         {
-            source = "user_chain_column";
-            return r.UserChainPreviousId.Value;
+            source = "verified_persisted_chain";
+            return predecessorId;
         }
-
-        // 保存列が唯一のtopology正本。時間隣接やruntime mapからpredecessorを再推論しない。
         return null;
     }
 
@@ -11825,9 +11826,9 @@ private readonly ReservationStore _store;
         return $"result=OK stage={stage} reservation=R{r.Id} kind={reservationKind} source={r.Source} route={route} status={r.Status} enabled={r.IsEnabled} conflicted={r.IsConflicted} service={LogTextContract.TrimOrDash(r.ServiceName)} title={ReservationDisplayTitle(r.Title, 80)} group={LogTextContract.TrimOrDash(group ?? ResolveGroup(r))} {leasePart} {channelIdentity} {fileNamePart} finalGuardApplied={finalGuardApplied} commonAllocationRoute=True wakeCoupled=True preRecordEpgCoupled=True {chainPart} {timePart} sourceRule={(r.SourceRuleId.HasValue ? r.SourceRuleId.Value.ToString() : "-")} sourceRuleName={LogTextContract.TrimOrDash(r.SourceRuleName)} note={LogTextContract.TrimOrDash(note)} rule=reservation_tuner_filename_pipeline_audit_release_contract";
     }
 
-    private static string ResolveReservationKindForPipelineAudit(Reservation r)
+    private string ResolveReservationKindForPipelineAudit(Reservation r)
     {
-        if (r.IsUserChain) return "UserChain";
+        if (IsChainContinuation(r)) return "UserChain";
         return r.Source switch
         {
             ReservationSource.Immediate => "Immediate",
@@ -11842,10 +11843,10 @@ private readonly ReservationStore _store;
         };
     }
 
-    private static string ResolveExecutionRouteForPipelineAudit(Reservation r)
+    private string ResolveExecutionRouteForPipelineAudit(Reservation r)
     {
         if (r.Source == ReservationSource.Epg) return "SystemEpgExcludedFromRecording";
-        if (r.IsUserChain) return "ALLOC_ROUTE/TUNER_ALLOC/UserChain/TvAIrEpgRec";
+        if (IsChainContinuation(r)) return "ALLOC_ROUTE/TUNER_ALLOC/UserChain/TvAIrEpgRec";
         return "ALLOC_ROUTE/TUNER_ALLOC/TvAIrEpgRec";
     }
 
